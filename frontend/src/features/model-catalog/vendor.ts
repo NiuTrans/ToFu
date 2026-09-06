@@ -5,7 +5,10 @@
  * fallback for historical/imported creator ids; it never merges Model rows.
  */
 
-import { detectModelBrand } from '../../core/model-brand-detection';
+import {
+  brandForCreator,
+  detectModelBrand,
+} from '../../core/model-brand-detection';
 
 export interface VendorIdentity {
   id: string;
@@ -46,7 +49,10 @@ export function detectVendor(
   const creatorKey = Object.keys(CREATOR_LABELS).find(
     (key) => normalizedId(key) === direct,
   );
-  const brand = detectModelBrand(`${creatorId} ${creatorName} ${modelId}`);
+  // Icon follows the explicit Creator identity; pattern detection only
+  // covers Creators the glyph table does not know yet.
+  const brand = brandForCreator(creatorId)
+    || detectModelBrand(`${creatorId} ${creatorName} ${modelId}`);
   const vendorId = creatorKey ?? BRAND_TO_VENDOR[brand] ?? (direct || 'other');
   const label = creatorName.trim() || CREATOR_LABELS[vendorId] || creatorId || 'Other';
   return {

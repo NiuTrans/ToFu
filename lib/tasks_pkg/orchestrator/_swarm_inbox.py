@@ -23,6 +23,13 @@ each drain call:
   * Steer items — human interjections drained from the swarm key with
     the same deferred-confirm discipline as peer. Salvaged back to the
     durable queue by finalize on abort.
+  * Background-command items — completions of ``run_command`` calls that
+    were handed off to a daemon worker for an operator steer. Same
+    deferred-confirm discipline as peer (durable ``message_queue`` row is
+    the authority; the inbox item is its fast-path twin), so a result
+    reaches the model at the next round boundary instead of waiting for
+    the whole steered turn to settle. On abort the durable row survives
+    and is dispatched as a fresh turn — exactly once, never zero.
 """
 
 from __future__ import annotations
@@ -83,13 +90,15 @@ def drain_and_inject_inbox(
             #   here (only swarm), or the two paths would double-drain.
             _peer_owned = bool(task.get('_peer_driver_owned'))
             _peer_key = task.get('_peer_drain_key') or _swarm_key
-            # Swarm items (peer-msg AND user-steer excluded — both are
-            # drained separately below with their own de-dup / chip
-            # semantics; folding them into _swarm_items would render a
-            # human steer as a <swarm-update> chip and mark it delivered
-            # via the swarm path, which is the wrong lane).
+            # Swarm items (peer-msg, user-steer AND background-command
+            # excluded — all three are drained separately below with their
+            # own de-dup / chip semantics; folding them into _swarm_items
+            # would render them as <swarm-update> chips, skip the durable
+            # message_queue row de-dup, and double-deliver).
             _swarm_items = _drain_inbox(
-                _swarm_key, exclude_modes=['peer-msg', 'user-steer'])
+                _swarm_key,
+                exclude_modes=['peer-msg', 'user-steer',
+                               'background-command'])
             _peer_items = ([] if _peer_owned
                            else _drain_inbox(_peer_key, modes=['peer-msg']))
             # Human steer messages (the operator interjecting into their
@@ -97,13 +106,19 @@ def drain_and_inject_inbox(
             # the send route enqueues under. Delivered exactly once via
             # the deferred-confirm flush after the LLM call (mirrors peer).
             _steer_items = _drain_inbox(_swarm_key, modes=['user-steer'])
+            # Background-command completions (detached run_command calls).
+            # Each item is the volatile twin of a durable message_queue row
+            # (tagged with the row's queueId) — the row is the delivery
+            # authority, this lane is only the mid-turn fast path.
+            _bgcmd_items = _drain_inbox(_swarm_key, modes=['background-command'])
             # Project path-overlap advice exists only on the live task.  It is
             # consumed before this model round or discarded at settlement;
-            # it never enters the durable inbox/feed/attention projections.
+            # it never enters the durable inbox/feed projections.
             _project_items = list(
                 task.pop('_projectOverlapAdvisories', []) or ())
             _inbox_items = (list(_swarm_items) + list(_peer_items)
-                            + list(_steer_items) + _project_items)
+                            + list(_steer_items) + list(_bgcmd_items)
+                            + _project_items)
             if _inbox_items:
                 # Coalesce ALL drained items into a single user
                 # message — one message with N <swarm-update>
@@ -135,6 +150,7 @@ def drain_and_inject_inbox(
                     _swarm_items = [it for it in _swarm_items if it.get('value')]
                     _peer_items = [it for it in _peer_items if it.get('value')]
                     _steer_items = [it for it in _steer_items if it.get('value')]
+                    _bgcmd_items = [it for it in _bgcmd_items if it.get('value')]
 
                     # Swarm: persist the delivered flag so a restart
                     # mid-turn doesn't re-inject these <swarm-update>s.
@@ -238,12 +254,24 @@ def drain_and_inject_inbox(
                         task.setdefault(
                             '_steer_inject_pending', []).extend(_steer_items)
 
+                    # Background-command: same deferred-confirm discipline
+                    # as peer. The durable row is NOT deleted here — the
+                    # post-LLM flush confirms consumption, then emits the
+                    # chip, records the display-only sidecar, and deletes
+                    # the durable row(s) by queueId. On abort before the
+                    # flush the row survives and is dispatched as a fresh
+                    # turn (delivered late, exactly once).
+                    if _bgcmd_items:
+                        task.setdefault(
+                            '_bgcmd_inject_pending', []).extend(_bgcmd_items)
+
                     logger.info(
                         '[Task %s] injected %d inbox item(s) '
-                        '(%d swarm, %d peer, %d steer) as 1 user message '
-                        'at round %d',
+                        '(%d swarm, %d peer, %d steer, %d bgcmd) as 1 user '
+                        'message at round %d',
                         tid, len(_payloads), len(_swarm_items),
-                        len(_peer_items), len(_steer_items), round_num + 1)
+                        len(_peer_items), len(_steer_items),
+                        len(_bgcmd_items), round_num + 1)
     except Exception as _e:
         logger.error(
             '[Task %s] swarm inbox drain/inject failed at round %d: %s '

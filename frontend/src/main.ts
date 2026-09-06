@@ -16,6 +16,7 @@ import { connectFeatureRuntime, getFeatureBinding } from './feature-registry';
 import {
   installLegacyApiBindings,
 } from './api/transport';
+import { createFeatureLoadRecovery } from './core/feature-load-recovery';
 
 type DomainModule = {
   prepare?(name: string): Promise<void>;
@@ -115,6 +116,35 @@ function domainLoader(name: string): () => Promise<DomainModule> {
   throw new Error(`No frontend owner is registered for ${name}`);
 }
 
+// One bounded self-heal for lazy-chunk load failures: the browser module map
+// caches a failed dynamic import for the document's lifetime, so only a
+// reload can clear it. The pending feature is re-invoked once after boot.
+const featureLoadRecovery = createFeatureLoadRecovery({
+  now: () => Date.now(),
+  readValue: (key: string) => window.sessionStorage.getItem(key),
+  writeValue: (key: string, value: string) => {
+    window.sessionStorage.setItem(key, value);
+  },
+  removeValue: (key: string) => { window.sessionStorage.removeItem(key); },
+  reload: () => { window.location.reload(); },
+  onError: (error: unknown) => {
+    console.warn('[modules] feature load recovery error', error);
+  },
+});
+
+const loadDomain = async (name: string): Promise<DomainModule> => {
+  try {
+    return await domainLoader(name)();
+  } catch (error: unknown) {
+    if (featureLoadRecovery.attemptRecovery(name, error)) {
+      // The reload owns the recovery now; never settle so the caller's
+      // failure toast cannot race the navigation.
+      return new Promise<DomainModule>(() => {});
+    }
+    throw error;
+  }
+};
+
 export interface TofuModuleBridge {
   version: 3;
   collectDiagnostics(): Promise<string>;
@@ -179,11 +209,11 @@ window.TofuModules = Object.freeze({
     if (!routedFeatureEntries.has(name)) {
       throw new Error(`No frontend owner is registered for ${name}`);
     }
-    const domain = await domainLoader(name)();
+    const domain = await loadDomain(name);
     await domain.prepare?.(name);
   },
   invokeFeature: async (name: string, args: readonly unknown[], stub: FeatureCallable) => {
-    const domain = await domainLoader(name)();
+    const domain = await loadDomain(name);
     return domain.invoke(name, args, stub);
   },
   resolveAction,
@@ -268,6 +298,19 @@ Promise.all([i18nReady(), runtimeReady]).then(() => {
     detail: { version: window.TofuModules?.version },
   }));
   scheduleAmbientScene();
+  const pendingFeature = featureLoadRecovery.consumePendingFeature();
+  if (pendingFeature && routedFeatureEntries.has(pendingFeature)) {
+    // Replay the exact click path: the retained bridge stub owns routing and
+    // stub identity, so invoke through the runtime service table.
+    const entry = getRuntimeService(pendingFeature);
+    if (typeof entry === 'function') {
+      try {
+        (entry as FeatureCallable)();
+      } catch (error: unknown) {
+        console.warn('[modules] pending feature resume failed', error);
+      }
+    }
+  }
 }).catch((error: unknown) => {
   console.error('[boot] application initialization failed', error);
   window.dispatchEvent(new CustomEvent('tofu:app-failed', { detail: { error } }));

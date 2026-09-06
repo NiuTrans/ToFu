@@ -82,7 +82,7 @@ INTEGRATION_SUBMIT_TOOL = {
         'description': (
             'Run enabled project checkers, checkpoint, and submit this '
             "execution's isolated workspace for human review. Checker "
-            'failure rejects submission and creates Project Attention.'
+            'failure rejects submission and records a Project Feed narrative.'
         ),
         'parameters': {
             'type': 'object',
@@ -99,7 +99,6 @@ INTEGRATION_SUBMIT_TOOL = {
 
 INTEGRATION_TOOLS = [INTEGRATION_CHECKPOINT_TOOL, INTEGRATION_SUBMIT_TOOL]
 INTEGRATION_TOOL_NAMES = {'integration_checkpoint', 'integration_submit'}
-
 
 __all__ = [
     'CONV_REF_LIST_TOOL', 'CONV_REF_GET_TOOL', 'CONV_REF_TOOLS',

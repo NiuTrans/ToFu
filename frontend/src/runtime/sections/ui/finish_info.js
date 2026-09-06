@@ -527,7 +527,10 @@ function _startWaitingBlockPoll(details) {
   _pollWaitingBlock(details);
   _waitingBlockPolls.set(details, setInterval(() => _pollWaitingBlock(details), 3000));
 }
-if (typeof document !== 'undefined') document.addEventListener('toggle', (event) => {
+/* Feature-detect, not existence-detect (the push.js pattern): bare-node
+ * harnesses stub `document = {}` without addEventListener, and an existence
+ * check alone crashes module evaluation there. */
+if (typeof document !== 'undefined' && document.addEventListener) document.addEventListener('toggle', (event) => {
   const details = event.target;
   if (!details?.classList?.contains('wait-block')) return;
   if (details.open) _startWaitingBlockPoll(details);
@@ -567,7 +570,9 @@ function renderFinishInfo(msg, turnId) {
   const _keyDisplay = _keyTail ? ('••' + _keyTail) : _route.keyName || "";
 
   if (_realModel) {
-    const _brand = typeof _detectBrand === 'function' ? _detectBrand(_realModel) : 'generic';
+    const _brand = typeof _modelBrand === 'function'
+      ? _modelBrand(_realModel)
+      : (typeof _detectBrand === 'function' ? _detectBrand(_realModel) : 'generic');
     const icon = (typeof _brandSvg === 'function') ? _brandSvg(_brand, 12) : Icon('star', 12);
     // Show the actual model id (e.g. "aws.claude-opus-4.8"), not the
     // friendly short name — the user wants the real upstream model here.

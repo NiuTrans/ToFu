@@ -809,6 +809,23 @@ function _lcRenderBrowser(d, err) {
   }
 
   var clients = d.clients || [];
+
+/* Which connected client should automation go to? Prefer the extension that
+ * stamped THIS document (origin_marker.js, data-tofu-browser-bridge) — with
+ * two computers on one account, clients[0] is whatever polled first and can
+ * be the OTHER machine's browser, which is how clicks land on a screen the
+ * user is not looking at. Unknown/absent marker falls back to clients[0]. */
+function _lcLocalBrowserClientId(clients) {
+  var localId = (typeof document !== 'undefined' && document.documentElement)
+    ? (document.documentElement.getAttribute('data-tofu-browser-bridge') || '')
+    : '';
+  if (localId) {
+    for (var i = 0; i < clients.length; i++) {
+      if (clients[i] && clients[i].client_id === localId) return localId;
+    }
+  }
+  return clients[0].client_id;
+}
   /* Fleet recovery states: the server reports
    * the version a fresh download would carry (servedExtVersion) and the
    * clients whose polls DIED at the bridge gate (lockedOutClients) or strict
@@ -833,7 +850,7 @@ function _lcRenderBrowser(d, err) {
   if (connected) {
     var ago = (d.secondsAgo != null) ? d.secondsAgo + 's' : '';
     if (clients.length > 0) {
-      runtimeScope._browserClientId = clients[0].client_id;
+      runtimeScope._browserClientId = _lcLocalBrowserClientId(clients);
     }
     /* Name WHICH extension binary is connected, next to the dot — the
      * version is the only at-a-glance evidence of a stale side-load. Only a

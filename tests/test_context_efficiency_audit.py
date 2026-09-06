@@ -261,9 +261,10 @@ def test_run_command_schema_stays_within_coding_round_budget():
             'no persistent shell', 'read_files', 'grep_search', 'find_files',
             'edit_file', 'write_file', 'browser_download_url_to_server',
             'FUSE-safe', 'credentials', '`sd`', '`mlr`', '`goawk',
+            'move to the background', 'arrive automatically',
         ):
             assert guidance in wire
-        assert tool_schema_tokens([tool], model='kimi-k3') <= 750
+        assert tool_schema_tokens([tool], model='kimi-k3') <= 450
 
 
 def test_core_read_search_schemas_stay_semantic_and_bounded():
@@ -286,7 +287,7 @@ def test_core_read_search_schemas_stay_semantic_and_bounded():
         assert tool_schema_tokens([tool], model='kimi-k3') <= budget
 
 
-def test_multiroot_path_guidance_has_bounded_schema_multiplier():
+def test_multiroot_compat_projection_keeps_canonical_schema():
     from lib.tools.gateway import tool_schema_tokens
     from lib.tools.project import (
         READ_FILES_TOOL, project_tools_for_runtime, with_multiroot_hint,
@@ -294,12 +295,9 @@ def test_multiroot_path_guidance_has_bounded_schema_multiplier():
 
     base = [READ_FILES_TOOL, *project_tools_for_runtime()]
     projected = with_multiroot_hint(base)
-    wire = json.dumps(projected, ensure_ascii=False, sort_keys=True)
-    assert 'absolute path' in wire
-    assert 'rootname:subdir' in wire
-    assert 'bare relative path uses the primary root' in wire
-    assert (tool_schema_tokens(projected, model='kimi-k3')
-            - tool_schema_tokens(base, model='kimi-k3')) <= 200
+    assert projected == base
+    assert tool_schema_tokens(projected, model='kimi-k3') == (
+        tool_schema_tokens(base, model='kimi-k3'))
 
 
 def test_routed_exposure_never_retracts_frontend_enabled_families():

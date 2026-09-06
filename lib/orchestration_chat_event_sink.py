@@ -84,9 +84,9 @@ class OrchestrationChatTaskEventSink:
                 candidate = {
                     key: event[key]
                     for key in (
-                        'roundNum', 'llmRound', 'toolCallId', 'toolName',
-                        'toolArgs', 'query', 'status', 'attentionKind',
-                        'parentToolCallId', 'tStart',
+                        'roundNum', 'llmRound', 'agentId', 'toolCallId',
+                        'toolName', 'toolArgs', 'query', 'status',
+                        'attentionKind', 'parentToolCallId', 'tStart',
                     )
                     if event.get(key) is not None
                 }

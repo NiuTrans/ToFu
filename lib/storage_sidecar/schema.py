@@ -10,7 +10,7 @@ from lib.storage.errors import StorageError
 from lib.storage_sidecar.adapters.base import Session
 
 
-SCHEMA_VERSION = 57
+SCHEMA_VERSION = 58
 
 
 _TABLES = (
@@ -862,6 +862,44 @@ _TABLES = (
         agent_id TEXT NOT NULL DEFAULT '',
         updated_at_ms BIGINT NOT NULL
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS storage_browser_site_observations (
+        owner_user_id BIGINT NOT NULL,
+        origin TEXT NOT NULL,
+        route_family TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        schema_version BIGINT NOT NULL,
+        strategy TEXT NOT NULL,
+        hints_json TEXT NOT NULL DEFAULT '[]',
+        anti_bot_vendor TEXT NOT NULL DEFAULT '',
+        auth_signal TEXT NOT NULL DEFAULT 'none',
+        status TEXT NOT NULL DEFAULT 'active',
+        confidence_milli BIGINT NOT NULL,
+        visit_count BIGINT NOT NULL,
+        successful_visits BIGINT NOT NULL,
+        hinted_visits BIGINT NOT NULL,
+        hint_match_visits BIGINT NOT NULL,
+        consecutive_failures BIGINT NOT NULL,
+        last_outcome TEXT NOT NULL,
+        last_elapsed_ms BIGINT NOT NULL DEFAULT 0,
+        last_verified_at_ms BIGINT NOT NULL,
+        last_observed_at_ms BIGINT NOT NULL,
+        expires_at_ms BIGINT NOT NULL,
+        payload_bytes BIGINT NOT NULL,
+        PRIMARY KEY (owner_user_id, origin, route_family, operation)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS storage_browser_site_observation_owners (
+        owner_user_id BIGINT PRIMARY KEY,
+        touched_at_ms BIGINT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_browser_site_observations_owner_lru
+    ON storage_browser_site_observations(
+        owner_user_id, last_observed_at_ms, origin, route_family, operation)
     """,
     """
     CREATE TABLE IF NOT EXISTS storage_knowledge_documents (
@@ -1911,6 +1949,31 @@ _MIGRATIONS = {
         "CREATE INDEX IF NOT EXISTS idx_storage_raw_archives_attempt "
         "ON storage_raw_archives("
         "user_id, attempt_id, created_at_ms, archive_id)",
+    ),
+    # Generic browser research retains only a compact, non-executable,
+    # owner-scoped structural projection. It is reconstructible, expires after
+    # a bounded horizon, and can never act as access or endpoint-replay authority.
+    58: (
+        "CREATE TABLE IF NOT EXISTS storage_browser_site_observation_owners ("
+        "owner_user_id BIGINT PRIMARY KEY, touched_at_ms BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS storage_browser_site_observations ("
+        "owner_user_id BIGINT NOT NULL, origin TEXT NOT NULL, "
+        "route_family TEXT NOT NULL, operation TEXT NOT NULL, "
+        "schema_version BIGINT NOT NULL, strategy TEXT NOT NULL, "
+        "hints_json TEXT NOT NULL DEFAULT '[]', "
+        "anti_bot_vendor TEXT NOT NULL DEFAULT '', "
+        "auth_signal TEXT NOT NULL DEFAULT 'none', "
+        "status TEXT NOT NULL DEFAULT 'active', "
+        "confidence_milli BIGINT NOT NULL, visit_count BIGINT NOT NULL, "
+        "successful_visits BIGINT NOT NULL, hinted_visits BIGINT NOT NULL, "
+        "hint_match_visits BIGINT NOT NULL, consecutive_failures BIGINT NOT NULL, "
+        "last_outcome TEXT NOT NULL, last_elapsed_ms BIGINT NOT NULL DEFAULT 0, "
+        "last_verified_at_ms BIGINT NOT NULL, last_observed_at_ms BIGINT NOT NULL, "
+        "expires_at_ms BIGINT NOT NULL, payload_bytes BIGINT NOT NULL, "
+        "PRIMARY KEY (owner_user_id, origin, route_family, operation))",
+        "CREATE INDEX IF NOT EXISTS idx_browser_site_observations_owner_lru "
+        "ON storage_browser_site_observations("
+        "owner_user_id, last_observed_at_ms, origin, route_family, operation)",
     ),
 }
 

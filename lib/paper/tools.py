@@ -491,7 +491,7 @@ def build_paper_full_tool_epoch(*, owner_user_id=None, model='', cfg=None,
 
 
 def apply_paper_tool_epoch_guidance(messages, epoch, *, lang='en'):
-    """Teach the gateway convention only when this arm exposes the gateway."""
+    """Append gateway guidance when this arm exposes the gateway."""
     wire_names = {_paper_schema_name(schema) for schema in epoch.wire_schemas}
     if 'search_tools' not in wire_names or 'execute_tools' not in wire_names:
         return False
@@ -506,16 +506,11 @@ def apply_paper_tool_epoch_guidance(messages, epoch, *, lang='en'):
             'For such a capability, call search_tools first, then execute_tools '
             'with the exact returned name and arguments_schema; never guess a '
             'hidden tool name.')
-    for message in messages or ():
-        if not isinstance(message, dict) or message.get('role') != 'system':
-            continue
-        content = message.get('content')
-        if not isinstance(content, str):
-            continue
-        if guidance not in content:
-            message['content'] = content.rstrip() + '\n\n' + guidance
+    if any(guidance in str(message.get('content', ''))
+           for message in messages or () if isinstance(message, dict)):
         return True
-    return False
+    messages.append({'role': 'user', 'content': guidance, '_isMeta': True})
+    return True
 
 
 def paper_effective_tool_name(fn_name):
@@ -1340,9 +1335,10 @@ def make_research_tool_executor(messages, *, user_question, abort_signal,
                 done_ev['verticals'] = verticals
             on_tool_event(done_ev)
 
-        result_budget.append(
+        visible_result = result_budget.append(
             messages, round_index=rnd, tool_name=fn_name,
             tool_call_id=tc_id, content=result, round_entry=round_entry,
             tool_arguments=fn_args)
+        return visible_result
 
     return _execute_tool

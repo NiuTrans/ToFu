@@ -6,22 +6,17 @@ Runs every round (cheap, no LLM call).  Cache-aware: messages in the
 prompt-cache prefix are left byte-identical to avoid invalidation.
 
 Architecture (2026-06 step refactor):
-    ``micro_compact`` is the *orchestration shell* — it builds the
-    ``_round_index`` (DB + in-flight task), computes the cache-prefix
-    boundary, owns the ``_stamp_l1`` durable-placeholder closure, and
-    persists narrow turn-projection updates. The actual
+    ``micro_compact`` is the *orchestration shell* — it computes the
+    cache-prefix boundary and emits request-local compaction evidence. The actual
     *transforms* (the former Phase A–D) live as registered steps in
     ``_builtin_steps.py`` and run through ``_steps.run_steps`` against a
     :class:`CompactionContext`.  This makes the compression methods
     orderable / ablatable / replaceable purely by configuration without
     touching the shell.
 
-Critical L1 invariant (memory: ``l1-compaction-fix-durable-placeholders``):
-when a tool result is compacted, the placeholder text is also written
-back to the source-of-truth ``toolContent`` field on the matching turn
-projection. Without this, the placeholder lives only in the api-form messages
-list (discarded after the LLM call) and the next turn re-reads the original
-33k-char content.
+Critical L1 invariant: settled conversation turns are immutable. L1 transforms
+only the request-local API projection; it never loads or updates transcript
+authority and never stamps compaction fields onto durable tool rounds.
 """
 
 from lib.log import get_logger
@@ -39,7 +34,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     """Compress cold tool results AND strip old thinking blocks.
 
     The transforms run through the compaction step registry; this
-    function owns the durable-placeholder bookkeeping and persistence.
+    function owns only request-local bookkeeping and observability.
 
     Cache-aware: if prompt cache is active (tracked by cache_tracking.py),
     messages in the cache prefix are left byte-identical to avoid
@@ -49,12 +44,9 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
     Args:
         messages: The live messages list.  Mutated in place.
         conv_id:  Conversation ID for logging.
-        task:     Live task dict.  When provided, micro_compact stamps
-                  per-call compaction metadata (compactionLayer='L1',
-                  compactedFromChars / compactedToChars / toolTokens)
-                  on the matching ``task['toolRounds']`` entry and emits
-                  a ``tool_compacted`` SSE event so the frontend can flag
-                  individual tool calls as compacted in real time.
+        task:     Live task dict. When provided, micro_compact emits a
+                  request-local ``tool_compacted`` event; no transcript or
+                  tool-round projection is changed.
 
     Keyword Args:
         steps: Explicit ordered list of compaction step names to run.
@@ -81,163 +73,33 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
 
     tokens_saved = 0
 
-    # ── Lookup index: tool_call_id → round_entry ──
-    #
-    # The index spans TWO data sources:
-    #   1. ``task['toolRounds']`` — the in-flight turn's rounds. These
-    #      are the rounds the assistant is producing right now; their
-    #      tool_call_ids match the bottom of the api-form ``messages``.
-    #   2. ``conv.messages[i]['toolRounds']`` for every prior assistant
-    #      message persisted in the DB. By definition L1 compacts COLD
-    #      rounds — i.e. rounds that have aged out of the in-flight
-    #      turn — so without these the index would only catch the
-    #      current turn and silently no-op on every cold compaction.
-    #
-    # We also stash the loaded conv messages so ``_stamp_l1`` can mutate
-    # the source-of-truth ``toolContent`` field (durable placeholders
-    # that survive the next ``build_api_messages_from_db`` rebuild) and
-    # so the closing block can persist any mutations back to disk.
-    _round_index: dict[str, dict] = {}
-    # Track which ids came from the persisted conv (vs the in-flight task)
-    # so we only DB-write when conv-form rounds were mutated. Task-form
-    # rounds are folded by the turn-event bridge when the turn ends.
-    _conv_owned_ids: set[str] = set()
-    # A normalized turn is the transcript authority for v2 conversations.
-    # Keep the owning projected message for every historical tool call so a
-    # compacted placeholder can be CAS-patched onto that ONE settled turn;
-    # whole-conversation replacement is forbidden for turn-native snapshots.
-    _conv_owner_by_tcid: dict[str, dict] = {}
-    _dirty_turn_messages: dict[str, dict] = {}
-    _conv_messages: list | None = None
-    _conv_dirty = False
-    _conv_index_loaded = False
-    _ambiguous_round_ids: set[str] = set()
-
-    def _index_round_owner(
-        tool_call_id: str, round_entry: dict, owner: dict | None = None,
-    ) -> None:
-        """Index only identities safe for durable placeholder write-back.
-
-        Old positional-id transcripts may contain several execution facts with
-        one truthy id.  A single-value index cannot know which round owns an
-        API-form tool result, so ambiguity must disable persistence instead of
-        overwriting an arbitrary earlier round.
-        """
-        if tool_call_id in _ambiguous_round_ids:
-            return
-        if tool_call_id in _round_index:
-            _round_index.pop(tool_call_id, None)
-            _conv_owned_ids.discard(tool_call_id)
-            _conv_owner_by_tcid.pop(tool_call_id, None)
-            _ambiguous_round_ids.add(tool_call_id)
-            return
-        _round_index[tool_call_id] = round_entry
-        if owner is not None:
-            _conv_owned_ids.add(tool_call_id)
-            _conv_owner_by_tcid[tool_call_id] = owner
-
-    if task is not None:
-        for _r in task.get('toolRounds') or []:
-            _tcid = _r.get('toolCallId')
-            if _tcid:
-                _index_round_owner(str(_tcid), _r)
-
     owner_id = None
     if task is not None:
         from lib.tasks_pkg.manager import task_user_id
         owner_id = task_user_id(task)
 
-    def _load_conversation_round_index() -> None:
-        """Load settled rounds only when a real L1 mutation needs a stamp.
-
-        Most per-round passes are no-ops: either every cold result already is a
-        placeholder or the result has not aged beyond the hot tail.  Loading a
-        conversation-sized transcript before discovering that fact made the
-        nominally cheap L1 pass perform one authority read on every model
-        round.  The in-flight task index is sufficient until ``stamp`` sees an
-        historical tool-call id; that is the first point at which persistence
-        ownership is actually required.
-        """
-        nonlocal _conv_messages, _conv_index_loaded
-        if _conv_index_loaded:
-            return
-        _conv_index_loaded = True
-        if not conv_id or owner_id is None:
-            return
-        try:
-            from lib.agent_core.store import get_conversation_store
-            _loaded = get_conversation_store().load_transcript(
-                conv_id, user_id=owner_id)
-            if _loaded is not None:
-                _conv_messages, _unused_updated_at, _unused_rev = _loaded
-                if isinstance(_conv_messages, list):
-                    if any(not isinstance(_m, dict) or not _m.get('_turnId')
-                           for _m in _conv_messages):
-                        raise ValueError(
-                            'Transcript authority returned an identity-free row')
-                    for _m in _conv_messages:
-                        if not isinstance(_m, dict):
-                            continue
-                        for _r in (_m.get('toolRounds') or []):
-                            _tcid = _r.get('toolCallId')
-                            if _tcid:
-                                _index_round_owner(str(_tcid), _r, _m)
-        except Exception as _e:
-            logger.debug('[L1] conv-side _round_index load failed conv=%s: %s',
-                         conv_id[:8] if conv_id else '?', _e)
-            _conv_messages = None
-
     def _stamp_l1(msg: dict, before_chars: int, after_chars: int) -> None:
-        """Stamp L1 compaction state on the matching round_entry and
-        emit a tool_compacted SSE event so the frontend can flag the
-        per-tool chip as compacted. Idempotent — safe to call twice.
+        """Emit evidence for a request-local projection change.
 
-        Also mutates ``round_entry['toolContent']`` to the placeholder
-        text so the next ``build_api_messages_from_db`` rebuild produces
-        the compacted content (otherwise the L1 mutation of
-        ``messages[idx]['content']`` is thrown away on the next turn)."""
-        nonlocal _conv_dirty
+        Never look up or mutate the owning durable round. Historical metadata
+        is descriptive user state and must remain byte-identical.
+        """
         tc_id = msg.get('tool_call_id', '')
-        if not tc_id:
+        if not tc_id or task is None:
             return
-        round_entry = _round_index.get(tc_id)
-        if round_entry is None:
-            _load_conversation_round_index()
-            round_entry = _round_index.get(tc_id)
-        if round_entry is None:
-            return
-        if round_entry.get('compactionLayer') == 'L1':
-            return  # already stamped
-        round_entry['compactionLayer'] = 'L1'
-        round_entry['compactedFromChars'] = before_chars
-        round_entry['compactedToChars'] = after_chars
-        # Make the placeholder durable: rebuild reads toolContent, not
-        # the api-form messages list. Only flag the conversation dirty
-        # when the round we mutated actually lives in the conv-side
-        # messages snapshot (cold rounds from prior assistant turns).
-        # Task-form rounds (current turn) get persisted via the
-        # terminal turn-event projection path.
-        _new_content = msg.get('content', '')
-        if isinstance(_new_content, str) and _new_content:
-            round_entry['toolContent'] = _new_content
-            if tc_id in _conv_owned_ids:
-                _conv_dirty = True
-                _owner = _conv_owner_by_tcid.get(tc_id)
-                _turn_id = str((_owner or {}).get('_turnId') or '')
-                if _turn_id:
-                    _dirty_turn_messages[_turn_id] = _owner
-        # Cheap re-count: micro_compact's placeholders are short, so the
-        # token estimate from len/4 is fine here. We still try the real
-        # counter but it's optional.
+        round_entry = next((
+            row for row in (task.get('toolRounds') or [])
+            if str(row.get('toolCallId') or '') == str(tc_id)
+        ), {})
         try:
             from lib.token_counter import count_text
-            round_entry['toolTokens'] = count_text(
+            tool_tokens = count_text(
                 msg.get('content', '') if isinstance(msg.get('content'), str) else str(msg.get('content', '')),
                 model=task.get('model', '') if task else '',
             )
         except Exception as _e:
             logger.debug('[L1] count_text failed for tc_id=%s: %s', tc_id[:8], _e)
-            round_entry['toolTokens'] = max(1, after_chars // 4)
+            tool_tokens = max(1, after_chars // 4)
         try:
             from lib.agent_core.events import EventType, build_event
             from lib.tasks_pkg.manager import append_event
@@ -256,7 +118,7 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
                 compactionLayer='L1',
                 compactedFromChars=before_chars,
                 compactedToChars=after_chars,
-                toolTokens=round_entry.get('toolTokens', 0),
+                toolTokens=tool_tokens,
                 compactedContent=_placeholder,
             ))
             # ── Diagnostic emit log ──
@@ -334,73 +196,5 @@ def micro_compact(messages: list, conv_id: str = '', task: dict | None = None,
         stamp_fn=_stamp_l1,
     )
     tokens_saved += run_steps(step_names, ctx)
-
-    # ── Persist conv-form mutations ──
-    # When _stamp_l1 mutated the source-of-truth toolContent on a round
-    # belonging to a prior assistant message, write the conversation back
-    # to the DB so the next build_api_messages_from_db rebuild produces
-    # placeholders. Without this, the placeholder lives only in the api-
-    # form messages list which is discarded after this LLM call, and
-    # next turn re-reads the original 33k-char content.
-    #
-    # CAS guard via rev: if a concurrent writer changed the row, skip the write
-    # — they have a fresher view; our mutation will be re-applied next
-    # round when this conversation is rebuilt and L1 fires again.
-    # ``rev`` and not ``updated_at``: the latter is a value the writer itself
-    # supplies, so a clock that does not advance between two writes yields a
-    # predicate that passes while the data has already changed. ``rev`` is
-    # issued by a DB trigger in the same statement and cannot be forged.
-    if _conv_dirty and _conv_messages is not None and conv_id:
-        _landed = 0
-        # Persist each dirty settled owner through the same turn-projection CAS
-        # used by PATCH /turns. A whole-transcript fallback does not exist.
-        from lib.turn_lifecycle import (
-            LifecycleConflict, LifecycleNotFound,
-            update_turn_projection,
-        )
-        for _turn_id, _owner in _dirty_turn_messages.items():
-            _projection_rev = _owner.get('_projectionRevision')
-            if not isinstance(_projection_rev, int):
-                logger.warning('[L1-persist] conv=%s turn=%s lacks a '
-                               'projection revision; placeholder will be '
-                               're-applied next round', conv_id[:8],
-                               _turn_id[:8])
-                continue
-            try:
-                _updated = update_turn_projection(
-                    conv_id, _turn_id, projection=_owner,
-                    expected_projection_revision=_projection_rev,
-                    user_id=owner_id)
-                _new_turn = (_updated or {}).get('turn') or {}
-                if isinstance(_new_turn.get('projectionRevision'), int):
-                    _owner['_projectionRevision'] = _new_turn[
-                        'projectionRevision']
-                _landed += 1
-            except LifecycleConflict:
-                logger.info('[L1-persist] conv=%s turn=%s CAS skipped — '
-                            'turn changed; placeholder will be re-applied '
-                            'next round', conv_id[:8], _turn_id[:8])
-            except LifecycleNotFound:
-                logger.warning('[L1-persist] conv=%s turn=%s vanished '
-                               'before placeholder persist', conv_id[:8],
-                               _turn_id[:8])
-            except Exception as _e:
-                logger.warning('[L1-persist] conv=%s turn=%s persist failed: %s',
-                               conv_id[:8], _turn_id[:8], _e, exc_info=True)
-        if _landed:
-            logger.info('[L1-persist] conv=%s patched %d turn projection(s) '
-                        'with durable placeholders', conv_id[:8], _landed)
-
-        # Event-driven cross-device sync: either persistence path bumped the
-        # authoritative conversation revision. Push once per L1 pass, only
-        # after at least one CAS landed.
-        if _landed:
-            try:
-                from lib.agent_core.store import get_conversation_store
-                get_conversation_store().notify_conversation_changed(
-                    conv_id, user_id=owner_id)
-            except Exception as _ne:
-                logger.debug('[L1-persist] conv=%s conv-changed notify skipped: %s',
-                             conv_id[:8] if conv_id else '?', _ne)
 
     return tokens_saved

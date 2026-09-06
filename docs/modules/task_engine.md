@@ -57,13 +57,15 @@ Facades may re-export stable entry points, but new implementation belongs in a c
 
 `run_agent_loop` is the sole LLM/tool round-loop authority for root chat, swarm workers, timer and research engines. It owns round numbering, continue/stop sites, three abort placements, timeout counting and the post-tool checkpoint. Root request building, anomaly policy, budget/protocol gates, event projection and semantic loop detection are typed `_root_agent_loop.py` hooks returning `LoopDirective`; they never own another LLM/tool `while` or infer completion from response text. FlowExecutor owns graph iteration only; role execution delegates through the shared agent runner.
 
-Independent guards bound non-recovering tool loops. Before execution, exact-call identity fingerprints tool name, arguments, world version and new evidence so repeated side effects stop. After execution, stable `nonretryable_failure_signatures` accept only a canonical non-retryable typed error (the sparse model error or a legacy full `tofu.tool-result/v2` record); changed arguments cannot recover an unchanged denial.
-Swarm halts after three equal terminal-failure rounds with `exit_reason=nonretryable_tool_failure`, then performs one tool-less wrap-up. Any success, mixed/retryable/malformed or legacy result, or changed code resets the streak; unknown results fail open.
+Independent guards bound non-recovering tool loops. The shared no-progress guard runs only after tool execution and fingerprints the ordered calls, world version, and exact model-visible result snapshot. It accumulates only when all three are unchanged in consecutive completed rounds; a changed result, changed operation, changed world, verified success, or missing/incomplete result evidence resets and fails open. Read-only work and elapsed rounds alone are never stall evidence.
+Stable `nonretryable_failure_signatures` accept only a canonical non-retryable typed error (the sparse model error or a legacy full `tofu.tool-result/v2` record) plus the concrete tool/argument identity. Swarm halts after three equal terminal-failure rounds with `exit_reason=nonretryable_tool_failure`, then performs one tool-less wrap-up. Any success, mixed/retryable/malformed or legacy result, or changed operation resets the streak; unknown results fail open.
 Root post-dispatch policy also distinguishes byte-identical call/outcome loops from semantic no-progress no-ops and already-covered reads, gives one `_isMeta` safety correction, then stops continued waste.
 For V2 partial results, the guard reconstructs its server observation from sparse `toolContent` plus the non-model `tofu.tool-result-evidence/v1` round sidecar (and still reads legacy full envelopes). Range/cursor/limit and presentation-only changes retain one resource identity across registered idempotent tools; only the model-visible summary/items/error projection counts as evidence, so new pages remain productive but new artifact IDs cannot disguise an identical projection.
 The guard first directs the model to `read_tool_artifact`/`search_tool_artifact` or a visibly advancing narrower read, then stops one continued no-progress episode.
 When local PTC was actually projected, three productive single eligible-read rounds may instead earn a non-forcing `_isMeta` adoption hint; a still-serial task may receive another only after 24 completed rounds, both efficiency lanes share a four-hint task cap, native/off lanes never receive the PTC-specific hint, a same-round safety correction preempts it, and real user steering remains a hard boundary.
 Engine-authored stall/stream-continuation corrections and pure peer/swarm evidence are likewise transparent to current-user extraction; an inbox row containing human steering is not.
+
+Flow convergence policy follows the same evidence hierarchy. Similar critic or virtual-user wording is an advisory signal only: it may inject one strategy-change directive but cannot terminate a run. The same is true when a complete structured `[PROGRESS]` signal stays flat across edit-shipping turns with overlapping targets: a complex fix may need several incremental edits before a criterion becomes fully resolved. The zero-deliverable hint explicitly permits focused read-only investigation and forbids mutation merely to satisfy the guard. Hard boundaries remain transparent finite iteration/turn budgets. The manager's `stuck_no_progress` reaper is separate infrastructure liveness policy: it requires both the real-event clock and dispatch heartbeat to be stale, exempts live human/model waits, and interrupts a silent subprocess before escalating to task failure.
 
 One provider response is an ordered occurrence list. Every response position is an independent model action even when tool name, arguments, caller, or provider call ID are byte-identical.
 Blank, recycled, or duplicate IDs are reminted before history/settlement so each assistant call retains exactly one adjacent result; equality never elects one physical owner for sibling positions.
@@ -140,7 +142,21 @@ window; provider return/failure or explicit abort converges normally. One
 bounded coalescer worker exits at the provider boundary; resource tests live in
 `test_stream_delta_coalescing.py` and `test_provider_ingress_isolation.py`.
 
-Terminal processing has one direction: stamp the task terminal once; emit the typed terminal event; commit turn settlement; persist bounded executor diagnostics; release heavy in-memory fields; then notify projections and dispatch any durable queued successor.
+Mid-turn injections (peer messages, operator steer, detached `run_command` completions) follow one dual-write delivery contract: the durable `message_queue` row is the delivery authority, while the conversation-keyed `agent_inbox` item is a volatile fast-path twin tagged with that row's `queueId`. A live turn drains the twin at its next round boundary and stashes it under `_peer_inject_pending` / `_steer_inject_pending` / `_bgcmd_inject_pending`; only after the LLM call returns does the deferred flush emit the arrival chip, accumulate the display-only `_peerInjects` / `_userSteerInjects` / `_bgCommandInjects` sidecar (never into `toolRounds`), and delete the durable row — chip-shown ⟺ model-consumed ⟺ durable-deleted is one atomic step. The forward race (inbox first) closes by that row deletion, the reverse race (turn ends first) closes when `dispatch_next_queued` pops the row and drops the twin by `queueId`. An abort before the flush leaves the row untouched, and `redispatch_orphaned_queue_on_startup` re-dispatches it after a restart, so delivery is exactly-once across crashes without persisting the inbox itself. Human steer carries no durable row of its own; finalize salvages undelivered steer back to the queue. Specs live in `test_background_command_injection_lane.py` and `test_peer_message_driver_loop.py`.
+
+Terminal processing has one direction: stamp the task terminal once; settle its
+private `ExecutionSession` resource stack; emit the typed terminal event; commit
+turn settlement; persist bounded executor diagnostics; release heavy in-memory
+fields; then notify projections and dispatch any durable queued successor. The
+session is not a second task state: `TaskRuntime.status` remains authoritative.
+It only proves that exact admission leases, request routes, billing holds, and
+other live resources were released or handed to a declared durable/TTL recovery
+owner. A non-recoverable cleanup failure converts a proposed success to a typed
+terminal error before persistence/push. `TaskRuntime` raises a private
+terminalization fence before running cleanup callbacks: a racing Stop cannot
+rewrite completed work, a second terminalizer cannot publish another verdict,
+and a session that already failed cannot later be projected as task success.
+Because chat task acceptance is durable-at-birth, every pre-worker billing, admission, binding, and spawn rejection settles the session, writes a typed terminal task row, and only then unregisters it. A failed terminal write leaves an eviction-fenced, lightweight durability debt; bounded maintenance retries it before TTL, capacity, or memory-pressure cleanup may remove the task, so no accepted task can be stranded durably at `pending`/`running` merely because its worker never started.
 
 The normal root-chat path uses the same immutable terminal stamp as Flow/error/queued-abort paths. A configured model fallback and its pool rescue each use a finite actual-429 budget (default 3, hard ceiling 16); after all recovery fails, every exception shape returns a normal loop break carrying typed `task.error` plus `autoRetryExhausted`, so finalization emits `done(error)` and does not reset the bound through whole-turn replay. `finished_at` is the TTL clock and cannot be
 omitted or rewritten; cleanup never measures a successful long task from its
@@ -185,6 +201,8 @@ keeps status `skipped`, summary `blocked`/`unavailable`, and kind as `reasonCode
 - Never push a frame whose authoritative write failed.
 - Never retry a CAS conflict by rewriting a conversation-sized snapshot.
 - Never bind after execution starts or report bound/queued work as running before physical worker entry.
+- Never release an anonymous/LIFO admission slot from a production path; carry
+  the exact lease token from acquisition through terminal settlement.
 - Fence stale attempts cooperatively; never let them emit indefinitely.
 - A safety-cap stop is incomplete, never verified completion.
 

@@ -14,6 +14,8 @@ read MODEL_PRICING from here by import.
 
 from types import MappingProxyType
 
+import re
+
 from lib.log import get_logger
 from lib.model_info._openai_gpt56 import gpt56_pricing_rows
 
@@ -53,6 +55,12 @@ MODEL_PRICING = {
     'us.anthropic.fable-5-v1:0': {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Fable 5 (Bedrock)'},
     # Meituan-gateway Fable 5 (Jul 2026 marketplace) — ¥72/¥360 per 1M.
     'claude-fable-5':            {'input': 9.94,  'output': 49.72, 'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Fable 5'},
+    # ── Anthropic Fable 5.1 (GA 2026-09-01) — $10/$50 per 1M, same as Fable 5 list;
+    # cache reads cut 75%: $0.25/1M → cacheReadMul 0.025. Official API id: claude-fable-5-1.
+    'fable-5.1':                   {'input': 10.0,  'output': 50.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.025, 'name': 'Fable 5.1'},
+    'aws.fable-5.1':               {'input': 10.0,  'output': 50.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.025, 'name': 'Fable 5.1'},
+    'us.anthropic.fable-5-1-v1:0': {'input': 10.0,  'output': 50.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.025, 'name': 'Fable 5.1 (Bedrock)'},
+    'claude-fable-5-1':            {'input': 10.0,  'output': 50.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.025, 'name': 'Fable 5.1'},
     # ── Logical Claude ids (the model-identity contract) ──
     # These are LOGICAL names: what presets target, the picker shows, and
     # conversations persist. The gateway spellings they dispatch to live in the
@@ -60,9 +68,9 @@ MODEL_PRICING = {
     # row: cost keys on the WIRE id, the picker's display name on the LOGICAL
     # one — see lib/llm_dispatch/model_entry.py.
     'claude-opus-5':             {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 5'},
-    # Sonnet 5 (2026-06-30, 1M ctx native): PROMO $2/$10 until 2026-08-31,
-    # then $3.0/$15.0 — update this row on 09-01.
-    'claude-sonnet-5':           {'input': 2.0,   'output': 10.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 5'},
+    # Sonnet 5 (2026-06-30, 1M ctx native): promo $2/$10 ended 2026-08-31 as
+    # announced — standard $3.0/$15.0 applies since 2026-09-01.
+    'claude-sonnet-5':           {'input': 3.0,   'output': 15.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 5'},
     'claude-opus-4.8':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8'},
     'claude-opus-4.7':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.7'},
     'claude-opus-4.6':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.6'},
@@ -73,6 +81,8 @@ MODEL_PRICING = {
     'yuju-claude-opus-4.7-evaDaily': {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.7'},
     'aws.claude-opus-4.8':       {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8'},
     'claude-opus-4-8':           {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8'},
+    'us.anthropic.claude-opus-5-v1:0':          {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 5 (Bedrock)'},
+    'us.anthropic.claude-sonnet-5-v1:0':        {'input': 3.0,   'output': 15.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 5 (Bedrock)'},
     'us.anthropic.claude-opus-4-8-v1:0':        {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.8 (Bedrock)'},
     'aws.claude-opus-4.7':       {'input': 5.0,   'output': 25.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4.7'},
     # Nova-04 deployment of the same model — an interchangeable member of the
@@ -105,24 +115,25 @@ MODEL_PRICING = {
     # (V3 thinking) now ERROR on the official API — their rows were removed.
     # Successors: deepseek-v4-flash / deepseek-v4-pro below. Do NOT re-add.
     # DeepSeek V4 (2026-04-24) — both models have 1M ctx, dual Thinking / Non-Thinking modes.
-    # Pro: 75% price cut made permanent 2026-05-22 ($1.74/$3.48 → $0.435/$0.87); cached input $0.003625 → cacheReadMul ≈ 0.0083.
-    # Flash cacheReadMul from disclosed cache-hit pricing: $0.028 / $0.14 = 0.20.
-    # 'peak' (official API rows ONLY — not the gateway mirrors): DeepSeek announced
-    # 2x pricing on ALL billing items during 09:00-12:00 + 14:00-18:00 Beijing time,
-    # effective date TBA (pricing page, 2026-07-31). Ships INERT: set
-    # effective_from (UTC epoch) when the date is announced. See lib/pricing/_peak.py.
-    'deepseek-v4-pro':           {'input': 0.435, 'output': 0.87,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0083, 'name': 'DeepSeek V4 Pro',
-                                  'peak': {'mul': 2.0, 'windows': [(9, 12), (14, 18)], 'tz_offset': 8, 'effective_from': None}},
-    'deepseek-v4-flash':         {'input': 0.14,  'output': 0.28,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.20,  'name': 'DeepSeek V4 Flash',
-                                  'peak': {'mul': 2.0, 'windows': [(9, 12), (14, 18)], 'tz_offset': 8, 'effective_from': None}},
+    # 2026-08-16 repricing (off-peak bases): Pro $0.66/$1.98 (cache hit $0.022 → cacheReadMul ≈ 0.0333);
+    # Flash $0.22/$0.66 (cache hit $0.007 → cacheReadMul ≈ 0.0318).
+    # 'peak' (official API rows ONLY — not the gateway mirrors): 2x pricing on ALL billing
+    # items during 09:00-12:00 + 14:00-18:00 Beijing time, effective 2026-08-16
+    # (1786809600 = 2026-08-15 16:00 UTC). See lib/pricing/_peak.py.
+    'deepseek-v4-pro':           {'input': 0.66,  'output': 1.98,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0333, 'name': 'DeepSeek V4 Pro',
+                                  'peak': {'mul': 2.0, 'windows': [(9, 12), (14, 18)], 'tz_offset': 8, 'effective_from': 1786809600}},
+    'deepseek-v4-flash':         {'input': 0.22,  'output': 0.66,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0318, 'name': 'DeepSeek V4 Flash',
+                                  'peak': {'mul': 2.0, 'windows': [(9, 12), (14, 18)], 'tz_offset': 8, 'effective_from': 1786809600}},
     # Meituan gateway Huawei-cloud mirror for DeepSeek V4 Flash — same pricing.
-    'deepseek-v4-flash-huawei':  {'input': 0.14,  'output': 0.28,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.20,  'name': 'DeepSeek V4 Flash (Huawei)'},
+    'deepseek-v4-flash-huawei':  {'input': 0.22,  'output': 0.66,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0318, 'name': 'DeepSeek V4 Flash (Huawei)'},
+    # Meituan gateway Tencent/Meituan-cloud mirrors for DeepSeek V4 — same pricing.
+    'deepseek-v4-flash-tencent': {'input': 0.22,  'output': 0.66,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0318, 'name': 'DeepSeek V4 Flash (Tencent)'},
+    'deepseek-v4-flash-meituan': {'input': 0.22,  'output': 0.66,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0318, 'name': 'DeepSeek V4 Flash (Meituan)'},
+    'deepseek-v4-pro-tencent':   {'input': 0.66,  'output': 1.98,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.0333, 'name': 'DeepSeek V4 Pro (Tencent)'},
+    # Vision experimental variant of V4 Flash on the Meituan gateway — no public
+    # price card; anchored to V4 Flash until DeepSeek publishes one.
+    'deepseek-v4-flash-vision-exp': {'input': 0.22, 'output': 0.66, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.0318, 'name': 'DeepSeek V4 Flash Vision (Exp)'},
     'deepseek-v3.2':             {'input': 0.28,  'output': 0.41,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2'},  # ¥2/¥3 per 1M
-    # DeepSeek V3.2 mirrors on Meituan gateway — tiered ¥2/¥4 input, ¥4/¥6 output at 32K (cheapest tier in USD)
-    'deepseek-v3.2-tencent':     {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Tencent)'},  # ¥2/¥4 per 1M ≤32K
-    'deepseek-v3.2-baidu':       {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Baidu)'},    # ¥2/¥4 per 1M ≤32K
-    'deepseek-v3.2-huawei':      {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Huawei)'},   # ¥2/¥4 per 1M ≤32K
-    'deepseek-v3.2-doubao':      {'input': 0.28,  'output': 0.55,  'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'DeepSeek V3.2 (Doubao)'},   # ¥2/¥4 per 1M ≤32K
     'LongCat-Flash-Thinking-2601': {'input': 0.0, 'output': 0.0,  'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'LongCat Flash'},
     'LongCat-Flash-Chat-2603':      {'input': 0.28,'output': 1.10, 'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'LongCat Flash Chat'},  # ¥2/¥8 per 1M
     # ── Qwen (DashScope) — converted from CNY at 7.24 ──
@@ -130,7 +141,16 @@ MODEL_PRICING = {
     'qwen3.5-plus':              {'input': 0.11, 'output': 0.66, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen 3.5 Plus'},  # ¥0.8/¥4.8 per 1M (≤128K)
     'qwen3.5-flash':             {'input': 0.03, 'output': 0.28, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen 3.5 Flash'},  # ¥0.2/¥2 per 1M (≤128K)
     'qwen3-max':                 {'input': 0.35, 'output': 1.38, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen3 Max'},  # ¥2.5/¥10 per 1M (≤32K)
+    # Qwen3.8 generation (2026-08, DashScope): native vision + thinking, 1M ctx.
+    # 3.8-max ¥12/¥36 per 1M (cache hit ¥1.5 → cacheReadMul 0.125); 3.7-plus row uses the
+    # >256K tier ¥6/¥24 (≤256K tier unverified); 3.8-flash ¥0.8/¥2.7 (read mul unverified —
+    # family convention 0.20).
+    'qwen3.8-max':               {'input': 1.66, 'output': 4.97, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.125, 'name': 'Qwen 3.8 Max'},
+    'qwen3.7-plus':              {'input': 0.83, 'output': 3.31, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen 3.7 Plus'},
+    'qwen3.8-flash':             {'input': 0.11, 'output': 0.37, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.20, 'name': 'Qwen 3.8 Flash'},
     'qwen3-vl-plus':             {'input': 0.14, 'output': 1.38, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen3 VL Plus'},  # ¥1/¥10 per 1M (≤32K)
+    # qwen-mt-plus (translation): Alibaba Cloud Model Studio international rate.
+    'qwen-mt-plus':              {'input': 2.46, 'output': 7.37, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen MT Plus'},
     'qwen3-vl-flash':            {'input': 0.02, 'output': 0.21, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen3 VL Flash'},  # ¥0.15/¥1.5 per 1M (≤32K)
     'qwen3-coder-plus':          {'input': 0.55, 'output': 2.21, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen3 Coder Plus'},  # ¥4/¥16 per 1M (≤32K)
     'qwen3-coder-flash':         {'input': 0.14, 'output': 0.55, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Qwen3 Coder Flash'},  # ¥1/¥4 per 1M (≤32K)
@@ -147,14 +167,18 @@ MODEL_PRICING = {
     # ── Gemini ──
     'gemini-2.5-pro':            {'input': 1.25, 'output': 10.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 2.5 Pro'},
     'gemini-2.5-flash':          {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 2.5 Flash'},
+    'gemini-2.5-flash-lite':     {'input': 0.10, 'output': 0.40, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 2.5 Flash-Lite'},
     'gemini-2.0-flash-lite':     {'input': 0.075,'output': 0.30, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 2.0 Flash-Lite'},
     'gemini-3.1-flash-lite-preview': {'input': 0.25, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Flash-Lite'},
+    # GA id (the Meituan gateway 404s the -preview spelling, serves this one).
+    'gemini-3.1-flash-lite':     {'input': 0.25, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Flash-Lite'},
     'gemini-3.1-pro-preview':    {'input': 2.00, 'output': 12.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Pro'},
     'gemini-3-flash-preview':    {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3 Flash'},
     'gemini-3.5-flash':          {'input': 1.49, 'output': 8.95, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.5 Flash'},  # ¥10.80/¥64.80 per 1M
     'gemini-3.6-flash':          {'input': 1.49, 'output': 7.46, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.6 Flash'},  # ¥10.80/¥54.00 per 1M
     # Intro pricing $0.75/$3.75 through 2026-12-31, then $1.50/$7.50 standard.
     'gemini-3.7-flash':          {'input': 0.75, 'output': 3.75, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.7 Flash'},
+    'gemini-3.8-flash':          {'input': 1.50, 'output': 7.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.8 Flash'},
     'gemini-3.5-flash-lite':     {'input': 0.30, 'output': 2.49, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.5 Flash-Lite'},  # ¥2.16/¥18 per 1M
     'gemini-3.1-flash-image-preview': {'input': 0.25, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3.1 Flash Image'},
     'gemini-3-pro-image-preview':    {'input': 2.50, 'output': 12.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Gemini 3 Pro Image'},
@@ -178,6 +202,7 @@ MODEL_PRICING = {
     # Original GPT-5 family retired — see _slots.py comment.
     # ── OpenAI (o-series reasoning) ──
     'o3':                        {'input': 2.00, 'output': 8.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'o3'},
+    'o3-pro':                    {'input': 20.0, 'output': 80.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'o3 Pro'},
     'o4-mini':                   {'input': 1.10, 'output': 4.40, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'o4-mini'},
     'o3-mini':                   {'input': 1.10, 'output': 4.40, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.50, 'name': 'o3-mini'},
     # ── OpenAI (GPT-4 family — previous gen) ──
@@ -196,9 +221,10 @@ MODEL_PRICING = {
     'claude-opus-4-20250514':    {'input': 15.0,  'output': 75.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Opus 4'},
     'claude-sonnet-4-20250514':  {'input': 3.0,   'output': 15.0,  'cacheWriteMul': 1.25, 'cacheReadMul': 0.10, 'name': 'Claude Sonnet 4'},
     # ── MiniMax ──
-    # M3 (2026-06-01) — new flagship: MSA sparse attn, 1M ctx, native multimodal (image+video in).
-    # Standard rate $0.60/$2.40; launch promo halves it to $0.30/$1.20 (temporary — not stored).
-    'MiniMax-M3':                {'input': 0.60, 'output': 2.40, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M3'},
+    # M3 (2026-06-01) — flagship: MSA sparse attn, 1M ctx, native multimodal (image+video in).
+    # Launch 50%-off promo made permanent 2026-07: $0.30/$1.20 (≤512K; >512K tier $0.60/$2.40);
+    # cache read $0.06 → cacheReadMul 0.20.
+    'MiniMax-M3':                {'input': 0.30, 'output': 1.20, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.20, 'name': 'MiniMax M3'},
     'MiniMax-M2':                {'input': 0.30, 'output': 1.20, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2'},
     'MiniMax-M2.1':              {'input': 0.30, 'output': 1.20, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2.1'},
     'MiniMax-M2.1-highspeed':    {'input': 0.30, 'output': 2.40, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2.1 HS'},
@@ -209,34 +235,77 @@ MODEL_PRICING = {
     'M2-her':                    {'input': 0.30, 'output': 1.20, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'MiniMax M2-her'},
     # ── GLM (Zhipu AI) — converted from CNY at 7.24 ──
     'glm-5.3':                   {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.3'},  # 1M context; registered billable rates, not a routing hint
+    # glm-5.3-flash (2026-08): ¥0.8/¥2.8 per 1M; cache hit ¥0.23 → cacheReadMul ≈ 0.29.
+    'glm-5.3-flash':             {'input': 0.11, 'output': 0.39, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.29, 'name': 'GLM-5.3 Flash'},
     'glm-5.2':                   {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.2'},  # 1M context, 128K output, text-only thinking flagship (2026-06-13)
     'glm-5.1':                   {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.1'},
     'glm-5.1-huawei':            {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5.1 (Huawei)'},
     'glm-5':                     {'input': 3.45, 'output': 13.81, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5'},
     'glm-5v-turbo':              {'input': 0.69, 'output': 3.04, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5V Turbo'},
+    # glm-5-turbo: text-only turbo tier — anchored to glm-5v-turbo until Zhipu
+    # publishes a separate card.
+    'glm-5-turbo':               {'input': 0.69, 'output': 3.04, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-5 Turbo'},
     'glm-4.7':                   {'input': 0.69, 'output': 0.69, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-4.7'},
     'glm-4.5-air':               {'input': 0.28, 'output': 1.10, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'GLM-4.5 Air'},
     'glm-4.5-flash':             {'input': 0.0,  'output': 0.0,  'cacheWriteMul': 0,    'cacheReadMul': 0,    'name': 'GLM-4.5 Flash'},
     # ── Doubao (Volcengine) — converted from CNY at 7.24 ──
     'Doubao-Seed-2.0-pro':       {'input': 0.55, 'output': 2.21, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Doubao Seed 2.0 Pro'},
+    # Seed 2.1 Pro (-260628 snapshot, current flagship): ¥8/¥20 per 1M → $1.10/$2.76 @ 7.24.
+    'doubao-seed-2-1-pro-260628': {'input': 1.10, 'output': 2.76, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Doubao Seed 2.1 Pro'},
     'Doubao-Seed-2.0-lite':      {'input': 0.04, 'output': 0.14, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Doubao Seed 2.0 Lite'},
     'Doubao-Seed-2.0-mini':      {'input': 0.02, 'output': 0.06, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Doubao Seed 2.0 Mini'},
+    'doubao-seed-1-6-vision-250815': {'input': 0.11, 'output': 1.10, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Doubao Seed 1.6 Vision'},  # ¥0.8/¥8 per 1M (≤32K)
     # ── Mistral AI ──
-    'mistral-large-latest':      {'input': 2.00, 'output': 6.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Mistral Large'},
-    'mistral-small-latest':      {'input': 0.10, 'output': 0.30, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Mistral Small'},
-    'codestral-latest':          {'input': 0.30, 'output': 0.90, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Codestral'},
+    # mistral-large-latest → Mistral Large 3 (25.12): $0.50/$1.50 per 1M.
+    'mistral-large-latest':      {'input': 0.50, 'output': 1.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Mistral Large 3'},
+    # mistral-small-latest → Mistral Small 4 (26.03): $0.15/$0.60 per 1M.
+    'mistral-small-latest':      {'input': 0.15, 'output': 0.60, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Mistral Small 4'},
+    # codestral-latest: Codestral 25.01 is on Mistral's official deprecated list; the coding
+    # role moved to mistral-medium-latest (Medium 3.5, no public card yet). Do NOT re-add.
     # ── xAI (Grok) ──
     'grok-3':                    {'input': 3.00, 'output': 15.0, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Grok 3'},
     'grok-3-mini':               {'input': 0.30, 'output': 0.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Grok 3 Mini'},
+    # grok-4.6 (2026-08, current flagship): $2/$6 per 1M, cached input $0.50 → cacheReadMul 0.25.
+    'grok-4.6':                  {'input': 2.00, 'output': 6.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.25, 'name': 'Grok 4.6'},
+    'grok-4.20':                 {'input': 1.25, 'output': 2.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Grok 4.20'},
+    'grok-4.1-fast':             {'input': 0.20, 'output': 0.50, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Grok 4.1 Fast'},
     # ── Moonshot (Kimi) — per OpenRouter (2026-04-20 release) ──
     # kimi-k3 (2026-07-17): ¥20/¥100 per 1M → $2.76/$13.81 @ 7.24; 1M context
     'kimi-k3':                   {'input': 2.76, 'output': 13.81,'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Kimi K3'},
     'kimi-k2.6':                 {'input': 0.60, 'output': 2.80, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Kimi K2.6'},
+    # kimi-k2.7-code (official platform.kimi.ai, verified 2026-09-03):
+    # $0.95/$4.00 per 1M, cache hit $0.19 → readMul 0.20; 262K context.
+    # highspeed is a gateway SKU billing 2× output (MiniMax highspeed pattern).
+    'kimi-k2.7-code':            {'input': 0.95, 'output': 4.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.20, 'name': 'Kimi K2.7 Code'},
+    'kimi-k2.7-code-highspeed':  {'input': 0.95, 'output': 8.00, 'cacheWriteMul': 1.00, 'cacheReadMul': 0.20, 'name': 'Kimi K2.7 Code (Highspeed)'},
     # ── Tencent Hunyuan ── hy4-preview (2026-08-28): ¥6/¥18 per 1M, cache hit ¥0.3 → $0.829/$2.486 @ 7.24
     'hy4-preview':               {'input': 0.829,'output': 2.486,'cacheWriteMul': 1.00, 'cacheReadMul': 0.05, 'name': 'Hunyuan HY4 Preview'},
     # ── Tencent Hunyuan ── cheapest tier (≤16K): ¥1.2/¥4 per 1M = $0.166/$0.553 @ 7.24
     'hy3-preview':               {'input': 0.166,'output': 0.553,'cacheWriteMul': 1.00, 'cacheReadMul': 0.10, 'name': 'Hunyuan HY3 Preview'},
+    # -- BEGIN meituan_template_sync auto-added (regenerated wholesale) --
+    # -- END meituan_template_sync auto-added --
 }
+
+# Dated-checkpoint pins (deepseek-v4-pro-0813, claude-opus-4-5-20251001) serve
+# the same model as their rolling alias, and vendors do not reprice a pin. An
+# exact miss therefore folds ONE trailing -MMDD / -YYYYMMDD stamp and retries
+# against the alias row instead of silently booking zero. Stamps that are not
+# dates (LongCat -2601-style iteration tags) fold to an id with no row and
+# still miss — same outcome as before, never a wrong row.
+_DATED_SUFFIX_RE = re.compile(r'-(?:\d{8}|\d{4})$')
+
+
+def pricing_for_model(model_id):
+    """Return the MODEL_PRICING row for *model_id*, or ``None``.
+
+    Exact id first; on a miss, one dated-checkpoint suffix is folded so a
+    pinned snapshot inherits the rolling alias's row.
+    """
+    row = MODEL_PRICING.get(model_id)
+    if row is None and isinstance(model_id, str):
+        row = MODEL_PRICING.get(_DATED_SUFFIX_RE.sub('', model_id))
+    return row
+
 
 # ── Qwen tiered pricing (CNY per 1M tokens) ──
 # The MODEL_PRICING above uses the cheapest tier converted to USD.
@@ -261,15 +330,10 @@ QWEN_PRICING_CNY = {
     'qwen-vl-max':      {'input': [(1_000_000, 1.6)],  'output': [(1_000_000, 4.0)]},
     'qwen-vl-plus':     {'input': [(1_000_000, 0.8)],  'output': [(1_000_000, 2.0)]},
     'deepseek-v3.2':    {'input': [(1_000_000, 2.0)],  'output': [(1_000_000, 3.0)]},
-    # Meituan mirrors: ¥2/¥4 input, ¥4/¥6 output, split at 32K context
-    'deepseek-v3.2-tencent': {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
-    'deepseek-v3.2-baidu':   {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
-    'deepseek-v3.2-huawei':  {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
-    'deepseek-v3.2-doubao':  {'input': [(32_000, 2.0), (1_000_000, 4.0)], 'output': [(32_000, 4.0), (1_000_000, 6.0)]},
     # DeepSeek V4 gateway mirrors use provider-qualified model ids.  The plain
     # official ids live in MODEL_PRICING above; repeating them here would make
     # the legacy CNY compatibility layer overwrite the official USD rows.
-    'deepseek-v4-flash-huawei': {'input': [(1_000_000, 1.0)],  'output': [(1_000_000, 2.0)]},
+    'deepseek-v4-flash-huawei': {'input': [(1_000_000, 1.6)],  'output': [(1_000_000, 4.8)]},
     # Tencent Hunyuan HY3 — tiered pricing on 16K / 32K / 256K context boundaries
     'hy3-preview':              {'input': [(16_000, 1.2), (32_000, 1.6), (256_000, 2.0)],
                                  'output': [(16_000, 4.0), (32_000, 6.4), (256_000, 8.0)]},

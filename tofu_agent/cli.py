@@ -8,6 +8,8 @@ from collections.abc import Mapping
 import json
 import os
 from pathlib import Path
+import sys
+from urllib.parse import urlparse
 
 from tofu_agent.models import (
     AgentConfigurationError,
@@ -21,7 +23,6 @@ from tofu_agent.provider_store import (
     ModelRoutingStoreError,
 )
 from tofu_agent.runtime import AgentRuntime
-from tofu_agent.server import HeadlessServerConfig, create_app
 
 
 def _load_dotenv(path: str) -> None:
@@ -127,19 +128,23 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         '--cwd', default=os.environ.get('TOFU_AGENT_RUN_CWD', ''),
         help='Project root exposed to the agent tools (run_command and file '
-             'tools resolve against it). Defaults to the process cwd.')
+             'tools resolve against it). Default: the process cwd.')
     run_parser.add_argument(
         '--timeout-s', type=float, default=float(os.environ.get(
             'TOFU_AGENT_RUN_TIMEOUT', '600')),
         help='Wall-clock budget for the whole run (default 600s).')
     run_parser.add_argument(
-        '--tools', default=os.environ.get('TOFU_AGENT_RUN_TOOLS', ''),
-        help="Comma-separated tool tags (see README) or '*'. Default keeps "
-             'the storage-free runtime policy.')
+        '--tools', default=os.environ.get('TOFU_AGENT_RUN_TOOLS', '*'),
+        help="Comma-separated tool tags (see README) or '*'. Default '*' "
+             'exposes the full storage-free tool surface (dangerous execution '
+             'stays opt-in inside TOOLS_ALL). Keyword-routed exposure is '
+             'opt-in via TOFU_AGENT_RUN_NATIVE_EXPOSURE=routed.')
     run_parser.add_argument(
-        '--trajectory', default=os.environ.get('TOFU_AGENT_RUN_TRAJECTORY', ''),
+        '--trajectory', default=os.environ.get(
+            'TOFU_AGENT_RUN_TRAJECTORY', 'atif'),
         choices=['', *AVAILABLE_FORMATS],
-        help='Embed a flattened trajectory of this run in the JSON result.')
+        help="Embed a flattened trajectory of this run in the JSON result "
+             "(default 'atif'; pass '' to disable).")
     run_parser.add_argument(
         '--output', default=os.environ.get('TOFU_AGENT_RUN_OUTPUT', ''),
         help='Write the JSON result to this path instead of stdout.')
@@ -150,6 +155,70 @@ def _is_loopback_host(host: str) -> bool:
     from tofu_agent.server import _is_loopback
     return _is_loopback(host)
 
+
+_PROXY_ENV_KEYS = ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY')
+
+
+def _iter_base_urls(value):
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if str(key).lower() in {'base_url', 'baseurl'} \
+                    and isinstance(item, str):
+                yield item
+            else:
+                yield from _iter_base_urls(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_base_urls(item)
+
+
+def _no_proxy_entry_matches(entry: str, host: str) -> bool:
+    entry = entry.strip().lower()
+    if not entry:
+        return False
+    if entry == '*':
+        return True
+    host = host.lower()
+    if entry.startswith('.'):
+        return host.endswith(entry) or host == entry[1:]
+    return host == entry or host.endswith('.' + entry)
+
+
+def _self_heal_no_proxy(access) -> None:
+    """Bypass the configured proxy for the envelope's own base_url hosts.
+
+    Sandboxed eval containers commonly export a catch-all http_proxy that
+    intercepts the model serving IP too, turning every LLM call into a 403.
+    Tofu knows its base_url from the access envelope, so it can close that
+    hole itself instead of relying on the launcher to get no_proxy right.
+    """
+    if access is None or not any(os.environ.get(k) for k in _PROXY_ENV_KEYS):
+        return
+    hosts = set()
+    for url in _iter_base_urls(access.document):
+        host = urlparse(str(url)).hostname
+        if host:
+            hosts.add(host)
+    if not hosts:
+        return
+    existing = []
+    for key in ('no_proxy', 'NO_PROXY'):
+        existing.extend(
+            e.strip() for e in os.environ.get(key, '').split(',') if e.strip())
+    missing = [
+        host for host in sorted(hosts)
+        if not any(_no_proxy_entry_matches(e, host) for e in existing)
+    ]
+    if not missing:
+        return
+    suffix = ','.join(missing)
+    for key in ('no_proxy', 'NO_PROXY'):
+        current = os.environ.get(key, '').strip(',')
+        os.environ[key] = f'{current},{suffix}' if current else suffix
+    print(
+        '[no_proxy] auto-appended %s: proxy vars are set and would intercept '
+        'the model base_url' % suffix,
+        file=sys.stderr)
 
 def _runtime_and_setup(
     args,
@@ -171,6 +240,7 @@ def _runtime_and_setup(
             load_error = str(exc)
         if access is not None:
             source = 'saved'
+    _self_heal_no_proxy(access)
     runtime = AgentRuntime.local(
         model_routing=access,
         model_routing_source=source,
@@ -202,12 +272,21 @@ def _run_task(args) -> int:
         raise AgentConfigurationError(
             'no task given; pass --task or --task-file')
 
+    # Headless benchmark semantics: the run only ever dispatches onto the
+    # request-scoped envelope, so the operator's configured slots add startup
+    # cost (and a key-leak surface) for nothing. Explicit env still wins.
+    os.environ.setdefault('TOFU_DISABLE_CONFIGURED_SLOTS', '1')
+
     config: dict = {}
-    if args.cwd:
-        config['project'] = args.cwd
+    config['project'] = args.cwd or os.getcwd()
     if args.tools:
         tags = [tag.strip() for tag in args.tools.split(',') if tag.strip()]
         config['tools'] = tags[0] if len(tags) == 1 else tags
+    # Eval determinism: expose the full native tool surface instead of the
+    # keyword-routed subset; routed exposure stays opt-in.
+    config['tools.nativeExposure'] = (
+        os.environ.get('TOFU_AGENT_RUN_NATIVE_EXPOSURE', 'full').strip()
+        or 'full')
 
     runtime = _runtime(args)
     try:
@@ -225,6 +304,8 @@ def _run_task(args) -> int:
             'error': {'kind': 'timeout',
                       'message': f'run exceeded {args.timeout_s}s'},
         }, args.output)
+        print(f'run failed: kind=timeout message=run exceeded '
+              f'{args.timeout_s}s', file=sys.stderr)
         return 3
     finally:
         runtime.close(abort=False)
@@ -251,6 +332,7 @@ def _run_task(args) -> int:
 
     if result.status == 'done':
         return 0
+    _report_failure(result)
     if result.status == 'aborted':
         return 5
     if isinstance(result.error, Mapping) \
@@ -260,6 +342,16 @@ def _run_task(args) -> int:
         # and plausibly succeed, unlike a permanent payload/permission error.
         return 6
     return 4
+
+
+def _report_failure(result) -> None:
+    error = result.error if isinstance(result.error, Mapping) else {}
+    parts = [f'status={result.status}']
+    for key in ('kind', 'message', 'detail', 'raw'):
+        value = str(error.get(key) or '').strip()
+        if value:
+            parts.append(f'{key}={value[:400]}')
+    print('run failed: ' + ' '.join(parts), file=sys.stderr)
 
 
 def _emit(document: dict, output: str) -> None:
@@ -277,6 +369,10 @@ async def _serve(args) -> None:
             'refusing a non-loopback bind without authentication; set '
             'TOFU_AGENT_TOKEN or explicitly pass --allow-unauthenticated')
     runtime, model_routing_setup = _runtime_and_setup(args)
+    # The server stack (quart/hypercorn) is only needed on the serve path;
+    # importing it lazily keeps `run`'s dependency closure minimal so the
+    # headless subcommand still starts in stripped-down eval containers.
+    from tofu_agent.server import HeadlessServerConfig, create_app
     auth_mode = 'open' if args.allow_unauthenticated else 'auto'
     config = HeadlessServerConfig(
         bind_host=args.host,

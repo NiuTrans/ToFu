@@ -315,9 +315,10 @@ def test_full_paper_prompts_teach_the_bounded_gateway_contract():
             'verify a number', 'Introduction\nEvidence.', '', lang=lang)
         assert apply_paper_tool_epoch_guidance(
             messages, candidate, lang=lang) is True
-        system = messages[0]['content']
-        assert 'search_tools' in system and 'execute_tools' in system
-        assert 'arguments_schema' in system
+        assert messages[-1]['role'] == 'user'
+        guidance = messages[-1]['content']
+        assert 'search_tools' in guidance and 'execute_tools' in guidance
+        assert 'arguments_schema' in guidance
 
         control_messages = [{'role': 'system', 'content': 'control prompt'}]
         assert apply_paper_tool_epoch_guidance(

@@ -37,6 +37,32 @@ so reconnect/poll sees the same in-flight rows and node completion replaces the
 transient projection instead of appending a second, renumbered batch. Ordinary
 swarm agents do not install this observer and remain isolated.
 
+A settled Goal Mode turn is durable-rendered exactly like a normal chat
+turn. The `turn.visible.sync` write boundary assembles the segment timeline
+(narrative ⇄ tool_use interleaved, terminal text last) with the same
+assembler normal turns checkpoint through, instead of persisting an empty
+`segments` list that collapsed the settled surface into content plus a
+ The flow projection's rounds are bounded previews
+(`query` brief + result snippet, no `toolArgs`), so the boundary fill-only
+inherits the missing display fields (`toolArgs`, `toolContent`, timing,
+execution identity) from the root turn's live-checkpointed projection,
+matched by the stable `toolCallId`, before segment assembly — the durable
+rows render full command cards without growing the sync payload, and the
+flow projection's own values always win. Once a run owns visible turns, the
+lifecycle fold likewise preserves the first turn's committed `content` and
+`thinking` instead of refolding the per-node task buffer that
+`flow_iteration` resets. The swarm substrate stamps `edited_path` /
+`edited_action` on each edit-tool `tool_log` row at dispatch time; the flow
+chat adapter projects those markers into the turn's
+`modifiedFileList`/`modifiedFiles`, so the settled file-changes block renders
+from the same projection fields a normal turn's journal derive produces.
+`run_command` rounds additionally harvest their flat result identity
+(command line, exit code, terminal badges) into the row's `result_meta`,
+and the bounded historical-row compaction now reclaims only prose bodies
+and heavy list values — `args_brief` (≤200 chars, the card's `$` line) and
+the flat meta scalars survive — so settled command cards keep their command
+line and exit pill instead of degrading to a bare `$`.
+
 “Save & use” selects a saved definition only when its document token/revision
 remain current, mode changes are allowed, and Studio closes. Conflict, failure,
 intervening edits, or a busy chat leaves Studio open and `activeFlow` unchanged.

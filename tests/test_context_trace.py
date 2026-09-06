@@ -275,7 +275,7 @@ def test_logging_failure_cannot_break_assembly(monkeypatch):
         monkeypatch.setattr(renderer, 'logger', real_logger)
 
     # The static + memory + swarm blocks still landed.
-    txt = _system_text(messages)
+    txt = _system_text(messages) + '\n' + _carrier_text(messages)
     assert 'NEVER generate or guess URLs' in txt  # static block present
     assert '<memory_accumulation>' in txt
     assert '<parallel_execution>' in txt

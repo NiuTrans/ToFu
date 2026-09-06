@@ -11,8 +11,8 @@ agent loops share:
     anti-analysis-spiral gating (STOP-with-unresolved-markers downgrade,
     CONTINUE_PLANNER requires a gated PLAN_DEFECT reason, replan kill-switch,
     the backend-authoritative done gate);
-  * Jaccard "stuck" detection on consecutive verifier feedbacks + the
-    diminishing-returns / no-value-progress guard;
+  * advisory Jaccard repetition and diminishing-returns signals for verifier
+    feedback;
   * usage-dict accumulation;
   * the autopilot loop-budget env config (fail-open readers);
   * the shared "cut off by a safety cap, not finished" outcome contract.

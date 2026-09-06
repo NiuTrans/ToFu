@@ -511,7 +511,9 @@ function _populateModelDropdown(models) {
       ? _rowBrand
       : _rowCredKind
         ? runtimeScope.modelGroupKey({ brand: m.brand, name: m.provider_name }, m)
-        : (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic');
+        : (typeof _modelBrand === 'function'
+          ? _modelBrand(m.model_id, m.creator_id)
+          : (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic'));
     const item = document.createElement('div');
     item.className = 'preset-dropdown-item' + (opts.sub ? ' ps-dd-sub-item' : '');
     item.setAttribute('data-value', m.model_id);

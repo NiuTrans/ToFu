@@ -85,10 +85,10 @@ from lib.agent_core.admission import (
     unregister_waiter, wait_for_event,
 )
 from lib.agent_core.execution_session import (
-    ExecutionPhase,
-    bind_admission_lease,
+    acquire_and_bind_admission,
     bind_billing_reservation,
     bind_model_route,
+    bind_tool_environment,
     execution_session_for_task,
 )
 from lib.agent_core.run_contract import (
@@ -436,7 +436,7 @@ async def agent_run():
               trajectory=trajectory_fmt, n_custom_tools=len(tool_env.tools) if tool_env else 0)
 
     # ── 4. Dispatch ───────────────────────────────────────────────
-    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.manager import create_task, reject_unstarted_chat_task
     from lib.tasks_pkg.spawn import spawn_task
     task = create_task(
         conversation_id, messages_in, cfg, user_id=owner_user_id
@@ -456,16 +456,21 @@ async def agent_run():
         else model_selection.provider_offering.public_dict()
     )
     execution_session = execution_session_for_task(task)
-    bind_model_route(
-        execution_session,
-        lambda: dispose_routed_slot_group(route_group),
-    )
-    if tool_env is not None:
-        execution_session.hold_resource(
-            'tool_environment',
-            lambda _context: dispose_tool_env(tool_env),
-            release_order=250,
+    try:
+        bind_model_route(
+            execution_session,
+            lambda: dispose_routed_slot_group(route_group),
         )
+        if tool_env is not None:
+            bind_tool_environment(
+                execution_session,
+                lambda: dispose_tool_env(tool_env),
+            )
+    except Exception as exc:
+        reject_unstarted_chat_task(
+            task, exc, cause='execution_resource_bind_failed',
+            conv_id=conversation_id)
+        raise
 
     # ── Billing: pre-flight reserve (multi-user installs only) ──
     # Mirrors routes/api_v1/chat.py. Personal / open installs have an
@@ -484,36 +489,56 @@ async def agent_run():
                 prompt_tokens=estimate_prompt_tokens(messages_in),
                 max_completion_tokens=est_completion)
         except InsufficientFunds as e:
-            execution_session.settle(
-                ExecutionPhase.FAILED, cause='billing_reservation_refused')
+            reject_unstarted_chat_task(
+                task, e, cause='billing_reservation_refused',
+                conv_id=conversation_id)
             return api_error(
                 f'Insufficient credits. '
                 f'Estimated cost {e.needed_micro / 1_000_000:.4f} credits, '
                 f'balance {e.balance_micro / 1_000_000:.4f}.',
                 status=402, error_kind='insufficient_funds',
                 balance_micro=e.balance_micro, needed_micro=e.needed_micro)
+        except Exception as exc:
+            reject_unstarted_chat_task(
+                task, exc, cause='billing_reservation_failed',
+                conv_id=conversation_id)
+            raise
 
     if billing_user_id:
-        bind_billing_reservation(
-            execution_session,
-            reservation_micro=reservation_micro,
-            settle=lambda: settle_task(
-                task, user_id=billing_user_id, model=model_id,
-                raise_on_error=True,
-            ),
-            release=lambda: release_reservation(
-                task, user_id=billing_user_id,
-                reservation_micro=reservation_micro, raise_on_error=True,
-            ),
-        )
+        try:
+            bind_billing_reservation(
+                execution_session,
+                reservation_micro=reservation_micro,
+                settle=lambda: settle_task(
+                    task, user_id=billing_user_id, model=model_id,
+                    raise_on_error=True,
+                ),
+                release=lambda: release_reservation(
+                    task, user_id=billing_user_id,
+                    reservation_micro=reservation_micro, raise_on_error=True,
+                ),
+            )
+        except Exception as exc:
+            reject_unstarted_chat_task(
+                task, exc, cause='billing_bind_failed',
+                conv_id=conversation_id)
+            raise
 
     # ── Admission control: bound concurrent in-flight tasks ───────
     # When the server is saturated, refuse with 503 + Retry-After
     # instead of spawning unbounded work that starves the thread pool.
-    admission_lease = controller.acquire()
+    try:
+        admission_lease = acquire_and_bind_admission(
+            execution_session, controller)
+    except Exception as exc:
+        reject_unstarted_chat_task(
+            task, exc, cause='admission_acquire_failed',
+            conv_id=conversation_id)
+        raise
     if admission_lease is None:
-        execution_session.settle(
-            ExecutionPhase.FAILED, cause='task_admission_refused')
+        reject_unstarted_chat_task(
+            task, RuntimeError('Task admission refused'),
+            cause='task_admission_refused', conv_id=conversation_id)
         logger.warning('[agent.run] admission refused (in_flight=%d/%d) '
                        'key=%s model=%s',
                        controller.in_flight, controller.capacity,
@@ -521,18 +546,14 @@ async def agent_run():
         return api_error(
             'Server at capacity; retry shortly.', status=503,
             error_kind='overloaded', retry_after=5)
-    bind_admission_lease(
-        execution_session,
-        lambda: controller.release(admission_lease),
-    )
     register_waiter(task['id'])
 
     try:
         spawn_task(task)
     except Exception as e:
-        execution_session.settle(
-            ExecutionPhase.FAILED, cause='task_spawn_failed')
         unregister_waiter(task['id'])
+        reject_unstarted_chat_task(
+            task, e, cause='task_spawn_failed', conv_id=conversation_id)
         logger.exception('[agent.run] spawn_task failed task=%s', task['id'][:8])
         return api_internal_error(e, context='api_v1.agent_run')
 
@@ -545,7 +566,7 @@ async def agent_run():
     # ── 5. Return a handle, stream, or block ──────────────────────
     if respond_async or 'respond-async' in str(
             request.headers.get('Prefer') or '').lower():
-        # The terminal callback remains registered and owns admission,
+        # The task's ExecutionSession remains registered and owns admission,
         # provider/tool cleanup, and billing. Only the HTTP waiter can be
         # released now; the caller resumes through the task endpoints.
         unregister_waiter(task['id'])

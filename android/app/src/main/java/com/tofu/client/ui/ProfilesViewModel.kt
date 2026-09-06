@@ -133,6 +133,7 @@ class ProfilesViewModel(
             is LoginResult.BadCredentials -> UiStatus.BadCredentials(profile)
             is LoginResult.NoCredential -> UiStatus.BadCredentials(profile)
             is LoginResult.Error -> UiStatus.Error(result.message)
+            is LoginResult.Incompatible -> UiStatus.Error(result.message)
             // Both navigate above; unreachable here.
             is LoginResult.Success, is LoginResult.NeedsInteractiveSso -> UiStatus.Idle
         }

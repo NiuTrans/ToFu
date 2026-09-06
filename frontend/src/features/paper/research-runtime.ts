@@ -61,6 +61,7 @@ interface ResearchApi {
 }
 
 type ResearchWindow = Window & {
+  config?: { model?: string };
   Api?: { tasks?: TaskApi; research?: ResearchApi };
   debugLog?: (message: string, level?: string) => void;
   _researchStream?: ResearchStream | null;
@@ -296,10 +297,13 @@ export async function startResearchJob(direction: string): Promise<void> {
   state._researchStream = stream;
   ensureResearchMode();
   try {
-    const data = await tasks().start('research', {
+    const payload: JsonObject = {
       direction,
       lang: _i18nLang,
-    });
+    };
+    const selectedModel = String(state.config?.model || '').trim();
+    if (selectedModel) payload.model = selectedModel;
+    const data = await tasks().start('research', payload);
     const taskId = typeof data.taskId === 'string' ? data.taskId : '';
     if (data.ok !== true || !taskId) {
       throw new Error(typeof data.error === 'string' ? data.error : 'research start failed');

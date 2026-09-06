@@ -1764,6 +1764,154 @@ def test_visible_sync_advances_revision_across_live_projection_head(
     assert len(task['_turnVisibleRunTurnIds']) == 2
 
 
+def test_visible_sync_restores_live_round_fidelity(storage, monkeypatch):
+    """Brief flow-summary rounds inherit full tool facts from the live root.
+
+    The flow projection carries bounded preview rounds (query + result
+    snippet, no toolArgs); the root turn's live checkpoint holds the same
+    rounds at full fidelity under the same toolCallId.  The sync boundary
+    must rebuild display-complete durable turns from it: fill-only, so the
+    flow projection's own values always win.
+    """
+    from lib.turn_lifecycle import (
+        bind_task,
+        create_turn_pair,
+        get_turn,
+        sync_visible_run_turns,
+    )
+    monkeypatch.setattr(
+        'lib.storage.get_storage_client', lambda write=False: storage.client)
+    created = create_turn_pair(
+        'turn-visible-fidelity',
+        command_id='turn-visible-fidelity-create',
+        input_projection={'content': 'hello'},
+        config={},
+        user_id=1,
+        conversation_defaults={
+            'allowCreate': True,
+            'title': 'Visible fidelity',
+            'createdAt': 1,
+            'settings': {},
+        },
+    )
+    attempt_id = created['attempt']['attemptId']
+    turn_id = created['turn']['turnId']
+    bind_task(attempt_id, 'turn-visible-fidelity-task', user_id=1)
+    task = {
+        '_attemptId': attempt_id,
+        '_userId': 1,
+        '_turnId': turn_id,
+        'convId': 'turn-visible-fidelity',
+        'config': {},
+    }
+    live_round = {
+        'toolCallId': 'call-live-1',
+        'toolName': 'run_command',
+        'toolArgs': {'command': 'ls -la', 'description': 'list'},
+        'toolContent': '{"exitCode": 0}',
+        'status': 'done',
+        'roundNum': 1,
+        'llmRound': 1,
+        'tStart': 10,
+        'tEnd': 20,
+        'attemptId': attempt_id,
+        'taskId': 'turn-visible-fidelity-task',
+    }
+    _record_streaming_projection_events(
+        storage,
+        attempt_id,
+        'turn-visible-fidelity-task',
+        [{'content': 'stream', 'thinking': 'live reasoning',
+          'segments': [], 'toolRounds': [live_round]}],
+        'turn-visible-fidelity-event',
+    )
+    brief_round = {
+        'toolCallId': 'call-live-1',
+        'toolName': 'run_command',
+        'query': 'ls -la',
+        'status': 'done',
+        'roundNum': 1,
+        'llmRound': 1,
+        'tStart': 10,
+        'results': [{'snippet': 'ok'}],
+    }
+    sync_visible_run_turns(task, [
+        {'role': 'assistant', 'content': 'phase one',
+         'thinking': 'node one reasoning', 'toolRounds': [brief_round]},
+    ])
+    projection = get_turn(
+        'turn-visible-fidelity', turn_id, user_id=1)['projection']
+    (round_dict,) = [item for item in projection['toolRounds']
+                     if item.get('toolCallId') == 'call-live-1']
+    assert round_dict['toolArgs'] == {'command': 'ls -la', 'description': 'list'}
+    assert round_dict['toolContent'] == '{"exitCode": 0}'
+    assert round_dict['tEnd'] == 20
+    assert round_dict['attemptId'] == attempt_id
+    # Fill-only: the flow projection's own fields are never overwritten.
+    assert round_dict['query'] == 'ls -la'
+    assert round_dict['results'] == [{'snippet': 'ok'}]
+    segment = next(item for item in projection['segments']
+                   if item.get('type') == 'tool_use'
+                   and item.get('id') == 'call-live-1')
+    assert segment['input'] == {'command': 'ls -la', 'description': 'list'}
+    assert segment['result']['content'] == '{"exitCode": 0}'
+    assert projection['thinking'] == 'node one reasoning'
+
+    # The next node commits as a child turn; it inherits from that node's
+    # live rounds currently checkpointed on the root.
+    live_round_two = dict(live_round, toolCallId='call-live-2',
+                          toolArgs={'command': 'pytest -q'})
+    _record_streaming_projection_events(
+        storage,
+        attempt_id,
+        'turn-visible-fidelity-task',
+        [{'content': 'stream two', 'thinking': '',
+          'segments': [], 'toolRounds': [live_round_two]}],
+        'turn-visible-fidelity-event-two',
+    )
+    sync_visible_run_turns(task, [
+        {'role': 'assistant', 'content': 'phase one',
+         'thinking': 'node one reasoning', 'toolRounds': [brief_round]},
+        {'role': 'assistant', 'content': 'phase two',
+         'thinking': 'node two reasoning',
+         'toolRounds': [dict(brief_round, toolCallId='call-live-2',
+                             query='pytest -q')]},
+    ])
+    child = get_turn('turn-visible-fidelity',
+                     task['_turnVisibleRunTurnIds'][1], user_id=1)
+    (child_round,) = [item for item in child['projection']['toolRounds']
+                      if item.get('toolCallId') == 'call-live-2']
+    assert child_round['toolArgs'] == {'command': 'pytest -q'}
+    assert child_round['query'] == 'pytest -q'
+    child_segment = next(
+        item for item in child['projection']['segments']
+        if item.get('type') == 'tool_use' and item.get('id') == 'call-live-2')
+    assert child_segment['input'] == {'command': 'pytest -q'}
+    assert child['projection']['thinking'] == 'node two reasoning'
+
+
+def test_task_projection_preserves_committed_thinking_for_visible_runs():
+    """Once a run owns visible turns, the per-node buffer reset must not
+    wipe the first turn's committed thinking (same guard as content)."""
+    from lib.turn_lifecycle import _delta_text_fields, _task_projection
+    previous = {'content': 'phase one', 'thinking': 'node one reasoning',
+                'toolRounds': []}
+    task = {'config': {}, 'content': '', 'thinking': '',
+            '_turnVisibleRunTurnIds': ['root', 'child-1']}
+    projection = _task_projection(task, previous)
+    assert projection['thinking'] == 'node one reasoning'
+    assert projection['content'] == 'phase one'
+    assert _delta_text_fields(task, previous) == (
+        'phase one', 'node one reasoning')
+    # Without visible-run ownership the live buffer still folds through.
+    live_task = {'config': {}, 'content': 'c', 'thinking': 'live'}
+    assert _task_projection(live_task, previous)['thinking'] == 'live'
+    assert _delta_text_fields(live_task, previous) == ('c', 'live')
+    # None thinking falls back to the previous projection either way.
+    assert _task_projection(
+        {'config': {}}, previous)['thinking'] == 'node one reasoning'
+
+
 def test_related_announce_advances_revision_across_live_projection_head(
         storage, monkeypatch):
     """A related-turn announce MUST NOT orphan the root's live patch head."""
@@ -1920,6 +2068,43 @@ def test_visible_turn_shape_projects_orchestration_header_facts():
     assert projection['model'] == 'deepseek-v4-pro'
     assert not any(key.startswith('_ep') or key == '_isStuck'
                    for key in projection)
+
+
+def test_visible_turn_shape_assembles_durable_segments_and_file_block():
+    """A visible-sync message arrives with toolRounds but no segments: the
+    write must persist the assembled timeline (tools inline, terminal text
+    last) plus the derived file-changes block. The settled surface renders
+    from durable segments — a serve-time repair cannot fix a browser that
+    consumed the raw sync event."""
+    from lib.storage_sidecar.operations_pkg._turns import _visible_shape
+
+    actor, kind, projection = _visible_shape({
+        'role': 'assistant',
+        'content': 'final answer',
+        'thinking': '',
+        '_flowIteration': 2,
+        'toolRounds': [{
+            'roundNum': 1, 'toolCallId': 'flow-tool-x',
+            'toolName': 'run_command', 'query': 'make test',
+            'status': 'done',
+            'results': [{'toolName': 'run_command', 'command': 'make test',
+                         'exitCode': 0, 'fetched': True}],
+        }],
+        'modifiedFileList': [{'action': 'patched', 'path': 'lib/a.py'}],
+        'modifiedFiles': 1,
+    }, 'flow_node')
+
+    assert (actor, kind) == ('assistant', 'flow_node')
+    kinds = [segment.get('type') for segment in projection['segments']]
+    assert kinds == ['tool_use', 'text'], kinds
+    assert projection['segments'][0]['name'] == 'run_command'
+    assert projection['segments'][-1]['text'] == 'final answer'
+    assert projection['modifiedFileList'] == [
+        {'action': 'patched', 'path': 'lib/a.py'}]
+    assert projection['modifiedFiles'] == 1
+    block = projection['fileChanges']
+    assert block['blockId'] == 'file-changes'
+    assert block['count'] == 1
 
 
 def test_recent_projects_are_atomic_and_owner_scoped(storage):

@@ -9,12 +9,12 @@ FlowExecutor lacked that guard, so it churned until the budget burned.
 
 This suite pins the step-3 wiring on the ``virtual_user`` verifier path only:
 
-  (a) a VU emitting STALLED ``[PROGRESS]`` (resolved never advances) while the
-      worker re-touches the same file trips ``no_progress`` BEFORE the cap;
+  (a) a VU emitting flat ``[PROGRESS]`` while the worker re-touches the same
+      file receives one strategy nudge but still runs to the finite cap;
   (b) FAIL-OPEN — a critic loop (never emits ``[PROGRESS]``) NEVER trips it,
       even under identical churn: no hard signal ⇒ cannot prove no-progress;
   (c) genuine per-turn progress (resolved advancing) does NOT trip it;
-  (d) the VU stuck window is AUTOPILOT_STUCK_WINDOW (3), not the critic's 2;
+  (d) repeated VU prose is advisory and cannot terminate the bounded loop;
   (e) NEGATIVE CONTROL — neuter parse_progress → None each turn and the guard
       can no longer fire even on stalled progress (proves the hard signal is
       load-bearing, not the churn alone).
@@ -41,23 +41,28 @@ def _critic_loop_defn(max_iterations=8):
     return build_verifier_loop_definition(max_iterations=max_iterations)
 
 
-def _run(defn, fake_runner, *, max_iter=8):
+def _run(defn, fake_runner, *, max_iter=8, events=None):
     import lib.orchestration_engine as eng
     orig = eng.FlowExecutor._default_runner
     eng.FlowExecutor._default_runner = fake_runner
     try:
-        ex = eng.FlowExecutor(defn, agent_runner=None, max_iterations=max_iter)
+        ex = eng.FlowExecutor(
+            defn,
+            agent_runner=None,
+            max_iterations=max_iter,
+            on_event=events.append if events is not None else None,
+        )
         return ex.run(initial_context='do the task')
     finally:
         eng.FlowExecutor._default_runner = orig
 
 
-# ── (a) VU stalled progress + same-target churn → no_progress before cap ──
+# ── (a) VU flat progress + same-target churn → advisory nudge only ──
 
-def test_vu_stalled_progress_trips_no_progress_before_cap():
+def test_vu_flat_progress_nudges_once_but_runs_to_cap():
     """The worker ships an edit to the SAME file every turn and the VU reports
-    resolved=1 every turn (no NET new items). The diminishing-returns guard
-    must break with 'no_progress' before the cap is reached."""
+    resolved=1 every turn (no NET new items). This can still be incremental
+    progress, so it earns one strategy nudge and never an early cutoff."""
     vu = {'n': 0}
     def runner(self, node, context, iteration):
         role = node.get('role')
@@ -76,13 +81,15 @@ def test_vu_stalled_progress_trips_no_progress_before_cap():
                 'error': '',
                 'tool_log': [{'round': 1, 'tool': 'write_file', 'args_brief': 'x.py'}]}
 
-    res = _run(_autopilot_defn(8), runner, max_iter=8)
+    events = []
+    res = _run(_autopilot_defn(8), runner, max_iter=8, events=events)
     assert res['ok'] is False
-    assert res['stop_reason'] == 'no_progress', res.get('stop_reason')
+    assert res['stop_reason'] == 'max_iterations', res.get('stop_reason')
     exits = res.get('loop_exits') or []
-    assert any(e['reason'] == 'no_progress' for e in exits), exits
-    # It broke BEFORE the cap (proves it's the guard, not max_iterations).
-    assert exits[-1]['iterations'] < 8, exits
+    assert exits[-1]['iterations'] == 8, exits
+    advisory = [event for event in events if event['type'] == 'no_progress']
+    assert len(advisory) == 1
+    assert advisory[0]['action'] == 'strategy_nudge'
 
 
 # ── (b) FAIL-OPEN: a critic loop (no PROGRESS) never trips the guard ──
@@ -139,11 +146,10 @@ def test_vu_real_progress_does_not_trip():
     assert exits and exits[-1]['reason'] == 'stop', exits
 
 
-# ── (d) VU stuck window is AUTOPILOT_STUCK_WINDOW (3), not critic's 2 ──
+# ── (d) Similar VU prose is advisory, never terminal ──
 
-def test_vu_stuck_window_tolerates_two_but_breaks_on_three():
-    """Two near-identical VU nudges are a legitimate 'try again' — the VU path
-    must NOT break on the 2nd (critic's window would). It breaks on the 3rd."""
+def test_vu_feedback_repetition_nudges_once_then_reaches_cap():
+    """Repeated acceptance wording cannot prove the worker made no progress."""
     from lib.agent_verdict import AUTOPILOT_STUCK_WINDOW
     assert AUTOPILOT_STUCK_WINDOW == 3
     same = ('Please actually run the tests before claiming done, the login '
@@ -153,27 +159,25 @@ def test_vu_stuck_window_tolerates_two_but_breaks_on_three():
         role = node.get('role')
         if role == 'virtual_user':
             seen['n'] += 1
-            # Same nudge every turn, NO [PROGRESS] (so no_progress fails open
-            # and we isolate the stuck-window behaviour).
+            # Same nudge every turn, NO [PROGRESS], so the evidence-grounded
+            # no_progress guard fails open.
             return {'output': same, 'status': 'completed', 'error': '',
                     'tool_log': []}
         return {'output': f'work {iteration}', 'status': 'completed', 'error': '',
                 'tool_log': [{'round': 1, 'tool': 'write_file', 'args_brief': 'x'}]}
 
     res = _run(_autopilot_defn(8), runner, max_iter=8)
-    assert res['stop_reason'] == 'stuck', res.get('stop_reason')
+    assert res['stop_reason'] == 'max_iterations', res.get('stop_reason')
     exits = res.get('loop_exits') or []
-    # Broke on the 3rd near-identical nudge (window=3), not the 2nd.
-    assert exits[-1]['iterations'] == 3, exits
+    assert exits[-1]['iterations'] == 8, exits
 
 
 # ── (e) NEGATIVE CONTROL: neuter parse_progress → guard cannot fire ──
 
-def test_NC_neuter_parse_progress_disables_guard():
+def test_NC_neuter_parse_progress_suppresses_advisory():
     """Force parse_progress to return (None, None) — the hard signal the guard
-    depends on. Under the SAME stalled churn as (a), no_progress can no longer
-    fire (resolved_delta is always None → fail-open), and the loop instead
-    hits the cap. Proves the [PROGRESS] hard signal is load-bearing."""
+    depends on. Under the SAME stalled churn as (a), no_progress cannot even
+    emit its advisory signal, and the loop reaches the same finite cap."""
     import lib.orchestration_engine as eng
 
     vu = {'n': 0}
@@ -193,10 +197,17 @@ def test_NC_neuter_parse_progress_disables_guard():
     eng.FlowExecutor._default_runner = runner
     eng._parse_progress = lambda text: (None, None)   # neuter the hard signal
     try:
-        ex = eng.FlowExecutor(_autopilot_defn(5), agent_runner=None, max_iterations=5)
+        events = []
+        ex = eng.FlowExecutor(
+            _autopilot_defn(5),
+            agent_runner=None,
+            max_iterations=5,
+            on_event=events.append,
+        )
         res = ex.run(initial_context='x')
         exits = res.get('loop_exits') or []
         assert not any(e['reason'] == 'no_progress' for e in exits), exits
+        assert not any(e['type'] == 'no_progress' for e in events), events
         assert res['stop_reason'] == 'max_iterations', res.get('stop_reason')
     finally:
         eng.FlowExecutor._default_runner = orig_runner

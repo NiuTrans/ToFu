@@ -14,9 +14,9 @@ from lib.tasks_pkg.manager._events import snapshot_task_text
 from lib.tool_round_identity import tool_rounds_with_execution_identity
 from lib.storage_projection import (
     _USAGE_TRANSIENT_KEYS,  # noqa: F401 — manager facade re-export
-    _sanitize_api_rounds_for_persist,
-    _sanitize_usage_for_persist,
-    _trim_round_for_persist,
+    sanitize_api_rounds_for_persist,
+    sanitize_usage_for_persist,
+    trim_tool_round_for_persist,
 )
 from lib.task_result_checkpoint_contract import (
     TASK_CACHE_PREFIX_HWM_CANDIDATE_FIELD,
@@ -171,7 +171,7 @@ def build_result_meta(task):
         meta['turnId'] = task.get('_turnId') or ''
         meta['attemptId'] = task.get('_attemptId') or ''
     if task.get('finishReason'): meta['finishReason'] = task['finishReason']
-    if task.get('usage'): meta['usage'] = _sanitize_usage_for_persist(task['usage'])
+    if task.get('usage'): meta['usage'] = sanitize_usage_for_persist(task['usage'])
     if task.get('preset'): meta['preset'] = task['preset']
     if task.get('toolSummary'): meta['toolSummary'] = task['toolSummary']
     if task.get('_fallback_model'):
@@ -232,7 +232,7 @@ def build_result_meta(task):
         meta['todoBlocked'] = task['_todo_blocked']
     if task.get('_waiting_on'):
         meta['waitingOn'] = task['_waiting_on']
-    if task.get('apiRounds'): meta['apiRounds'] = _sanitize_api_rounds_for_persist(task['apiRounds'])
+    if task.get('apiRounds'): meta['apiRounds'] = sanitize_api_rounds_for_persist(task['apiRounds'])
 
     if task.get('compactionUsage'):
         meta['compactionUsage'] = task['compactionUsage']
@@ -331,9 +331,9 @@ def _merge_tool_rounds(task):
     merged = scoped_checkpoint + scoped_current
     # The shallow-copy is thread-safety (see docstring); layer the persist
     # trim on top so a DONE round's transient _partialOutput buffer never
-    # reaches the DB. _trim_round_for_persist returns dict(r) when it strips,
+    # reaches the DB. trim_tool_round_for_persist returns dict(r) when it strips,
     # so it subsumes the shallow copy for those rounds.
-    return [_trim_round_for_persist(dict(r)) if isinstance(r, dict) else r
+    return [trim_tool_round_for_persist(dict(r)) if isinstance(r, dict) else r
             for r in merged]
 
 
@@ -775,6 +775,8 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
     first. But the VU also reads ``task['messages']`` — so the heavy-state
     release moves to AFTER the hook instead of riding this call."""
     if task.get('_transientRuntime'):
+        task.pop('_terminalPersistencePending', None)
+        task.pop('_terminalPersistenceRetryReady', None)
         if not _defer_heavy_release:
             _release_heavy_task_state(task)
         return True
@@ -808,13 +810,28 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
                      task_id_short, conv_id_short, status, content_len, thinking_len,
                      finish_reason, model, provider, error or 'none')
 
-    # Build metadata before the write so serialization failures are reported as
-    # persistence failures rather than leaving a partially described row.
-    meta = build_result_meta(task)
-    meta['contentEpoch'] = content_epoch
-
-    # Merge checkpoint toolRounds for DB persistence (continue flow)
-    _merged_tr = _merge_tool_rounds(task)
+    # Build metadata before the write so preparation/serialization failures
+    # become an explicit durability debt rather than escaping around the
+    # terminal eviction fence.
+    try:
+        meta = build_result_meta(task)
+        meta['contentEpoch'] = content_epoch
+        # Merge checkpoint toolRounds for DB persistence (continue flow)
+        _merged_tr = _merge_tool_rounds(task)
+    except Exception as _prep_error:
+        task['_terminalPersistencePending'] = True
+        task['_terminalPersistenceRetryReady'] = True
+        logger.error(
+            '[Task %s] conv=%s terminal persistence preparation failed: %s',
+            task_id_short, conv_id_short, type(_prep_error).__name__,
+            exc_info=True,
+        )
+        logger.error(
+            '[Task %s] conv=%s terminal metadata not persisted: %s',
+            task_id_short, conv_id_short,
+            terminal_state_log_summary(task, persisted=False),
+        )
+        return False
 
     # Segment-timeline SoT (, step 1 — SHIPS DARK).
     #   Assemble the ordered typed-segment list from the SAME merged rounds +
@@ -859,10 +876,23 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
             thinking=thinking, status=task['status'],
             error_json=error_json, tr_json=tr_json, meta_json=meta_json,
             segments_json=segments_json)
+        task.pop('_terminalPersistencePending', None)
+        task.pop('_terminalPersistenceRetryReady', None)
         logger.debug('[Task %s] conv=%s Persisted to DB successfully', task_id_short, conv_id_short)
     except Exception as _pf_err:
-        from lib.storage import storage_status
-        if storage_status().get('state') in {'stopping', 'stopped'}:
+        # This flag is an eviction fence and a retry receipt. Without it a
+        # terminal task whose row write failed could be removed by TTL,
+        # capacity, or memory-pressure cleanup while its durable row still
+        # claimed ``pending``/``running``.
+        task['_terminalPersistencePending'] = True
+        task['_terminalPersistenceRetryReady'] = True
+        try:
+            from lib.storage import storage_status
+            _storage_stopping = storage_status().get('state') in {
+                'stopping', 'stopped'}
+        except Exception:
+            _storage_stopping = False
+        if _storage_stopping:
             logger.info('[Task %s] conv=%s persist aborted during shutdown (expected: %s)',
                         task_id_short, conv_id_short, type(_pf_err).__name__)
         else:
@@ -878,6 +908,7 @@ def persist_task_result(task, *, _defer_heavy_release: bool = False):
             logger.error('[Task %s] conv=%s ⚠️ TERMINAL METADATA NOT PERSISTED — %s',
                          task_id_short, conv_id_short,
                          terminal_state_log_summary(task, persisted=False))
+        return False
 
     if _task_row_owned is False:
         # Recovery fenced this pre-boot executor. Every later action in this

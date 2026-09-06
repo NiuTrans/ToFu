@@ -46,7 +46,7 @@ class MainActivity : ComponentActivity() {
         ).addMigrations(ProfileDatabase.MIGRATION_1_2).build()
         secrets = SecretStore(applicationContext)
         val dao = db.profileDao()
-        session = SessionManager(dao, secrets)
+        session = SessionManager(dao, secrets, appVersionCode = BuildConfig.VERSION_CODE)
         val controller = SessionController(dao, secrets, session)
         vm = ProfilesViewModel(dao, secrets, controller)
         // One-time upgrade fix: flip persisted /proxy/ profiles stuck on the

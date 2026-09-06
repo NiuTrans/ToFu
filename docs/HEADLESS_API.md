@@ -257,8 +257,13 @@ GET    /api/v1/tasks/{id}            — current state (event cursor summary onl
 GET    /api/v1/tasks/{id}/events?cursor=N — bounded long-poll cursor replay
 GET    /api/v1/tasks/{id}/stream     — SSE replay-from-cursor
 POST   /api/v1/tasks/{id}/abort      — graceful stop
-DELETE /api/v1/tasks/{id}            — drop from registry (admin)
+DELETE /api/v1/tasks/{id}            — drop a terminal task (admin)
 ```
+
+Deleting active work requests owner cancellation and returns `409 task_active`;
+retry deletion after its terminal frame. It never drops registry/resource
+authority underneath a live provider or tool dispatch. A terminal task whose
+event or durable row is still settling similarly returns `409 task_settling`.
 
 Cursor-based replay means the consumer can disconnect and reconnect
 without losing events. Replay pages are bounded to 128 events and roughly

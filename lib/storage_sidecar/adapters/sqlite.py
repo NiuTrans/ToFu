@@ -1233,6 +1233,8 @@ class SQLiteBackend(Backend):
                 # Split-brain guard inside reconcile refused the front.
                 report_fastpath['reason'] = 'reconcile refused; classic path'
         else:
+            fastpath.require_classic_authority_is_current(
+                self.config.data_dir)
             report_fastpath = {
                 'active': False, 'reason': decision.reason,
                 'benchmark': decision.benchmark,

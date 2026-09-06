@@ -26,6 +26,7 @@ def _classify_exception(exc: BaseException) -> str:
             ContextCompactionError as _Compact,
             EndpointUnreachableError as _Unreach,
             InvalidImageError as _Img,
+            LocalRequestPreparationError as _LocalPrepare,
             ModelLimitError as _Mlim,
             PermissionError_ as _Perm,
             PromptTooLongError as _Plong,
@@ -36,7 +37,7 @@ def _classify_exception(exc: BaseException) -> str:
         )
     except Exception as _imp_err:
         logger.debug('lib.llm import failed in error classifier: %s', _imp_err)
-        _Abort = _BR = _CF = _Compact = _Img = _Mlim = _Perm = _Plong = _RL = _Req = _Retry = _SO = _Unreach = None  # type: ignore
+        _Abort = _BR = _CF = _Compact = _Img = _LocalPrepare = _Mlim = _Perm = _Plong = _RL = _Req = _Retry = _SO = _Unreach = None  # type: ignore
 
     if _Abort is not None and isinstance(exc, _Abort):
         return 'aborted'
@@ -57,8 +58,16 @@ def _classify_exception(exc: BaseException) -> str:
     # 5xx-after-retries: same vendor-outage truth as the gateway RL above.
     if _Retry is not None and isinstance(exc, _Retry):
         return 'upstream_error'
-    if (_BR is not None and isinstance(exc, _BR)) or \
-            (_Req is not None and isinstance(exc, _Req)):
+    if _Req is not None and isinstance(exc, _Req):
+        # 404 (model/route missing upstream) is NOT a payload rejection —
+        # keeping it inside bad_request rendered every 404 under the
+        # hardcoded "HTTP 400" title. Protocol-defect subclasses
+        # (ContinueToolHistory/ResumeState) carry status_code=0 and keep
+        # the bad_request bucket.
+        if getattr(exc, 'status_code', 0) == 404:
+            return 'not_found'
+        return 'bad_request'
+    if _BR is not None and isinstance(exc, _BR):
         return 'bad_request'
     if _Perm is not None and isinstance(exc, _Perm):
         return 'permission'
@@ -66,6 +75,8 @@ def _classify_exception(exc: BaseException) -> str:
         return 'content_filter'
     if _Img is not None and isinstance(exc, _Img):
         return 'invalid_image'
+    if _LocalPrepare is not None and isinstance(exc, _LocalPrepare):
+        return 'internal'
     if _Compact is not None and isinstance(exc, _Compact):
         return 'internal'
     if _Plong is not None and isinstance(exc, _Plong):

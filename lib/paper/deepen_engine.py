@@ -477,7 +477,7 @@ def _run_deepen_task(task, messages, *, paper_hash, section, ui_lang):
         if verticals:
             done_ev['verticals'] = verticals
         _append_deepen_event(task, done_ev)
-        _result_budget.append(
+        return _result_budget.append(
             messages, round_index=rnd, tool_name=fn_name,
             tool_call_id=tc_id, content=result, round_entry=round_entry,
             world_version=str(task.get('_worldVersion') or ''),

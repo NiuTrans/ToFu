@@ -357,13 +357,56 @@ async function researchProbe() {
   const result = await vm.runInContext(`cmdResearchUrl({
     url: 'https://example.test/list', maxChars: 60000,
     maxScrolls: 999, maxPages: 999, pagination: 'auto', timeoutMs: 65000,
+    captureHints: [{method: 'GET', origin: 'https://example.test',
+      pathTemplate: '/api/data'}],
   })`, context);
   const limits = vm.runInContext(`({
     websocketFrames: NETWORK_CAPTURE_MAX_WEBSOCKET_FRAMES,
     active: NETWORK_CAPTURE_MAX_ACTIVE,
+    hintReserveChars: NETWORK_CAPTURE_HINT_RESERVE_CHARS,
     capabilities: [...BROWSER_CAPABILITIES],
   })`, context);
   return {result, limits, operations, debuggerCommands};
+}
+
+async function researchHintBudgetProbe() {
+  const normalizeHints = vm.runInContext('_normalizedResearchCaptureHints', context);
+  const captureBody = vm.runInContext('_captureResponseBody', context);
+  const maximum = vm.runInContext('NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS', context);
+  const reserve = vm.runInContext('NETWORK_CAPTURE_HINT_RESERVE_CHARS', context);
+  const capture = {
+    target: {tabId: 7}, totalBodyChars: 0, droppedBodies: 0,
+    priorityHints: normalizeHints([{method: 'GET', origin: 'https://example.test',
+      pathTemplate: '/api/{segment}'}]),
+    priorityReserveChars: reserve, priorityBodyMatches: 0,
+    lastActivityAt: 0,
+  };
+  const sizes = {normal1: 300000, normal2: 300000, normal3: 300000, priority: 200000};
+  const originalSendCommand = chrome.debugger.sendCommand;
+  chrome.debugger.sendCommand = async (_target, method, params) => {
+    if (method === 'Network.getResponseBody') {
+      return {body: 'x'.repeat(sizes[params.requestId]), base64Encoded: false};
+    }
+    return {};
+  };
+  const rows = [
+    {requestId: 'normal1', method: 'GET', url: 'https://example.test/noise/one'},
+    {requestId: 'normal2', method: 'GET', url: 'https://example.test/noise/two'},
+    {requestId: 'normal3', method: 'GET', url: 'https://example.test/noise/three'},
+    {requestId: 'priority', method: 'GET', url: 'https://example.test/api/data'},
+  ];
+  try {
+    for (const row of rows) await captureBody(capture, row, sizes[row.requestId]);
+  } finally {
+    chrome.debugger.sendCommand = originalSendCommand;
+  }
+  return {
+    maximum, reserve, totalBodyChars: capture.totalBodyChars,
+    priorityBodyMatches: capture.priorityBodyMatches,
+    normalBeforePriorityChars: rows.slice(0, 3)
+      .reduce((total, row) => total + String(row.responsePreview || '').length, 0),
+    priorityChars: String(rows[3].responsePreview || '').length,
+  };
 }
 
 async function fileTransferProbe() {
@@ -686,6 +729,7 @@ const probes = {
   payload413: payloadLimitProbe,
   transportFailure: transportFailureProbe,
   research: researchProbe,
+  researchHintBudget: researchHintBudgetProbe,
   pagination: paginationProbe,
 };
 

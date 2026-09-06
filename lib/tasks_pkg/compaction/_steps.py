@@ -129,9 +129,7 @@ class CompactionContext:
         return idx < self.cache_prefix_count
 
     def stamp(self, msg: dict, before_chars: int, after_chars: int) -> None:
-        """Record a durable placeholder + emit the ``tool_compacted`` SSE
-        event for a just-compacted tool result.  No-op when no task /
-        round index is present (unit tests / stateless calls)."""
+        """Emit request-local evidence for a just-compacted tool result."""
         if self.stamp_fn is not None:
             self.stamp_fn(msg, before_chars, after_chars)
 

@@ -23,6 +23,12 @@ sealed interface LoginResult {
     data object NoCredential : LoginResult
     /** Transport / parse failure. */
     data class Error(val message: String) : LoginResult
+    /**
+     * The server's v4 meta endpoint definitively refuses this client build
+     * (API major mismatch, or minAndroidBuild above us). Fail-closed at login
+     * so the user gets an actionable message instead of a half-broken SPA.
+     */
+    data class Incompatible(val message: String) : LoginResult
 }
 
 /**
@@ -46,6 +52,14 @@ class SessionManager(
     private val secrets: SecretLookup,
     private val cookies: CookieSink = CookieBridge,
     private val http: OkHttpClient = defaultClient(),
+    /**
+     * This app's versionCode, checked against the server's minAndroidBuild in
+     * the post-login preflight. Int.MAX_VALUE = "build unknown" (pure-tier
+     * tests) and never blocks.
+     */
+    private val appVersionCode: Int = Int.MAX_VALUE,
+    /** Sleep hook for the login retry backoff; tests inject a recorder. */
+    private val sleeper: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
 ) {
 
     /**
@@ -57,6 +71,11 @@ class SessionManager(
             ?: return@withContext LoginResult.Error("Invalid URL: ${profile.baseUrl}")
 
         if (profile.authType == AuthType.NONE) {
+            // No outer gateway to unlock: the WebView reaches Tofu directly,
+            // so the SPA's own 426/upgrade handling surfaces a version
+            // mismatch in-page. A headless preflight here would only add a
+            // tunnel round-trip (and double the dead-server wait) for a
+            // verdict the WebView gives anyway — stay zero-request.
             return@withContext LoginResult.Success(server.host)
         }
         if (profile.authType == AuthType.INTERACTIVE_SSO) {
@@ -67,6 +86,48 @@ class SessionManager(
         val secret = secrets.secretFor(profile.alias)
             ?: return@withContext LoginResult.NoCredential
 
+        // The login POST rides the outer tunnel (vscode proxy / VPN); a
+        // transient reset there surfaces as a transport Error, not an HTTP
+        // status, so bounded retry with backoff is the difference between
+        // "tap Open twice on a flaky tunnel" and "it just works". WARMING
+        // outcomes (the proxy's 502/503/504, or a connect timeout — the
+        // sandbox behind the tunnel is still booting) get a longer ladder:
+        // a cold sandbox routinely takes tens of seconds to serve, and
+        // bouncing the user back to the list after 3.5s just makes them tap
+        // Open again by hand. Definitive answers (BadCredentials /
+        // NeedsInteractiveSso / Success) never retry.
+        var attempt = 0
+        var previousKind = AttemptKind.DEFINITIVE
+        var result: LoginResult
+        do {
+            attempt += 1
+            if (attempt > 1) {
+                val backoff = LoginRetryPolicy.backoffMs(
+                    attempt - 1, warming = previousKind == AttemptKind.WARMING,
+                )
+                Log.i(TAG, "login attempt $attempt alias=${profile.alias} " +
+                    "after ${backoff}ms backoff (${previousKind.name.lowercase()})")
+                sleeper(backoff)
+            }
+            val outcome = attemptLogin(profile, server, secret)
+            previousKind = outcome.kind
+            result = outcome.result
+        } while (previousKind != AttemptKind.DEFINITIVE &&
+            attempt < LoginRetryPolicy.maxAttempts(previousKind == AttemptKind.WARMING))
+        return@withContext withApiPreflight(server, profile.baseUrl, result)
+    }
+
+    /**
+     * One login attempt: resolve the form target, POST the password, classify
+     * the response. Blocking — [login] calls it on Dispatchers.IO. Transport
+     * failures and proxy-edge warming statuses are retried by [login] on the
+     * matching ladder; every other HTTP-status branch is definitive.
+     */
+    private suspend fun attemptLogin(
+        profile: Profile,
+        server: ServerUrl,
+        secret: String,
+    ): Attempt {
         // Gap-1: derive the real login POST target from the served login form,
         // falling back to the origin-root only when no <form action> is found.
         val loginUrl = resolveLoginUrl(server)
@@ -85,7 +146,10 @@ class SessionManager(
                 // Detect layer-1 SSO: a redirect to an ABSOLUTE, foreign origin.
                 val location = resp.header("Location")
                 if (isSsoRedirect(location, server)) {
-                    return@withContext LoginResult.NeedsInteractiveSso(profile.baseUrl)
+                    return Attempt(
+                        LoginResult.NeedsInteractiveSso(profile.baseUrl),
+                        AttemptKind.DEFINITIVE,
+                    )
                 }
 
                 val setCookies = resp.headers("Set-Cookie")
@@ -106,19 +170,40 @@ class SessionManager(
                         Log.i(TAG, "login: 302 without $SESSION_COOKIE for " +
                             "alias=${profile.alias} host=${server.host}; " +
                             "no code-server gate to replay, deferring to WebView")
-                        return@withContext LoginResult.Success(server.host)
+                        return Attempt(LoginResult.Success(server.host), AttemptKind.DEFINITIVE)
                     }
                     cookies.inject(server.origin, sessionCookies)
                     dao.setCookieHost(profile.id, server.host)
                     Log.i(TAG, "login ok alias=${profile.alias} host=${server.host}")
-                    return@withContext LoginResult.Success(server.host)
+                    return Attempt(LoginResult.Success(server.host), AttemptKind.DEFINITIVE)
                 }
 
                 // code-server re-serves the login page (200) on a bad password.
                 // Keep that as the confirmed BadCredentials signal so the user
                 // sees "wrong password" rather than being silently dropped into
                 // the WebView.
-                if (resp.code == 200) return@withContext LoginResult.BadCredentials
+                if (resp.code == 200) {
+                    return Attempt(LoginResult.BadCredentials, AttemptKind.DEFINITIVE)
+                }
+
+                // The vscode proxy answers 502/503/504 while the sandbox
+                // behind the tunnel is still booting — nothing is listening
+                // yet. That is a WARMING condition, not an "unconfirmed
+                // gate": retry on the longer ladder instead of degrading into
+                // a WebView that would render the proxy's raw error page with
+                // no way to retry from a phone.
+                if (LoginRetryPolicy.isWarmingStatus(resp.code)) {
+                    Log.i(TAG, "login: proxy edge ${resp.code} for " +
+                        "alias=${profile.alias}; sandbox still warming")
+                    return Attempt(
+                        LoginResult.Error(
+                            LoginRetryPolicy.warmingMessage(
+                                "the proxy answered HTTP ${resp.code}",
+                            ),
+                        ),
+                        AttemptKind.WARMING,
+                    )
+                }
                 // ANY other status is an outcome we cannot confirm as either a
                 // replayable code-server gate (302 handled above) or a bad
                 // password (200). A bare Tofu server returns 401 HTML when
@@ -132,11 +217,68 @@ class SessionManager(
                 Log.i(TAG, "login: unconfirmed status ${resp.code} for " +
                     "alias=${profile.alias} host=${server.host}; " +
                     "no replayable code-server gate, deferring to WebView")
-                return@withContext LoginResult.Success(server.host)
+                return Attempt(LoginResult.Success(server.host), AttemptKind.DEFINITIVE)
             }
         } catch (e: Exception) {
             Log.w(TAG, "login failed alias=${profile.alias}: ${e.message}")
-            return@withContext LoginResult.Error(e.message ?: "network error")
+            // A connect/read timeout against the proxy has the same meaning
+            // as its 5xx: the edge is up but the sandbox behind the tunnel
+            // isn't answering yet — longer ladder. Any other transport
+            // failure (refused, reset, DNS) stays on the short one.
+            val msg = e.message ?: "network error"
+            return if (LoginRetryPolicy.isWarmingTransport(msg)) {
+                Attempt(
+                    LoginResult.Error(LoginRetryPolicy.warmingMessage(msg)),
+                    AttemptKind.WARMING,
+                )
+            } else {
+                Attempt(LoginResult.Error(msg), AttemptKind.TRANSIENT)
+            }
+        }
+    }
+
+    /**
+     * v4 meta preflight on a successful login: swap [LoginResult.Success] for
+     * [LoginResult.Incompatible] ONLY when the server definitively refuses
+     * this build. Never blocks on partial knowledge — see [ApiMetaGate].
+     */
+    private fun withApiPreflight(
+        server: ServerUrl,
+        baseUrl: String,
+        result: LoginResult,
+    ): LoginResult {
+        if (result !is LoginResult.Success) return result
+        val reason = preflightApiCompatibility(server, baseUrl) ?: return result
+        Log.w(TAG, "v4 meta preflight refuses this build: $reason")
+        return LoginResult.Incompatible(reason)
+    }
+
+    /**
+     * GET the meta endpoint through the SAME gateway the login just unlocked
+     * (the session cookie rides along when the jar has one). Redirect-following
+     * clone of [http], mirroring [resolveLoginUrl].
+     */
+    private fun preflightApiCompatibility(server: ServerUrl, baseUrl: String): String? {
+        val req = Request.Builder()
+            .url(ApiMetaGate.metaUrl(baseUrl))
+            .get()
+            .apply {
+                val header = cookies.cookieHeader(server.origin)
+                if (!header.isNullOrBlank()) addHeader("Cookie", header)
+            }
+            .build()
+        return try {
+            http.newBuilder().followRedirects(true).followSslRedirects(true).build()
+                .newCall(req).execute().use { resp ->
+                    ApiMetaGate.incompatibilityReason(
+                        status = resp.code,
+                        body = resp.body?.string(),
+                        appVersionCode = appVersionCode,
+                    )
+                }
+        } catch (e: Exception) {
+            Log.w(TAG, "v4 meta preflight skipped: ${e.message}")
+            null
         }
     }
 
@@ -236,4 +378,54 @@ class SessionManager(
             .followSslRedirects(false)
             .build()
     }
+}
+
+
+/** How one login attempt's outcome steers the retry loop in [SessionManager.login]. */
+private enum class AttemptKind {
+    /** A real answer (success, bad password, SSO handoff) — never retried. */
+    DEFINITIVE,
+    /** A transport failure with no usable HTTP response — short ladder. */
+    TRANSIENT,
+    /** The sandbox behind the tunnel is still booting — long ladder. */
+    WARMING,
+}
+
+private data class Attempt(val result: LoginResult, val kind: AttemptKind)
+
+/** Bounded retry for transient transport failures of the login POST. */
+internal object LoginRetryPolicy {
+    const val MAX_ATTEMPTS = 3
+
+    /**
+     * Longer ladder for a WARMING sandbox: a cold container behind the vscode
+     * proxy routinely takes tens of seconds before anything listens, so the
+     * short 3-attempt/3.5s ladder would hand the user back a dead page long
+     * before the host is up.
+     */
+    const val MAX_WARMING_ATTEMPTS = 6
+
+    fun maxAttempts(warming: Boolean): Int =
+        if (warming) MAX_WARMING_ATTEMPTS else MAX_ATTEMPTS
+
+    /** Delay before the next attempt, after [failedAttempts] failures. */
+    fun backoffMs(failedAttempts: Int, warming: Boolean = false): Long = when {
+        warming -> minOf(2_000L * failedAttempts, 8_000L)
+        failedAttempts <= 1 -> 1_000L
+        else -> 2_500L
+    }
+
+    /** The wire contract for "sandbox waking" lives in [TofuProbe]. */
+    fun isWarmingStatus(code: Int): Boolean = TofuProbe.isWakingStatus(code)
+
+    /** Socket-timeout phrasing ("timeout", "connect timed out", …). */
+    fun isWarmingTransport(message: String?): Boolean {
+        val m = message?.lowercase() ?: return false
+        return "timed out" in m || "timeout" in m
+    }
+
+    /** User-facing text for a warming retry that eventually exhausted. */
+    fun warmingMessage(cause: String): String =
+        "The sandbox is still waking up ($cause) — it usually comes up within " +
+            "half a minute. Give it a few more seconds and tap Open again."
 }

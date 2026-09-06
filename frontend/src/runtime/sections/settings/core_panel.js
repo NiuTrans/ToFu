@@ -118,24 +118,34 @@ async function _loadServerConfig() {
   }
 }
 
-async function _loadModelRoutingAuthority() {
-  try {
-    var response = await Api.modelRouting.get();
-    var document = response && response.model_routing;
-    if (!document || document.contract_version !== 'tofu.model-routing/v2') {
-      throw new Error('model-routing v2 authority is unavailable');
+function _loadModelRoutingAuthority() {
+  // Opening Settings, refreshing the provider catalogue, and Save may all
+  // need this authority at once. Share one read so a slower response cannot
+  // overwrite a newer staged revision, and let a failed read be retried by
+  // the next caller instead of leaving Save permanently unready.
+  if (_stgModelRoutingLoadPromise) return _stgModelRoutingLoadPromise;
+  _stgModelRoutingLoadPromise = (async function() {
+    try {
+      var response = await Api.modelRouting.get();
+      var document = response && response.model_routing;
+      if (!document || document.contract_version !== 'tofu.model-routing/v2') {
+        throw new Error('model-routing v2 authority is unavailable');
+      }
+      _stgModelRouting = JSON.parse(JSON.stringify(document));
+      _stgModelRoutingRevision = Number(response.revision || document.revision || 0);
+      _stgModelRoutingLoadError = '';
+      _stgPendingCredentialSecrets = {};
+      return _stgModelRouting;
+    } catch (error) {
+      _stgModelRouting = null;
+      _stgModelRoutingLoadError = String(error && error.message || error || 'unknown');
+      debugLog('[Settings] Failed to load model-routing v2: ' + _stgModelRoutingLoadError, 'error');
+      return null;
+    } finally {
+      _stgModelRoutingLoadPromise = null;
     }
-    _stgModelRouting = JSON.parse(JSON.stringify(document));
-    _stgModelRoutingRevision = Number(response.revision || document.revision || 0);
-    _stgModelRoutingLoadError = '';
-    _stgPendingCredentialSecrets = {};
-    return _stgModelRouting;
-  } catch (error) {
-    _stgModelRouting = null;
-    _stgModelRoutingLoadError = String(error && error.message || error || 'unknown');
-    debugLog('[Settings] Failed to load model-routing v2: ' + _stgModelRoutingLoadError, 'error');
-    return null;
-  }
+  })();
+  return _stgModelRoutingLoadPromise;
 }
 
 function _refreshSubscriptionModelCatalog() {
@@ -262,15 +272,39 @@ function openSettings() {
     if (typeof runtimeScope._renderSettingsUpdatePill === 'function') {
       runtimeScope._renderSettingsUpdatePill();
     }
-    var mcEl = document.getElementById('settingsMobileClient');
-    if (mcEl) {
+    var mcCard = document.getElementById('settingsMobileCard');
+    if (mcCard) {
       var url = d && d.mobile_client_url;
       if (url) {
-        mcEl.href = url;
-        mcEl.innerHTML = '<img ' + brandLogoImgAttrs(15) + '> ' + t('settings.mobileClient');
-        mcEl.style.display = '';
+        var androidRow = document.getElementById('settingsMobileAndroid');
+        if (androidRow) androidRow.href = url;
+        // Version badge comes from the backend (routes/common.py
+        // MOBILE_CLIENT_VERSION, pinned to android/app/build.gradle.kts
+        // versionName by tests/test_mobile_client_apk_url.py). Empty → hide
+        // the badge rather than render a bare "v".
+        var verEl2 = document.getElementById('settingsMobileAndroidVersion');
+        if (verEl2) {
+          var mcVer = d && d.mobile_client_version;
+          verEl2.textContent = mcVer ? ('v' + mcVer) : '';
+          verEl2.style.display = mcVer ? '' : 'none';
+        }
+        // iOS: an inert "coming soon" row until TOFU_IOS_CLIENT_URL ships a
+        // real TestFlight/App Store link — then the row flips into an active
+        // download and the badge becomes its version.
+        var iosRow = document.getElementById('settingsMobileIos');
+        if (iosRow) {
+          var iosUrl = d && d.ios_client_url;
+          if (iosUrl) {
+            iosRow.href = iosUrl;
+            iosRow.target = '_blank';
+            iosRow.classList.remove('stg-mobile-row-soon');
+            var iosBadge = document.getElementById('settingsMobileIosBadge');
+            if (iosBadge) iosBadge.style.display = 'none';
+          }
+        }
+        mcCard.style.display = '';
       } else {
-        mcEl.style.display = 'none';
+        mcCard.style.display = 'none';
       }
     }
   }).catch(function(){});

@@ -426,9 +426,10 @@ def record_execution_terminal(
         'outcome': outcome_label,
         'invariants': 'satisfied' if invariants_satisfied else 'failed',
     }
+    execution_settling_phase = 'settling'
     _STORE.add_gauge(
         'tofu_execution_sessions_active', -1,
-        kind=labels['kind'], phase='settling',
+        kind=labels['kind'], phase=execution_settling_phase,
     )
     _STORE.inc('tofu_execution_sessions_terminal_total', **labels)
     _STORE.observe(

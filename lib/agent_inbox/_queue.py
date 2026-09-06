@@ -296,9 +296,23 @@ def peek(task_id: str) -> int:
         return len(_inboxes.get(task_id, []))
 
 
-def has_pending(task_id: str) -> bool:
-    """Return True if the inbox has at least one item."""
-    return peek(task_id) > 0
+def has_pending(task_id: str, *, modes: list[str] | None = None) -> bool:
+    """Return whether the inbox has an item matching ``modes``.
+
+    The unfiltered form preserves the original cheap depth probe. A filtered
+    probe lets synchronous work notice an operator steer without consuming it;
+    the round-boundary injector remains the sole delivery owner.
+    """
+    if not task_id:
+        return False
+    if modes is None:
+        return peek(task_id) > 0
+    wanted = set(modes)
+    with _lock:
+        return any(
+            item.get('mode', '') in wanted
+            for item in _inboxes.get(task_id, ())
+        )
 
 
 def is_tombstoned(task_id: str) -> bool:

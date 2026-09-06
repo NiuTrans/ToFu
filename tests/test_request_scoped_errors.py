@@ -63,6 +63,46 @@ class TestRequestScopedClassification:
             _classify(429, '{"error":{"message":"rate limited"}}')
 
 
+@pytest.mark.unit
+class TestRequestScopedEnvelopeKind:
+    """404 and 422 render through DIFFERENT envelope kinds (2026-09-02):
+    the shared bad_request bucket labeled every 404 with the hardcoded
+    "HTTP 400" title while the wire statusCode said 404."""
+
+    def test_404_envelope_kind_is_not_found(self):
+        from lib.error_envelope import from_exception
+        from lib.llm_errors import RequestScopedError
+        envelope = from_exception(
+            RequestScopedError('API HTTP 404: {"detail":"Not Found"}',
+                               status_code=404),
+            model='gpt-5.6-sol', context='request-rejected',
+            source='llm-stream')
+        assert envelope['kind'] == 'not_found'
+        assert envelope['titleKey'] == 'err.k.not_found.title'
+        assert envelope['hintKey'] == 'err.k.not_found.hint'
+        assert envelope['statusCode'] == 404
+        assert envelope['retryable'] is False
+        assert envelope['severity'] == 'error'
+        assert 'HTTP 404' in envelope['message']
+        assert 'HTTP 400' not in envelope['message']
+
+    def test_422_envelope_kind_stays_bad_request(self):
+        from lib.error_envelope import from_exception
+        from lib.llm_errors import RequestScopedError
+        envelope = from_exception(
+            RequestScopedError('API HTTP 422: unprocessable', status_code=422))
+        assert envelope['kind'] == 'bad_request'
+
+    def test_protocol_defect_subclass_stays_bad_request(self):
+        """Guard: Continue-protocol defects (status_code=422, custom
+        _user_message) must not drift into the 404 bucket."""
+        from lib.error_envelope import from_exception
+        from lib.tasks_pkg.message_builder._tool_history import (
+            ContinueToolHistoryProtocolError)
+        envelope = from_exception(ContinueToolHistoryProtocolError('broken'))
+        assert envelope['kind'] == 'bad_request'
+
+
 class _FakeDispatcher:
     def __init__(self, slots):
         self._slots = list(slots)
@@ -209,3 +249,40 @@ def test_request_rejection_never_switches_model_or_pool_rescues(
     assert rescue_calls == []
     assert '_fallback_model' not in task
     assert error._user_message['kind'] == 'bad_request'
+
+
+@pytest.mark.unit
+def test_local_request_preparation_never_switches_or_pool_rescues(monkeypatch):
+    import lib.tasks_pkg.llm_fallback._call as fallback
+    from lib.llm_errors import LocalRequestPreparationError
+
+    error = LocalRequestPreparationError(
+        'ptc projection signature mismatch', stage='wire_projection')
+    stream_calls = []
+    rescue_calls = []
+
+    def reject(_task, body, **_kwargs):
+        stream_calls.append(body.get('model'))
+        raise error
+
+    monkeypatch.setattr(fallback, 'stream_llm_response', reject)
+    monkeypatch.setattr(fallback, '_get_fallback_model', lambda _task: 'glm-5.3')
+    monkeypatch.setattr(
+        fallback, '_attempt_pool_rescue',
+        lambda *_args, **_kwargs: rescue_calls.append(True))
+    task = {
+        'id': 'local-prepare-task', 'convId': 'local-prepare-conv',
+        'config': {}, 'content': '', 'thinking': '', 'events': [],
+    }
+
+    with pytest.raises(LocalRequestPreparationError) as raised:
+        fallback._llm_call_with_fallback(
+            task, {'model': 'kimi-k3'}, 'kimi-k3', 0, 512,
+            False, None, [{'role': 'user', 'content': 'hi'}],
+            'low', False, {}, [])
+
+    assert raised.value is error
+    assert stream_calls == ['kimi-k3']
+    assert rescue_calls == []
+    assert '_fallback_model' not in task
+    assert error._user_message['kind'] == 'internal'

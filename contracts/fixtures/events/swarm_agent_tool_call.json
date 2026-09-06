@@ -1,0 +1,20 @@
+{
+  "agentId": "s",
+  "argsBrief": "s",
+  "callElapsed": 1.5,
+  "callId": "s",
+  "callStatus": "s",
+  "content": "s",
+  "error": "s",
+  "errorFullChars": 1,
+  "errorTruncated": true,
+  "phase": "s",
+  "preview": "s",
+  "previewFullChars": 1,
+  "previewTruncated": true,
+  "role": "s",
+  "roundNum": 1,
+  "status": "s",
+  "toolName": "s",
+  "type": "swarm_agent_tool_call"
+}

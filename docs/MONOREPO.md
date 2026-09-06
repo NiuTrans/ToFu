@@ -10,6 +10,7 @@ optional capability part of the core wheel or force it into another process.
 | Source owner | Distribution | Runtime role | Version authority |
 |---|---|---|---|
 | repository root, `tofu_agent/`, selected `lib/` | `tofu-agent` | application source composition plus embeddable/headless agent | root `pyproject.toml` and `VERSION` |
+| `packages/tofu-db/` | `tofu-db` (not yet released) | pre-authority personal storage-engine certification target | member `Cargo.toml` |
 | `packages/tofu-search/` | `tofu-search` | standalone, lazily loaded search/fetch capability | member `pyproject.toml` |
 | `plugins/tofu-trading/` | `tofu-trading` | optional application plugin discovered through entry points | member `pyproject.toml` |
 
@@ -33,6 +34,11 @@ python3 scripts/check_monorepo.py
 Root gates then verify the integration adapters and full application. A source
 change that affects a public member contract updates producer, consumer,
 compatibility test, and version range together.
+
+`tofu-db` remains outside application assembly and release assets while it is
+pre-authority.  Its focused gate is
+`cargo test --manifest-path packages/tofu-db/Cargo.toml`; promotion adds native
+build artifacts and application compatibility gates in the same change.
 
 ## Releases
 

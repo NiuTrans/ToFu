@@ -34,6 +34,7 @@ if _ROOT not in sys.path:
 
 from lib.llm._sse_core import SSEAccumulator, classify_status_error  # noqa: E402
 from lib.llm_errors import (  # noqa: E402
+    ModelLimitError,
     RateLimitError,
     RetryableAPIError,
     _ERR_BODY_LIMIT,
@@ -118,6 +119,30 @@ class TestSSEErrorMojibakeRepair:
     # bytes decoded as latin-1 then re-encoded — repair_mojibake reverses it.
     _MOJIBAKE = ('求失败，请稍后再尝试'.encode('utf-8').decode('latin-1'))
     _CLEAN = '求失败，请稍后再尝试'
+
+    def test_embedded_limit_error_keeps_route_identity(self, monkeypatch):
+        import lib.llm._sse_core as sse_core
+
+        learned = []
+        monkeypatch.setattr(
+            sse_core, '_learn_model_limit',
+            lambda model, limit, **kwargs: learned.append(
+                (model, limit, kwargs)))
+        accumulator = SSEAccumulator(
+            {'model': 'gemini-2.5-flash-lite', 'max_tokens': 65_536},
+            'trace-route', _Dumper(), None, 0.0,
+            route_output_limit_key='["p","o","d","openai","gemini"]')
+
+        with pytest.raises(ModelLimitError):
+            accumulator._handle_sse_error({
+                'message': 'maxOutputTokens range is from 1 (inclusive) '
+                           'to 65536 (exclusive)',
+            })
+
+        assert learned == [(
+            'gemini-2.5-flash-lite', 65_535,
+            {'route_key': '["p","o","d","openai","gemini"]'},
+        )]
 
     def test_sse_embedded_mojibake_repaired_in_exception(self):
         """A generic SSE error whose message is double-encoded must raise with

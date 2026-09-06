@@ -98,7 +98,9 @@ function _applyModelUI(modelId) {
   }
   config.model = modelId;
   config._modelIsProvisional = _provisional;
-  const brand = typeof _detectBrand === 'function' ? _detectBrand(modelId) : 'generic';
+  const brand = typeof _modelBrand === 'function'
+    ? _modelBrand(modelId)
+    : (typeof _detectBrand === 'function' ? _detectBrand(modelId) : 'generic');
   const shortName = _modelShortName(modelId);
   const isThinking = _isThinkingCapable(modelId);
   /* Ensure thinkingDepth is always set for thinking models, null for non-thinking.
@@ -405,7 +407,9 @@ function selectThinkingDepth(depth) {
   if (toggle) {
     const iconEl = toggle.querySelector(".ps-icon");
     if (iconEl) {
-      const brand = typeof _detectBrand === 'function' ? _detectBrand(config.model) : 'generic';
+      const brand = typeof _modelBrand === 'function'
+        ? _modelBrand(config.model)
+        : (typeof _detectBrand === 'function' ? _detectBrand(config.model) : 'generic');
       if (brand === 'generic') iconEl.innerHTML = _DEPTH_ICONS[depth] || _DEPTH_ICON_FALLBACK;
     }
   }
@@ -1430,7 +1434,13 @@ function _startBuildWatch() {
   };
   window.addEventListener('pagehide', _persistLastActiveConv);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') _persistLastActiveConv();
+    // The Android shell-hide flip arrives as a synthetic visibilitychange
+    // with document.visibilityState still 'visible' — persist on it too, so
+    // a backgrounded-then-killed app still restores the last conversation.
+    if (document.visibilityState === 'hidden'
+        || runtimeScope.nativeVisibility?.isHidden() === true) {
+      _persistLastActiveConv();
+    }
   });
 
   /* Resolve this tab's storage owner before any push subscriber is wired.
@@ -1502,7 +1512,8 @@ function _startBuildWatch() {
    * core/conversation_invalidation.js. */
   // ── Tab visibility: resume pending translations when user switches back ──
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && activeConvId) {
+    if (document.visibilityState === 'visible'
+        && runtimeScope.nativeVisibility?.isHidden() !== true && activeConvId) {
       // Small delay to let the page settle after tab switch
       setTimeout(() => {
         if (activeConvId) {

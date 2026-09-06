@@ -1,10 +1,9 @@
 """Remote-worktree binding contract (RWA 拍板 3A — same-name routing).
 
 One shared home for the master switch + the cfg binding shape, consumed by
-BOTH the projection layer (``ToolContext.project_remote`` →
-``with_remote_hint``) and the execution-routing layer
-(``handlers/project.py`` → bridge command). Keeping the contract here —
-not re-parsed in two places — is what stops the tool schema and the
+the tail-context projection layer (``ToolContext.project_remote``) and the
+execution-routing layer (``handlers/project.py`` → bridge command). Keeping
+the contract here — not re-parsed in two places — stops model guidance and the
 executor from disagreeing about whether a conversation is remote.
 """
 

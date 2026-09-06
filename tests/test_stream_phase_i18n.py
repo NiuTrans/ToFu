@@ -203,7 +203,8 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
     #    (kimi-k3, attempt 1)" raw-English leak — must ship structured
     #    detailKey/detailArgs (+ typed reasonKey) so the HUD localizes. ──
 
-    def _drive_retry(self, reason, status_code, model='kimi-k3'):
+    def _drive_retry(self, reason, status_code, model='kimi-k3',
+                     retry_context=None):
         """Drive the REAL stream_llm_response with a scripted dispatch that
         fires on_retry once and then succeeds; return the retry PHASE event.
 
@@ -222,7 +223,8 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
         def _fake_dispatch(body, **kwargs):
             cb = kwargs.get('on_retry')
             if cb:
-                cb(1, reason=reason, status_code=status_code)
+                cb(1, reason=reason, status_code=status_code,
+                   **(retry_context or {}))
             return ({'role': 'assistant', 'content': 'ok',
                      'reasoning_content': ''}, 'stop', {})
 
@@ -285,7 +287,22 @@ class TestBackendEmittersShipDetailKey(unittest.TestCase):
         ev = self._drive_retry('Endpoint unreachable', 0,
                                model='aws.claude-opus-4.8')
         self.assertEqual(ev['detailArgs']['model'], 'claude-opus-4.8')
-        self.assertIn('aws.claude-opus-4.8', ev['detail'])
+        self.assertIn('claude-opus-4.8', ev['detail'])
+        self.assertNotIn('aws.', ev['detail'])
+
+    def test_pool_rescue_names_physical_candidate_without_hold_claim(self):
+        ev = self._drive_retry(
+            'Upstream error', 503, model='glm-5.3', retry_context={
+                'attempt_model': 'gemini-2.5-flash-lite',
+                'provider_id': 'google-aigc',
+                'strict_model': False,
+            })
+
+        self.assertEqual(ev['model'], 'gemini-2.5-flash-lite')
+        self.assertEqual(ev['providerId'], 'google-aigc')
+        self.assertEqual(ev['dispatchMode'], 'pool_rescue')
+        self.assertIn('池救援候选 gemini-2.5-flash-lite', ev['detail'])
+        self.assertNotIn('模型保持', ev['detail'])
 
     def test_reasonkey_resolution_present_in_both_renderers(self):
         """The native HUD forwards structured args and its retained i18n port

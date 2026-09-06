@@ -66,7 +66,6 @@ from lib.storage_sidecar.operations_pkg._project_brain import (
     _project_brain_work_change as _project_brain_work_change,
     _project_brain_work_finish as _project_brain_work_finish,
     _project_brain_narrative_add as _project_brain_narrative_add,
-    _project_brain_attention_add as _project_brain_attention_add,
     _project_brain_checker_register as _project_brain_checker_register,
     _project_brain_checker_result as _project_brain_checker_result,
     _project_brain_decision_promote as _project_brain_decision_promote,
@@ -298,6 +297,10 @@ from lib.storage_sidecar.operations_pkg._desktop import (
     _desktop_egress_agent_get as _desktop_egress_agent_get,
     _desktop_egress_agent_initialize as _desktop_egress_agent_initialize,
     _desktop_egress_agent_set as _desktop_egress_agent_set,
+)
+from lib.storage_sidecar.operations_pkg._browser import (
+    _browser_site_observation_get as _browser_site_observation_get,
+    _browser_site_observation_record as _browser_site_observation_record,
 )
 from lib.storage_sidecar.operations_pkg._orchestration_definitions import (
     _DEFINITION_COLUMNS as _DEFINITION_COLUMNS,

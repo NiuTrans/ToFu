@@ -66,9 +66,11 @@ Long pipelines checkpoint at semantic stages. A retry resumes from a complete
 checkpoint or recomputes the stage; partial output is never published as a
 terminal artifact. Abort closes runtime state and prevents later background
 callbacks from overwriting a terminal result. Auto-research overlaps its two independent primary judges behind a two-call ceiling; only material disagreement adds a third call, and final repository publication retries after every model-backed checkpoint. Post-report terminology backfill admits at most 60 gaps in 15-term batches, warms one shared report-prefix cache before bounded fan-out, and leaves any unfilled gap visible. arXiv streaming progress is a non-blocking one-item latest-value slot, so a disconnected consumer cannot accumulate page updates.
-Auto-research preserves the submitted direction as its prompt and durable identity, but non-English directions receive one bounded, cached English discovery alias before arXiv search; that translation is accounted under harvest usage. The browser also sends its active language with the start request so downstream artifacts use the language the user selected.
+Auto-research preserves the submitted direction as its prompt and durable identity, but non-English directions receive one bounded, cached English discovery alias before arXiv search; that translation is accounted under harvest usage. The browser also sends its active language and currently selected text model with the start request, so downstream artifacts use the user's language and the five-stage run stays pinned to a route already proven usable by the session. Neither becomes an extra Research form field.
+Paper research dispatches may rotate across at most 12 deterministic no-route/bad-request candidates to reach a healthy text model; this route-attempt envelope is separate from paid agent-round and token budgets. If ideation's forced tool-less synthesis receives a provider-terminated empty answer, it reissues that exact synthesis once, accounts both paid attempts, and never replays the completed tool history or whole stage.
+The survey boundary treats `open_gaps[].id` as a mechanical cross-stage handle: missing or duplicate model-authored handles are repaired deterministically after evidence verification, while the stage gate rejects any artifact still lacking a usable handle before ideation begins.
 
-A completed auto-research direction opens an owner-scoped Research Foundry program while frozen survey/novelty artifacts remain read-only evidence. `contracts/research_program_v1.schema.json` is the authority for its falsification protocol, at most 24 exact capability bindings, 32 evidence-bearing runs, 32 claim/evidence records, full conference-paper sections, 24-file/384-KiB LaTeX source tree, figures/tables, and compile/publication receipts. `GET /api/v1/research/workspace` returns revision zero; `PUT` and manuscript scaffolding use compare-and-swap, so stale writers receive 409. Direction hash, language, and user form the key. Submission readiness is derived from protocol, artifact-backed passing runs, supported claims, complete source, and a compile receipt whose source digest is still current—never stored as a percentage.
+A completed auto-research direction opens an owner-scoped Research Foundry program while frozen survey/novelty artifacts remain read-only evidence. `contracts/research_program_v1.schema.json` is the authority for its falsification protocol, at most 24 exact capability bindings, 32 evidence-bearing runs, 32 claim/evidence records, full conference-paper sections, 24-file/384-KiB LaTeX source tree, figures/tables, and compile/publication receipts. `GET /api/v1/research/workspace` returns revision zero; `PUT` and manuscript scaffolding use compare-and-swap, so stale writers receive 409. Direction hash, language, and user form the key; because a constrained reverse proxy can re-escape an already-encoded query string while POST/PUT bodies stay raw (PROXY_RUNTIME.md), every direction-keyed read retries a miss under one level of percent-decoding, exact identity first. Submission readiness is derived from protocol, artifact-backed passing runs, supported claims, complete source, and a compile receipt whose source digest is still current—never stored as a percentage.
 The action line starts `research-action` jobs through the generic task API for `experiment`, `analyze`, `manuscript`, `compile`, and `publish`. They reuse the guarded Paper Agent loop and shared dispatch, but freeze a narrower least-authority epoch: local search/code tools are action-specific, and an MCP tool is executable only when its exact namespaced name and schema hash are saved under a relevant capability; drift revokes execution until the owner reviews and saves the binding again. Catalog suggestions inspect live name/description/schema metadata and grant no authority. Experiment, analysis, compile, and publish require an explicit start confirmation; compile requires `manuscript.compile`, publish requires `publication.push`. No server name is privileged, so private LLM/HOPE/Overleaf services and third-party providers follow the same contract. Model prose cannot assert a passing run, compile, or publication: deterministic settlement requires a successful call receipt from that action. Source ZIP export is pure and deterministic. A compiler or publication platform remains an external bound tool rather than a second manuscript authority.
 Research-only paper loops freeze their exact post-policy schemas and execution
 documents each round. Full report, Q&A, and deepen loops instead freeze one
@@ -204,18 +206,13 @@ contracts must pass.
 ## Test map
 
 ```bash
-pytest -q tests/test_pdf_parser_page_isolation.py \
-  tests/test_pymupdf_layout_policy.py
-pytest -q tests/test_paper_ingest_persist.py \
-  tests/test_paper_upload_atomic.py tests/test_paper_hash_canonical.py
+pytest -q tests/test_pdf_parser_page_isolation.py tests/test_pymupdf_layout_policy.py
+pytest -q tests/test_paper_ingest_persist.py tests/test_paper_upload_atomic.py tests/test_paper_hash_canonical.py
 pytest -q tests/test_paper_report_abort.py tests/test_paper_checkpoints.py
-pytest -q tests/test_paper_arxiv_startup_boundary.py \
-  tests/test_text_lang_startup_boundary.py
-pytest -q tests/test_paper_request_policy.py tests/test_paper_full_tools.py \
-  tests/test_paper_deepen.py
+pytest -q tests/test_paper_arxiv_startup_boundary.py tests/test_text_lang_startup_boundary.py
+pytest -q tests/test_paper_request_policy.py tests/test_paper_full_tools.py tests/test_paper_deepen.py
 pytest -q tests/test_paper_podcast_api.py tests/test_paper_podcast_script.py
 pytest -q tests/test_translate_identity_invariant.py tests/test_translate_refusal_cache.py tests/test_translate_startup_boundary.py tests/test_translate_dispatch_deadline.py
 pytest -q tests/test_knowledge_data_layer.py tests/test_knowledge_enrichment_budget.py tests/test_knowledge_pdf_resource_budget.py tests/test_video_analysis.py tests/test_frontend_authoritative_composer.py
-pytest -q tests/test_motion_video_engine.py \
-  tests/test_motion_video_gate_verdict.py
+pytest -q tests/test_motion_video_engine.py tests/test_motion_video_gate_verdict.py
 ```

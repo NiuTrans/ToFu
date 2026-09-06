@@ -56,7 +56,7 @@ def _would_gate(fn_name, fn_args, *, cfg, attended, write_tools, aborted=False,
         and not is_code_exec
     )
     if needs_approval and fn_name == 'run_command':
-        from lib.project_mod.tools import _is_destructive_command
+        from lib.project_mod.command_analysis import _is_destructive_command
         needs_approval = _is_destructive_command(fn_args.get('command', ''))
     return needs_approval
 

@@ -93,3 +93,28 @@ def test_learn_preserves_other_config_and_moves_refresh_to_tail(
     assert persisted['unrelated'] == 7
     assert list(persisted['model_limits']) == ['other', 'refresh']
     assert persisted['model_limits']['refresh'] == 300
+
+
+def test_route_limit_persists_without_poisoning_global_model_limit(
+    monkeypatch,
+    tmp_path,
+):
+    from lib.model_info import _limits as limits_store
+
+    path = _redirect_config(monkeypatch, tmp_path)
+    path.write_text(json.dumps({
+        'unrelated': 7,
+        'model_limits': {'gemini': 100_000},
+    }), encoding='utf-8')
+    monkeypatch.setattr(limits_store, '_LEARNED_ROUTE_LIMITS', {})
+    route_key = limits_store._route_output_limit_key(
+        provider_id='provider', offering_id='offering',
+        deployment_id='deployment', protocol='openai', model='gemini')
+
+    limits_store._learn_model_limit(
+        'gemini', 65_535, route_key=route_key)
+
+    persisted = json.loads(path.read_text(encoding='utf-8'))
+    assert persisted['unrelated'] == 7
+    assert persisted['model_limits'] == {'gemini': 100_000}
+    assert persisted['route_model_limits'] == {route_key: 65_535}

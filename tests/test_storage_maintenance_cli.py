@@ -14,6 +14,7 @@ import pytest
 
 from lib.storage import StorageSupervisor
 from lib.storage_sidecar import cli as cli_module
+from lib.storage_sidecar import fastpath
 from lib.storage_sidecar.cli import main
 from lib.storage_sidecar.schema import SCHEMA_VERSION
 
@@ -129,6 +130,139 @@ def test_restore_rejects_a_backup_that_no_longer_matches_its_manifest(
     ]) == 2
     error = json.loads(capsys.readouterr().err)
     assert 'manifest' in error['message']
+
+
+def test_retire_fastpath_materializes_shadow_and_preserves_rollback(
+        tmp_path: Path, capsys):
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    classic = data_dir / 'tofu.db'
+    connection = sqlite3.connect(classic)
+    connection.execute(
+        'CREATE TABLE storage_meta(meta_key TEXT PRIMARY KEY, '
+        'meta_value TEXT NOT NULL)')
+    connection.execute(
+        "INSERT INTO storage_meta VALUES ('authority_uuid', 'old-classic')")
+    connection.execute('CREATE TABLE items(value TEXT NOT NULL)')
+    connection.execute("INSERT INTO items VALUES ('old')")
+    connection.commit()
+    connection.close()
+
+    shadow_dir = data_dir / fastpath.SHADOW_DIRNAME
+    shadow_dir.mkdir()
+    snapshot, _shadow_wal = fastpath.shadow_paths(shadow_dir)
+    connection = sqlite3.connect(snapshot)
+    connection.execute(
+        'CREATE TABLE storage_meta(meta_key TEXT PRIMARY KEY, '
+        'meta_value TEXT NOT NULL)')
+    connection.execute(
+        "INSERT INTO storage_meta VALUES ('authority_uuid', 'shadow-current')")
+    connection.execute('CREATE TABLE items(value TEXT NOT NULL)')
+    connection.execute("INSERT INTO items VALUES ('current')")
+    connection.commit()
+    connection.close()
+    fastpath.write_shadow_manifest(shadow_dir, {
+        'format': 'tofu.fastpath-shadow.v1',
+        'generation': 9,
+        'authority_uuid': 'shadow-current',
+        'snapshot_bytes': snapshot.stat().st_size,
+        'wal_shipped_bytes': 0,
+    })
+    (shadow_dir / f'{fastpath.SNAPSHOT_NAME}.rebase-tmp').write_bytes(
+        b'incomplete-rebase')
+    (shadow_dir / f'{fastpath.SNAPSHOT_NAME}.rebase-state.json').write_text(
+        '{}', encoding='utf-8')
+
+    assert main([
+        '--backend', 'sqlite', '--project-root', str(tmp_path),
+        'retire-fastpath', '--confirm',
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['generation'] == 9
+    assert result['next_step'] == (
+        'set TOFU_STORAGE_FASTPATH=off before starting Tofu')
+    assert not shadow_dir.exists()
+
+    connection = sqlite3.connect(classic)
+    assert connection.execute('SELECT value FROM items').fetchone() == ('current',)
+    connection.close()
+    previous = tmp_path / result['previous']
+    connection = sqlite3.connect(previous)
+    assert connection.execute('SELECT value FROM items').fetchone() == ('old',)
+    connection.close()
+    retired_shadow = tmp_path / result['retired_shadow']
+    assert (retired_shadow / fastpath.SNAPSHOT_NAME).is_file()
+    assert result['reclaimed_private_bytes'] == len(b'incomplete-rebase') + 2
+    assert not (retired_shadow /
+                f'{fastpath.SNAPSHOT_NAME}.rebase-tmp').exists()
+    assert not (retired_shadow /
+                f'{fastpath.SNAPSHOT_NAME}.rebase-state.json').exists()
+
+
+def test_retire_fastpath_prefers_verified_local_crash_tail(
+        tmp_path: Path, monkeypatch, capsys):
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    classic = data_dir / 'tofu.db'
+    connection = sqlite3.connect(classic)
+    connection.execute(
+        'CREATE TABLE storage_meta(meta_key TEXT PRIMARY KEY, '
+        'meta_value TEXT NOT NULL)')
+    connection.execute(
+        "INSERT INTO storage_meta VALUES ('authority_uuid', 'old-classic')")
+    connection.commit()
+    connection.close()
+
+    shadow_dir = data_dir / fastpath.SHADOW_DIRNAME
+    shadow_dir.mkdir()
+    snapshot, _shadow_wal = fastpath.shadow_paths(shadow_dir)
+    connection = sqlite3.connect(snapshot)
+    connection.execute(
+        'CREATE TABLE storage_meta(meta_key TEXT PRIMARY KEY, '
+        'meta_value TEXT NOT NULL)')
+    connection.execute(
+        "INSERT INTO storage_meta VALUES ('authority_uuid', 'shared-lineage')")
+    connection.execute('CREATE TABLE items(value TEXT NOT NULL)')
+    connection.execute("INSERT INTO items VALUES ('shadow')")
+    connection.commit()
+    connection.close()
+    fastpath.write_shadow_manifest(shadow_dir, {
+        'format': 'tofu.fastpath-shadow.v1',
+        'generation': 4,
+        'authority_uuid': 'shared-lineage',
+        'snapshot_bytes': snapshot.stat().st_size,
+        'wal_shipped_bytes': 0,
+    })
+
+    local_dir = tmp_path / 'local-front'
+    local_dir.mkdir()
+    local = local_dir / 'tofu.db'
+    connection = sqlite3.connect(local)
+    connection.execute(
+        'CREATE TABLE storage_meta(meta_key TEXT PRIMARY KEY, '
+        'meta_value TEXT NOT NULL)')
+    connection.execute(
+        "INSERT INTO storage_meta VALUES ('authority_uuid', 'shared-lineage')")
+    connection.execute('CREATE TABLE items(value TEXT NOT NULL)')
+    connection.execute("INSERT INTO items VALUES ('local-tail')")
+    connection.commit()
+    connection.close()
+    fastpath.write_local_manifest(local_dir, {
+        'authority_uuid': 'shared-lineage',
+        'shadow_dir': str(shadow_dir),
+    })
+    monkeypatch.setenv('TOFU_STORAGE_FASTPATH_DIR', str(local_dir))
+
+    assert main([
+        '--backend', 'sqlite', '--project-root', str(tmp_path),
+        'retire-fastpath', '--confirm',
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['source'] == 'verified_local_front'
+    connection = sqlite3.connect(classic)
+    assert connection.execute('SELECT value FROM items').fetchone() == (
+        'local-tail',)
+    connection.close()
 
 
 def test_cutover_check_reports_static_debt_and_live_owners_as_json(

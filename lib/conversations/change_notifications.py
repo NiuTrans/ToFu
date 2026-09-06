@@ -26,22 +26,21 @@ def notify_conv_changed(
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id < 1:
         raise ValueError("user_id must be a positive integer")
     try:
+        from lib.agent_core.events import build_push_frame
         from lib.agent_core.push import push_event
 
-        payload = {
-            "type": "conv_deleted" if deleted else "conv_changed",
-            "convId": conversation_id,
-            "userId": user_id,
-        }
+        frame_fields = {"convId": conversation_id, "userId": user_id}
         if rev is not None:
             try:
-                payload["rev"] = int(rev)
+                frame_fields["rev"] = int(rev)
             except (TypeError, ValueError):
                 logger.debug(
                     "[ConversationNotify] conv=%s non-int rev=%r dropped",
                     conversation_id[:8],
                     rev,
                 )
+        payload = build_push_frame(
+            "conv_deleted" if deleted else "conv_changed", **frame_fields)
         push_event("notify", conversation_id, payload, user_id=user_id)
     except Exception as exc:
         logger.debug(

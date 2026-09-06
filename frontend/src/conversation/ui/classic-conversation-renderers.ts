@@ -1514,6 +1514,59 @@ function renderActivityEventBlock(
   );
 }
 
+const SYSTEM_NOTE_STALL_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M3 2v6h6"/><path d="M3 8a9 9 0 1 0 3-5.7L3 8"/></svg>';
+const SYSTEM_NOTE_TODO_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>';
+
+/* Engine-authored intervention (stall nudge / todo reminder) carried as a
+ * durable system_note segment. Renders in the injection-chip visual family,
+ * collapsed by default; the body is the verbatim text the model was sent
+ * (textContent, never markdown) so the render cannot drift from the wire. */
+function renderSystemNoteBlock(
+  node: HTMLElement,
+  block: Extract<ConversationBlockViewModel, { kind: 'system-note' }>,
+  ports: ClassicConversationRendererPorts,
+): void {
+  node.className = 'conversation-block conversation-block--system-note';
+  const document = node.ownerDocument;
+  const details = document.createElement('details');
+  details.className = 'sw-inbox-row sw-system-note-row';
+  details.dataset.noteKind = block.noteKind;
+  const summary = document.createElement('summary');
+  summary.className = 'ptool-line sw-inbox-row-header';
+  const icon = document.createElement('span');
+  icon.className = 'ptool-icon';
+  icon.innerHTML = block.noteKind === 'todo-continuation'
+    ? SYSTEM_NOTE_TODO_ICON_HTML : SYSTEM_NOTE_STALL_ICON_HTML;
+  const label = document.createElement('span');
+  label.className = 'ptool-text';
+  label.textContent = textFor(
+    ports,
+    block.noteKind === 'todo-continuation'
+      ? 'systemNote.todoContinuationLabel' : 'systemNote.intentStallLabel',
+    'System note',
+  );
+  const badge = document.createElement('span');
+  badge.className = 'ptool-badge ptool-badge-info';
+  badge.textContent = textFor(ports, 'peer.injectRowBadge', 'injected → context');
+  summary.append(icon, label, badge);
+  const body = document.createElement('div');
+  body.className = 'sw-inbox-row-body';
+  const card = document.createElement('div');
+  card.className = 'sw-card sw-stall-card-item';
+  const head = document.createElement('div');
+  head.className = 'sw-card-head';
+  const role = document.createElement('span');
+  role.className = 'sw-card-role';
+  role.textContent = textFor(ports, 'stall.promptLabel', 'Sent to the model');
+  head.appendChild(role);
+  const pre = document.createElement('pre');
+  pre.className = 'sw-card-raw-pre';
+  pre.textContent = block.text;
+  card.append(head, pre);
+  body.appendChild(card);
+  details.append(summary, body);
+  node.replaceChildren(details);
+}
 function renderInjectionBlock(
   node: HTMLElement,
   block: Extract<ConversationBlockViewModel, { kind: 'injections' }>,
@@ -2394,6 +2447,8 @@ export function createClassicConversationRenderers(
         renderAttachmentsBlock(node, block, ports);
       } else if (block.kind === 'injections') {
         renderInjectionBlock(node, block, context.turn, ports);
+      } else if (block.kind === 'system-note') {
+        renderSystemNoteBlock(node, block, ports);
       } else if (block.kind === 'file-changes') {
         renderFileChangesBlock(node, block, context.turn, ports);
       } else if (block.kind === 'provenance') {

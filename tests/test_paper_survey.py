@@ -252,6 +252,25 @@ def test_verify_against_library_is_pure_and_biting():
     _ok('_verify_against_library is a pure, biting gate (version-normalized id set)')
 
 
+def test_verified_gaps_receive_unique_deterministic_handles_when_model_omits_them():
+    """A missing mechanical id must not discard an otherwise grounded survey."""
+    import lib.paper.survey as sv
+
+    raw = {
+        'open_gaps': [
+            {'gap': 'first', 'evidence': ['2301.00001']},
+            {'id': 'gap_1', 'gap': 'second', 'evidence': ['2301.00001']},
+            {'id': 'gap_1', 'gap': 'third', 'evidence': ['2301.00001']},
+        ],
+    }
+    out = sv._verify_against_library(
+        raw, user_id=1, lib_ids={'2301.00001'}, ground_fn=lambda aid: '')
+    ids = [row['id'] for row in out['open_gaps']]
+    assert ids == ['gap_2', 'gap_1', 'gap_3']
+    assert out['generated_gap_ids'] == ['gap_2', 'gap_3']
+    assert len(ids) == len(set(ids))
+
+
 # ── Test 3: NEUTER — fake citation flagged by audit ───────────────────────
 
 def test_fake_citation_flagged():

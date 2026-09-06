@@ -55,6 +55,8 @@ The `kind` enum is closed — callers must pick one of these values:
   - ``task_start_failed``   durable turn exists but its executor did not start
   - ``internal``            backend bug / unhandled exception
   - ``generic``             unrecognized — last-resort fallback
+  - ``bad_request``         deterministic HTTP 400 payload rejection
+  - ``not_found``           HTTP 404 — model/route missing on the upstream
   - ``tool_not_available``  requested tool is absent from this turn
   - ``tool_call_rejected``  tool was blocked before execution
 

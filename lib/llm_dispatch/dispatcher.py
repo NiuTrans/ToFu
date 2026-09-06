@@ -203,6 +203,8 @@ class LLMDispatcher:
                     route_deployment_id=candidate.deployment['deployment_id'],
                     route_connection_id=candidate.connection['connection_id'],
                     route_credential_id=candidate.credential['credential_id'],
+                    max_output_tokens=int(
+                        candidate.deployment.get('max_output_tokens') or 0),
                     route_snapshot=snapshot.finalize(candidate),
                     extra_headers={
                         **(candidate.connection.get('extra_headers') or {}),

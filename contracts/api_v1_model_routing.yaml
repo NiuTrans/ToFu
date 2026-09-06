@@ -1,0 +1,737 @@
+openapi: 3.1.0
+info:
+  title: Tofu API v1 model-routing domain contract
+  version: 1.0.0
+  description: >-
+    Per-endpoint request/response payload authority for the model-routing v2
+    route family owned by routes/api_v1/providers.py. Response schemas describe
+    the success-envelope DATA fields (the fields beside `ok` produced by
+    api_ok/api_created); the envelope itself is owned by docs/API_CONTRACT.md
+    section 2. Entity-level field authority for the aggregate document is
+    contracts/model_routing_v2.schema.json, referenced here — never duplicated.
+    Schemas are closed (additionalProperties: false) unless marked loose for a
+    genuinely dynamic passthrough; loose schemas may only gain declared fields
+    over time, never lose the closed-core ratchet.
+x-tofu-contract: tofu.api-v1-model-routing/v1
+x-tofu-routes-blueprint: routes.api_v1.providers:api_v1_providers_bp
+paths:
+  /api/v1/model-routing:
+    get:
+      operationId: getModelRouting
+      summary: Get the owner model-routing v2 authority
+      responses:
+        '200':
+          description: Public aggregate document and its revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelRoutingAuthorityResponse'
+    put:
+      operationId: putModelRouting
+      summary: CAS replace the owner model-routing v2 authority
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelRoutingPutRequest'
+      responses:
+        '200':
+          description: Committed public document and revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelRoutingAuthorityResponse'
+  /api/v1/providers:
+    get:
+      operationId: listProviders
+      summary: List service providers and owner access pools
+      responses:
+        '200':
+          description: Provider bundles and the authority revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderListResponse'
+    post:
+      operationId: createProvider
+      summary: Create one ProviderAccess aggregate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderWriteRequest'
+      responses:
+        '201':
+          description: Created provider bundle and the new revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderResponse'
+  /api/v1/providers/templates:
+    get:
+      operationId: listProviderTemplates
+      summary: List provider onboarding recipes
+      responses:
+        '200':
+          description: Secret-free onboarding recipes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderTemplateListResponse'
+  /api/v1/providers/templates/compile:
+    post:
+      operationId: compileProviderTemplate
+      summary: Compile a provider recipe into a v2 access draft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderTemplateCompileRequest'
+      responses:
+        '200':
+          description: Secret-free staged bundle; nothing is persisted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderTemplateCompileResponse'
+  /api/v1/providers/probe:
+    post:
+      operationId: probeProvider
+      summary: Probe an endpoint and compile a v2 ProviderAccess draft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderProbeRequest'
+      responses:
+        '200':
+          description: >-
+            Transport facts plus a secret-free draft. Probe failure is
+            reported in-band (ok:false fields) with HTTP 200, so this schema
+            is deliberately loose; the closed fields are the compiled bundle.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderProbeResponse'
+  /api/v1/providers/{provider_id}:
+    get:
+      operationId: getProvider
+      summary: Get one ProviderAccess aggregate
+      responses:
+        '200':
+          description: Provider bundle and the authority revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderResponse'
+    patch:
+      operationId: updateProvider
+      summary: CAS replace one ProviderAccess aggregate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderWriteRequest'
+      responses:
+        '200':
+          description: Replaced provider bundle and the new revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderResponse'
+    delete:
+      operationId: deleteProvider
+      summary: Delete one ProviderAccess aggregate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderDeleteRequest'
+      responses:
+        '200':
+          description: Deleted provider id and the new revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderDeleteResponse'
+  /api/v1/providers/{provider_id}/probe-cells/start:
+    post:
+      operationId: startProviderProbeCells
+      summary: Start or resume a per-(credential x wire id) reachability probe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProbeCellsStartRequest'
+      responses:
+        '200':
+          description: Live or persisted probe snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeCellsSnapshot'
+  /api/v1/providers/{provider_id}/probe-cells/status:
+    get:
+      operationId: getProviderProbeCellsStatus
+      summary: Poll a provider's access-matrix probe progress
+      responses:
+        '200':
+          description: Live task, disk snapshot, or status "none"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeCellsSnapshot'
+  /api/v1/model-routing/credentials/{credential_id}/secret:
+    put:
+      operationId: putCredentialSecret
+      summary: Replace one encrypted credential secret
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialSecretPutRequest'
+      responses:
+        '200':
+          description: Opaque secret metadata and the new revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialSecretPutResponse'
+  /api/v1/model-routing/credentials/{credential_id}/secret/reveal:
+    post:
+      operationId: revealCredentialSecret
+      summary: Reveal one credential secret plaintext (audited)
+      responses:
+        '200':
+          description: Credential id and its plaintext secret
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialSecretRevealResponse'
+  /api/v1/model-routing/migration/plan:
+    post:
+      operationId: planModelRoutingMigration
+      summary: Build a redacted one-way model-routing migration plan
+      responses:
+        '200':
+          description: Redacted non-writing plan and entity counts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MigrationPlanResponse'
+  /api/v1/model-routing/migration/commit:
+    post:
+      operationId: commitModelRoutingMigration
+      summary: Validate and atomically activate model-routing v2
+      responses:
+        '200':
+          description: Activated authority and the migration receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MigrationCommitResponse'
+components:
+  schemas:
+    Revision:
+      type: integer
+      minimum: 0
+    ModelRoutingDocument:
+      $ref: './model_routing_v2.schema.json'
+    ModelRoutingAuthorityResponse:
+      type: object
+      additionalProperties: false
+      required: [model_routing, revision]
+      properties:
+        model_routing:
+          $ref: '#/components/schemas/ModelRoutingDocument'
+        revision:
+          $ref: '#/components/schemas/Revision'
+    ModelRoutingPutRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, model_routing]
+      properties:
+        model_routing:
+          $ref: '#/components/schemas/ModelRoutingDocument'
+        expected_revision:
+          $ref: '#/components/schemas/Revision'
+    ProviderBundle:
+      type: object
+      additionalProperties: false
+      required:
+        - provider
+        - provider_access
+        - connections
+        - credentials
+        - offerings
+        - deployments
+      properties:
+        provider:
+          $ref: './model_routing_v2.schema.json#/$defs/provider'
+        provider_access:
+          anyOf:
+            - $ref: './model_routing_v2.schema.json#/$defs/providerAccess'
+            - type: 'null'
+        connections:
+          type: array
+          maxItems: 64
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/connection'
+        credentials:
+          type: array
+          maxItems: 128
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/credentialMetadata'
+        offerings:
+          type: array
+          maxItems: 512
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/offering'
+        deployments:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/deployment'
+    ProviderListResponse:
+      type: object
+      additionalProperties: false
+      required: [providers, revision]
+      properties:
+        providers:
+          type: array
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/ProviderBundle'
+        revision:
+          $ref: '#/components/schemas/Revision'
+    ProviderResponse:
+      type: object
+      additionalProperties: false
+      required: [provider, revision]
+      properties:
+        provider:
+          $ref: '#/components/schemas/ProviderBundle'
+        revision:
+          $ref: '#/components/schemas/Revision'
+    ProviderWriteRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - expected_revision
+        - provider
+        - provider_access
+        - connections
+        - credentials
+        - offerings
+        - deployments
+      properties:
+        provider:
+          $ref: './model_routing_v2.schema.json#/$defs/provider'
+        provider_access:
+          $ref: './model_routing_v2.schema.json#/$defs/providerAccess'
+        connections:
+          type: array
+          maxItems: 64
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/connection'
+        credentials:
+          type: array
+          maxItems: 128
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/credentialMetadata'
+        offerings:
+          type: array
+          maxItems: 512
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/offering'
+        deployments:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/deployment'
+        creators:
+          type: array
+          maxItems: 256
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/creator'
+        models:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/model'
+        credential_secrets:
+          type: object
+          maxProperties: 128
+          additionalProperties:
+            type: string
+            maxLength: 8192
+        expected_revision:
+          $ref: '#/components/schemas/Revision'
+    ProviderDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision]
+      properties:
+        expected_revision:
+          $ref: '#/components/schemas/Revision'
+    ProviderDeleteResponse:
+      type: object
+      additionalProperties: false
+      required: [deleted, revision]
+      properties:
+        deleted:
+          type: string
+          minLength: 1
+        revision:
+          $ref: '#/components/schemas/Revision'
+    CredentialSecretPutRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, secret]
+      properties:
+        secret:
+          type: string
+        expected_revision:
+          $ref: '#/components/schemas/Revision'
+    CredentialSecretPutResponse:
+      type: object
+      additionalProperties: false
+      required: [credential_id, key_hint, revision]
+      properties:
+        credential_id:
+          type: string
+          minLength: 1
+        key_hint:
+          type: string
+          maxLength: 64
+        revision:
+          $ref: '#/components/schemas/Revision'
+    CredentialSecretRevealResponse:
+      type: object
+      additionalProperties: false
+      required: [credential_id, secret]
+      properties:
+        credential_id:
+          type: string
+          minLength: 1
+        secret:
+          type: string
+    ProviderTemplate:
+      type: object
+      additionalProperties: true
+      required: [key]
+      properties:
+        key:
+          type: string
+          minLength: 1
+        name:
+          type: string
+        category:
+          type: string
+        brand:
+          type: string
+        base_url:
+          type: string
+    ProviderTemplateListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/ProviderTemplate'
+    ProviderTemplateCompileRequest:
+      type: object
+      additionalProperties: false
+      required: [template_key]
+      properties:
+        template_key:
+          type: string
+        selected_model_ids:
+          type: array
+          maxItems: 1024
+          items:
+            type: string
+    CompiledProviderBundle:
+      type: object
+      additionalProperties: false
+      required:
+        - provider
+        - provider_access
+        - connections
+        - credentials
+        - offerings
+        - deployments
+        - creators
+        - models
+        - credential_extra_headers
+      properties:
+        provider:
+          $ref: './model_routing_v2.schema.json#/$defs/provider'
+        provider_access:
+          $ref: './model_routing_v2.schema.json#/$defs/providerAccess'
+        connections:
+          type: array
+          maxItems: 64
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/connection'
+        credentials:
+          type: array
+          maxItems: 128
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/credentialMetadata'
+        offerings:
+          type: array
+          maxItems: 512
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/offering'
+        deployments:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/deployment'
+        creators:
+          type: array
+          maxItems: 256
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/creator'
+        models:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: './model_routing_v2.schema.json#/$defs/model'
+        credential_extra_headers:
+          type: object
+          maxProperties: 32
+          additionalProperties:
+            type: string
+            maxLength: 2048
+    ProviderTemplateCompileResponse:
+      type: object
+      additionalProperties: false
+      required: [provider_bundle]
+      properties:
+        provider_bundle:
+          $ref: '#/components/schemas/CompiledProviderBundle'
+    ProviderProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [base_url]
+      properties:
+        base_url:
+          type: string
+        api_key:
+          type: string
+        models_path:
+          type: string
+    ProviderProbeResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+        base_url:
+          type: string
+        name:
+          type: string
+        brand:
+          type: string
+        provider_bundle:
+          $ref: '#/components/schemas/CompiledProviderBundle'
+        credential_id:
+          type: string
+        model_count:
+          type: integer
+          minimum: 0
+    ProbeCellsStartRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        timeout:
+          type: integer
+        attempts:
+          type: integer
+        force:
+          type: boolean
+        only:
+          type: object
+          additionalProperties: false
+          properties:
+            key_idxs:
+              type: array
+              maxItems: 128
+              items:
+                type: integer
+            model_ids:
+              type: array
+              maxItems: 1024
+              items:
+                type: string
+    ProbeCellsSnapshot:
+      type: object
+      additionalProperties: true
+      required: [status]
+      properties:
+        status:
+          type: string
+        probe_schema_version:
+          type: integer
+        provider_id:
+          type: string
+        started_at:
+          type: number
+        finished_at:
+          anyOf:
+            - type: number
+            - type: 'null'
+        total:
+          type: integer
+        done_count:
+          type: integer
+        attempts:
+          type: integer
+        cells:
+          type: object
+          additionalProperties: true
+        summary:
+          type: object
+          additionalProperties: true
+          properties:
+            ok:
+              type: integer
+            disable:
+              type: integer
+            skipped:
+              type: integer
+            neutral:
+              type: integer
+            failed:
+              type: integer
+        error:
+          anyOf:
+            - type: string
+            - type: 'null'
+    MigrationPlan:
+      type: object
+      additionalProperties: false
+      required:
+        - contract_version
+        - source_digest
+        - entity_counts
+        - secrets
+        - issues
+        - ready
+      properties:
+        contract_version:
+          const: tofu.model-routing/v2
+        source_digest:
+          type: string
+        entity_counts:
+          type: object
+          additionalProperties: false
+          required:
+            - creators
+            - models
+            - providers
+            - provider_accesses
+            - connections
+            - credentials
+            - offerings
+            - deployments
+          properties:
+            creators:
+              type: integer
+              minimum: 0
+            models:
+              type: integer
+              minimum: 0
+            providers:
+              type: integer
+              minimum: 0
+            provider_accesses:
+              type: integer
+              minimum: 0
+            connections:
+              type: integer
+              minimum: 0
+            credentials:
+              type: integer
+              minimum: 0
+            offerings:
+              type: integer
+              minimum: 0
+            deployments:
+              type: integer
+              minimum: 0
+        secrets:
+          type: array
+          maxItems: 1024
+          items:
+            type: object
+            additionalProperties: false
+            required: [credential_id, secret_reference, key_hint]
+            properties:
+              credential_id:
+                type: string
+              secret_reference:
+                type: string
+              key_hint:
+                type: string
+        issues:
+          type: array
+          maxItems: 4096
+          items:
+            type: object
+            additionalProperties: false
+            required: [severity, code, message]
+            properties:
+              severity:
+                type: string
+              code:
+                type: string
+              message:
+                type: string
+              path:
+                type: string
+              candidates:
+                type: array
+                maxItems: 64
+                items:
+                  type: object
+                  additionalProperties:
+                    type: string
+        ready:
+          type: boolean
+    MigrationPlanResponse:
+      type: object
+      additionalProperties: false
+      required: [migration_plan]
+      properties:
+        migration_plan:
+          $ref: '#/components/schemas/MigrationPlan'
+    MigrationCommitResponse:
+      type: object
+      additionalProperties: false
+      required: [model_routing, revision, migration_receipt]
+      properties:
+        model_routing:
+          anyOf:
+            - $ref: '#/components/schemas/ModelRoutingDocument'
+            - type: 'null'
+        revision:
+          $ref: '#/components/schemas/Revision'
+        migration_receipt:
+          type: object
+          additionalProperties: true

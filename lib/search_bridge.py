@@ -822,6 +822,70 @@ class _ChatuiAuthSourceProvider(tofu_search.AuthSourceProvider):
 
 
 # ═══════════════════════════════════════════════════════
+#  Reader tier — km.internal.example.com doc URLs reroute to xuecheng-mcp
+# ═══════════════════════════════════════════════════════
+
+# Soft floor: on tofu-search versions without the reader tier the base class
+# does not exist; degrading to `object` keeps this module importable and the
+# reader simply never gets registered (install guards with hasattr).
+_SiteReaderBase = getattr(tofu_search, 'SiteReader', object)
+
+
+class _ChatuiKmDocReader(_SiteReaderBase):
+    """Reroute 学城 (km.internal.example.com) doc URLs through the xuecheng MCP server.
+
+    An anonymous fetch of a KM doc URL only ever returns the SSO login wall
+    (~80K chars of JS/config noise) — which poisoned fetch_url results. The
+    xuecheng-mcp server reads the same URL under the user's identity. As a
+    tofu-search READER this runs before the anonymous pipeline, so BOTH
+    direct fetch_url and web_search result-fetching transparently return
+    the real document instead of the wall.
+    """
+
+    name = 'km-doc'
+    _TOOL = 'mcp__xuecheng__read_doc'
+    _PATH_RE = re.compile(r'^/(?:collabpage|collaborate|page|docs?|xtable)/\d+')
+
+    def matches(self, url):
+        try:
+            parts = urlparse(str(url))
+        except Exception:
+            return False
+        host = parts.netloc.lower().split('@')[-1].split(':')[0]
+        return host == 'km.internal.example.com' and bool(self._PATH_RE.match(parts.path))
+
+    def read(self, url, *, max_chars=None, timeout=15):
+        try:
+            from lib.mcp import get_bridge
+            bridge = get_bridge()
+        except Exception as e:
+            logger.debug('[KMReader] MCP bridge unavailable: %s', e)
+            return None
+        args = {'doc': url}
+        if max_chars:
+            args['max_chars'] = int(max_chars)
+        try:
+            text = bridge.call_tool(
+                self._TOOL, args,
+                timeout_override=max(int(timeout or 15), 30))
+        except ValueError as e:
+            # Server unconfigured / tool disabled — legacy anonymous path.
+            logger.debug('[KMReader] %s', e)
+            return None
+        except Exception as e:
+            # Matched but the reroute failed: an anonymous retry only yields
+            # the login wall, so surface the failure instead of falling through.
+            logger.info('[KMReader] read_doc reroute failed for %s: %s',
+                        url_for_log(url), text_for_log(e))
+            return (f'[学城文档自动读取失败] {e} '
+                    f'可改用 xuecheng 的 read_doc 工具重试。原始链接: {url}')
+        if not text:
+            return (f'[学城文档] xuecheng read_doc 未返回内容'
+                    f'（文档可能为空）。原始链接: {url}')
+        return text
+
+
+# ═══════════════════════════════════════════════════════
 #  Site-knowledge seam — lib.site_knowledge (tofu-search >=0.7.1)
 # ═══════════════════════════════════════════════════════
 
@@ -1059,6 +1123,10 @@ def install_search_bridge():
         if hasattr(tofu_search, 'register_site_search_provider'):
             tofu_search.register_site_search_provider(_ChatuiSiteSearchProvider())
         tofu_search.register_auth_source_provider(_ChatuiAuthSourceProvider())
+        # Reader tier: km.internal.example.com doc URLs reroute to the xuecheng MCP
+        # server (user-identity read) instead of the anonymous login wall.
+        if hasattr(tofu_search, 'register_reader'):
+            tofu_search.register_reader(_ChatuiKmDocReader())
         # tofu-search >=0.7.1: doctor-pinned selector knowledge + the drift
         # signal that feeds the autofix loop (lib/site_doctor.py). Older
         # libraries lack both entry points — the hasattr guards keep the

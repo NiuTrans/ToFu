@@ -1670,6 +1670,12 @@ var runtimeScope = (typeof window !== 'undefined' && window.TofuModules &&
     document.addEventListener('visibilitychange', function () {
       _paused = document.hidden; _ensureLoop();
     });
+    // The Android WebView never flips document.hidden when the app is
+    // backgrounded; the shell dispatches tofu:native-visibility instead.
+    document.addEventListener('tofu:native-visibility', function (e) {
+      _paused = !!(e && e.detail && e.detail.hidden) || document.hidden;
+      _ensureLoop();
+    });
     // Follow the bar's box + the scene attribute (set by tofu-pet.js) + the
     // app theme, all without coupling to the pet: attribute/resize observers.
     if (window.ResizeObserver && _bar) {

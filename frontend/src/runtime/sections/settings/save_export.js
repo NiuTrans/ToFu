@@ -41,7 +41,45 @@ function closeSettings() {
   }
 }
 
+/* Save is a long awaited chain (STT persist → model-routing replace →
+   credential secrets → server config update → config reload) with no other
+   visible feedback: without a busy latch the button looks dead on a slow
+   network, and a second click races modelRouting.replace with the same
+   expected_revision (409 conflict). While busy the button is disabled and
+   the footer hint shows 保存中…; any throw anywhere in the body is surfaced
+   in that same hint instead of dying silently in the action registry. */
+var _settingsSaveBusy = false;
+
+function _setSettingsSaveBusy(busy) {
+  _settingsSaveBusy = busy;
+  var btn = document.getElementById('settingsSaveBtn');
+  if (btn) btn.disabled = busy;
+  var hint = document.getElementById('settingsStatusHint');
+  if (!hint) return;
+  if (busy) hint.textContent = t('common.saving');
+  else if (hint.textContent === t('common.saving')) hint.textContent = '';
+}
+
+function _settingsSaveFailed(e) {
+  var message = (e && e.message) ? e.message : String(e);
+  debugLog('[Settings] Save failed: ' + message, 'error');
+  var statusHint = document.getElementById('settingsStatusHint');
+  if (statusHint) statusHint.textContent = '保存失败：' + message;
+}
+
 async function saveSettings() {
+  if (_settingsSaveBusy) return;
+  _setSettingsSaveBusy(true);
+  try {
+    await _saveSettingsBody();
+  } catch (e) {
+    _settingsSaveFailed(e);
+  } finally {
+    _setSettingsSaveBusy(false);
+  }
+}
+
+async function _saveSettingsBody() {
   // 1. Client-side config (General tab)
   if (typeof _collectResponsesExperimentControls === 'function') {
     _collectResponsesExperimentControls();
@@ -174,6 +212,16 @@ async function saveSettings() {
 
   // 3. Server config (Providers / Presets / Search)
   if (_serverConfig) {
+    // openSettings() intentionally loads miscellaneous config and the routing
+    // authority concurrently. A fast Save must join that authority read; if
+    // the initial read failed, this also performs one fresh retry.
+    if (_stgModelRoutingLoadPromise || !_stgModelRouting) {
+      var readyModelRouting = await _loadModelRoutingAuthority();
+      if (!readyModelRouting) {
+        throw new Error(
+          _stgModelRoutingLoadError || 'model-routing v2 authority is unavailable');
+      }
+    }
     if (typeof _persistSttProvider === 'function') {
       await _persistSttProvider();
     }
@@ -309,9 +357,7 @@ async function _saveServerConfig() {
       return false;
     }
   } catch (e) {
-    debugLog('[Settings] Save failed: ' + e.message, 'error');
-    var statusHint = document.getElementById('settingsStatusHint');
-    if (statusHint) statusHint.textContent = '保存失败：' + e.message;
+    _settingsSaveFailed(e);
     return false;
   }
 }

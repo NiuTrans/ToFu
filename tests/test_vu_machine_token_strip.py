@@ -10,7 +10,7 @@ conversations).
 
 The budget guard (``_record_vu_turn_and_check_budget``) is the ONE consumer
 that must still see the raw PROGRESS line (it drives the
-diminishing-returns ledger), so the strip happens AFTER guard consumption
+diminishing-returns ledger), so the strip happens AFTER ledger consumption
 and BEFORE persistence — the guard reads the original, the DB stores the
 clean copy.
 

@@ -105,7 +105,8 @@ def append_context_blocks(messages: list[dict], blocks: list[ContextBlock],
     result = render_context(messages, blocks, request, replace_managed=False)
     if request.task is not None:
         manifest = request.task.setdefault('_contextManifest', [])
-        manifest.extend(result.manifest)
+        manifest.extend(
+            row for row in result.manifest if row.get('appended'))
     return result
 
 

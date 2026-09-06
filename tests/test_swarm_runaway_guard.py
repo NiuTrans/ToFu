@@ -58,7 +58,10 @@ def _mk_agent(dispatch_fn, **spec_kw):
         build_body_fn=lambda **kw: dict(kw),
         dispatch_stream_fn=dispatch_fn,
     )
-    agent._execute_tool_calls = lambda tool_calls, round_num: None
+    agent._execute_tool_calls = lambda tool_calls, round_num: {
+        'progress_evidence_ids': ['stable-tool-result'],
+        'result_evidence_complete': True,
+    }
     return agent
 
 

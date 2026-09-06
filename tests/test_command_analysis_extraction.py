@@ -5,9 +5,11 @@ from ``lib/project_mod/run_command.py`` into
 The extraction MUST be behavior-neutral and MUST NOT break either historical
 import path. This test pins:
 
-  1. Every moved symbol is importable from ALL THREE modules
+  1. Every moved FUNCTION is importable from ALL THREE modules
      (command_analysis, run_command re-export, tools re-export) and is the
      SAME object in each — i.e. no accidental re-definition / shadow.
+     Bare regex constants are command_analysis-only since the 2026-09-02
+     re-export wall trim and must not leak back into the facade modules.
   2. The relocated functions still produce their documented verdicts (a
      smoke subset; the exhaustive behavior lives in test_project_tools.py,
      which continues to import via ``lib.project_mod.tools``).
@@ -37,8 +39,8 @@ _MOVED_FUNCS = [
 # (tools.py's back-compat list never included these bare names).
 _FUNCS_NO_TOOLS = ['_is_dangerous_command', '_mask_quoted_literals']
 
-# Module-level constants/regexes: shared between command_analysis and the
-# run_command re-export (tools.py never re-exported these bare names).
+# Module-level constants/regexes: command_analysis-only since the 2026-09-02
+# re-export wall trim; neither facade module may re-export them.
 _MOVED_CONSTS = [
     '_ANSI_ESC_RE', '_AWK_INPLACE', '_DANGEROUS_RE', '_DELETE_COMMANDS', '_DEVICE_RE',
     '_FS_HEAVY_RE', '_GIT_DESTRUCTIVE_SUBCOMMANDS', '_GIT_READONLY_SUBCOMMANDS',
@@ -57,9 +59,13 @@ def test_moved_symbols_identical_across_import_paths():
         src = getattr(ca, name)
         assert getattr(rc, name) is src, f'{name} diverged in run_command'
         assert getattr(tools, name) is src, f'{name} diverged in tools'
-    for name in _MOVED_CONSTS + _FUNCS_NO_TOOLS:
+    for name in _FUNCS_NO_TOOLS:
         src = getattr(ca, name)
         assert getattr(rc, name) is src, f'{name} diverged in run_command'
+    for name in _MOVED_CONSTS:
+        assert hasattr(ca, name), f'{name} missing from command_analysis'
+        assert not hasattr(rc, name), f'{name} leaked back into run_command'
+        assert not hasattr(tools, name), f'{name} leaked back into tools'
 
 
 def test_relocated_functions_behave():

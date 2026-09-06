@@ -23,10 +23,10 @@ pytestmark = pytest.mark.unit
 
 
 def _block(block_id, content, *, authority='ambient', placement='tail',
-           priority=10, dedupe_key=''):
+           priority=10, dedupe_key='', stability='turn'):
     return ContextBlock(
         id=block_id, source=f'test.{block_id}', content=content,
-        authority=authority, placement=placement, stability='turn',
+        authority=authority, placement=placement, stability=stability,
         lifecycle='task', priority=priority, dedupe_key=dedupe_key,
     )
 
@@ -53,12 +53,15 @@ def test_authority_order_is_deterministic_and_higher_authority_is_closer():
                placement='system'),
     ]
     result = render_context(messages, blocks, ComposeRequest(model='m'))
-    system = _texts(result.messages[0])
-    assert system.index('operator system') < system.index('ambient body')
-    assert system.index('ambient body') < system.index('workflow body')
-    assert system.index('workflow body') < system.index('platform body')
+    assert _texts(result.messages[0]) == 'operator system'
+    tail = _texts(result.messages[-1])
+    assert tail.index('ambient body') < tail.index('workflow body')
+    assert tail.index('workflow body') < tail.index('platform body')
     assert [row['id'] for row in result.manifest if row['injected']] == [
         'ambient', 'workflow', 'platform']
+    assert all(row['placement'] == 'tail' for row in result.manifest)
+    assert all(row['requestedPlacement'] == 'system'
+               for row in result.manifest)
 
 
 def test_head_tail_placement_and_single_reminder_wrapper():
@@ -69,10 +72,10 @@ def test_head_tail_placement_and_single_reminder_wrapper():
         _block('evidence', 'EVIDENCE', authority='evidence', placement='tail'),
     ]
     result = render_context(messages, blocks, ComposeRequest())
-    assert result.messages[0]['_contextComposer'] is True
+    assert result.messages[0] == messages[0]
     assert result.messages[-1]['_contextComposer'] is True
-    assert _texts(result.messages[0]).count('<system-reminder>') == 1
-    assert 'RULES' in _texts(result.messages[0])
+    assert _texts(result.messages[-1]).count('<system-reminder>') == 2
+    assert 'RULES' in _texts(result.messages[-1])
     assert 'EVIDENCE' in _texts(result.messages[-1])
 
 
@@ -92,6 +95,112 @@ def test_dedupe_manifest_explains_suppression_and_rerender_is_idempotent():
     joined = '\n'.join(_texts(message) for message in second.messages)
     assert joined.count('tofu-context:winner:start') == 1
     assert 'TWO' not in joined
+    assert second.manifest[0]['reused'] is True
+    assert second.manifest[0]['reason'] == 'already_present'
+
+
+def test_rerender_keeps_existing_carrier_byte_identical():
+    messages = [{'role': 'user', 'content': 'request'}]
+    first = render_context(
+        messages, [_block('stable', 'ONE', stability='conversation')],
+        ComposeRequest(),
+    )
+    frozen = copy.deepcopy(first.messages)
+    render_context(
+        messages, [_block('stable', 'ONE', stability='conversation')],
+        ComposeRequest(),
+    )
+    assert messages == frozen
+
+
+def test_changed_block_appends_version_without_rewriting_prefix():
+    messages = [{'role': 'user', 'content': 'request'}]
+    render_context(messages, [_block('state', 'VERSION ONE')], ComposeRequest())
+    frozen_prefix = copy.deepcopy(messages)
+
+    result = render_context(
+        messages, [_block('state', 'VERSION TWO')], ComposeRequest())
+
+    assert messages[:len(frozen_prefix)] == frozen_prefix
+    assert len(messages) == len(frozen_prefix) + 1
+    assert 'VERSION ONE' in _texts(messages[-2])
+    assert 'VERSION TWO' in _texts(messages[-1])
+    row = result.manifest[0]
+    assert row['injected'] is True
+    assert row['reason'].startswith('supersedes:')
+
+
+def test_explicit_retraction_appends_tombstone_and_keeps_prefix():
+    messages = [{'role': 'user', 'content': 'request'}]
+    render_context(messages, [_block('plan_mode', 'ACTIVE')], ComposeRequest())
+    frozen_prefix = copy.deepcopy(messages)
+    disabled = ContextBlock(
+        id='plan_mode', source='test.plan', content='', authority='workflow',
+        placement='tail', stability='turn', lifecycle='task',
+        suppressed_reason='plan_mode_off',
+    )
+
+    result = render_context(messages, [disabled], ComposeRequest())
+
+    assert messages[:len(frozen_prefix)] == frozen_prefix
+    assert len(messages) == len(frozen_prefix) + 1
+    assert 'no longer active' in _texts(messages[-1])
+    assert result.manifest[0]['reason'].startswith('supersedes:')
+
+
+def test_steady_retraction_reuses_one_tombstone_without_growth():
+    messages = [{'role': 'user', 'content': 'request'}]
+    request = ComposeRequest(model='test-model')
+    render_context(
+        messages,
+        [_block('memory_guidance', 'remember this', stability='conversation')],
+        request,
+    )
+    disabled = ContextBlock(
+        id='memory_guidance', source='test.memory', content='',
+        authority='ambient', placement='tail', stability='conversation',
+        lifecycle='conversation', suppressed_reason='memory_disabled',
+    )
+
+    render_context(messages, [disabled], request)
+    after_first_retraction = copy.deepcopy(messages)
+    result = render_context(messages, [disabled], request)
+
+    assert messages == after_first_retraction
+    assert result.manifest[0]['reused'] is True
+    assert result.manifest[0]['reason'] == 'already_present'
+
+
+def test_transient_absence_retains_last_known_block_without_append():
+    messages = [{'role': 'user', 'content': 'request'}]
+    render_context(messages, [_block('rules', 'STABLE RULES')], ComposeRequest())
+    frozen = copy.deepcopy(messages)
+    failed = ContextBlock(
+        id='rules', source='test.rules', content='', authority='project',
+        placement='tail', stability='conversation', lifecycle='conversation',
+        suppressed_reason='build_failed',
+    )
+
+    result = render_context(messages, [failed], ComposeRequest())
+
+    assert messages == frozen
+    assert result.manifest[0]['injected'] is True
+    assert result.manifest[0]['reused'] is True
+    assert result.manifest[0]['reason'] == 'retained_after:build_failed'
+
+
+def test_reuse_validates_actual_carrier_bytes_not_stale_metadata():
+    messages = [{'role': 'user', 'content': 'request'}]
+    render_context(messages, [_block('stable', 'ORIGINAL')], ComposeRequest())
+    messages[-1]['content'][0]['text'] = messages[-1]['content'][0][
+        'text'].replace('ORIGINAL', 'ALTERED')
+    frozen_prefix = copy.deepcopy(messages)
+
+    render_context(messages, [_block('stable', 'ORIGINAL')], ComposeRequest())
+
+    assert messages[:len(frozen_prefix)] == frozen_prefix
+    assert len(messages) == len(frozen_prefix) + 1
+    assert 'ORIGINAL' in _texts(messages[-1])
 
 
 def test_round_append_preserves_stable_prefix_and_extends_task_manifest():
@@ -109,6 +218,38 @@ def test_round_append_preserves_stable_prefix_and_extends_task_manifest():
     assert messages[:2] == prefix
     assert messages[-1]['_contextComposer'] is True
     assert task['_contextManifest'][-1]['id'] == 'attachment'
+
+
+def test_repeated_round_append_does_not_grow_messages_or_manifest():
+    task = {'_contextManifest': []}
+    messages = [{'role': 'user', 'content': 'request'}]
+    request = ComposeRequest(task=task)
+    block = _block('attachment', 'same evidence')
+
+    append_context_blocks(messages, [block], request)
+    frozen_messages = copy.deepcopy(messages)
+    frozen_manifest = copy.deepcopy(task['_contextManifest'])
+    append_context_blocks(messages, [block], request)
+
+    assert messages == frozen_messages
+    assert task['_contextManifest'] == frozen_manifest
+
+
+def test_legacy_marker_text_inside_history_is_never_rewritten():
+    historical = {
+        'role': 'system',
+        'content': (
+            'operator text\n<!-- tofu-context:legacy:start -->\n'
+            'historical payload\n<!-- tofu-context:legacy:end -->'),
+    }
+    result = render_context(
+        [copy.deepcopy(historical), {'role': 'user', 'content': 'request'}],
+        [_block('fresh', 'new tail context', placement='system')],
+        ComposeRequest(),
+    )
+    assert result.messages[0] == historical
+    assert result.messages[-1]['role'] == 'user'
+    assert result.messages[-1]['_contextComposer'] is True
 
 
 def test_manifest_contains_budget_hash_and_provenance():
@@ -315,22 +456,70 @@ def test_environment_is_a_tail_block_and_static_survives_project_path_change():
     assert '/tmp/env-beta' in second['environment'].content
 
     # Path-change transition: first sight only baselines; the change fires a
-    # provenance chip + a one-turn model-facing note; steady state clears it.
+    # provenance chip + an independently-addressed one-shot event. Keeping the
+    # note out of environment prevents a second environment version next turn.
     assert '_projectPathChange' not in task1
     assert task2['_projectPathChange'] == {
         'from': '/tmp/env-alpha', 'to': '/tmp/env-beta'}
+    transition_ids = [
+        block_id for block_id in second
+        if block_id.startswith('project_path_change_')
+    ]
+    assert len(transition_ids) == 1
     assert ('project path changed from "/tmp/env-alpha" to "/tmp/env-beta"'
-            in second['environment'].content)
+            in second[transition_ids[0]].content)
+    assert 'project path changed' not in second['environment'].content
     task3 = {'id': 'env-tail-task'}
     third = _blocks('/tmp/env-beta', task3)
     assert '_projectPathChange' not in task3
-    assert 'project path changed' not in third['environment'].content
+    assert not any(
+        block_id.startswith('project_path_change_') for block_id in third
+    )
+    assert second['environment'].content == third['environment'].content
 
     task4 = {'id': 'env-tail-task'}
     disabled = _blocks('/tmp/env-alpha', task4,
                        disabled_blocks=frozenset({'environment'}))
     assert disabled['environment'].content == ''
     assert disabled['environment'].suppressed_reason == 'disabled'
+
+
+def test_all_runtime_provider_blocks_use_tail_user_placement(monkeypatch):
+    """Dynamic context never rewrites the system message or history head."""
+    monkeypatch.setattr(providers, '_project_rules', lambda _request: 'rules')
+    monkeypatch.setattr(providers, '_profile_block', lambda _request: 'prefs')
+    monkeypatch.setattr(providers, '_memory_guidance', lambda _request: 'memory')
+    monkeypatch.setattr(providers, '_skill_index', lambda _request: 'skills')
+    monkeypatch.setattr(
+        providers, '_swarm_guidance', lambda _request, _query: 'swarm')
+
+    blocks = providers.collect_context_blocks(
+        [{'role': 'system', 'content': 'operator'},
+         {'role': 'user', 'content': 'request'}],
+        ComposeRequest(
+            user_id=7, model='test-model', has_real_tools=True,
+            task={'id': 'tail-only', 'config': {}},
+        ),
+    )
+    assert {block.placement for block in blocks if block.content} == {'tail'}
+
+
+def test_workspace_routing_guidance_is_in_environment_tail(monkeypatch):
+    blocks = providers.collect_context_blocks(
+        [{'role': 'user', 'content': 'request'}],
+        ComposeRequest(
+            project_path='/primary', project_enabled=True, user_id=7,
+            task={'id': 'workspace-tail', 'config': {
+                'projectPaths': ['/primary', '/secondary'],
+                'project_remote': {'agent_id': 'desktop', 'root': '/primary'},
+            }},
+        ),
+    )
+    environment = next(block for block in blocks if block.id == 'environment')
+    assert environment.placement == 'tail'
+    assert 'rootname:subdir' in environment.content
+    assert 'Remote worktree' in environment.content
+    assert 'Server-vault credentials are unavailable' in environment.content
 
 
 def test_mcp_tools_delta_surfaces_late_connected_tools(monkeypatch):

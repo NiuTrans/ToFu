@@ -42,7 +42,9 @@ This app remembers servers and authenticates once per profile.
 MainActivity (single Activity, Compose)     routes on ProfilesViewModel.screen:
   ├─ ProfileListScreen   list / switcher — tap to activate, edit/delete, add FAB
   ├─ AddEditScreen       add/edit form (validated by ProfileForm)
-  └─ WebScreen           WebView hosting the Tofu SPA + ReauthWebViewClient wiring
+  └─ WebScreen           WebView hosting the Tofu SPA + ReauthWebViewClient +
+                         TofuNative bridge (reauth escape hatch +
+                         tofu:native-visibility lifecycle signal)
 ui/
   ProfilesViewModel.kt   reactive profile list + screen/status state; delegates
                          every mutation to SessionController (no session logic here)
@@ -63,7 +65,12 @@ session/
                       vs {"error":"Unauthorized"}; 200+bootId is the Tofu signal)
   HealthProbe.kt      GET {base}/api/health WITH the session cookie — a cookie-less
                       probe would measure the gate, not the server
-  SessionManager.kt   headless login, URL-change purge+relogin, profile update path
+  SessionManager.kt   headless login (bounded transport retry + post-login
+                      v4 meta preflight), URL-change purge+relogin, profile
+                      update path
+  ApiMetaGate.kt      pure GET /api/v4/meta verdict — blocks only on a
+                      definitive apiMajor / minAndroidBuild mismatch, fail-open
+                      on partial knowledge (404 / unparseable / transport)
   SessionController.kt orchestrates add/edit/delete/activate over DAO+vault+manager
                        (rename moves the alias-keyed secret; delete removes it;
                         host-change routes through updateUrlAndReauth)
@@ -80,8 +87,9 @@ session/
 ## Distribution
 Release APKs ship via **GitHub Releases** — NOT self-hosted from Tofu, NOT a
 browser-extension bundle (an Android app has no host to embed in). The Tofu web
-UI surfaces a download link in the Settings footer from `GET /api/health` →
-`mobile_client_url`, which **defaults to a DIRECT APK deep link**:
+UI surfaces a download card in **Settings → General → About & Update** from
+`GET /api/health` → `mobile_client_url`, which **defaults to a DIRECT APK deep
+link**:
 
 ```
 https://github.com/rangehow/tofu-android/releases/latest/download/tofu-android.apk
@@ -192,8 +200,13 @@ daemon, `supervisor.py` (this repo's root), NOT by Tofu itself. Design +
 rationale: [`docs/SUPERVISOR_DESIGN.md`](docs/SUPERVISOR_DESIGN.md).
 
 - **Reachability:** the supervisor is proxied by the SAME code-server as Tofu,
-  one port up — Tofu `…/proxy/15000/` → supervisor `…/proxy/15001`. The app
-  reuses the profile's `code-server-session` cookie.
+  one port up. The app DERIVES the sibling from the profile URL's own
+  `/proxy/<port>/` segment — `…/proxy/15000/` → `…/proxy/15001`, and a
+  non-default deployment like `…/proxy/15005/` → `…/proxy/15006` — falling
+  back to the conventional 15001 only when no numeric proxy segment exists
+  (neuter: hardcode 15001 → `SupervisorUrlTest`'s non-default-port case
+  derives the wrong base). The app reuses the profile's
+  `code-server-session` cookie.
 - **No auth:** Tofu is a personal app and the code-server password already gates
   the whole proxy (its terminal can already run any shell command), so the
   supervisor adds NO token — nothing to type in the app.
@@ -221,18 +234,15 @@ path → open it from the server list → use the **Start / Stop** controls.
   can never wedge). NOT yet built/installed here (no network for Gradle);
   confirm on a tablet: tap "+" → picker opens → a selection yields a preview card
   → cancel-then-reopen works.
-- **Camera capture (separate ticket)**: `<input accept="image/*">` can request a
-  camera-capture intent; `createIntent()` covers the gallery/document path but a
-  "take a photo" flow additionally needs `MediaStore.ACTION_IMAGE_CAPTURE` + a
-  FileProvider. Not required for attach-existing-files; deferred.
+- **Camera capture**: the chooser now ALSO offers "take a photo" — the picker
+  intent is wrapped in a chooser carrying `MediaStore.ACTION_IMAGE_CAPTURE`
+  with a FileProvider-staged cache file (`res/xml/file_paths.xml`), and an
+  OK-with-no-data result maps onto the parked capture uri. Shares the same
+  pending on-device confirmation as the picker itself.
 - **Cellular layer-1** (needs a phone): confirm a phone on cellular lands on the
   password page (fast path) vs an SSO screen (`AuthType.INTERACTIVE_SSO` handles
   it — WebView completes SSO once, jar persisted).
 - **URL stability** (needs a re-provision): confirm whether stop→start reuses the UUID.
-- **Login retry/backoff (gap 3, deferred)**: `SessionManager.login` has no
-  retry/backoff for a flaky-tunnel drop mid-login — a cellular blip returns
-  `Error` with no auto-recovery. Lower priority than gaps 1/2/4; add a bounded
-  backoff (mirroring the web boot-reconnect ladder) when the E2E path is exercised.
 - **Next increment**: the profile-list / add-server / switcher Compose UI, and a
   signed release APK built on an Android-SDK machine (the one step that can't run here).
 
@@ -245,15 +255,16 @@ The canonical target is `./gradlew test` (needs the Android SDK). For a fast
 proof without the SDK, `./test-local.sh` runs two tiers on a plain JDK 17 +
 `kotlinc`:
 
-- **Pure-JVM tier** (116 tests: `ServerUrl`, `LoginForm`, `CookieHeaders`,
+- **Pure-JVM tier** (132 tests: `ServerUrl`, `LoginForm`, `CookieHeaders`,
   `ProfileForm`, `SessionManager` + `SessionController` via the `CookieSink` /
-  `SecretVault` seams, `InteractiveSso`, `ServerLifecycle`, `SupervisorUrl`,
+  `SecretVault` seams (incl. the login-retry and meta-preflight suites),
+  `ApiMetaGate`, `InteractiveSso`, `ServerLifecycle`, `SupervisorUrl`,
   `TofuProbe`) —
   no Android runtime. `SupervisorRunner` stays Gradle-tier (it needs
   `SupervisorClient` → `android.webkit` + `org.json`, absent from the pure
   classpath).
-- **Robolectric tier** (3 tests: `CookieBridge` against a shadow `CookieManager`;
-  `ReauthWebViewClient` latch) — runs headless on the JVM, no device/emulator.
+- **Robolectric tier** (6 tests: `CookieBridge` against a shadow `CookieManager`;
+  `ReauthWebViewClient` latch + consecutive-failure cap + dead-link routing) — runs headless on the JVM, no device/emulator.
   Needs the Robolectric jars + an instrumented `android-all` in `LIBS`.
 
 The jars are fetched reproducibly by the committed `fetch-test-deps.sh` (pinned
@@ -266,7 +277,7 @@ export JAVA_HOME=/path/to/jdk17            # e.g. Temurin 17
 export KOTLINC=/path/to/kotlinc/bin/kotlinc  # kotlinc 1.9.24
 
 ./fetch-test-deps.sh /tmp/tofu-libs        # populate a LIBS dir from Maven
-LIBS=/tmp/tofu-libs ./test-local.sh        # → 116 pure-JVM + 3 Robolectric green
+LIBS=/tmp/tofu-libs ./test-local.sh        # → 132 pure-JVM + 6 Robolectric green
 ```
 
 (A JDK 17 + `kotlinc` on PATH are the only prerequisites the script does not
@@ -299,6 +310,32 @@ mechanism is removed):**
   `{"error":"Unauthorized"}` (error STRING) → `GATEWAY` — and only 200 with a
   `bootId` counts as Tofu (neuter: drop the envelope check → `TofuProbeTest`'s
   discrimination case flips to `GATEWAY`).
+- `SessionManager.login` retries only transient failures with a bounded
+  backoff, on TWO ladders (`LoginRetryPolicy`): ordinary transport `Error`s
+  get 3 attempts (1s/2.5s); a WARMING sandbox — the proxy edge's 502/503/504
+  page, or a connect timeout (edge up, nothing behind the tunnel yet) — gets
+  6 attempts (2s→8s, ≈28s worst case) because a cold container routinely
+  takes tens of seconds before anything listens. `BadCredentials` /
+  `NeedsInteractiveSso` / `Success` are definitive answers and return
+  immediately, even mid-ladder (neuter: retry definitive outcomes →
+  `SessionManagerLoginRetryTest` fails on the wrong-password path re-POSTing;
+  collapse the ladders → its warming cases fail the 6-attempt schedule).
+- `TofuProbe.classify` maps 502/503/504 to WAKING (distinct from
+  UNREACHABLE): the add/edit screen tells the user to wait and re-test rather
+  than edit a correct URL (neuter: fold WAKING into UNREACHABLE →
+  `TofuProbeTest`'s waking-guidance case fails).
+- `ReauthWebViewClient` reports MAIN-FRAME failures to the host's recovery
+  overlay: the proxy edge's 5xx page while the sandbox wakes MUST surface as
+  the app's retry UI (the WebView's own error page is a dead end on a
+  phone), while sub-resource failures, aborted navigations and the 401
+  re-auth path must NOT blanket the page (neuter: report every failure →
+  `ReauthWebViewClientFailureTest`'s sub-resource case fails).
+- The post-login v4 meta preflight swaps `Success` for `Incompatible` ONLY on a
+  definitive refusal (wrong `apiMajor`, or `minAndroidBuild` above this build);
+  404 / unparseable / transport failure keep `Success` (fail-open), and
+  `AuthType.NONE` stays a zero-request short-circuit with NO preflight (neuter:
+  drop `withApiPreflight` → `SessionManagerPreflightTest`'s mismatch cases stay
+  `Success`; fire it for NONE → the degrade suite's zero-HTTP pin fails).
 
 
 ## Release / cutting a version

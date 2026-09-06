@@ -93,6 +93,18 @@ stylesheet order are explicit contract data in their manifests.
   pong every five minutes and on visibility resume; retained composition adds
   no health HTTP poll, timer, or visibility listener, replays the last valid
   identity to late subscribers, and remains inert against older servers.
+- Lazy feature-chunk load failures self-heal in
+  `frontend/src/core/feature-load-recovery.ts`. A failed dynamic import is
+  cached by the browser module map for the document's whole lifetime, so the
+  DOM-free controller answers a module-load-shaped failure with at most one
+  reload per 60-second guard interval and hands the pending feature entry to
+  the next boot through sessionStorage (5-minute replay expiry); anything
+  else still falls through to the `feature.loadFailed` toast. `main.ts`
+  routes both `invokeFeature` and `prepareFeature` domain loads through that
+  seam and replays the pending entry via the retained bridge stub after
+  `tofu:app-ready`; the classic `feature-bridge.js` module-graph-timeout
+  path mirrors the same storage keys for the case where the failed ESM graph
+  is exactly what the typed owner cannot survive.
 - The Memory panel owns one active catalog request per open epoch and at most
   one trailing request after close/reopen invalidates presentation ownership.
   Repeated opens and scope-tab clicks share the active all-scope snapshot and
@@ -791,8 +803,9 @@ sufficient.
 | Conversation role-avatar snippets | `frontend/src/core/role-avatar-icons.ts` |
 | Alias/family model display projection | `frontend/src/core/model-display-fold.ts` |
 | Bounded recent-model persistence | `frontend/src/core/recent-models.ts` |
-| Settings ProviderAccess summary and advanced Connection/Credential/Offering/Deployment editor | `runtime/sections/settings/provider_render.js::_renderModelRoutingProvidersTab` |
-| Owner-scoped model-routing v2 Settings load/CAS/secret replacement | `runtime/sections/settings/core_panel.js::_loadModelRoutingAuthority` + `runtime/sections/settings/save_export.js::_saveServerConfig` |
+| Settings ProviderAccess summary with in-card Connection/Credential editor and per-provider 模型管理 dialog (Offering enable/alias/remove, no tabs); classic two-row key card (hint-only secret + today's per-key stats/override toggle) fed by `GET /api/v1/dispatch/key-stats` (`key_namespace` composes the owner-scoped provider id that override writes must target) | `runtime/sections/settings/provider_render.js::_renderModelRoutingProvidersTab` + `_renderV2KeyCardStats` |
+| Owner-scoped model-routing v2 Settings load/CAS/secret replacement | `runtime/sections/settings/core_panel.js::_loadModelRoutingAuthority` + `runtime/sections/settings/save_export.js::_saveServerConfig`; concurrent Settings reads coalesce, and Save joins or retries authority readiness before feature persistence |
+| 本地部署 entry: engine preset chooser, batch endpoint probe-and-stage, managed model-path handoff into a fresh chat (local_serve flow) | `runtime/sections/settings/local_deploy.js::addLocalProvider` (staging via `provider_render.js::_stageModelRoutingProviderBundle`) |
 | Provider-first chat picker, automatic Provider choice, and provider-scoped pending identity | `runtime/sections/main/main_toolbar_ui.js::_modelRoutingDropdownModels` |
 | Model visibility/default projection from enabled v2 Offerings | `runtime/sections/settings/core_panel.js::_getAllModels` + `runtime/sections/settings/visibility_defaults.js` |
 | Speech ProviderAccess bundle creation/update/deletion and encrypted credential handoff | `frontend/src/features/settings/speech.ts` + `Api.modelRouting` |
@@ -892,7 +905,14 @@ historical reconstruction and joins the matching bounded
 requests only (state mirrors are served per round through the payload
 endpoint, never listed), and each round row names the tools that round
 INVOKED — folded server-side from the next snapshot's new-message tail,
-the same glanceability contract as the chat timeline's turn blocks. The
+the same glanceability contract as the chat timeline's turn blocks.
+A delegating run (Goal mode) merges its swarm children's rounds into the
+same list: each child event log is folded independently (attempt/wire/tool
+joins stay scoped to that log's own `(turn, roundNum)` space), merged rows
+carry `sourceTaskId` plus the agent badge, and the drawer's per-round
+payload, previous-round diff base, and raw-archive reads all address
+`sourceTaskId` instead of the selected parent.
+ The
 round detail exposes the wire projection: ordered final names,
 schema-token estimate, an opaque exact-schema fingerprint, discovery backend,
 explicit budget, and budget omissions; it never presents the larger assembly
@@ -1077,7 +1097,15 @@ python3 scripts/frontend_budget.py
 
 `check:frontend` verifies generated runtime, styles, conversation and i18n
 contracts, all literal i18n calls/attributes, actions, TypeScript, and the
-production build. The Vite manifest carries the locale-source digest; the
+production build. Retained runtime composition also rejects import-time use of
+a later top-level lexical declaration; infrastructure registries such as
+`runtimeScope` are declared before eager composition and cannot depend on
+manifest concatenation order. Before any new asset enters the live directory,
+the unpublished minified graph is loaded in one bounded, headless Chromium
+canary with in-memory API fixtures. Publication requires `tofu:app-ready`, the
+conversation and folder bootstrap requests, and no unhandled page or fatal boot
+error. A failed canary leaves the existing manifest and all served assets
+untouched. The Vite manifest carries the locale-source digest; the
 deployment controller and packaging gates refuse a graph whose language chunks
 predate the locale source. The ASGI lifespan validates only the complete
 published graph, which is also the atomic request-serving commit: authoring

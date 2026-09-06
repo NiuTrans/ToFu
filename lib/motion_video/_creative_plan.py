@@ -31,7 +31,7 @@ from lib.motion_video._shot_recipes import (
 logger = get_logger(__name__)
 
 __all__ = [
-    'NARRATIVE_ROLES', 'BLUEPRINTS', 'normalise_scene_plan',
+    'NARRATIVE_ROLES', 'normalise_scene_plan',
     'normalise_film_plan', 'frame_packet',
 ]
 
@@ -41,9 +41,6 @@ NARRATIVE_ROLES = (
     'cta', 'credits',
 )
 
-# Backward-compatible public name.  The registry is now a structured shot
-# contract rather than the former eight one-line blueprint hints.
-BLUEPRINTS = SHOT_RECIPES
 _NUMBER_RE = re.compile(r'(?:\d[\d,.]*\s*%|\d+(?:\.\d+)?)')
 
 _RENDERER_CANDIDATES = {
@@ -130,7 +127,7 @@ def normalise_scene_plan(scene: dict, index: int, total: int, *,
     scene['blueprint'] = blueprint
     scene['transition_in'] = transition
     scene['signature_move'] = str(scene.get('signature_move') or '').strip() \
-        or (BLUEPRINTS.get(blueprint) or {}).get('rule', '')
+        or (SHOT_RECIPES.get(blueprint) or {}).get('rule', '')
     modality = str(scene.get('visual_modality') or '').strip().lower()
     if modality not in _RENDERER_CANDIDATES:
         modality = 'kinetic-type' if role == 'credits' else 'generated-still'
@@ -160,7 +157,7 @@ def normalise_film_plan(scenes: list[dict]) -> list[dict]:
 def frame_packet(scene: dict, *, include_reference: bool = True) -> str:
     """Return the mandatory creative packet injected into scene authoring."""
     blueprint = str(scene.get('shot_recipe') or scene.get('blueprint') or '')
-    spec = BLUEPRINTS.get(blueprint) or {}
+    spec = SHOT_RECIPES.get(blueprint) or {}
     progresses = scene.get('qa_progresses') or []
     qa_labels = ' / '.join(f'{round(float(point) * 100)}%'
                            for point in progresses)

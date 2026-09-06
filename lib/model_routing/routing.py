@@ -9,6 +9,8 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from lib.model_catalog._creator_identity import canonical_key
+
 from .domain import (
     MAX_ROUTE_SNAPSHOT_BYTES,
     ModelRef,
@@ -86,7 +88,36 @@ def _indexes(document: Mapping[str, Any]) -> dict[str, Any]:
         "offerings_by_model": offerings_by_model,
         "deployments_by_offering": deployments_by_offering,
         "credentials_by_access": credentials_by_access,
+        "models_by_canonical": _models_by_canonical(normalized),
     }
+
+
+def _models_by_canonical(
+    normalized: Mapping[str, Any],
+) -> dict[str, list[ModelRef]]:
+    index: dict[str, list[ModelRef]] = {}
+    for row in normalized["models"]:
+        key = canonical_key(row["model_id"])
+        if key:
+            index.setdefault(key, []).append(
+                ModelRef(row["creator_id"], row["model_id"]))
+    return index
+
+
+def _resolve_model_ref(
+    idx: Mapping[str, Any], ref: ModelRef,
+) -> ModelRef | None:
+    """Resolve a model ref, tolerating provider respellings absorbed by the
+    trained-model merge (old pins keep routing to the survivor)."""
+    if ref in idx["models"]:
+        return ref
+    matches = [
+        candidate
+        for candidate in idx["models_by_canonical"].get(
+            canonical_key(ref.model_id), ())
+        if candidate.creator_id == ref.creator_id
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def resolve_compatible_model(
@@ -147,6 +178,14 @@ def resolve_compatible_model(
         ref for ref in idx["models"]
         if ref.model_id == text and (not creator or ref.creator_id == creator)
     ]
+    if not matches:
+        # Provider respellings (relay SKUs, snapshots) absorbed by the
+        # trained-model merge still resolve to the surviving row.
+        matches = [
+            ref
+            for ref in idx["models_by_canonical"].get(canonical_key(text), ())
+            if not creator or ref.creator_id == creator
+        ]
     if len(matches) == 1:
         return NativeModelSelection(matches[0], None, preferred)
     candidates = [ref.public_dict() for ref in sorted(matches)]
@@ -267,10 +306,12 @@ def _compile_candidates(
         if offering["identity_state"] == "confirmed":
             target_model = ModelRef.from_value(offering["model"])
     elif selection.model is not None:
-        if selection.model not in idx["models"]:
+        resolved = _resolve_model_ref(idx, selection.model)
+        if resolved is None:
             raise ModelRoutingError(
                 "official model is not registered", kind="model_not_found")
-        target_offerings = idx["offerings_by_model"].get(selection.model, [])
+        target_model = resolved
+        target_offerings = idx["offerings_by_model"].get(resolved, [])
     else:
         raise ModelRoutingError("model selection is empty")
 

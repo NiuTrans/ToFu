@@ -8,8 +8,13 @@ Ordering observer: the interleaving is ALREADY fully captured at finalization
 time. Each llmRound batch's pre-tool prose is stamped onto the FIRST entry of
 that batch as ``assistantContent`` / ``thinking`` / ``thinkingSignature``
 before ``_discard_pretool_prose`` zeroes the accumulators; the terminal round's
-deliverable prose survives in ``task['content']`` / ``task['thinking']``. So
-the ordered merged list + terminal strings are a complete, lossless record.
+deliverable prose survives in ``task['content']`` / ``task['thinking']``.
+Prose-only rounds whose stop a continuation enforcer vetoed are the ONE shape
+that record misses (no tool batch to stamp onto, accumulators later zeroed);
+they are snapshotted into ``task[CONTINUATION_PROSE_FIELD]`` at nudge time
+(``record_continuation_prose``) and interleaved here. So the ordered merged
+list + continuation snapshots + terminal strings are a complete, lossless
+record.
 
 ``deliverable`` rule (explicit, position-based): a ``text`` segment is
 ``deliverable=False`` iff it is the ``assistantContent`` of a tool-round batch;
@@ -35,6 +40,10 @@ from lib.tool_round_replay import (
 )
 
 from lib.tasks_pkg.segments._types import (
+    CONTINUATION_PROSE_FIELD,
+    INJECTED_NOTES_FIELD,
+    NOTE_KINDS,
+    SEG_SYSTEM_NOTE,
     SEG_THINKING, SEG_TEXT, SEG_TOOL_USE, RESUMABLE_FINISH_REASONS,
     is_synthetic_inbox_round,
 )
@@ -98,6 +107,208 @@ def tool_use_segment_from_round(
     if is_superseded_provider_attempt_round(round_dict):
         segment[SUPERSEDED_PROVIDER_ATTEMPT_FIELD] = True
     return segment
+
+
+def record_continuation_prose(
+    task: dict[str, Any],
+    *,
+    llm_round: Any,
+    content: Any,
+    thinking: Any = '',
+) -> dict[str, Any] | None:
+    """Snapshot a prose-only round whose stop a continuation enforcer vetoed.
+
+    The wire keeps the interrupted answer (``append_assistant_prose_message``
+    runs first), but the legacy channels cannot: ``task['content']`` /
+    ``task['thinking']`` are NOT reset between consecutive continuations and
+    are zeroed by the next tool round's ``_discard_pretool_prose``, and the
+    prose-only round owns no tool batch to stamp ``assistantContent`` onto.
+    Append the exact per-round strings here so ``assemble_segments`` can
+    interleave them. Sources MUST be the per-round message fields
+    (``assistant_msg['content']`` / ``['reasoning_content']``), never the
+    accumulators — those carry earlier rounds too and would duplicate
+    already-recorded entries on a second nudge.
+    """
+    if not isinstance(task, dict):
+        return None
+    text = content if isinstance(content, str) else ''
+    think = thinking if isinstance(thinking, str) else ''
+    if not (text.strip() or think.strip()):
+        return None
+    entry: dict[str, Any] = {
+        'llmRound': (llm_round if isinstance(llm_round, int)
+                     and not isinstance(llm_round, bool) else None),
+        'content': text,
+        'thinking': think,
+    }
+    attempt_id = str(task.get('_attemptId') or task.get('attemptId') or '')
+    task_id = str(task.get('id') or task.get('taskId') or '')
+    if attempt_id:
+        entry['attemptId'] = attempt_id
+        if task_id:
+            entry['taskId'] = task_id
+    entries = task.setdefault(CONTINUATION_PROSE_FIELD, [])
+    entries.append(entry)
+    return entry
+
+
+def record_injected_note(
+    task: dict[str, Any],
+    *,
+    llm_round: Any,
+    kind: Any,
+    text: Any,
+) -> dict[str, Any] | None:
+    """Snapshot an engine-authored intervention (``_isMeta`` user message).
+
+    The nudge itself rides the wire as a ``role='user'`` row appended at
+    injection time; this record lets ``assemble_segments`` place a
+    ``system_note`` segment at the SAME position so the durable timeline
+    shows the intervention where it happened instead of hiding it behind a
+    sidecar chip (or, for the todo-continuation lane, nothing at all).
+    ``kind`` is closed-vocabulary (``NOTE_KINDS``); ``text`` is the verbatim
+    injected content so the render shows exactly what the model was told.
+    """
+    if not isinstance(task, dict):
+        return None
+    note_kind = kind if isinstance(kind, str) and kind in NOTE_KINDS else ''
+    body = text if isinstance(text, str) else ''
+    if not note_kind or not body.strip():
+        return None
+    entry: dict[str, Any] = {
+        'llmRound': (llm_round if isinstance(llm_round, int)
+                     and not isinstance(llm_round, bool) else None),
+        'kind': note_kind,
+        'text': body,
+    }
+    attempt_id = str(task.get('_attemptId') or task.get('attemptId') or '')
+    task_id = str(task.get('id') or task.get('taskId') or '')
+    if attempt_id:
+        entry['attemptId'] = attempt_id
+        if task_id:
+            entry['taskId'] = task_id
+    entries = task.setdefault(INJECTED_NOTES_FIELD, [])
+    entries.append(entry)
+    return entry
+
+
+def _insert_continuation_prose_segments(
+    segments: list[dict[str, Any]],
+    task: dict[str, Any],
+) -> None:
+    """Interleave vetoed final answers into the round-derived segment list.
+
+    Each entry becomes the same shape a tool batch's pre-tool prose has
+    (a non-deliverable, non-terminal thinking/text pair) and lands BEFORE the
+    first segment of a later llmRound — exactly where the interrupted answer
+    sat on the wire. Runs before the terminal append in ``assemble_segments``,
+    so an entry past every round still precedes the terminal deliverable.
+    ``deliverable=False`` keeps ``derive_content`` byte-identical, and the
+    rounds view only attaches prose to tool-bearing batches, so replay never
+    re-sends these bytes (the wire row appended at nudge time already did).
+    """
+    entries = task.get(CONTINUATION_PROSE_FIELD)
+    if not isinstance(entries, list):
+        return
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        raw_text = entry.get('content')
+        raw_think = entry.get('thinking')
+        text = raw_text if isinstance(raw_text, str) else ''
+        think = raw_think if isinstance(raw_think, str) else ''
+        if not (text.strip() or think.strip()):
+            continue
+        lr = entry.get('llmRound')
+        if not isinstance(lr, int) or isinstance(lr, bool):
+            lr = None
+        identity_fields = {
+            **({'attemptId': entry['attemptId']}
+               if isinstance(entry.get('attemptId'), str)
+               and entry['attemptId'] else {}),
+            **({'taskId': entry['taskId']}
+               if isinstance(entry.get('taskId'), str)
+               and entry['taskId'] else {}),
+        }
+        index = len(segments)
+        if lr is not None:
+            for i, segment in enumerate(segments):
+                seg_round = segment.get('llmRound')
+                if (isinstance(seg_round, int)
+                        and not isinstance(seg_round, bool)
+                        and seg_round > lr):
+                    index = i
+                    break
+        block_suffix = f'continuation-{position}'
+        inserted: list[dict[str, Any]] = []
+        if think:
+            inserted.append({
+                'type': SEG_THINKING, 'text': think,
+                'blockId': f'thinking:{block_suffix}',
+                'deliverable': False, 'llmRound': lr,
+                **identity_fields,
+            })
+        if text:
+            inserted.append({
+                'type': SEG_TEXT, 'text': text,
+                'blockId': f'text:{block_suffix}',
+                'deliverable': False, 'llmRound': lr,
+                **identity_fields,
+            })
+        segments[index:index] = inserted
+
+
+def _insert_injected_note_segments(
+    segments: list[dict[str, Any]],
+    task: dict[str, Any],
+) -> None:
+    """Interleave engine-authored intervention notes into the segment list.
+
+    Same anchor rule as the continuation-prose insert (before the first
+    segment of a LATER llmRound; else the tail), and MUST run after it: on
+    the wire the vetoed prose precedes the nudge that re-drove the model,
+    and the shared ``seg_round > lr`` boundary only preserves that order
+    when the prose is already in place.
+    """
+    entries = task.get(INJECTED_NOTES_FIELD)
+    if not isinstance(entries, list):
+        return
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get('kind')
+        raw_text = entry.get('text')
+        text = raw_text if isinstance(raw_text, str) else ''
+        if kind not in NOTE_KINDS or not text.strip():
+            continue
+        lr = entry.get('llmRound')
+        if not isinstance(lr, int) or isinstance(lr, bool):
+            lr = None
+        identity_fields = {
+            **({'attemptId': entry['attemptId']}
+               if isinstance(entry.get('attemptId'), str)
+               and entry['attemptId'] else {}),
+            **({'taskId': entry['taskId']}
+               if isinstance(entry.get('taskId'), str)
+               and entry['taskId'] else {}),
+        }
+        index = len(segments)
+        if lr is not None:
+            for i, segment in enumerate(segments):
+                seg_round = segment.get('llmRound')
+                if (isinstance(seg_round, int)
+                        and not isinstance(seg_round, bool)
+                        and seg_round > lr):
+                    index = i
+                    break
+        segments[index:index] = [{
+            'type': SEG_SYSTEM_NOTE,
+            'blockId': f'system-note:{kind}-{position}',
+            'text': text,
+            'noteKind': kind,
+            'llmRound': lr,
+            **identity_fields,
+        }]
 
 
 def _merged_rounds(task: dict[str, Any], merged: list | None) -> list:
@@ -208,6 +419,16 @@ def assemble_segments(task: dict[str, Any],
         # Every round entry becomes a tool_use segment with its result nested,
         # so a tool and its output are one renderable unit.
         segments.append(tool_use_segment_from_round(r, idx))
+
+    # ── Interrupted final answers vetoed by continuation enforcers ──
+    # Ordered before any later llmRound's segments (and before the terminal
+    # deliverable appended below) — the position they occupied on the wire.
+    _insert_continuation_prose_segments(segments, task)
+
+    # ── Engine-authored intervention notes (stall nudge / todo reminder) ──
+    # After the continuation-prose pass on purpose: on the wire the vetoed
+    # prose precedes the nudge, and both share the same anchor rule.
+    _insert_injected_note_segments(segments, task)
 
     # ── Terminal round: the deliverable prose + its thinking ──
     # task['content'] / task['thinking'] hold the LAST round's output (reset

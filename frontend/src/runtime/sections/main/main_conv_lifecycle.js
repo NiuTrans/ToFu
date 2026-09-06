@@ -600,7 +600,15 @@ function _buildToolbarOverrides() {
     // translates the assistant reply to it instead of the old Chinese hard-pin.
     uiLang: (typeof _i18nLang !== 'undefined' ? _i18nLang : 'zh'),
     autoApply: autoApplyWrites,
-    browserClientId: runtimeScope._browserClientId || null,
+    /* _browserClientId is refreshed only while the Local Control panel is
+     * open. Outside it, fall back to the DOM stamp the LOCAL extension left
+     * on this document (origin_marker.js) so a conversation started without
+     * ever opening the panel still pins automation to THIS machine instead
+     * of drifting across the owner's other connected browsers. */
+    browserClientId: runtimeScope._browserClientId ||
+      ((typeof document !== 'undefined' && document.documentElement)
+        ? document.documentElement.getAttribute('data-tofu-browser-bridge')
+        : '') || null,
     cache: Object.assign({}, config.cache || {}),
     tools: Object.assign({}, config.tools || {}),
     responses: Object.assign({}, config.responses || {}),

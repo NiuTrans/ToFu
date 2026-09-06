@@ -82,3 +82,12 @@ def test_stale_absolute_entry_self_heals_under_proxy_prefix():
     assert "new URL('./', location.href)" in index
     assert "replacement.setAttribute('data-tofu-proxy-retry', '1')" in index
     assert 'if (retryProxyAsset(event, asset))' in index
+
+
+def test_cached_entry_resource_failure_gets_one_fresh_retry():
+    index = (ROOT / 'index.html').read_text(encoding='utf-8')
+    assert 'function retryFreshModule(event, asset)' in index
+    assert "failed.searchParams.set('tofu-recover', String(Date.now()))" in index
+    assert "target.getAttribute('data-tofu-fresh-retry') === '1'" in index
+    assert 'if (retryFreshModule(event, asset))' in index
+    assert 'target === window || event.error' in index

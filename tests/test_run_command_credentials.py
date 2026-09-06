@@ -250,13 +250,11 @@ def test_vault_prompt_requires_explicit_run_command_selection(isolated_vault):
     assert _SECRET not in block
 
 
-def test_remote_run_command_schema_documents_vault_unavailability():
+def test_remote_run_command_schema_stays_canonical():
     from lib.tools.project import PROJECT_TOOL_RUN_COMMAND, with_remote_hint
 
     remote_tool = with_remote_hint([PROJECT_TOOL_RUN_COMMAND])[0]
-    description = remote_tool['function']['description']
-    assert 'Server vault credentials are unavailable' in description
-    assert 'do not pass the `credentials` field' in description
+    assert remote_tool == PROJECT_TOOL_RUN_COMMAND
 
 
 @pytest.mark.parametrize('credential_field', [

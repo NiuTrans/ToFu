@@ -3,9 +3,9 @@
 Old configs stored brand keys like "qwen", "gemini", "opus", and
 thinking-effort labels like "medium" / "high" / "max" in the same field. The
 new design stores the actual model_id directly. This module mirrors the JS
-``_LEGACY_PRESET_TO_MODEL`` constant in ``static/js/core.js`` so a config
-posted with a legacy preset name resolves to the same model the UI would have
-applied.
+``_LEGACY_PRESET_TO_MODEL`` constant in
+``frontend/src/runtime/sections/core/cost.js`` so a config posted with a
+legacy preset name resolves to the same model the UI would have applied.
 """
 
 from __future__ import annotations
@@ -18,13 +18,7 @@ logger = get_logger(__name__)
 
 
 # ── Legacy preset → canonical model_id migration ─────────────────────
-#
-# Old configs stored brand keys like "qwen", "gemini", "opus", and
-# thinking-effort labels like "medium" / "high" / "max" in the same
-# field. The new design stores the actual model_id directly. This
-# table mirrors the JS ``_LEGACY_PRESET_TO_MODEL`` constant in
-# ``static/js/core.js`` so a config posted with a legacy preset name
-# resolves to the same model the UI would have applied.
+# Keep this table in sync with the JS mirror named in the module docstring.
 
 _LEGACY_PRESET_TO_MODEL: dict[str, str] = {
     'qwen': 'qwen3.6-plus',

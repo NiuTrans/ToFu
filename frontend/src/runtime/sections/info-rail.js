@@ -186,7 +186,11 @@
    * id — reuses the typed model-brand icon owner so the mark + color match
    * the model picker. Falls back to '' for isolated alternate entries. */
   function _brandLogo(modelId, size) {
-    if (typeof _detectBrand === 'function' && typeof _brandSvg === 'function') {
+    if (typeof _brandSvg !== 'function') return '';
+    if (typeof _modelBrand === 'function') {
+      return _brandSvg(_modelBrand(modelId || ''), size || 15);
+    }
+    if (typeof _detectBrand === 'function') {
       return _brandSvg(_detectBrand(modelId || ''), size || 15);
     }
     return '';

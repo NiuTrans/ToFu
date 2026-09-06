@@ -8,6 +8,8 @@ import pytest
 
 from lib.storage_sidecar.operations_pkg._common import _dump, _load
 from lib.storage_sidecar.operations_pkg._project_brain import (
+    _empty_projection,
+    _fold_event,
     _project_brain_checker_register,
     _project_brain_cutover,
     _project_brain_decision_promote,
@@ -169,7 +171,7 @@ def _table_names(connection: sqlite3.Connection) -> set[str]:
     }
 
 
-def test_cutover_keeps_watch_deduplicates_legacy_intent_and_drops_histories():
+def test_cutover_keeps_watch_and_drops_legacy_intent_and_histories():
     connection = _legacy_database()
     connection.execute('BEGIN')
     result = _project_brain_cutover(_Session(connection), {'timestamp': 100})
@@ -187,11 +189,7 @@ def test_cutover_keeps_watch_deduplicates_legacy_intent_and_drops_histories():
     projection = _load(row['projection_json'])
     assert projection['workItems'] == []
     assert projection['narratives'] == []
-    assert len(projection['attention']) == 2
-    assert {item['text'].strip().casefold()
-            for item in projection['attention']} == {
-                'ship safely', 'use checker-backed releases',
-            }
+    assert 'attention' not in projection
     assert len(projection['watch']) == 1
     assert projection['watch'][0]['latestResult']['text'] == 'latest result'
     assert connection.execute(
@@ -286,3 +284,28 @@ def test_checkpoint_reclaims_only_rebuildable_prefix_and_keeps_long_lived_state(
     assert rebuilt['checkers'][0]['checkerId'] == 'release'
     assert rebuilt['charter']['decisions'][0]['decisionId'] == 'release-policy'
     assert rebuilt['narratives'][-1]['text'] == 'Checkpoint boundary reached.'
+
+
+def test_historical_attention_events_fold_to_nothing():
+    # Retired Attention collection: pre-removal events stay in the immutable
+    # log but must not re-materialize state during rebuild.
+    projection = _empty_projection(7, '/workspace/demo')
+    _fold_event(projection, {
+        'kind': 'attention_added',
+        'payload': {
+            'attentionId': 'legacy:abc', 'attentionKind': 'legacy_decision',
+            'text': 'Ship safely', 'workId': '',
+        },
+        'projectSequence': 1, 'timestamp': 100,
+    })
+    _fold_event(projection, {
+        'kind': 'legacy_migrated',
+        'payload': {
+            'watch': [{'id': 'w1', 'text': 'Keep latency bounded'}],
+            'attention': [{'id': 'legacy:def', 'text': 'Old charter prose'}],
+        },
+        'projectSequence': 2, 'timestamp': 110,
+    })
+    assert 'attention' not in projection
+    assert projection['watch'][0]['id'] == 'w1'
+    assert projection['headSequence'] == 2

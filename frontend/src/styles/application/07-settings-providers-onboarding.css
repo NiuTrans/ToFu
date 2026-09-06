@@ -75,19 +75,19 @@
 /* ── Add / discover buttons ── */
 .stg-btn-add {
   background: none;
-  border: 2px dashed var(--s-ink-soft);
+  border: 1px dashed rgba(26, 24, 20, 0.3);
   color: var(--s-ink-soft);
   font-size: 11px;
   font-weight: 700;
   padding: 6px 12px;
-  border-radius: var(--s-radius);
+  border-radius: 8px;
   cursor: pointer;
   transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 .stg-btn-add:hover {
-  color: var(--s-ink);
-  border-color: var(--s-ink);
-  background: var(--s-cream);
+  color: var(--s-gold-dim);
+  border-color: var(--s-gold-dim);
+  background: rgba(201, 153, 63, 0.07);
 }
 .stg-btn-add:disabled { opacity: 0.4; cursor: wait; }
 .stg-btn-ico {
@@ -117,12 +117,18 @@
   --s-done:      #4ade80;
   --s-blocked:   #f87171;
   --s-accent:    #6366f1;
-  --s-shadow:    5px 5px 0 var(--s-ink);
-  --s-shadow-sm: 3px 3px 0 var(--s-ink);
-  --s-shadow-xs: 2px 2px 0 var(--s-ink);
-  --s-border:    2px solid var(--s-ink);
-  --s-border-sm: 1.5px solid var(--s-ink);
-  --s-radius:    0px;
+  --s-danger:    #dc2626;
+  --s-line:        rgba(26, 24, 20, 0.08);
+  --s-line-strong: rgba(26, 24, 20, 0.15);
+  --s-shadow:    0 4px 10px rgba(26, 24, 20, 0.06), 0 18px 44px rgba(26, 24, 20, 0.14);
+  --s-shadow-md: 0 2px 4px rgba(26, 24, 20, 0.05), 0 8px 22px rgba(26, 24, 20, 0.10);
+  --s-shadow-sm: 0 1px 2px rgba(26, 24, 20, 0.04), 0 3px 8px rgba(26, 24, 20, 0.06);
+  --s-shadow-xs: 0 1px 2px rgba(26, 24, 20, 0.05);
+  --s-border:    1px solid var(--s-line-strong);
+  --s-border-sm: 1px solid var(--s-line);
+  --s-radius:    9px;
+  --s-radius-sm: 6px;
+  --s-radius-lg: 14px;
 
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -137,9 +143,9 @@
 @keyframes stgFadeIn { from { opacity: 0; } to { opacity: 1; } }
 .stg-modal {
   background: var(--s-white);
-  border: var(--s-border);
-  box-shadow: 8px 8px 0 var(--s-ink);
-  border-radius: var(--s-radius);
+  border: 1px solid rgba(26, 24, 20, 0.18);
+  box-shadow: 0 24px 70px rgba(26, 24, 20, 0.3), 0 6px 22px rgba(26, 24, 20, 0.14);
+  border-radius: var(--s-radius-lg);
   color: var(--s-ink);
   width: 520px;
   max-width: 95vw;
@@ -237,12 +243,18 @@
   --s-done:      #4ade80;
   --s-blocked:   #f87171;
   --s-accent:    #6366f1;
-  --s-shadow:    5px 5px 0 var(--s-ink);
-  --s-shadow-sm: 3px 3px 0 var(--s-ink);
-  --s-shadow-xs: 2px 2px 0 var(--s-ink);
-  --s-border:    2px solid var(--s-ink);
-  --s-border-sm: 1.5px solid var(--s-ink);
-  --s-radius:    0px;
+  --s-danger:    #dc2626;
+  --s-line:        rgba(26, 24, 20, 0.08);
+  --s-line-strong: rgba(26, 24, 20, 0.15);
+  --s-shadow:    0 4px 10px rgba(26, 24, 20, 0.06), 0 18px 44px rgba(26, 24, 20, 0.14);
+  --s-shadow-md: 0 2px 4px rgba(26, 24, 20, 0.05), 0 8px 22px rgba(26, 24, 20, 0.10);
+  --s-shadow-sm: 0 1px 2px rgba(26, 24, 20, 0.04), 0 3px 8px rgba(26, 24, 20, 0.06);
+  --s-shadow-xs: 0 1px 2px rgba(26, 24, 20, 0.05);
+  --s-border:    1px solid var(--s-line-strong);
+  --s-border-sm: 1px solid var(--s-line);
+  --s-radius:    9px;
+  --s-radius-sm: 6px;
+  --s-radius-lg: 14px;
   width: 560px;
   font-family: 'Inter', 'SF Pro', -apple-system, system-ui, sans-serif;
 }
@@ -453,9 +465,6 @@
 .settings-footer-actions { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
 .settings-version { font-size: 10px; color: var(--s-ink-soft); opacity: 0.5; margin-right: 4px; font-family: 'SF Mono', 'Consolas', monospace; letter-spacing: 0.02em; }
 
-.settings-mobile-client { display: inline-flex; align-items: center; gap: 5px; margin-right: auto; font-size: 12px; color: var(--s-ink-soft); opacity: 0.72; text-decoration: none; transition: opacity 0.15s; }
-.settings-mobile-client:hover { opacity: 1; text-decoration: underline; }
-.settings-mobile-client > img { display: block; flex-shrink: 0; image-rendering: pixelated; }
 .settings-footer-actions .btn { min-width: 88px; box-sizing: border-box; text-align: center; }
 
 /* ── Footer buttons — tofu blocks ── */
@@ -492,6 +501,12 @@
 .settings-footer .btn-primary:hover {
   background: var(--s-gold-dim);
 }
+.settings-footer .btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+  transform: none;
+  box-shadow: var(--s-shadow-sm);
+}
 
 /* ── Override modal base styles inside settings panel ── */
 .settings-panel.modal {
@@ -510,25 +525,25 @@
 .settings-panel input,
 .settings-panel select {
   background: #fff;
-  border: 2px solid var(--s-ink);
-  border-radius: 0;
+  border: 1px solid var(--s-line-strong, rgba(26, 24, 20, 0.18));
+  border-radius: 8px;
   color: var(--s-ink);
-  box-shadow: 2px 2px 0 var(--s-ink);
-  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  box-shadow: 0 1px 2px rgba(26, 24, 20, 0.05);
+  outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
 }
 .settings-panel input:focus,
 .settings-panel select:focus {
-  transform: translate(1px, 1px);
-  box-shadow: 1px 1px 0 var(--s-ink);
-  background: #fffef5;
-  border-color: var(--s-ink);
+  background: #fff;
+  border-color: var(--s-gold);
+  box-shadow: 0 0 0 3px var(--s-gold-glow);
 }
 .settings-panel input[type="range"] {
   box-shadow: none;
   background: var(--s-skin);
-  border: 2px solid var(--s-ink);
+  border: 1px solid var(--s-line-strong, rgba(26, 24, 20, 0.18));
   height: 8px;
-  border-radius: 0;
+  border-radius: 999px;
   padding: 0;
   margin: 0;
 }
@@ -540,10 +555,10 @@
   -webkit-appearance: none;
   width: 18px;
   height: 18px;
-  border-radius: 0;
+  border-radius: 50%;
   background: var(--s-gold);
-  border: 2px solid var(--s-ink);
-  box-shadow: 2px 2px 0 var(--s-ink);
+  border: 1px solid rgba(26, 24, 20, 0.28);
+  box-shadow: 0 1px 3px rgba(26, 24, 20, 0.28);
   cursor: pointer;
 }
 .settings-panel .range-row {

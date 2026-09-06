@@ -65,6 +65,7 @@ export function buildVendorGroups(
       capabilities: unique(model.capabilities ?? []),
       contextWindow: Number(model.context_window) || 0,
       registeredQualityRank: Number.isFinite(score) && score > 0 ? score : null,
+      releaseDate: model.release_date ?? null,
       aa: aaScores[`${model.creator_id}::${model.model_id}`] ?? null,
       pricing: model.list_pricing ?? null,
       lifecycle: model.lifecycle,

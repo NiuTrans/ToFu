@@ -35,6 +35,7 @@ from lib.model_info import (
     is_gpt5,
     is_kimi,
     is_kimi_k3,
+    is_kimi_k27_code,
     is_longcat,
     is_minimax,
     is_qwen,
@@ -295,6 +296,18 @@ def build_body(model, messages, *, max_tokens=128000, temperature=1.0,
             # other value is HTTP 400 — so it must be omitted entirely.
             body['reasoning_effort'] = kimi_k3_reasoning_effort(
                 _effort, thinking_enabled)
+        elif is_kimi_k27_code(model):
+            # K2.7 Code contract (platform.kimi.ai, 2026-09-03): thinking is
+            # ALWAYS on — ``{'type': 'disabled'}`` is an API error, so depth
+            # 'off' must OMIT the field entirely (server default = enabled).
+            # ``keep: 'all'`` pins reasoning_content retention across
+            # multi-turn replays. Sampling is pinned server-side; only the
+            # fixed temperature=1.0 is legal.
+            if thinking_enabled:
+                body['thinking'] = {'type': 'enabled', 'keep': 'all'}
+            else:
+                body.pop('thinking', None)
+            body['temperature'] = 1.0
         else:
             _is_k2_thinking = ('k2-thinking' in model.lower()
                                and 'turbo' not in model.lower())

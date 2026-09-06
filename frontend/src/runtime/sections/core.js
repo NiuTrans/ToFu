@@ -446,7 +446,8 @@ function _spliceInjectRow(arr, row, anchorLlmRound) {
     for (let i = 0; i < arr.length; i++) {
       const r = arr[i];
       if (r && !r._userSteerInject && !r._peerInject && !r._inboxInject
-          && !r._stallNudge && r.llmRound === anchorLlmRound) { at = i; break; }
+          && !r._bgCommandInject && !r._stallNudge
+          && r.llmRound === anchorLlmRound) { at = i; break; }
     }
   }
   if (at >= 0) arr.splice(at, 0, row);
@@ -464,14 +465,15 @@ if (typeof window !== "undefined") runtimeScope._spliceInjectRow = _spliceInject
  * four lanes collision-free with each other and with real (small sequential)
  * roundNums; `+ injectRound` keeps one inject event's key fixed for the whole
  * turn, so rehydrate passes and live appends land on the SAME DOM node. */
-const _INJECT_ROUND_BASE = { inbox: 9000000, peer: 9100000, steer: 9200000, stall: 9300000 };
+const _INJECT_ROUND_BASE = { inbox: 9000000, peer: 9100000, steer: 9200000, stall: 9300000, bgcmd: 9400000 };
 function _rehydrateInjectRows(msg, base) {
   if (!msg) return base;
   const swarm = Array.isArray(msg._inboxInjects) ? msg._inboxInjects : [];
   const peer = Array.isArray(msg._peerInjects) ? msg._peerInjects : [];
   const steer = Array.isArray(msg._userSteerInjects) ? msg._userSteerInjects : [];
+  const bgcmd = Array.isArray(msg._bgCommandInjects) ? msg._bgCommandInjects : [];
   const stall = Array.isArray(msg._stallNudges) ? msg._stallNudges : [];
-  if (!swarm.length && !peer.length && !steer.length && !stall.length) return base;
+  if (!swarm.length && !peer.length && !steer.length && !bgcmd.length && !stall.length) return base;
   const out = base.slice();
   const _has = (pred) => out.some(pred);
   for (const s of swarm) {
@@ -512,6 +514,19 @@ function _rehydrateInjectRows(msg, base) {
       steerRound: rnd,
       steerCount: s.count || 0,
       steerPreviews: Array.isArray(s.previews) ? s.previews : [],
+    }, rnd - 1);
+  }
+  for (const s of bgcmd) {
+    const rnd = s.round || 0;
+    if (_has(r => r._bgCommandInject && r._bgcmdKey === "bgcmd:" + rnd)) continue;
+    _spliceInjectRow(out, {
+      roundNum: _INJECT_ROUND_BASE.bgcmd + rnd,
+      status: "done",
+      _bgCommandInject: true,
+      _bgcmdKey: "bgcmd:" + rnd,
+      bgCommandRound: rnd,
+      bgCommandCount: s.count || 0,
+      bgCommandPreviews: Array.isArray(s.previews) ? s.previews : [],
     }, rnd - 1);
   }
   for (const s of stall) {

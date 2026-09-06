@@ -23,6 +23,22 @@ SEG_TOOL_USE = 'tool_use'
 # consumers that reference it by name resolve against this single object.
 SEG_TOOL_RESULT = 'tool_result'
 
+# Engine-authored intervention note (``role='user', _isMeta=True`` on the
+# wire): the intent-stall nudge and the todo-continuation reminder. These
+# messages re-drive the model mid-turn; the segment makes the intervention a
+# first-class timeline entry at its true insertion position instead of a
+# display-only sidecar chip or a transient status line. A distinct type —
+# NOT a ``text`` segment — is load-bearing for wire purity: the replay
+# projections (``_rounds_view_from_segments``) collect non-deliverable
+# ``text`` segments as assistant batch prose, and the note was a USER-role
+# message, so as ``text`` it would be re-sent as assistant content.
+SEG_SYSTEM_NOTE = 'system_note'
+
+# The closed ``noteKind`` vocabulary. Renderers key styling/labels off it.
+NOTE_INTENT_STALL = 'intent-stall'
+NOTE_TODO_CONTINUATION = 'todo-continuation'
+NOTE_KINDS = frozenset({NOTE_INTENT_STALL, NOTE_TODO_CONTINUATION})
+
 # ── Synthetic display-only tool rounds (agent_inbox lanes) ──
 # The frontend surfaces async <swarm-update> / peer / user-steer injections as
 # SYNTHETIC toolRounds entries (roundNum 9e6+, no toolCallId / toolContent) so
@@ -55,6 +71,27 @@ def is_synthetic_inbox_round(round_dict) -> bool:
     if not isinstance(round_dict, dict):
         return False
     return any(round_dict.get(k) for k in SYNTHETIC_INBOX_MARKERS)
+
+
+# ── Continuation-prose durable record ──
+# Task field holding the ordered snapshots of interrupted final answers:
+# prose-only rounds whose stop was vetoed by a continuation enforcer
+# (todo-continuation / intent-stall nudge). The wire keeps those answers (an
+# assistant row is appended before the meta nudge), but the three legacy
+# channels cannot represent them: the round owns no tool batch to stamp
+# ``assistantContent`` onto, and ``task['content']`` / ``task['thinking']``
+# are zeroed by the NEXT tool round's ``_discard_pretool_prose`` — so the
+# interrupted answer silently vanished from the assembled segments (the
+# 2026-09-02 lost-report incident). ``assemble_segments`` interleaves these
+# entries as non-deliverable prose so the durable display record is lossless.
+CONTINUATION_PROSE_FIELD = '_continuation_prose'
+
+
+# Task field holding the ordered engine-authored intervention notes (see
+# ``SEG_SYSTEM_NOTE`` above). Same lifecycle as ``CONTINUATION_PROSE_FIELD``:
+# recorded on the task dict at injection time, consumed by
+# ``assemble_segments`` at the next checkpoint / final assembly.
+INJECTED_NOTES_FIELD = '_injected_notes'
 
 
 # Finish reasons under which the terminal deliverable text is a RESUMABLE

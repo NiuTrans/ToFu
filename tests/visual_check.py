@@ -144,8 +144,8 @@ def _vlm_analyze(
         api_key = os.environ.get("VLM_API_KEY") or os.environ.get("LLM_API_KEY", "")
         if not api_key:
             try:
-                from lib import LLM_API_KEY
-                api_key = LLM_API_KEY
+                from lib import LLM_API_KEYS
+                api_key = LLM_API_KEYS[0] if LLM_API_KEYS else ''
             except ImportError:
                 pass
 

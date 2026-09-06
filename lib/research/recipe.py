@@ -108,8 +108,6 @@ def _translate_direction_for_search(direction, *, abort_check=None):
         target='English',
         overall_deadline=45,
         abort_check=abort_check,
-        max_429_attempts=1,
-        defer_on_shared_contention=True,
     )
     query = ' '.join(str(translated or '').split())
     if not query:
@@ -125,19 +123,19 @@ def _harvest_batch(arxiv_ids, *, folder_id, user_id, abort_check=None,
                                titles_by_arxiv_id=titles_by_arxiv_id)
 
 
-def _build_survey(direction, arxiv_ids, *, lang, user_id, folder_id, abort=None,
-                  on_tool_event=None):
+def _build_survey(direction, arxiv_ids, *, lang, user_id, folder_id, model=None,
+                  abort=None, on_tool_event=None):
     from lib.paper.survey import build_survey
     return build_survey(direction, arxiv_ids, lang=lang, user_id=user_id,
-                        folder_id=folder_id, abort=abort,
+                        folder_id=folder_id, model=model, abort=abort,
                         on_tool_event=on_tool_event)
 
 
 def _generate_ideas(direction, open_gaps, *, lang, n_ideas, user_id,
-                    abort=None, on_tool_event=None):
+                    model=None, abort=None, on_tool_event=None):
     from lib.paper.ideate import generate_ideas
     return generate_ideas(direction, open_gaps, lang=lang, n_ideas=n_ideas,
-                          user_id=user_id,
+                          user_id=user_id, model=model,
                           abort=abort, on_tool_event=on_tool_event)
 
 
@@ -192,22 +190,32 @@ def _run_harvest(ctx: dict) -> dict:
             ctx.get('harvest_n', _DEFAULT_HARVEST_N))
         try:
             if '_research_search_query' not in ctx:
-                query, raw_usage = _translate_direction_for_search(
-                    direction, abort_check=ctx.get('abort_check'))
-                from lib.research.telemetry import ResearchUsageMeter
-                meter = ResearchUsageMeter(
-                    'harvest', token_budget=8_000, dispatch_budget=1,
-                    repeat_limit=0)
-                if raw_usage:
-                    meter.record(raw_usage)
-                ctx['_research_search_query'] = query
-                ctx['_research_search_usage'] = (
-                    meter.snapshot() if raw_usage else {})
-                if query != direction:
-                    logger.info(
-                        '[Research:harvest] translated discovery query %.60s → %.80s',
-                        direction, query)
-            query = ctx['_research_search_query']
+                try:
+                    query, raw_usage = _translate_direction_for_search(
+                        direction, abort_check=ctx.get('abort_check'))
+                except Exception as e:
+                    # Translation must not zero the harvest: search with the
+                    # raw direction instead. The fallback stays uncached so a
+                    # stage retry re-attempts the translation.
+                    logger.warning(
+                        '[Research:harvest] discovery translation failed for '
+                        '%.60s; falling back to the raw direction: %s',
+                        direction, e)
+                else:
+                    from lib.research.telemetry import ResearchUsageMeter
+                    meter = ResearchUsageMeter(
+                        'harvest', token_budget=8_000, dispatch_budget=1,
+                        repeat_limit=0)
+                    if raw_usage:
+                        meter.record(raw_usage)
+                    ctx['_research_search_query'] = query
+                    ctx['_research_search_usage'] = (
+                        meter.snapshot() if raw_usage else {})
+                    if query != direction:
+                        logger.info(
+                            '[Research:harvest] translated discovery query '
+                            '%.60s → %.80s', direction, query)
+            query = ctx.get('_research_search_query', direction)
             search_usage = ctx.get('_research_search_usage') or {}
             hits = list(islice(
                 iter(_search_arxiv(query, max_results=n) or ()),
@@ -270,6 +278,8 @@ def _run_survey(ctx: dict) -> dict:
     user_id = require_user_id(ctx.get('user_id'), context='research survey stage')
     kwargs = dict(lang=ctx.get('lang', 'en'), user_id=user_id,
                   folder_id=h['folder_id'], abort=ctx.get('abort'))
+    if ctx.get('model'):
+        kwargs['model'] = ctx['model']
     # Keep the monkeypatch seam backward-compatible for offline graph tests;
     # real jobs always carry the stage runner's event sink.
     if ctx.get('emit') is not None:
@@ -289,6 +299,15 @@ def _gate_survey(ctx: dict, art: dict) -> list:
     gm = art.get('open_gaps') or {}
     if not gm.get('open_gaps'):
         return ['survey produced no open gaps — nothing for ideate to solve']
+    usable_gap_ids = {
+        row.get('id').strip()
+        for row in (gm.get('open_gaps') or [])
+        if isinstance(row, dict) and isinstance(row.get('id'), str)
+        and row.get('id').strip()
+    }
+    if not usable_gap_ids:
+        return ['survey produced no usable open-gap ids — ideate cannot link '
+                'ideas to verified gaps']
     surveyed = {str(value).strip() for value in
                 (gm.get('surveyed_arxiv_ids') or []) if str(value).strip()}
     if surveyed:
@@ -319,6 +338,8 @@ def _run_ideate(ctx: dict) -> dict:
     kwargs = dict(lang=ctx.get('lang', 'en'),
                   n_ideas=normalize_research_idea_count(ctx.get('n_ideas')),
                   user_id=user_id, abort=ctx.get('abort'))
+    if ctx.get('model'):
+        kwargs['model'] = ctx['model']
     if ctx.get('emit') is not None:
         kwargs['on_tool_event'] = ctx['emit']
     res = _generate_ideas(ctx['direction'], s['open_gaps'], **kwargs)
@@ -375,7 +396,8 @@ def _run_evaluate(ctx: dict) -> dict:
     }
     try:
         evaluation = _evaluate_result(
-            ctx['direction'], frozen, model=ctx.get('evaluation_model'),
+            ctx['direction'], frozen,
+            model=ctx.get('evaluation_model') or ctx.get('model'),
             abort=ctx.get('abort'))
         if not isinstance(evaluation, dict):
             raise TypeError('evaluator returned a non-object result')
@@ -460,6 +482,7 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
                                   user_id: int, n_ideas: int = 6,
                                   seed_arxiv_ids=None, harvest_n: int = _DEFAULT_HARVEST_N,
                                   abort_event=None, emit=None,
+                                  model: str | None = None,
                                   evaluation_model: str | None = None) -> dict:
     """Run harvest → survey → ideate → evaluate → publish for one direction.
 
@@ -481,7 +504,7 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
     user_id = require_user_id(user_id, context='research recipe')
     request = normalize_research_request(
         direction, lang=lang, n_ideas=n_ideas,
-        seed_arxiv_ids=seed_arxiv_ids)
+        seed_arxiv_ids=seed_arxiv_ids, model=model)
     harvest_n = normalize_research_harvest_count(harvest_n)
     os.makedirs(workdir, exist_ok=True)
     folder_id = f'research_{os.path.basename(workdir.rstrip("/"))}'
@@ -489,6 +512,7 @@ def build_research_from_direction(direction: str, workdir: str, *, lang: str = '
         'direction': request.direction, 'workdir': workdir, 'lang': request.lang,
         'user_id': user_id, 'n_ideas': request.n_ideas, 'folder_id': folder_id,
         'seed_arxiv_ids': list(request.seed_arxiv_ids), 'harvest_n': harvest_n,
+        'model': request.model,
         'evaluation_model': evaluation_model,
         'abort_event': abort_event,
         'emit': emit,

@@ -255,7 +255,7 @@ def test_schema_v37_backfills_legacy_optimizer_rows_without_owner_default(
         'idx_opt_actlog_owner_applied',
         'idx_opt_actlog_owner_expires',
     }.issubset(indexes)
-    assert int(version) == schema.SCHEMA_VERSION
+    assert int(version) == schema.SCHEMA_VERSION == 51
 
 
 @pytest.mark.skipif(

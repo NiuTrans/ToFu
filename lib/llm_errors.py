@@ -149,6 +149,21 @@ class AbortedError(Exception):
         self.url = str(url or '')
 
 
+class LocalRequestPreparationError(Exception):
+    """A provider request failed before any network attempt was made.
+
+    Dispatch must release the reserved slot neutrally and surface this error
+    unchanged. Rotating credentials or models cannot repair a deterministic
+    bug in local body construction, and doing so would incorrectly charge
+    fallback budgets and poison provider health.
+    """
+
+    def __init__(self, message: str, *, stage: str = 'request_prepare'):
+        super().__init__(message)
+        self.stage = str(stage or 'request_prepare')[:80]
+        self.provider_reached = False
+
+
 class ModelLimitError(Exception):
     """HTTP 400 indicating max_tokens exceeds model's limit — auto-learnable.
 
@@ -863,7 +878,8 @@ def _claims_credential_missing(error_text: str) -> bool:
 
 def _classify_http_error(status_code: int, err_msg: str, model: str,
                          log_prefix: str, *, max_tokens: int = 0,
-                         credential_present: bool = False) -> None:
+                         credential_present: bool = False,
+                         route_limit_key: str = '') -> None:
     """Classify an HTTP error and raise the appropriate exception.
 
     Centralizes the error-classification chain shared by ``chat()`` and
@@ -991,7 +1007,8 @@ def _classify_http_error(status_code: int, err_msg: str, model: str,
             raise ModelRouteMissingError(display_msg, model)
         _detected_limit = _parse_token_limit_from_error(err_msg, model)
         if _detected_limit:
-            _learn_model_limit(model, _detected_limit)
+            _learn_model_limit(
+                model, _detected_limit, route_key=route_limit_key)
             raise ModelLimitError(display_msg, model, _detected_limit, max_tokens)
         if _is_image_error(err_msg):
             logger.warning('%s Image content error (HTTP 400): %s',

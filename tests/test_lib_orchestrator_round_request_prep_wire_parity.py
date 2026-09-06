@@ -107,9 +107,7 @@ def test_run_task_delegates_to_prep_helper():
 # ---------------------------------------------------------------------------
 def test_run_py_no_longer_sorts_tool_results_inline():
     src = RUN_PY.read_text()
-    assert 'sort_tool_results(messages, conv_id=' not in src, (
-        'sort_tool_results(messages, conv_id=...) must live in '
-        '_round_request_prep.py, not _run.py')
+    assert 'sort_tool_results(' not in src
 
 
 def test_run_py_no_longer_builds_body_inline():
@@ -135,15 +133,15 @@ def test_run_py_has_no_tool_round_gate():
 # 5. leaf carries the pivotal semantics (order + late binding + attach)
 # ---------------------------------------------------------------------------
 def test_leaf_preserves_step_ordering():
-    """Sort, build once, then snapshot the canonical body messages."""
+    """Build once, then snapshot the canonical body messages."""
     src = LEAF_PY.read_text()
-    i_sort = src.index('sort_tool_results(')
     i_snap = src.index('emit_messages_snapshot_event(')
     i_body = src.index('orchestrator_ports.build_request_body(')
-    assert i_sort < i_body < i_snap, (
-        'leaf must order sort_tool_results → build_request_body → '
+    assert i_body < i_snap, (
+        'leaf must order build_request_body → '
         'emit_messages_snapshot_event so the snapshot reuses canonical body '
         'messages instead of sanitizing the prompt twice')
+    assert 'sort_tool_results(' not in src
 
 
 def test_leaf_builds_body_through_the_explicit_port_owner():
@@ -186,7 +184,6 @@ def test_leaf_passes_call_local_admission_count_to_body_builder(monkeypatch):
     captured = {}
     captured_telemetry = {}
     captured_snapshots = []
-    monkeypatch.setattr(prep, 'sort_tool_results', lambda *a, **k: None)
     monkeypatch.setattr(
         prep, 'emit_messages_snapshot_event',
         lambda *args, **kwargs: captured_snapshots.append((args, kwargs)))
@@ -208,7 +205,10 @@ def test_leaf_passes_call_local_admission_count_to_body_builder(monkeypatch):
         prep.orchestrator_ports, 'build_request_body', build_body)
     state = SimpleNamespace(
         model='gpt-5.6-sol', preset='medium', thinking_enabled=True)
-    task = {'id': 'admission-reuse', 'convId': 'conv-reuse', 'config': {}}
+    task = {
+        'id': 'admission-reuse', 'convId': 'conv-reuse',
+        '_userId': 1, 'config': {},
+    }
 
     tools = [{'type': 'function', 'function': {'name': 'read_files'}}]
     _, body = prep.build_round_request(
@@ -245,13 +245,83 @@ def test_leaf_passes_call_local_admission_count_to_body_builder(monkeypatch):
         evidence) == 'a' * 64
 
 
+def test_orchestration_schema_decision_is_latched_and_additive(monkeypatch):
+    from types import SimpleNamespace
+
+    import lib.context_telemetry as context_telemetry
+    import lib.tasks_pkg.orchestrator._round_request_prep as prep
+    import lib.tasks_pkg.tool_orchestration_policy as policy
+
+    decisions = []
+
+    def resolve(**kwargs):
+        decisions.append(kwargs['round_num'])
+        return {
+            'policyVersion': 'tool-orchestration/v2',
+            'compositionMode': 'ptc_bounded_reduction',
+            'programmaticCalling': 'on',
+            'programmaticReason': 'resident_eligible_read_tools',
+            'programmaticTier': 'program',
+            'programmaticExposurePolicy': 'serial_gateway',
+            'programmaticSerialChainLength': 0,
+            'programmaticSerialChain': [],
+            'programmaticStage': 'stable stage',
+            'programmaticEligibleTools': ['read_files'],
+            'multiAgent': 'off',
+            'multiAgentReason': 'disabled',
+            'multiAgentStage': '',
+            'round': kwargs['round_num'],
+            'shape': 'ptc_bounded_reduction',
+            'expectedSavings': {},
+            'projectionEvidence': [],
+            'adoptionEvidence': [],
+        }
+
+    monkeypatch.setattr(policy, 'resolve_tool_orchestration', resolve)
+    monkeypatch.setattr(prep, 'emit_messages_snapshot_event', lambda *a, **k: None)
+    monkeypatch.setattr(context_telemetry, 'capture_round_context', lambda *a, **k: None)
+    monkeypatch.setattr(
+        prep.orchestrator_ports, 'build_request_body',
+        lambda model, messages, **kwargs: {
+            'model': model, 'messages': list(messages),
+            'tools': kwargs.get('tools'),
+        },
+    )
+    task = {
+        'id': 'stable-tools', 'convId': 'stable-tools-conv', '_userId': 1,
+        'config': {'tools': {'programmaticExposure': 'serial_gateway'}},
+        '_toolScriptBatchFallback': True,
+    }
+    state = SimpleNamespace(
+        model='test-model', preset='default', thinking_enabled=False,
+    )
+    tools = [{'type': 'function', 'function': {'name': 'read_files'}}]
+    kwargs = dict(
+        tid='stable', thinking_depth='medium', temperature=1.0,
+        max_tokens=4096, response_format=None,
+    )
+
+    _, first = prep.build_round_request(
+        task, state, [{'role': 'user', 'content': 'inspect all files'}],
+        tools, round_num=0, **kwargs,
+    )
+    _, second = prep.build_round_request(
+        task, state, [{'role': 'user', 'content': 'inspect all files'}],
+        tools, round_num=3, **kwargs,
+    )
+
+    assert decisions == [0]
+    assert first['_programmatic_tier'] == second['_programmatic_tier'] == 'program'
+    assert first['_programmatic_exposure'] == second['_programmatic_exposure'] == 'additive'
+    assert task['_toolOrchestration']['round'] == 3
+
+
 def test_body_build_failure_emits_fallback_snapshot_then_reraises(monkeypatch):
     from types import SimpleNamespace
 
     import lib.tasks_pkg.orchestrator._round_request_prep as prep
 
     snapshots = []
-    monkeypatch.setattr(prep, 'sort_tool_results', lambda *a, **k: None)
     monkeypatch.setattr(
         prep, 'emit_messages_snapshot_event',
         lambda *args, **kwargs: snapshots.append((args, kwargs)),
@@ -265,7 +335,7 @@ def test_body_build_failure_emits_fallback_snapshot_then_reraises(monkeypatch):
 
     with pytest.raises(RuntimeError) as raised:
         prep.build_round_request(
-            {'id': 'failure-task', 'convId': 'failure-conv'},
+            {'id': 'failure-task', 'convId': 'failure-conv', '_userId': 1},
             SimpleNamespace(
                 model='gpt-5.6-sol', preset='medium',
                 thinking_enabled=False),

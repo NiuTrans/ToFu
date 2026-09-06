@@ -170,12 +170,6 @@
   box-shadow: none;
   transform: none;
 }
-.settings-panel .stg-toggle-track {
-  border: 1px solid rgba(26, 24, 20, .34);
-  border-radius: 999px;
-  box-shadow: inset 0 1px 2px rgba(26, 24, 20, .1);
-}
-.settings-panel .stg-toggle-thumb { border: 0; border-radius: 50%; }
 .settings-panel .stg-provider-name {
   overflow: hidden;
   text-overflow: ellipsis;

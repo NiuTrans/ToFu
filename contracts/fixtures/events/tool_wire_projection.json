@@ -1,0 +1,16 @@
+{
+  "backend": "s",
+  "budgetDroppedNames": [],
+  "compactedNames": [],
+  "executableToolCount": 1,
+  "model": "s",
+  "parentSpanId": "s",
+  "roundNum": 1,
+  "schemaBudgetTokens": 1,
+  "schemaFingerprint": "s",
+  "schemaTokens": 1,
+  "toolCount": 1,
+  "toolNames": [],
+  "turn": "s",
+  "type": "tool_wire_projection"
+}

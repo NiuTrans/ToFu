@@ -156,24 +156,6 @@ def sqlite_index_exists(
     return row is not None
 
 
-def sqlite_conversation_change_references_available(
-    connection: sqlite3.Connection,
-) -> bool:
-    """Return whether an offline authority can contain schema-51 references.
-
-    Recovery tooling may run before the application has upgraded a schema-50
-    authority. Missing tables or columns mean there cannot be compact replay
-    references to protect; other SQLite failures remain fail-closed.
-    """
-    columns = {
-        str(row[1])
-        for row in connection.execute(
-            'PRAGMA table_info("storage_conversation_changes")'
-        )
-    }
-    return {'attempt_id', 'attempt_sequence'} <= columns
-
-
 def sqlite_transport_retention_candidate_queries(
     *,
     attempt_cutoff_ms: int,
@@ -181,7 +163,6 @@ def sqlite_transport_retention_candidate_queries(
     aggregate: bool,
     last_settled_ms: int = -1,
     last_attempt_id: str = '',
-    protect_conversation_change_references: bool = True,
 ) -> dict[str, dict[str, object]]:
     """Build canonical Sidecar/legacy retention queries for inspect/delete."""
     structural_types = tuple(sorted(STRUCTURAL_EVENT_TYPES))
@@ -202,14 +183,6 @@ def sqlite_transport_retention_candidate_queries(
         attempt_suffix = ' ORDER BY old.created_at, old.rowid LIMIT ?'
         task_suffix = ' ORDER BY ts_ms, rowid LIMIT ?'
 
-    reference_guard = ''
-    if protect_conversation_change_references:
-        reference_guard = (
-            'AND NOT EXISTS (SELECT 1 '
-            'FROM storage_conversation_changes AS changes '
-            'WHERE changes.attempt_id=attempts.attempt_id '
-            'AND changes.attempt_sequence IS NOT NULL) '
-        )
     if aggregate:
         sidecar_sql = (
             'SELECT count(*), COALESCE(sum('
@@ -220,17 +193,23 @@ def sqlite_transport_retention_candidate_queries(
             "WHERE attempts.status NOT IN ('pending','running') "
             'AND attempts.settled_at IS NOT NULL '
             'AND attempts.settled_at < ? '
-            + reference_guard
+            'AND NOT EXISTS (SELECT 1 '
+            'FROM storage_conversation_changes AS changes '
+            'WHERE changes.attempt_id=attempts.attempt_id '
+            'AND changes.attempt_sequence IS NOT NULL)'
         )
         sidecar_params = (int(attempt_cutoff_ms),)
     else:
         sidecar_sql = (
             'SELECT attempt_id, settled_at '
-            'FROM storage_generation_attempts AS attempts '
+            'FROM storage_generation_attempts '
             "WHERE status NOT IN ('pending','running') "
             'AND settled_at IS NOT NULL AND settled_at < ? '
-            + reference_guard
-            + 'AND (settled_at > ? OR '
+            'AND NOT EXISTS (SELECT 1 '
+            'FROM storage_conversation_changes AS changes '
+            'WHERE changes.attempt_id=storage_generation_attempts.attempt_id '
+            'AND changes.attempt_sequence IS NOT NULL) '
+            'AND (settled_at > ? OR '
             '(settled_at = ? AND attempt_id > ?)) '
             'ORDER BY settled_at, attempt_id LIMIT 64'
         )
@@ -241,17 +220,14 @@ def sqlite_transport_retention_candidate_queries(
             str(last_attempt_id),
         )
 
-    sidecar_required_tables = (
-        'storage_attempt_events',
-        'storage_generation_attempts',
-    )
-    if protect_conversation_change_references:
-        sidecar_required_tables += ('storage_conversation_changes',)
-
     return {
         'storage_attempt_events': {
             'table': 'storage_attempt_events',
-            'required_tables': sidecar_required_tables,
+            'required_tables': (
+                'storage_attempt_events',
+                'storage_generation_attempts',
+                'storage_conversation_changes',
+            ),
             'sql': sidecar_sql,
             'params': sidecar_params,
         },
@@ -304,14 +280,10 @@ def measure_sqlite_transport_retention(
 ) -> dict:
     """Measure exact expired payload selected by the offline delete pass."""
     attempt_cutoff_ms = int(now_ms - ttl_days * 86_400_000)
-    references_available = sqlite_conversation_change_references_available(
-        connection
-    )
     queries = sqlite_transport_retention_candidate_queries(
         attempt_cutoff_ms=attempt_cutoff_ms,
         now_ms=now_ms,
         aggregate=True,
-        protect_conversation_change_references=references_available,
     )
     sources: dict[str, dict] = {}
     complete = True

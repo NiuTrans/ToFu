@@ -1039,24 +1039,45 @@ def analyse_stream_result(
                 )
                 append_assistant_prose_message(
                     messages, assistant_msg, task=task)
+                # Durable display record of the vetoed final answer: this
+                # prose-only round owns no tool batch to stamp onto and the
+                # NEXT tool round's _discard_pretool_prose zeroes the
+                # accumulators — without the snapshot the answer vanishes
+                # from the assembled segments (2026-09-02 lost-report
+                # incident). Per-round fields only, never the accumulators.
+                from lib.tasks_pkg.segments import record_continuation_prose
+                record_continuation_prose(
+                    task, llm_round=round_num, content=round_content,
+                    thinking=round_thinking)
+                _todo_nudge_text = (
+                    '[SYSTEM: TODO CONTINUATION REQUIRED]\n'
+                    f'You have {len(_incomplete)} incomplete checklist '
+                    f'item(s):\n{render_todo_list(_todos)}\n\n'
+                    'Do NOT end your turn yet. Continue working and complete '
+                    'ALL items, updating the checklist with todo_write as you '
+                    'go. If the scope changed, use todo_write operation='
+                    '"replan" with a reason instead of silently deleting '
+                    'unfinished items. If an item is genuinely impossible, '
+                    'mark it blocked and explain the blocker; blocked work '
+                    'settles explicitly as incomplete, never as success.'
+                )
                 messages.append({
                     'role': 'user',
                     # Provider-wire user role, but engine-authored continuation
                     # control rather than a new human query/objective.
                     '_isMeta': True,
-                    'content': (
-                        '[SYSTEM: TODO CONTINUATION REQUIRED]\n'
-                        f'You have {len(_incomplete)} incomplete checklist '
-                        f'item(s):\n{render_todo_list(_todos)}\n\n'
-                        'Do NOT end your turn yet. Continue working and complete '
-                        'ALL items, updating the checklist with todo_write as you '
-                        'go. If the scope changed, use todo_write operation='
-                        '"replan" with a reason instead of silently deleting '
-                        'unfinished items. If an item is genuinely impossible, '
-                        'mark it blocked and explain the blocker; blocked work '
-                        'settles explicitly as incomplete, never as success.'
-                    ),
+                    'content': _todo_nudge_text,
                 })
+                # Timeline visibility: the reminder becomes a system_note
+                # segment at this wire position (assemble_segments), so the
+                # settled turn shows the intervention instead of hiding it.
+                from lib.tasks_pkg.segments import (
+                    NOTE_TODO_CONTINUATION,
+                    record_injected_note,
+                )
+                record_injected_note(
+                    task, llm_round=round_num, kind=NOTE_TODO_CONTINUATION,
+                    text=_todo_nudge_text)
                 logger.info(
                     '[%s] 📋 Todo-continuation enforcer: %d incomplete item(s) '
                     'at stop — re-driving loop (nudge %d/%d) round=%d',
@@ -1124,6 +1145,13 @@ def analyse_stream_result(
                 )
                 append_assistant_prose_message(
                     messages, assistant_msg, task=task)
+                # Same durable-record gap as the todo-continuation lane:
+                # snapshot the vetoed prose-only answer before the next tool
+                # round discards the accumulators.
+                from lib.tasks_pkg.segments import record_continuation_prose
+                record_continuation_prose(
+                    task, llm_round=round_num, content=round_content,
+                    thinking=round_thinking)
                 messages.append({
                     'role': 'user',
                     'content': _stall_text,
@@ -1131,6 +1159,16 @@ def analyse_stream_result(
                     # intent or split a productive read sequence next round.
                     '_isMeta': True,
                 })
+                # Same timeline visibility as the todo lane: the nudge lands
+                # as a system_note segment at its wire position; the chip
+                # sidecar below stays the grouped-path/back-compat render.
+                from lib.tasks_pkg.segments import (
+                    NOTE_INTENT_STALL,
+                    record_injected_note,
+                )
+                record_injected_note(
+                    task, llm_round=round_num, kind=NOTE_INTENT_STALL,
+                    text=_stall_text)
                 # DISPLAY-ONLY sidecar accumulation — the in-timeline chip.
                 # Unlike the peer / steer lanes this is emitted AT INJECTION
                 # rather than deferred until the next LLM call confirms

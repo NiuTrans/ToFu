@@ -208,6 +208,11 @@ def test_flow_tool_observer_emits_live_lifecycle_and_reuses_persisted_id(
     assert row['tool_call_id'] == occurrence_id
     assert row['provider_tool_call_id'] == 'provider-recycled'
     assert row['status'] == 'done'
+    # Owning sub-agent identity rides every live frame AND the durable row —
+    # the debug entry re-derives the Request Inspector stream
+    # ``{parent}#agent:{agentId}`` from it.
+    assert {event.get('agentId') for event in canonical} == {agent.agent_id}
+    assert row['agentId'] == agent.agent_id
 
 
 def test_parallel_same_name_tools_settle_their_own_bounded_rows(monkeypatch):

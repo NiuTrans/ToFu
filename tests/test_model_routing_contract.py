@@ -29,6 +29,8 @@ from lib.model_routing import (
     execute_migration,
     normalize_document,
     parse_native_model_selection,
+    resolve_compatible_model,
+    public_projection,
     plan_legacy_migration,
 )
 
@@ -136,6 +138,7 @@ def _full_document() -> dict:
             'connection_id': 'connection-a', 'wire_model_id': 'alpha-wire-a',
             'enabled': True, 'identity_confidence': 'high',
             'probe_status': 'passed', 'priority': 0,
+            'max_output_tokens': 65_535,
         }, {
             'deployment_id': 'alpha-b-deployment', 'offering_id': 'alpha-b',
             'connection_id': 'connection-b', 'wire_model_id': 'alpha-wire-b',
@@ -167,6 +170,81 @@ def test_full_document_references_and_unique_wire_ids_validate() -> None:
     with pytest.raises(ModelRoutingError) as error:
         normalize_document(duplicate)
     assert error.value.kind == 'duplicate_wire_model_id'
+
+
+def test_release_date_is_projected_at_read_boundary_never_persisted() -> None:
+    document = _full_document()
+    for row in document['models']:
+        if row['model_id'] == 'alpha':
+            row['model_id'] = 'glm-5.3'
+            # A client echoing the projected field back must not persist it.
+            row['release_date'] = '1999-01'
+    for credential in document['credentials']:
+        for ref in credential['authorization']['models']:
+            if ref['model_id'] == 'alpha':
+                ref['model_id'] = 'glm-5.3'
+    for offering in document['offerings']:
+        if offering['model']['model_id'] == 'alpha':
+            offering['model']['model_id'] = 'glm-5.3'
+
+    normalized = normalize_document(document)
+    assert all('release_date' not in model for model in normalized['models'])
+    _validator().validate(normalized)
+
+    projected = public_projection(document)
+    by_id = {model['model_id']: model for model in projected['models']}
+    assert by_id['glm-5.3']['release_date'] == '2026-08'
+    assert 'release_date' not in by_id['beta']
+    _validator().validate(projected)
+
+
+def test_trained_model_alias_rows_merge_and_repoint_references() -> None:
+    """Provider respellings (relay SKU, quant, snapshot) of one trained model
+    collapse into the survivor row; offerings, credential authorizations and
+    stale pins all follow the merge."""
+    survivor = {'creator_id': 'creator', 'model_id': 'llama-4-maverick-17b-128e-instruct'}
+    relay = {'creator_id': 'creator', 'model_id': 'cerebras-llama-4-maverick-17b-128e-instruct'}
+    quant = {'creator_id': 'creator', 'model_id': 'llama-4-maverick-17b-128e-instruct-fp8'}
+    document = _full_document()
+    document['models'].append({
+        **survivor, 'display_name': 'Llama 4 Maverick',
+        'capabilities': ['text'], 'context_window': 128_000, 'quality_rank': 90,
+    })
+    document['models'].append({
+        **relay, 'display_name': 'Cerebras Llama 4 Maverick',
+        'capabilities': ['text', 'vision'], 'context_window': 128_000,
+        'quality_rank': 90,
+    })
+    document['models'].append({
+        **quant, 'display_name': 'Llama 4 Maverick FP8',
+        'capabilities': ['text'], 'context_window': 1_000_000, 'quality_rank': 90,
+    })
+    document['offerings'][0]['model'] = copy.deepcopy(relay)
+    document['offerings'][0]['capabilities'] = ['text', 'vision']
+    document['credentials'][0]['authorization']['models'] = [
+        copy.deepcopy(quant), copy.deepcopy(relay),
+    ]
+
+    normalized = normalize_document(document)
+
+    model_ids = [row['model_id'] for row in normalized['models']]
+    assert 'llama-4-maverick-17b-128e-instruct' in model_ids
+    assert relay['model_id'] not in model_ids
+    assert quant['model_id'] not in model_ids
+    merged = next(
+        row for row in normalized['models']
+        if row['model_id'] == survivor['model_id'])
+    assert merged['capabilities'] == ['text', 'vision']
+    assert merged['context_window'] == 1_000_000
+    assert normalized['offerings'][0]['model'] == survivor
+    assert normalized['credentials'][0]['authorization']['models'] == [survivor]
+
+    # Stale pins and provider respellings still resolve to the survivor.
+    pinned = NativeModelSelection(ModelRef(**relay), None, '')
+    assert compile_candidates(normalized, pinned)
+    selection = resolve_compatible_model(
+        normalized, 'cerebras-llama-4-maverick-17b-128e-instruct')
+    assert selection.model == ModelRef(**survivor)
 
 
 def test_desktop_adapter_connection_is_bounded_to_matching_loopback_port() -> None:

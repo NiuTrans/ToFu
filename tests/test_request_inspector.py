@@ -639,6 +639,124 @@ def test_flow_untagged_is_ambiguous_not_uncovered(task_flow):
     assert fold['coverageReason'] == 'flow-untagged'
 
 
+def test_goal_delegator_merges_swarm_child_rounds(chat_sidecar):
+    """Goal mode: the parent task delegates — its own log carries no request
+    snapshots; the worker runs as a swarm agent under '<parent>#agent:<id>'.
+    The fold must merge child rows (carrying ``sourceTaskId``) so the
+    parent's round list answers 'what did this run actually do', and the
+    per-round payload endpoint addresses the CHILD's log with that id."""
+    parent = f'ri-g-{uuid.uuid4().hex[:8]}'
+    child = f'{parent}#agent:agent-worker-g1'
+    _seed(parent, [('flow_iteration', {'iteration': 0, 'phase': 'working'})])
+    _seed(child, [
+        ('messages_snapshot', _snap_turn(
+            'swarm-agent', 1, content='worker-r1',
+            agentId='agent-worker-g1', agentRole='worker')),
+        ('messages_snapshot', _snap_turn(
+            'swarm-agent', 2, content='worker-r2',
+            agentId='agent-worker-g1', agentRole='worker')),
+    ])
+    try:
+        from lib.tasks_pkg.request_inspector import (
+            fold_request_log, get_request_payload)
+        fold = fold_request_log(parent)
+        assert fold['eventsAvailable'] is True
+        assert fold['requestCount'] == 2
+        assert [r['roundNum'] for r in fold['requests']] == [1, 2]
+        for row in fold['requests']:
+            assert row['sourceTaskId'] == child
+            assert row['turn'] == 'swarm-agent'
+            assert row['agentId'] == 'agent-worker-g1'
+        # child rows carry turn tags → nothing untagged → no ambiguous chip
+        assert fold['coverage'] == 'full'
+        assert 'coverageReason' not in fold
+        # payload addressing: sourceTaskId IS the id the per-round
+        # endpoint must be called with
+        payload = get_request_payload(child, 2, turn='swarm-agent')
+        assert payload is not None
+        assert payload['messages'][0]['content'] == 'worker-r2'
+        # the child's own fold stays standalone — merged rows never leak
+        # sourceTaskId back into the direct view
+        solo = fold_request_log(child)
+        assert solo['requestCount'] == 2
+        assert all('sourceTaskId' not in r for r in solo['requests'])
+    finally:
+        _cleanup(child, parent)
+
+
+def test_goal_delegator_merges_multiple_agents(chat_sidecar):
+    """Sibling agents share round numbers; each merged row keeps its own
+    sourceTaskId so the UI can badge and address them distinctly."""
+    parent = f'ri-m-{uuid.uuid4().hex[:8]}'
+    child_a = f'{parent}#agent:agent-a'
+    child_b = f'{parent}#agent:agent-b'
+    _seed(parent, [('flow_iteration', {'iteration': 0, 'phase': 'working'})])
+    _seed(child_a, [('messages_snapshot', _snap_turn(
+        'swarm-agent', 1, content='a-r1', agentId='agent-a'))])
+    _seed(child_b, [('messages_snapshot', _snap_turn(
+        'swarm-agent', 1, content='b-r1', agentId='agent-b'))])
+    try:
+        from lib.tasks_pkg.request_inspector import fold_request_log
+        fold = fold_request_log(parent)
+        assert fold['requestCount'] == 2
+        sources = {r['sourceTaskId'] for r in fold['requests']}
+        assert sources == {child_a, child_b}
+        assert all(r['roundNum'] == 1 for r in fold['requests'])
+    finally:
+        _cleanup(child_a, child_b, parent)
+
+
+def test_empty_flow_delegator_is_not_flagged_untagged(chat_sidecar):
+    """A pure delegator's flow marker with ZERO request rounds has nothing
+    ambiguous to warn about — the flow-untagged chip requires ROWS that
+    cannot be told apart (2026-09-03: goal-mode parents showed the warning
+    over an empty list)."""
+    tid = f'ri-d-{uuid.uuid4().hex[:8]}'
+    _seed(tid, [('flow_iteration', {'iteration': 0, 'phase': 'working'})])
+    try:
+        from lib.tasks_pkg.request_inspector import fold_request_log
+        fold = fold_request_log(tid)
+        assert fold['eventsAvailable'] is True
+        assert fold['requests'] == []
+        assert fold['coverage'] == 'full'
+        assert 'coverageReason' not in fold
+    finally:
+        _cleanup(tid)
+
+
+def test_summary_list_conv_prefilter_keeps_exact_semantics(chat_sidecar):
+    """The instr() byte pre-filter can match a conv id quoted inside
+    another row's content — the post-decode comparison must still reject
+    that false positive (byte match is a hint, never the filter)."""
+    from lib.storage import get_storage_client
+    real = f'ri-pf-{uuid.uuid4().hex[:8]}'
+    foreign = f'ri-pf-{uuid.uuid4().hex[:8]}'
+    conv = f'conv-{uuid.uuid4().hex[:8]}'
+    client = get_storage_client(write=True)
+    _seed_task_result(real, conv, 100)
+    client.command('task_results.checkpoint', {
+        'key': foreign,
+        'expected_version': 0,
+        'value': {
+            'task_id': foreign,
+            'conv_id': f'other-{conv}',
+            'user_id': 1,
+            'content': f'this answer mentions {conv} in prose',
+            'status': 'done',
+            'created_at': 200,
+            'completed_at': 200,
+        },
+    }, None)
+    try:
+        result = client.query('task_results.summary_list', {
+            'conv_id': conv, 'limit': 10, 'scan_limit': 1000,
+        }, deadline=30)
+        keys = [row['key'] for row in result['records']]
+        assert keys == [real]
+    finally:
+        _cleanup(real, foreign)
+
+
 def test_payload_turn_disambiguation(task_turns):
     from lib.tasks_pkg.request_inspector import get_request_payload
     critic = get_request_payload(task_turns, 1, turn='reviewing')

@@ -118,6 +118,20 @@ def test_tool_lifecycle_updates_reconnect_snapshot_without_duplicate_rows():
         'tool_result', 'tool_complete']
 
 
+def test_tool_start_carries_swarm_agent_identity_into_snapshot_row():
+    """The reconnect/poll snapshot row must keep ``agentId`` — the frontend
+    debug entry re-derives the ``{parent}#agent:{agentId}`` Request
+    Inspector stream from the projected round."""
+    task = {'content': '', 'thinking': '', 'toolRounds': []}
+    sink = OrchestrationChatTaskEventSink(task, lambda _owner, _event: None)
+    sink({
+        'type': 'tool_start', 'roundNum': 2, 'llmRound': 2,
+        'agentId': 'agent-9', 'toolCallId': 'flow-tool-x',
+        'toolName': 'run_command', 'query': 'pytest -x', 'tStart': 100,
+    })
+    assert task['toolRounds'][0]['agentId'] == 'agent-9'
+
+
 def test_discard_unknown_events_and_lockless_final_content_are_safe():
     task = {'content': 'partial', 'thinking': 'private'}
     forwarded = []

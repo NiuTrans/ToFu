@@ -5,10 +5,11 @@ from __future__ import annotations
 import pytest
 
 from lib.motion_video._creative_plan import (
-    BLUEPRINTS, frame_packet, normalise_film_plan, normalise_scene_plan,
+    frame_packet, normalise_film_plan, normalise_scene_plan,
 )
 from lib.motion_video._shot_recipes import (
     SHOT_CONTRACT_VERSION,
+    SHOT_RECIPES,
     shot_contract_errors,
     shot_plan_findings,
 )
@@ -24,7 +25,7 @@ def test_legacy_storyboard_gets_a_complete_creative_plan():
     ]
     normalise_film_plan(scenes)
     assert scenes[0]['narrative_role'] == 'hook'
-    assert scenes[0]['blueprint'] in BLUEPRINTS
+    assert scenes[0]['blueprint'] in SHOT_RECIPES
     assert scenes[1]['narrative_role'] == 'comparison'
     assert scenes[1]['blueprint'] == 'comparison-split-cards'
     assert scenes[2]['narrative_role'] == 'credits'

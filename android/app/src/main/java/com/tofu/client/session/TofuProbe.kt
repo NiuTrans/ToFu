@@ -16,7 +16,10 @@ import com.tofu.client.data.AuthType
  *    ``{"ok":false,"error":{…}}`` — error is a JSON OBJECT;
  *  - the measured proxy edge answers ``{"error":"Unauthorized"}`` — error is a
  *    STRING — and a gateway landing page is 200 HTML with no bootId;
- *  - the positive proof of "this is Tofu" is 200 + a bootId in the health JSON.
+ *  - the positive proof of "this is Tofu" is 200 + a bootId in the health JSON;
+ *  - a COLD sandbox behind the proxy edge surfaces as 502/503/504 — the edge
+ *    answers but nothing listens behind the tunnel yet; that is "waking up",
+ *    not "wrong URL", and the honest guidance is to wait, not to edit.
  *
  * Pure and Android-free so the rules are unit-testable off-device (the JSON
  * checks are deliberately structural regexes — org.json is not on the pure-JVM
@@ -37,9 +40,17 @@ object TofuProbe {
         /** 200 (or anything else) that is not Tofu's health JSON — landing page / wrong server. */
         NOT_TOFU,
 
-        /** No usable HTTP response (transport failure / 5xx). */
+        /** 502/503/504 from the proxy edge — the sandbox behind the tunnel is still booting. */
+        WAKING,
+
+        /** No usable HTTP response (transport failure / non-edge 5xx). */
         UNREACHABLE,
     }
+
+    /** Proxy-edge statuses meaning "nothing listens behind the tunnel yet". */
+    val WAKING_STATUSES = setOf(502, 503, 504)
+
+    fun isWakingStatus(status: Int): Boolean = status in WAKING_STATUSES
 
     private val OK_FALSE = Regex(""""ok"\s*:\s*false""")
     private val ERROR_OBJECT = Regex(""""error"\s*:\s*\{""")
@@ -63,6 +74,7 @@ object TofuProbe {
      */
     fun classify(status: Int, body: String?): Verdict = when {
         status == 0 -> Verdict.UNREACHABLE
+        isWakingStatus(status) -> Verdict.WAKING
         status in 500..599 -> Verdict.UNREACHABLE
         status == 401 || status == 403 ->
             if (isTofuErrorEnvelope(body)) Verdict.TOFU_AUTH else Verdict.GATEWAY
@@ -79,7 +91,7 @@ object TofuProbe {
                 AuthType.CODE_SERVER_PASSWORD -> !hasSecret
                 AuthType.INTERACTIVE_SSO -> false
             }
-            Verdict.NOT_TOFU, Verdict.UNREACHABLE -> true
+            Verdict.NOT_TOFU, Verdict.WAKING, Verdict.UNREACHABLE -> true
         }
 
     /**
@@ -109,6 +121,9 @@ object TofuProbe {
         }
         Verdict.NOT_TOFU ->
             "Something answered, but it isn't Tofu — check the host and the /proxy/<port>/ prefix."
+        Verdict.WAKING ->
+            "The proxy answered, but the sandbox behind it is still waking up — " +
+                "wait half a minute and re-test, don't edit the URL."
         Verdict.UNREACHABLE ->
             "No answer from this URL — check the network and the address."
     }

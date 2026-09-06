@@ -12,6 +12,7 @@ import secrets
 import shutil
 import socket
 import sqlite3
+import stat
 import sys
 import time
 import uuid
@@ -51,6 +52,9 @@ def _parser() -> argparse.ArgumentParser:
     restore = subparsers.add_parser('restore')
     restore.add_argument('backup', type=Path)
     restore.add_argument('--confirm', action='store_true', required=True)
+    retire_fastpath = subparsers.add_parser('retire-fastpath')
+    retire_fastpath.add_argument(
+        '--confirm', action='store_true', required=True)
     handoff = subparsers.add_parser('handoff')
     handoff.add_argument('--target-host', required=True)
     handoff.add_argument('--force', action='store_true')
@@ -455,6 +459,191 @@ def _restore(config: SidecarConfig, requested: Path) -> dict:
         lease.release()
 
 
+def _retire_fastpath_sqlite(config: SidecarConfig) -> dict:
+    """Materialize the durable shadow as the ordinary SQLite authority.
+
+    The caller owns the offline project lease.  Existing classic bytes and the
+    complete shadow are renamed into ``data/backups`` for rollback; no durable
+    user state is deleted.  The candidate is fully WAL-checkpointed and
+    integrity-checked before publication.
+    """
+    from lib.storage_sidecar import fastpath
+
+    shadow_dir = config.data_dir / fastpath.SHADOW_DIRNAME
+    manifest = fastpath.read_shadow_manifest(shadow_dir)
+    if manifest is None:
+        raise RuntimeError('no fastpath durable shadow exists to retire')
+    if shadow_dir.is_symlink() or not shadow_dir.is_dir():
+        raise RuntimeError('fastpath shadow must be a real project directory')
+    snapshot, shadow_wal = fastpath.shadow_paths(shadow_dir)
+    if not snapshot.is_file():
+        raise RuntimeError('fastpath shadow snapshot is missing')
+    matching_fronts = fastpath.matching_local_fronts(config.data_dir)
+    if len(matching_fronts) > 1:
+        choices = ', '.join(str(path) for path in matching_fronts)
+        raise RuntimeError(
+            f'multiple verified fastpath fronts exist; refusing to choose: '
+            f'{choices}')
+    if matching_fronts:
+        source_database = matching_fronts[0]
+        source_wal = source_database.with_name(source_database.name + '-wal')
+        source_kind = 'verified_local_front'
+    else:
+        source_database = snapshot
+        source_wal = shadow_wal
+        source_kind = 'durable_shadow'
+
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    candidate = config.data_dir / f'.tofu-fastpath-retire-{stamp}.new'
+    backups = config.data_dir / 'backups'
+    backups.mkdir(parents=True, exist_ok=True)
+    previous = backups / f'pre-fastpath-retire-{stamp}.sqlite3'
+    retired_shadow = backups / f'fastpath-shadow-retired-{stamp}'
+    restore_temporary = candidate.with_name(candidate.name + '.restore-tmp')
+    owned_paths = (
+        candidate,
+        candidate.with_name(candidate.name + '-wal'),
+        candidate.with_name(candidate.name + '-shm'),
+        restore_temporary,
+        restore_temporary.with_name(restore_temporary.name + '-wal'),
+        previous,
+        previous.with_name(previous.name + '-wal'),
+        previous.with_name(previous.name + '-shm'),
+        retired_shadow,
+    )
+    collisions = [path.name for path in owned_paths if path.exists()]
+    if collisions:
+        raise RuntimeError(
+            'fastpath retirement artifact collision: ' + ', '.join(collisions))
+
+    try:
+        fastpath._restore_from_shadow(
+            candidate, source_database, source_wal, manifest)
+        connection = sqlite3.connect(candidate, isolation_level=None)
+        try:
+            connection.execute('PRAGMA busy_timeout=30000')
+            checkpoint = connection.execute(
+                'PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+            if checkpoint is None or int(checkpoint[0]) != 0:
+                raise RuntimeError('fastpath retirement WAL checkpoint was busy')
+            integrity = connection.execute(
+                'PRAGMA integrity_check').fetchone()[0]
+            if integrity != 'ok':
+                raise RuntimeError(
+                    f'fastpath retirement candidate failed integrity_check: '
+                    f'{integrity}')
+            row = connection.execute(
+                "SELECT meta_value FROM storage_meta WHERE meta_key = ?",
+                ('authority_uuid',),
+            ).fetchone()
+            expected_uuid = str(manifest.get('authority_uuid') or '')
+            if expected_uuid and (not row or str(row[0]) != expected_uuid):
+                raise RuntimeError(
+                    'fastpath retirement candidate authority UUID mismatch')
+        finally:
+            connection.close()
+        for suffix in ('-wal', '-shm'):
+            sidecar = candidate.with_name(candidate.name + suffix)
+            if sidecar.exists() and sidecar.stat().st_size:
+                raise RuntimeError(
+                    f'fastpath retirement left non-empty {sidecar.name}')
+            sidecar.unlink(missing_ok=True)
+        fsync_file(candidate)
+    except BaseException:
+        for path in (
+                candidate,
+                candidate.with_name(candidate.name + '-wal'),
+                candidate.with_name(candidate.name + '-shm'),
+                restore_temporary,
+                restore_temporary.with_name(restore_temporary.name + '-wal')):
+            path.unlink(missing_ok=True)
+        raise
+
+    moved_previous = False
+    installed_candidate = False
+    moved_shadow = False
+    moved_classic_sidecars: list[tuple[Path, Path]] = []
+    try:
+        if config.sqlite_path.exists():
+            os.replace(config.sqlite_path, previous)
+            moved_previous = True
+        for suffix in ('-wal', '-shm'):
+            stale = config.sqlite_path.with_name(config.sqlite_path.name + suffix)
+            if stale.exists():
+                archived = previous.with_name(previous.name + suffix)
+                os.replace(stale, archived)
+                moved_classic_sidecars.append((stale, archived))
+        os.replace(candidate, config.sqlite_path)
+        installed_candidate = True
+        os.replace(shadow_dir, retired_shadow)
+        moved_shadow = True
+        fsync_file(config.sqlite_path)
+        fsync_directory(config.data_dir)
+        fsync_directory(backups)
+    except BaseException:
+        if moved_shadow and retired_shadow.exists() and not shadow_dir.exists():
+            os.replace(retired_shadow, shadow_dir)
+        if installed_candidate and config.sqlite_path.exists():
+            os.replace(config.sqlite_path, candidate)
+        if moved_previous and previous.exists() and not config.sqlite_path.exists():
+            os.replace(previous, config.sqlite_path)
+        for active, archived in moved_classic_sidecars:
+            if archived.exists() and not active.exists():
+                os.replace(archived, active)
+        fsync_directory(config.data_dir)
+        fsync_directory(backups)
+        raise
+
+    reclaimed_private_bytes = 0
+    reclaimed_private_files: list[str] = []
+    for private_name in (
+            f'{fastpath.SNAPSHOT_NAME}.rebase-tmp',
+            f'{fastpath.SNAPSHOT_NAME}.rebase-state.json',
+            f'{fastpath.SNAPSHOT_NAME}.rebase-state.json.new'):
+        private_path = retired_shadow / private_name
+        try:
+            private_status = private_path.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(private_status.st_mode):
+            continue
+        private_path.unlink()
+        reclaimed_private_bytes += max(0, int(private_status.st_size))
+        reclaimed_private_files.append(private_name)
+    if reclaimed_private_files:
+        fsync_directory(retired_shadow)
+
+    return {
+        'ok': True,
+        'authority': str(config.sqlite_path.relative_to(config.project_root)),
+        'authority_uuid': str(manifest.get('authority_uuid') or ''),
+        'generation': manifest.get('generation'),
+        'source': source_kind,
+        'previous': (
+            str(previous.relative_to(config.project_root))
+            if moved_previous else None),
+        'retired_shadow': str(retired_shadow.relative_to(config.project_root)),
+        'reclaimed_private_bytes': reclaimed_private_bytes,
+        'reclaimed_private_files': reclaimed_private_files,
+        'next_step': 'set TOFU_STORAGE_FASTPATH=off before starting Tofu',
+    }
+
+
+def _retire_fastpath(config: SidecarConfig) -> dict:
+    if config.backend != 'sqlite':
+        raise RuntimeError('fastpath retirement applies only to SQLite')
+    lease = ProjectLease(
+        config.data_dir,
+        owner_kind='offline_maintenance',
+        owner_label='Fastpath retirement',
+    )
+    lease.acquire()
+    try:
+        return _retire_fastpath_sqlite(config)
+    finally:
+        lease.release()
+
+
 def _handoff(
     config: SidecarConfig,
     target_host: str,
@@ -508,6 +697,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _online(config, args.command)
         elif args.command == 'restore':
             result = _restore(config, args.backup)
+        elif args.command == 'retire-fastpath':
+            result = _retire_fastpath(config)
         else:
             result = _handoff(
                 config, args.target_host, args.force, args.reason)

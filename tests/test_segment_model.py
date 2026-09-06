@@ -40,6 +40,9 @@ if PROJECT_ROOT not in sys.path:
 
 from lib.tasks_pkg.manager._persist import _merge_tool_rounds
 from lib.tasks_pkg.segments import (
+    NOTE_INTENT_STALL,
+    NOTE_TODO_CONTINUATION,
+    SEG_SYSTEM_NOTE,
     SEG_TEXT,
     SEG_THINKING,
     SEG_TOOL_USE,
@@ -47,8 +50,12 @@ from lib.tasks_pkg.segments import (
     derive_content,
     derive_thinking,
     derive_tool_rounds,
+    record_continuation_prose,
+    record_injected_note,
+    reconstruct_tool_messages_from_segments,
     rehydrate_segments,
     segments_to_json,
+    tool_history_from_segments,
 )
 
 
@@ -345,6 +352,104 @@ class TestGoldenByteIdentity:
         think0 = next(s for s in segs
                       if s.get('type') == SEG_THINKING and s.get('llmRound') == 0)
         assert think0['signature'] == 'opaque-sig-0'
+
+
+# ═════════════════════════════════════════════════════════════
+#  Engine-authored intervention notes (SEG_SYSTEM_NOTE)
+# ═════════════════════════════════════════════════════════════
+
+class TestInjectedNotes:
+    """The stall nudge / todo reminder is a durable timeline citizen: pinned
+    at its wire position, invisible to every wire/replay projection."""
+
+    def test_note_orders_after_same_round_blocks_before_next_round(self):
+        task = _task_multi_round()
+        record_injected_note(task, llm_round=0, kind=NOTE_INTENT_STALL,
+                             text='[SYSTEM] keep going')
+        segs = assemble_segments(task)
+        shape = [(s['type'], s.get('name')) for s in segs]
+        assert shape == [
+            (SEG_THINKING, None),
+            (SEG_TEXT, None),
+            (SEG_TOOL_USE, 'grep_search'),
+            (SEG_TOOL_USE, 'read_files'),
+            (SEG_SYSTEM_NOTE, None),          # after round-0's blocks…
+            (SEG_TEXT, None),                 # …before round-1's narration
+            (SEG_TOOL_USE, 'apply_diff'),
+            (SEG_THINKING, None),
+            (SEG_TEXT, None),
+        ]
+        note = segs[4]
+        assert note['noteKind'] == NOTE_INTENT_STALL
+        assert note['llmRound'] == 0
+        assert note['text'] == '[SYSTEM] keep going'
+
+    def test_note_follows_the_vetoed_prose_it_re_drove(self):
+        """Wire order on a stall/todo veto: prose first, then the nudge that
+        answered it — the assemble pass must not invert them."""
+        task = _task_multi_round()
+        record_continuation_prose(task, llm_round=0,
+                                  content='I will stop here.')
+        record_injected_note(task, llm_round=0, kind=NOTE_TODO_CONTINUATION,
+                             text='[SYSTEM: TODO CONTINUATION REQUIRED]')
+        segs = assemble_segments(task)
+        prose_idx = next(i for i, s in enumerate(segs)
+                         if s['type'] == SEG_TEXT
+                         and s['text'] == 'I will stop here.')
+        note_idx = next(i for i, s in enumerate(segs)
+                        if s['type'] == SEG_SYSTEM_NOTE)
+        round1_idx = next(i for i, s in enumerate(segs)
+                          if s.get('llmRound') == 1)
+        assert prose_idx < note_idx < round1_idx
+
+    def test_channels_stay_byte_identical_with_notes(self):
+        """Notes ride alongside the three channels without perturbing them —
+        the loss-less projection guarantee extends to noted turns."""
+        task = _task_multi_round()
+        record_injected_note(task, llm_round=0, kind=NOTE_INTENT_STALL,
+                             text='[SYSTEM] keep going')
+        segs = assemble_segments(task)
+        assert derive_content(segs) == task['content']
+        assert derive_thinking(segs) == task['thinking']
+        assert derive_tool_rounds(segs) == _merge_tool_rounds(task)
+
+    def test_record_rejects_unknown_kind_and_blank_text(self):
+        task = _task_multi_round()
+        assert record_injected_note(task, llm_round=0, kind='bogus',
+                                    text='x') is None
+        assert record_injected_note(task, llm_round=0, kind=NOTE_INTENT_STALL,
+                                    text='   ') is None
+        assert '_injected_notes' not in task
+
+    def test_note_survives_serde_round_trip(self):
+        import json
+        task = _task_multi_round()
+        record_injected_note(task, llm_round=0, kind=NOTE_TODO_CONTINUATION,
+                             text='继续完成清单')
+        segs = assemble_segments(task)
+        thin = segments_to_json(segs)
+        wire = json.loads(json.dumps(thin, ensure_ascii=False))
+        back = rehydrate_segments(wire, _merge_tool_rounds(task))
+        notes = [s for s in back if s['type'] == SEG_SYSTEM_NOTE]
+        assert len(notes) == 1
+        assert notes[0]['text'] == '继续完成清单'
+        assert notes[0]['noteKind'] == NOTE_TODO_CONTINUATION
+        assert derive_tool_rounds(back) == _merge_tool_rounds(task)
+
+    def test_wire_projections_never_emit_the_note(self):
+        """Wire purity: the note was a USER-role message on the wire — the
+        replay projections must not resurrect it as assistant prose."""
+        import json
+        task = _task_multi_round()
+        record_injected_note(task, llm_round=0, kind=NOTE_INTENT_STALL,
+                             text='unique-marker-7x')
+        segs = assemble_segments(task)
+        messages = reconstruct_tool_messages_from_segments(segs)
+        assert 'unique-marker-7x' not in json.dumps(
+            messages, ensure_ascii=False)
+        history = tool_history_from_segments(segs)
+        assert 'unique-marker-7x' not in json.dumps(
+            history, ensure_ascii=False)
 
 
 # ═══════════════════════════════════════════════════════════

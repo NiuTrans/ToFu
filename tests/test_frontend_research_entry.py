@@ -77,6 +77,7 @@ global.escapeHtml = (s) => String(s == null ? '' : s)
 global.t = (k) => k;
 global.debugLog = () => {};
 global.Icon = () => '<svg></svg>';
+global.config = { model: 'kimi-k3' };
 
 const calls = { start: [], get: [], events: [], abort: [], subscribed: [] };
 
@@ -194,6 +195,8 @@ def test_a_direction_starts_a_job_with_no_paper_open():
     assert starts[0]['payload'].get('direction') == \
         'long-context KV cache compression', (
         f"the direction did not reach the API: {starts[0]['payload']}")
+    assert starts[0]['payload'].get('model') == 'kimi-k3', (
+        f"the active model did not reach the API: {starts[0]['payload']}")
     assert out.get('state', {}).get('taskId') == 'research_t1', (
         'the returned task id was not retained — nothing to poll or abort')
 

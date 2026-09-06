@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 
+from lib.agent_core.execution_session import ExecutionSession
 from lib.error_envelope import to_json as _err_to_json
 from lib.log import get_logger
 
@@ -291,11 +292,14 @@ def create_task(
                 from lib.model_routing import dispose_routed_slot_group
                 dispose_routed_slot_group(_route_group)
 
+            # bind_model_route owns both registration and rollback. Mark the
+            # handoff before calling so its failure path cannot be disposed a
+            # second time by this outer construction guard.
+            _route_bound = True
             bind_model_route(
                 execution_session_for_task(task),
                 _dispose_model_routing_group,
             )
-            _route_bound = True
         except Exception:
             if _route_group is not None and not _route_bound:
                 from lib.model_routing import dispose_routed_slot_group
@@ -456,7 +460,9 @@ def discard_task(task_id: str, conv_id: str | None = None) -> None:
         # be resurrected as a phantom 'running' row by a trailing event.
         _popped['_discarded_at'] = time.time()
         _route_group = _popped.pop('_model_routing_group', None)
-        if _route_group is not None:
+        if (_route_group is not None
+                and not isinstance(
+                    _popped.get('_executionSession'), ExecutionSession)):
             try:
                 from lib.model_routing import dispose_routed_slot_group
                 dispose_routed_slot_group(_route_group)

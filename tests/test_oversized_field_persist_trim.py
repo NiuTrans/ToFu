@@ -22,8 +22,8 @@ Three fields leak into the persisted conversation JSON with zero render value:
 Persist boundaries covered here:
   • SERVER (lib/tasks_pkg/manager.py): ``_merge_tool_rounds`` (both task_results
     + conversation-sync toolRounds), ``build_result_meta`` (final usage +
-    apiRounds). Twins: ``_sanitize_usage_for_persist`` /
-    ``_sanitize_api_rounds_for_persist`` / ``_trim_round_for_persist``.
+    apiRounds). Twins: ``sanitize_usage_for_persist`` /
+    ``sanitize_api_rounds_for_persist`` / ``trim_tool_round_for_persist``.
   • STORAGE PROJECTION: Sidecar writes and first-paint windows reuse the same
     bootstrap-free sanitizer source of truth.
 
@@ -106,7 +106,7 @@ def test_server_merge_tool_rounds_trims_done_partial_output():
 
 
 def test_server_merge_tool_rounds_neuter():
-    """DOUBLE-NEUTER: without _trim_round_for_persist, _partialOutput survives."""
+    """DOUBLE-NEUTER: without trim_tool_round_for_persist, _partialOutput survives."""
     import lib.tasks_pkg.manager._persist as M
     task = _fat_task()
     # Simulate the pre-fix behaviour: shallow-copy WITHOUT the trim.
@@ -146,7 +146,7 @@ def test_server_build_result_meta_neuter():
     raw_meta_usage = task['usage']
     assert '_wire_fp' in raw_meta_usage, (
         'neuter sanity: the raw usage carries _wire_fp — so build_result_meta '
-        'calling _sanitize_usage_for_persist is the load-bearing change.')
+        'calling sanitize_usage_for_persist is the load-bearing change.')
 
 
 def test_server_sanitizers_are_free_when_nothing_to_strip():
@@ -154,7 +154,7 @@ def test_server_sanitizers_are_free_when_nothing_to_strip():
     so the common small-usage case pays no copy cost."""
     import lib.tasks_pkg.manager._persist as M
     clean = {'prompt_tokens': 5, 'trace_id': 't'}
-    assert M._sanitize_usage_for_persist(clean) is clean
+    assert M.sanitize_usage_for_persist(clean) is clean
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -228,15 +228,15 @@ def test_window_projection_is_idempotent_and_copy_on_change():
     assert once is not original
 
 
-def test_manager_reexports_single_storage_projection_helpers():
-    """Manager compatibility aliases must point to the storage source of truth."""
+def test_manager_uses_single_storage_projection_helpers():
+    """Manager persistence must reuse the storage projection source of truth."""
     import lib.storage_projection as projection
     import lib.tasks_pkg.manager._persist as M
 
-    assert M._sanitize_usage_for_persist is projection.sanitize_usage_for_persist
-    assert (M._sanitize_api_rounds_for_persist
+    assert M.sanitize_usage_for_persist is projection.sanitize_usage_for_persist
+    assert (M.sanitize_api_rounds_for_persist
             is projection.sanitize_api_rounds_for_persist)
-    assert M._trim_round_for_persist is projection.trim_tool_round_for_persist
+    assert M.trim_tool_round_for_persist is projection.trim_tool_round_for_persist
 
 
 def test_storage_projection_import_is_bootstrap_free():

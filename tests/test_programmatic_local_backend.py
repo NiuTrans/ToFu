@@ -222,7 +222,7 @@ def test_ptc_projection_appends_program_tier():
     execute = out[-1]
     props = execute['function']['parameters']['properties']
     assert 'program' in props
-    assert 'task-executable tool' in execute['function']['description']
+    assert 'task-executable tool' not in execute['function']['description']
     assert 'read_files' not in execute['function']['description']
 
 
@@ -546,9 +546,9 @@ def test_wire_boundary_local_backend_chat_completions():
                if (t.get('function') or {}).get('name')
                == 'execute_tools'][0]
     assert 'program' not in execute['function']['parameters']['properties']
-    assert 'task-executable tool' in execute['function']['description']
-    assert 'schema, authority, and approval checks' \
-        in execute['function']['description']
+    # Provider projection must not append body-only guidance: it would vanish
+    # from task history and break the next request's cache prefix.
+    assert plan.body['messages'] == [{'role': 'user', 'content': 'hi'}]
     assert 'read_files' not in execute['function']['description']
     # Internal PTC keys must never leak onto the verbatim OpenAI wire.
     for key in ('_programmatic_tool_calling', '_programmatic_stage',
@@ -924,11 +924,11 @@ def test_serial_chain_broken_by_parallel_or_write_calls():
     assert batch['programmaticSerialChain'] == []
 
 
-def test_ptc_projection_carries_static_serial_chain_rule():
+def test_ptc_schema_does_not_carry_runtime_serial_chain_rule():
     out = gw.ptc_local_wire_tools(
         [_fn('read_files')], tier='program', eligible=['read_files'])
     execute = out[-1]
-    assert 'Do not continue a serial chain' in execute['function']['description']
+    assert 'Do not continue a serial chain' not in execute['function']['description']
     assert 'find_files > grep_search' not in execute['function']['description']
 
 
@@ -993,7 +993,7 @@ def test_oversized_gateway_stays_byte_stable_instead_of_compacting():
         > gw.LOCAL_GATEWAY_MAX_TOKENS
 
 
-def test_single_oversized_direct_schema_degrades_without_raising():
+def test_single_oversized_direct_schema_is_omitted_without_rewriting():
     descriptive = _fn('descriptive_tool')
     descriptive['function']['description'] = 'detail ' * 2_000
     structural = _fn('structural_tool')
@@ -1006,13 +1006,11 @@ def test_single_oversized_direct_schema_degrades_without_raising():
     omitted = gw.fit_tool_schema_budget(
         [structural], budget_tokens=100, model='kimi-k3')
 
-    assert _wire_names(compacted) == ['descriptive_tool']
-    assert 'description' not in compacted[0]['function']
-    assert gw.tool_schema_tokens(compacted, model='kimi-k3') <= 100
+    assert compacted == []
     assert omitted == []
 
 
-def test_budget_compaction_preserves_required_parameter_named_description():
+def test_budget_keeps_required_tool_canonical_even_above_soft_target():
     """Regression: task 6e699b88, kimi-k3 Moonshot schema HTTP 400.
 
     ``description`` is both a JSON-Schema annotation keyword and a legitimate
@@ -1025,16 +1023,18 @@ def test_budget_compaction_preserves_required_parameter_named_description():
     # structural floor. The budget still forces help-text compaction while
     # retaining the complete callable contract.
     out = gw.fit_tool_schema_budget(
-        [PROJECT_TOOL_WRITE_FILE], budget_tokens=120, model='kimi-k3')
+        [PROJECT_TOOL_WRITE_FILE], budget_tokens=120, model='kimi-k3',
+        required_names={'write_file'})
 
     assert _wire_names(out) == ['write_file']
     function = out[0]['function']
     parameters = function['parameters']
-    assert 'description' not in function
+    assert function['description'] == PROJECT_TOOL_WRITE_FILE['function']['description']
     assert 'description' in parameters['properties']
-    assert parameters['properties']['description'] == {'type': 'string'}
+    assert parameters['properties']['description'] == (
+        PROJECT_TOOL_WRITE_FILE['function']['parameters']['properties']['description'])
     assert set(parameters['required']) <= set(parameters['properties'])
-    assert gw.tool_schema_tokens(out, model='kimi-k3') <= 120
+    assert gw.tool_schema_tokens(out, model='kimi-k3') > 120
 
 
 def _project_schema_budget_body(model='kimi-k3'):

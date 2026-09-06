@@ -164,20 +164,7 @@ def build_search_tool() -> dict:
 }
 
 def build_fetch_url_tool() -> dict:
-    """Build the fetch_url tool schema.
-
-    The single-URL ``reason`` parameter and the content-filter prose are only
-    exposed when the LLM content filter is actually enabled. The source of
-    truth is the RUNTIME flag ``lib.LLM_CONTENT_FILTER_ENABLED`` — the
-    Settings toggle hot-applied by routes/config.py — NOT the
-    ``FETCH_LLM_FILTER`` env var, which only seeds the flag's default at
-    import time (reading env here left this schema stale after a Settings
-    toggle). Built per call by the consumers for the same reason: a
-    module-level snapshot freezes whatever was set at import.
-    """
-    import lib as _lib
-    filter_on = bool(getattr(_lib, 'LLM_CONTENT_FILTER_ENABLED', True))
-
+    """Build the canonical, runtime-state-independent fetch_url schema."""
     description = (
         "Fetch and read one remote HTTP(S) URL (HTML, PDF, or text). Use it for "
         "a user-provided URL or a promising search result; follow only relevant "
@@ -188,22 +175,14 @@ def build_fetch_url_tool() -> dict:
         "browser has it, bytes stream from that session to server staging, never "
         "browser Downloads. Staging is not a requested final destination: copy/move "
         "through an authorized filesystem tool and verify its own receipt before "
-        "claiming completion.\n"
-    )
-    if filter_on:
-        description += (
-            "Large HTML (>~3000 chars) uses a cheap boilerplate cleaner plus a "
-            "relevance GATE keyed by `reason`. It keeps or drops the whole extracted "
-            "page (`Failed to fetch`); it does not select passages or summarize. Give "
-            "an accurate, non-narrow reason. PDFs, short pages, and batches bypass the "
-            "gate; large content is capped.\n"
-        )
-    else:
-        description += "Returns raw extracted text; large pages/PDFs are capped.\n"
-    description += (
-        "For multiple URLs use concurrent `urls:[{url}, ...]`; top-level `url` "
-        "is ignored" + (" and `reason` applies only to single-URL mode."
-                        if filter_on else ".")
+        "claiming completion. Large HTML may use a relevance GATE keyed by "
+        "`reason` when the server setting enables it. The gate keeps or drops "
+        "the whole extracted page (`Failed to fetch`); it does not select "
+        "passages or summarize. Give an accurate, non-narrow reason. If the "
+        "gate is disabled, `reason` is accepted but ignored. PDFs, short pages, "
+        "and batches bypass the gate; large content is capped. For multiple "
+        "URLs use concurrent `urls:[{url}, ...]`; top-level `url` is ignored "
+        "and `reason` applies only to single-URL mode."
     )
 
     properties = {
@@ -214,14 +193,13 @@ def build_fetch_url_tool() -> dict:
             ),
         },
     }
-    if filter_on:
-        properties["reason"] = {
-            "type": "string",
-            "description": (
-                "Accurate whole-page relevance goal for the large-HTML "
-                "keep/drop gate; single mode only."
-            ),
-        }
+    properties["reason"] = {
+        "type": "string",
+        "description": (
+            "Accurate whole-page relevance goal for the optional large-HTML "
+            "keep/drop gate; single mode only."
+        ),
+    }
     properties["urls"] = {
         "type": "array",
         "description": (

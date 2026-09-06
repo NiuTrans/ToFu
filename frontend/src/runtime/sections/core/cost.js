@@ -17,7 +17,11 @@ const _LEGACY_PRESET_TO_MODEL = {
   'gemini': 'gemini-3-flash-preview', 'gemini_flash': 'gemini-3-flash-preview',
   'minimax': 'MiniMax-M2.7', 'doubao': 'Doubao-Seed-2.0-pro',
   'opus': 'aws.claude-opus-4.7',
+  'xhigh': 'aws.claude-opus-4.7',
   'medium': 'aws.claude-opus-4.7', 'high': 'aws.claude-opus-4.7', 'max': 'aws.claude-opus-4.7',
+  // Early GPT-5.6 integration mistakenly represented Pro reasoning as a
+  // separate SKU; the canonical form is gpt-5.6 + reasoning.mode='pro'.
+  'gpt-5.6-pro': 'gpt-5.6',
 };
 if (!config.model || config.model === serverModel) {
   // Try migrating from old preset/effort keys

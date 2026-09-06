@@ -10,7 +10,7 @@ ProviderAccess and Deployment resources.
 This package is a facade split across cohesive sub-modules::
 
     _pricing.py  — PRICING_TIERS / MANAGED_TIER_TAGS +
-                   get_pricing_tiers / is_model_cheap / reevaluate_pricing_tags
+                   get_pricing_tiers / reevaluate_pricing_tags
     _slots.py    — DEFAULT_SLOT_CONFIGS reference table
     _aliases.py  — MODEL_ALIAS_GROUPS + MODEL_ALIASES lookup map
 
@@ -32,7 +32,6 @@ from lib.llm_dispatch.config._pricing import (  # noqa: F401
     _resolve_prices,
     _tier_matches,
     get_pricing_tiers,
-    is_model_cheap,
     reevaluate_pricing_tags,
 )
 
@@ -56,7 +55,6 @@ __all__ = [
     'MODEL_ALIAS_GROUPS',
     'PRICING_TIERS',
     'MANAGED_TIER_TAGS',
-    'is_model_cheap',
     'get_pricing_tiers',
     'reevaluate_pricing_tags',
 ]

@@ -282,7 +282,7 @@ and may not become a header-only row during send/translation preparation.
   bounded; approval identity is escaped data consumed by a static restricted
   action rather than interpolated executable text. Retained code owns approval
   authority and dispatcher order only.
-- The four synthetic injection lanes share one immutable presentation
+- The five synthetic injection lanes share one immutable presentation
   projection. Swarm XML is parsed only below 65,536 code units; no more than 16
   previews cross the renderer, Markdown/raw content is bounded to 16,384 units,
   and stall prompts to 32,768. Omitted records and truncated content are

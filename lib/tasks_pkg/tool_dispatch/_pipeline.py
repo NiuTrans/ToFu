@@ -1090,7 +1090,7 @@ def _approval_stops_tool_call(
         and not (round_entry and round_entry.get('toolName') == 'code_exec')
     )
     if needs_approval and fn_name == 'run_command':
-        from lib.project_mod.tools import _is_destructive_command
+        from lib.project_mod.command_analysis import _is_destructive_command
         needs_approval = _is_destructive_command(fn_args.get('command', ''))
 
     if needs_approval and fn_name.startswith('browser_'):
@@ -2207,9 +2207,11 @@ def execute_tool_pipeline(
         return _pipeline_timed_out
     try:
         from lib.tasks_pkg.wire_messages import apply_wire_sanitize
+        from lib.tasks_pkg.manager import task_user_id
         _wire = apply_wire_sanitize(
             messages, conv_id=task.get('convId', ''),
-            provider_id=task.get('provider_id') or '')
+            provider_id=task.get('provider_id') or '',
+            user_id=task_user_id(task))
         snapshot = _strip_base64_for_snapshot(_wire)
         snap_evt = build_event(
             EventType.MESSAGES_SNAPSHOT,

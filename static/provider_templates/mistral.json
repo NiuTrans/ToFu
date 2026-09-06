@@ -1,0 +1,25 @@
+{
+  "brand": "mistral",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "mistral",
+  "category": "official",
+  "name": "Mistral AI",
+  "base_url": "https://api.mistral.ai/v1",
+  "offering_recipes": [
+    {
+      "model_id": "mistral-large-latest",
+      "capabilities": ["text", "vision", "cheap"],
+      "rpm": 60
+    },
+    {
+      "model_id": "mistral-small-latest",
+      "capabilities": ["text", "vision", "cheap"],
+      "rpm": 120
+    },
+    {
+      "model_id": "mistral-medium-latest",
+      "capabilities": ["text", "vision"],
+      "rpm": 60
+    }
+  ]
+}

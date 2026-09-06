@@ -13,7 +13,7 @@ into local storage.
 | Env | Values | Default | Meaning |
 | --- | --- | --- | --- |
 | `TOFU_STORAGE_FASTPATH` | `off` / `auto` / `required` | `off` (opt-in since 2026-08-20) | `off`: never relocate. `auto`: probe and relocate on a measured win. `required`: refuse to boot unless relocation activates. |
-| `TOFU_STORAGE_FASTPATH_DIR` | path | unset | Explicit local candidate. Skips the same-device short-circuit; the measured benchmark still gates activation. |
+| `TOFU_STORAGE_FASTPATH_DIR` | path | unset | Explicit persistent-local candidate. Skips the same-device short-circuit; the measured benchmark still gates activation. |
 | `TOFU_STORAGE_FASTPATH_MIN_SPEEDUP` | 0–1000 | `3.0` | Minimum (data-dir fsync median ÷ candidate fsync median) to activate. The benchmark is recorded either way. |
 | `TOFU_STORAGE_FASTPATH_STARTUP_TIMEOUT_S` | 30–3600 seconds | `900` | Immutable hard limit for a fastpath boot. Valid progress renews only the 30-second stall watchdog; it never extends this limit. Hypercorn reserves another 60 seconds for later required startup phases. |
 
@@ -22,12 +22,30 @@ free space, insufficient measured win) leaves the authority on the data dir
 exactly as before. Check `system.metrics` → `fastpath` for the verdict and
 the measured numbers.
 
-The flagship deployment sets `TOFU_STORAGE_FASTPATH=auto` in its project
-`.env` (2026-08-27, after the 2026-08-26 four-minute writer-acquisition
-wedge: cgroup memory pressure → network-mount fsync seconds → single-writer
-queue pinned). `server.py`'s dotenv phase applies it before the sidecar
-boots, so no supervisor/supervisord change is needed; the code default stays
-`off`.
+`server.py`'s dotenv phase applies an explicit fastpath choice before the
+Sidecar boots; the code default stays `off`. Auto discovery may reuse a
+surviving deployment-keyed temporary front for compatibility, but it never
+creates or restores an absent implicit `/tmp` front. Container recreation
+would otherwise turn every cold launch into a database-sized copy. New
+activation therefore requires a measured persistent-local candidate or an
+explicit `TOFU_STORAGE_FASTPATH_DIR`.
+
+If a durable shadow exists but no front can be selected, startup fails closed
+instead of opening the stale pre-fastpath `data/tofu.db`. To leave fastpath,
+stop Tofu and run:
+
+```bash
+python3 scripts/storagectl.py retire-fastpath --confirm
+```
+
+The offline command first prefers the uniquely verified surviving local front,
+including its unshipped crash tail; only a genuinely lost front falls back to
+the durable shadow. It copies and WAL-checkpoints that source, validates
+integrity and authority identity, atomically publishes it as `data/tofu.db`,
+and moves both the former classic image and complete shadow under
+`data/backups/` for rollback. It deletes no durable user state. Set
+`TOFU_STORAGE_FASTPATH=off` before the next start; remove the retained rollback
+artifacts only after application-level verification.
 
 First activation copies the current classic database and any WAL byte for byte.
 Before deciding and again immediately before the copy, the Sidecar requires the
@@ -153,7 +171,7 @@ file and byte counts are exported in the shipper metrics.
    `TOFU_STORAGE_FASTPATH_DIR`, then restart. Confirm a measured activation,
    commit p95/max, and shadow ship lag before declaring the window complete.
 
-Do not point the front at RAM/tmpfs for a large durable authority. A
+Do not explicitly point the front at RAM/tmpfs for a durable authority. A
 deployment-scoped persistent local SSD gives the latency benefit without
 making every ordinary reboot look like local-disk loss.
 

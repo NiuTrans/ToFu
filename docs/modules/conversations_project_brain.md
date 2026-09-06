@@ -102,7 +102,7 @@ other running tasks owned by the same user/project. A prefix overlap queues one
 user-role advisory for both tasks before their next tool round and pushes a UI
 hint. Deduplication is by task pair plus overlap path, with at most 20 keys per
 task. Settlement discards undelivered advice. This data is process-local: it is
-never written to Feed, Attention, Board, or a persistent inbox, and detection
+never written to Feed, Board, or a persistent inbox, and detection
 failure is fail-soft.
 
 ## Executable Charter and Checkers
@@ -115,12 +115,12 @@ the project and output is bounded.
 `CharterDecision` always references one registered `{id, version}` and records
 its source conversation/turn plus the latest verification. Assistant-turn
 promotion pre-fills the conclusion and requires the human to select an exact
-Checker version. Text without a Checker cannot enter Charter or prompt; it can
-remain Attention or be explicitly exported to docs.
+Checker version. Text without a Checker cannot enter Charter or prompt; the
+human may export it to docs manually.
 
 Checkers run manually, after a terminal work item whose changed paths match
 `pathGlobs`, and as a complete enabled set before Integration/release. Failure
-or timeout adds one narrative and one Attention item, and release is rejected or
+or timeout adds one narrative, and release is rejected or
 quarantined. It never changes a terminal work item or creates a block state.
 
 ## HTTP and UI
@@ -131,12 +131,10 @@ Read projections:
 - `GET /api/v1/project/feed` → `NarrativeEvent[]`
 - `GET /api/v1/project/charter`
 - `GET /api/v1/project/brain/status`
-- `GET /api/v1/project/brain/attention`
 - `GET /api/v1/project/brain/watch`
 
 Human commands:
 
-- save an unchecked conclusion as non-prompt `pending_decision` Attention;
 - Watch add/update/delete;
 - Checker catalog/register/run;
 - `POST /api/v1/project/charter/decision/promote`;
@@ -152,9 +150,10 @@ tools and `integration_status` are absent from the model schema.
 
 Startup readiness first creates a standard SQLite backup (or requires an
 explicit platform PostgreSQL backup receipt), then runs one atomic cutover.
-Migration keeps current Watch state and its newest result. Normalized,
-deduplicated legacy Charter/North Star/decision text becomes non-prompt legacy
-Attention. Old Board, Feed, and Status history is not imported. Verification
+Migration keeps current Watch state and its newest result. Legacy
+Charter/North Star/decision text and old Board, Feed, and Status history are
+not imported. Historical attention events in the event log stay inert and
+never re-materialize projection state. Verification
 precedes removal of legacy tables/records; any failure rolls back the Sidecar
 transaction and keeps readiness closed.
 

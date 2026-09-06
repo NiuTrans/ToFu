@@ -37,6 +37,7 @@ type ResearchViewWindow = Window & {
   _renderRecentResearch?: typeof renderRecentResearch;
   _paintResearch?: typeof paintResearch;
   _showResearchLanding?: typeof showResearchLanding;
+  _switchResearchTab?: typeof switchResearchTab;
 };
 
 const RESEARCH_PHASES = ['harvest', 'survey', 'ideate', 'evaluate', 'publish'] as const;
@@ -145,11 +146,26 @@ function researchFailureHtml(stream: ResearchStream, t: Translator): string {
     + '</section>';
 }
 
+function textList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => text(item)).filter(Boolean) : [];
+}
+
+function researchFieldValue(value: unknown): string {
+  const raw = text(value);
+  if (!raw) return '';
+  // Ideate used to let models prefix inapplicable fields with "N/A (kind):"
+  // even when substantive text followed; stored artifacts still carry it.
+  const stripped = raw.replace(/^[Nn]\/?[Aa](?:\s*\([^)]*\))?\s*[:：]\s*/, '');
+  if (!stripped || /^[Nn]\/?[Aa]\.?$/.test(stripped) || stripped === '不适用') return '';
+  return stripped;
+}
+
 export function researchField(label: string, value: unknown): string {
-  if (!value) return '';
+  const cleaned = researchFieldValue(value);
+  if (!cleaned) return '';
   return '<div class="rs-idea-field">'
     + '<div class="rs-idea-label">' + escapeHtml(label) + '</div>'
-    + '<div class="rs-idea-value">' + escapeHtml(String(value)) + '</div>'
+    + '<div class="rs-idea-value">' + escapeHtml(cleaned) + '</div>'
     + '</div>';
 }
 
@@ -215,10 +231,42 @@ function researchIdeaBrief(idea: JsonObject, t: Translator): string {
   )).join('\n\n');
 }
 
-function researchIdeaCard(idea: JsonObject, index: number, t: Translator): string {
+function ideaAssessments(stream: ResearchStream): JsonObject[] {
+  return array(object(stream.evaluation)?.idea_assessments);
+}
+
+function ideaAssessmentFor(stream: ResearchStream, title: string): JsonObject | null {
+  const wanted = title.trim().toLowerCase();
+  if (!wanted) return null;
+  return ideaAssessments(stream).find((row) => text(row.idea).toLowerCase() === wanted) ?? null;
+}
+
+function researchIdeaReviewHtml(stream: ResearchStream, idea: JsonObject, t: Translator): string {
+  const assessment = ideaAssessmentFor(stream, text(idea.title));
+  if (!assessment) return '';
+  const score = number(assessment.score);
+  const verdicts = textList(assessment.verdicts);
+  const risks = textList(assessment.main_risks);
+  return '<div class="rs-idea-review"><div class="rs-idea-review-head"><span>'
+    + escapeHtml(tr(t, 'paper.research.ideaReviewTitle', 'Review board on this idea')) + '</span>'
+    + (score == null ? '' : '<strong>' + escapeHtml(score.toFixed(2)) + '<small> / 5</small></strong>')
+    + '</div>'
+    + verdicts.map((verdict) => '<p>' + escapeHtml(verdict) + '</p>').join('')
+    + (risks.length
+      ? '<div class="rs-idea-risk"><span>' + escapeHtml(tr(t, 'paper.research.mainRisk', 'Main risk'))
+        + '</span>' + escapeHtml(risks.join(' · ')) + '</div>'
+      : '')
+    + '</div>';
+}
+
+function researchIdeaCard(idea: JsonObject, index: number, t: Translator, stream: ResearchStream): string {
   const title = text(idea.title) || tr(t, 'paper.research.untitled', '(untitled)');
   const overall = number(idea.overall);
   const linkedGap = text(idea.linked_gap_id);
+  const secondary = researchField(tr(t, 'paper.research.corpusAnchor', 'Corpus anchor'), idea.corpus_anchor_id)
+    + researchField(tr(t, 'paper.research.corpusDelta', 'Delta from prior work'), idea.corpus_delta)
+    + researchField(tr(t, 'paper.research.newInvariant', 'New invariant'), idea.new_invariant)
+    + researchField(tr(t, 'paper.research.whyNotAB', 'Why this is not A+B'), idea.why_not_AB);
   return '<article class="rs-idea-card" data-research-idea="' + index + '">'
     + '<div class="rs-idea-card-head"><div class="rs-idea-rank">#' + (index + 1) + '</div>'
     + '<div class="rs-idea-heading"><h3>' + escapeHtml(title) + '</h3>'
@@ -233,11 +281,14 @@ function researchIdeaCard(idea: JsonObject, index: number, t: Translator): strin
     + researchField(tr(t, 'paper.research.mechanism', 'Mechanism'), idea.core_mechanism)
     + researchField(tr(t, 'paper.research.novelty', 'Novelty claim'), idea.novelty_claim)
     + researchField(tr(t, 'paper.research.prediction', 'Falsifiable prediction'), idea.falsifiable_prediction)
-    + researchField(tr(t, 'paper.research.corpusAnchor', 'Corpus anchor'), idea.corpus_anchor_id)
-    + researchField(tr(t, 'paper.research.corpusDelta', 'Delta from prior work'), idea.corpus_delta)
-    + researchField(tr(t, 'paper.research.newInvariant', 'New invariant'), idea.new_invariant)
-    + researchField(tr(t, 'paper.research.whyNotAB', 'Why this is not A+B'), idea.why_not_AB)
     + '</div>'
+    + (secondary
+      ? '<details class="rs-idea-more"><summary><span>'
+        + escapeHtml(tr(t, 'paper.research.ideaMoreFields', 'Supporting arguments'))
+        + '</span><span class="rs-details-toggle">＋</span></summary>'
+        + '<div class="rs-idea-grid is-secondary">' + secondary + '</div></details>'
+      : '')
+    + researchIdeaReviewHtml(stream, idea, t)
     + researchScoresHtml(idea.scores, null, t)
     + '<div class="rs-idea-actions"><button type="button" class="rs-link-btn" '
     + 'data-tofu-action="_copyResearchArtifact(\'idea\',' + index + ',this)">'
@@ -267,7 +318,7 @@ export function researchIdeasHtml(stream: ResearchStream, t: Translator): string
     + '<p class="rs-panel-intro">'
     + escapeHtml(tr(t, 'paper.research.candidatesHint', 'Ranked by the novelty gate. Open the mechanism, falsifier and evidence delta before committing compute.'))
     + '</p><div class="rs-idea-list">'
-    + ideas.map((idea, index) => researchIdeaCard(idea, index, t)).join('')
+    + ideas.map((idea, index) => researchIdeaCard(idea, index, t, stream)).join('')
     + '</div></section>';
 }
 
@@ -347,6 +398,27 @@ export function researchCorpusHtml(stream: ResearchStream, t: Translator): strin
     + '<div class="rs-paper-list">' + rows + '</div></details>';
 }
 
+function researchIdeaAssessmentsHtml(stream: ResearchStream, t: Translator): string {
+  const rows = ideaAssessments(stream);
+  if (!rows.length) return '';
+  return '<div class="rs-review-ideas"><h3>'
+    + escapeHtml(tr(t, 'paper.research.evaluationIdeasTitle', 'Challenges by idea')) + '</h3>'
+    + rows.map((row) => {
+      const score = number(row.score);
+      const verdicts = textList(row.verdicts);
+      const risks = textList(row.main_risks);
+      return '<article class="rs-review-idea"><div class="rs-review-idea-head"><strong>'
+        + escapeHtml(text(row.idea)) + '</strong>'
+        + (score == null ? '' : '<span>' + escapeHtml(score.toFixed(2)) + ' / 5</span>')
+        + '</div>'
+        + verdicts.map((verdict) => '<p>' + escapeHtml(verdict) + '</p>').join('')
+        + (risks.length
+          ? '<div class="rs-idea-risk"><span>' + escapeHtml(tr(t, 'paper.research.mainRisk', 'Main risk'))
+            + '</span>' + escapeHtml(risks.join(' · ')) + '</div>'
+          : '')
+        + '</article>';
+    }).join('') + '</div>';
+}
 export function researchEvaluationHtml(stream: ResearchStream, t: Translator): string {
   const evaluation = stream.evaluation;
   if (!evaluation) return '';
@@ -367,6 +439,12 @@ export function researchEvaluationHtml(stream: ResearchStream, t: Translator): s
     + escapeHtml(worthFollowing
       ? tr(t, 'paper.research.followUpYes', 'Worth a follow-up experiment')
       : tr(t, 'paper.research.followUpNo', 'Revise before spending compute')) + '</div></div>'
+    + '<p class="rs-panel-intro">'
+    + escapeHtml(format(t, 'paper.research.evaluationScope',
+      'Review target: the whole decision packet — survey + {n} ranked ideas + the novelty gate. Per-idea challenges are listed below.', {
+        n: stream.acceptedIdeas?.length || stream.accepted || 0,
+      }))
+    + '</p>'
     + '<div class="rs-review-grid"><div class="rs-review-score"><span>'
     + escapeHtml(tr(t, 'paper.research.overall', 'Overall')) + '</span><strong>'
     + escapeHtml(score == null ? '—' : score.toFixed(2)) + '</strong><small>/ 5</small>'
@@ -393,6 +471,7 @@ export function researchEvaluationHtml(stream: ResearchStream, t: Translator): s
         + escapeHtml([item.target, item.priority].filter(Boolean).join(' · ')) + '</small>'
         + (item.evidence ? '<p>' + escapeHtml(item.evidence) + '</p>' : '') + '</div></div>').join('')
       + '</div>' : '')
+    + researchIdeaAssessmentsHtml(stream, t)
     + '</section>';
 }
 
@@ -690,6 +769,84 @@ export function newResearchDirection(): void {
   showResearchLanding();
 }
 
+// Tab selection survives re-paints (hydration repaints a finished run) and
+// resets only when a different direction is shown.
+let activeResearchTab = 'ideas';
+let activeResearchDirection = '';
+
+export function switchResearchTab(id: string): void {
+  activeResearchTab = id;
+  const shell = document.querySelector('[data-research-shell]');
+  if (!shell) return;
+  shell.querySelectorAll('[data-rs-tab]').forEach((node) => {
+    node.classList.toggle('is-active', node.getAttribute('data-rs-tab') === id);
+  });
+  shell.querySelectorAll('[data-rs-panel]').forEach((node) => {
+    node.classList.toggle('is-active', node.getAttribute('data-rs-panel') === id);
+  });
+}
+
+function researchLedgerHtml(stream: ResearchStream, t: Translator): string {
+  return '<section class="rs-panel rs-ledger"><div class="rs-panel-head"><div><div class="rs-eyebrow">'
+    + escapeHtml(tr(t, 'paper.research.ledgerKicker', 'Reproducibility ledger')) + '</div><h2>'
+    + escapeHtml(tr(t, 'paper.research.ledgerTitle', 'Corpus, execution and resource record')) + '</h2></div>'
+    + (stream.folderId ? '<button type="button" class="rs-btn is-secondary" data-tofu-action="_openResearchFolder()">'
+      + escapeHtml(tr(t, 'paper.research.openFolder', 'Open paper library')) + ICONS.external + '</button>' : '')
+    + '</div>' + researchCorpusHtml(stream, t) + researchUsageHtml(stream, t) + '</section>';
+}
+
+function researchTabsHtml(stream: ResearchStream, t: Translator): string {
+  if (activeResearchDirection !== stream.direction) {
+    activeResearchDirection = stream.direction;
+    activeResearchTab = 'ideas';
+  }
+  const tabs: Array<{ id: string; label: string; badge: string; content: string }> = [
+    {
+      id: 'ideas',
+      label: tr(t, 'paper.research.tabIdeas', 'Ideas'),
+      badge: stream.accepted ? String(stream.accepted) : '',
+      content: researchIdeasHtml(stream, t) + researchRejectedHtml(stream, t),
+    },
+    {
+      id: 'review',
+      label: tr(t, 'paper.research.tabReview', 'Independent review'),
+      badge: '',
+      content: researchEvaluationHtml(stream, t),
+    },
+    {
+      id: 'evidence',
+      label: tr(t, 'paper.research.tabEvidence', 'Evidence & gaps'),
+      badge: '',
+      content: researchSurveyHtml(stream, t),
+    },
+    {
+      id: 'ledger',
+      label: tr(t, 'paper.research.tabLedger', 'Ledger & trace'),
+      badge: '',
+      content: researchLedgerHtml(stream, t) + researchToolsHtml(stream),
+    },
+    {
+      id: 'workspace',
+      label: tr(t, 'paper.research.tabWorkspace', 'Workspace'),
+      badge: '',
+      content: researchWorkspaceHtml(stream),
+    },
+  ].filter((tab) => tab.content);
+  if (!tabs.some((tab) => tab.id === activeResearchTab)) {
+    activeResearchTab = tabs[0]?.id ?? 'ideas';
+  }
+  const nav = tabs.map((tab) => '<button type="button" role="tab" class="rs-tab-btn'
+    + (tab.id === activeResearchTab ? ' is-active' : '')
+    + '" data-tofu-action="_switchResearchTab(\'' + tab.id + '\')" data-rs-tab="' + tab.id + '"><span>'
+    + escapeHtml(tab.label) + '</span>'
+    + (tab.badge ? '<b>' + escapeHtml(tab.badge) + '</b>' : '')
+    + '</button>').join('');
+  const panels = tabs.map((tab) => '<div class="rs-tab-panel'
+    + (tab.id === activeResearchTab ? ' is-active' : '')
+    + '" data-rs-panel="' + tab.id + '" role="tabpanel">' + tab.content + '</div>').join('');
+  return '<div class="rs-tabs" role="tablist">' + nav + '</div><div class="rs-tab-panels">' + panels + '</div>';
+}
+
 function researchHeader(stream: ResearchStream, t: Translator): string {
   const statusClass = stream.status === 'error' ? 'is-error'
     : stream.degraded ? 'is-degraded'
@@ -735,22 +892,11 @@ export function paintResearch(): void {
   const finishedBody = researchDeliverablesHtml(stream, t)
     + researchFailureHtml(stream, t)
     + quality
-    + researchIdeasHtml(stream, t)
-    + researchEvaluationHtml(stream, t)
-    + researchSurveyHtml(stream, t)
-    + researchRejectedHtml(stream, t)
-    + '<section class="rs-panel rs-ledger"><div class="rs-panel-head"><div><div class="rs-eyebrow">'
-    + escapeHtml(tr(t, 'paper.research.ledgerKicker', 'Reproducibility ledger')) + '</div><h2>'
-    + escapeHtml(tr(t, 'paper.research.ledgerTitle', 'Corpus, execution and resource record')) + '</h2></div>'
-    + (stream.folderId ? '<button type="button" class="rs-btn is-secondary" data-tofu-action="_openResearchFolder()">'
-      + escapeHtml(tr(t, 'paper.research.openFolder', 'Open paper library')) + ICONS.external + '</button>' : '')
-    + '</div>' + researchCorpusHtml(stream, t) + researchUsageHtml(stream, t) + '</section>'
-    + researchWorkspaceHtml(stream);
+    + researchTabsHtml(stream, t);
   viewer.innerHTML = '<main class="rs-workbench rs-console" data-research-shell="1">'
     + researchHeader(stream, t)
     + researchPipelineHtml(stream, t)
-    + (running ? runningBody : finishedBody)
-    + researchToolsHtml(stream)
+    + (running ? runningBody + researchToolsHtml(stream) : finishedBody)
     + '</main>';
 
   if (!running) void loadResearchWorkspace(stream.direction, stream.lang);
@@ -775,6 +921,7 @@ export function installResearchViewGlobals(): void {
   target._renderRecentResearch = renderRecentResearch;
   target._paintResearch = paintResearch;
   target._showResearchLanding = showResearchLanding;
+  target._switchResearchTab = switchResearchTab;
 }
 
 installResearchViewGlobals();

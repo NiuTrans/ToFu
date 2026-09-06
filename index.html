@@ -13,17 +13,17 @@
 <meta name="theme-color" content="#F5F3ED">
 <link rel="manifest" href="static/manifest.json" crossorigin="use-credentials">
 <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><defs><linearGradient id='t' x1='0' y1='0' x2='.5' y2='1'><stop offset='0%25' stop-color='%23fef8ec'/><stop offset='100%25' stop-color='%23fdf2d7'/></linearGradient><linearGradient id='f' x1='0' y1='0' x2='.2' y2='1'><stop offset='0%25' stop-color='%23fdf4dc'/><stop offset='100%25' stop-color='%23f5e8c8'/></linearGradient><linearGradient id='r' x1='0' y1='0' x2='1' y2='.7'><stop offset='0%25' stop-color='%23ecdcc0'/><stop offset='100%25' stop-color='%23dcc8a4'/></linearGradient></defs><path d='M86 26 L36 54 L91 90 L147 59Z' fill='url(%23t)'/><path d='M36 54 L34 119 L97 153 L91 90Z' fill='url(%23f)'/><path d='M91 90 L97 153 L145 125 L147 59Z' fill='url(%23r)'/><path d='M86 26 L36 54 L34 119 L97 153 L145 125 L147 59Z' stroke='%231a1520' stroke-width='3.2' stroke-linejoin='round' fill='none'/><path d='M53 38 L74 31 L80 34 L59 41Z' fill='white' opacity='.5'/><rect x='44' y='80' width='15' height='19' rx='1' fill='%231a1520'/><rect x='52' y='81' width='5' height='7' rx='1' fill='white' opacity='.92'/><rect x='45' y='89' width='3' height='4' rx='.5' fill='white' opacity='.45'/><rect x='73' y='93' width='15' height='21' rx='1' fill='%231a1520'/><rect x='81' y='94' width='5' height='7' rx='1' fill='white' opacity='.92'/><rect x='74' y='104' width='3' height='5' rx='.5' fill='white' opacity='.45'/><path d='M57 113 Q68 121 78 113' stroke='%231a1520' stroke-width='1.5' fill='none' stroke-linecap='round' opacity='.45'/><ellipse cx='45' cy='103' rx='5.5' ry='4' fill='%23ffaaa2' opacity='.5'/><ellipse cx='84' cy='120' rx='6' ry='4' fill='%23feaca5' opacity='.5'/></svg>">
-<link rel="icon" type="image/svg+xml" href="static/icons/tofu-welcome.svg?v=0.17.0">
+<link rel="icon" type="image/svg+xml" href="static/icons/tofu-welcome.svg?v=0.17.1">
 <!-- Fonts, the highlight theme and KaTeX styles now ship inside the Vite
      module graph (see frontend/src/styles/fonts.css and vendor-runtime.ts).
      The shell still preloads the three critical Plus Jakarta Sans UI weights —
      rendered by routes/common.py from the Vite manifest so the content hashes
      track every build. crossorigin is REQUIRED so the preload and the
      @font-face fetch share one cache entry. -->
-<link rel="stylesheet" href="static/styles.css?v=0.17.0">
-<link rel="stylesheet" href="static/request-inspector-trace.css?v=0.17.0">
+<link rel="stylesheet" href="static/styles.css?v=0.17.1">
+<link rel="stylesheet" href="static/request-inspector-trace.css?v=0.17.1">
 <link rel="stylesheet" href="static/settings.css">
-<link rel="stylesheet" href="static/project-integration.css?v=0.17.0">
+<link rel="stylesheet" href="static/project-integration.css?v=0.17.1">
 <script>
   // Prevent flash of wrong theme — apply before render (default: tofu)
   (function(){var t=localStorage.getItem('claude_ui_theme')||'tofu';document.documentElement.setAttribute('data-theme',t);})();
@@ -48,6 +48,7 @@
   var firstAsset = '';
   var retryKey = 'tofu:vite-preload-reload';
   var proxyRetries = Object.create(null);
+  var freshRetries = Object.create(null);
 
   function eventAsset(event) {
     var target = event && event.target;
@@ -101,6 +102,32 @@
       return true;
     }
     return false;
+  }
+
+  function retryFreshModule(event, asset) {
+    var target = event && event.target;
+    if (!target || target === window || event.error || !asset) return false;
+    var tag = String(target.tagName || '').toUpperCase();
+    if (tag !== 'SCRIPT' || String(target.type || '').toLowerCase() !== 'module' ||
+        target.getAttribute('data-tofu-fresh-retry') === '1') return false;
+    try {
+      var failed = new URL(asset, location.href);
+      if (failed.origin !== location.origin ||
+          failed.pathname.indexOf('/static/vite/assets/') === -1) return false;
+      var key = failed.pathname;
+      if (freshRetries[key]) return false;
+      freshRetries[key] = true;
+      failed.searchParams.set('tofu-recover', String(Date.now()));
+      firstAsset = failed.href;
+      var replacement = document.createElement('script');
+      replacement.type = 'module';
+      replacement.src = failed.href;
+      replacement.setAttribute('data-tofu-fresh-retry', '1');
+      document.head.appendChild(replacement);
+      return true;
+    } catch (error) {
+      return false;
+    }
   }
 
   function details(error, asset) {
@@ -183,6 +210,14 @@
       event.preventDefault();
       return;
     }
+    /* A content-addressed entry can still be poisoned by an intermediary or
+     * browser cache. Retry a genuine module resource failure once with a
+     * unique query before declaring the whole application unavailable. Runtime
+     * exceptions target window / carry event.error and are never re-executed. */
+    if (retryFreshModule(event, asset)) {
+      event.preventDefault();
+      return;
+    }
     firstAsset = firstAsset || asset;
     firstFailure = firstFailure || event.error || new Error(
       event.message || ('module load failed' + (firstAsset ? ': ' + firstAsset : '')));
@@ -207,7 +242,7 @@
 <body>
 <aside class="sidebar" id="sidebar">
   <div class="sidebar-header">
-    <h1><img class="sidebar-tofu-icon" src="static/icons/tofu-welcome.svg?v=0.17.0" data-brand-logo="1" alt="Tofu" width="22" height="22"><span class="sidebar-brand"><span class="sidebar-brand-t">T</span><span class="sidebar-brand-o">o</span><span class="sidebar-brand-f">f</span><span class="sidebar-brand-u">u</span></span></h1>
+    <h1><img class="sidebar-tofu-icon" src="static/icons/tofu-welcome.svg?v=0.17.1" data-brand-logo="1" alt="Tofu" width="22" height="22"><span class="sidebar-brand"><span class="sidebar-brand-t">T</span><span class="sidebar-brand-o">o</span><span class="sidebar-brand-f">f</span><span class="sidebar-brand-u">u</span></span></h1>
     <div class="sidebar-header-actions">
       <!-- Feature launchers (Paper / My Day / Trading / Studio) live in the
            topbar as labeled buttons. Search, Settings and debug toggle live
@@ -693,10 +728,6 @@
         <!-- Projection surfaces are shown one at a time so each remains
              readable in narrow and port-forwarded viewports. -->
         <div class="project-brain-tabs" id="projectBrainTabs" role="tablist">
-          <button type="button" class="pb-tab" data-pb-tab="attention" role="tab" aria-selected="false">
-            <span class="pb-tab-label" data-i18n="projectBrain.attention">Needs you</span>
-            <span class="pb-tab-count" id="pbTabCountAttention" hidden></span>
-          </button>
           <button type="button" class="pb-tab pb-tab-active" data-pb-tab="charter" role="tab" aria-selected="true">
             <span class="pb-tab-label" data-i18n="projectBrain.charter">Charter</span>
             <span class="pb-tab-count" id="pbTabCountCharter" hidden></span>
@@ -717,13 +748,6 @@
           </button>
         </div>
         <div class="project-brain-columns">
-          <!-- Checker, Integration, and legacy-decision Attention. Ephemeral
-               path overlap advice never appears in this projection. -->
-          <div class="project-brain-col project-brain-col-attention pb-tab-panel" data-pb-panel="attention">
-            <div class="project-brain-col-body" id="projectBrainAttentionBody">
-              <div class="pb-attn-empty" data-i18n="projectBrain.attnEmpty">Nothing needs you</div>
-            </div>
-          </div>
           <div class="project-brain-col project-brain-col-charter pb-tab-panel pb-tab-panel-active" data-pb-panel="charter">
             <div class="project-brain-col-body" id="projectBrainCharterBody">
               <div class="pb-charter-empty" data-i18n="projectBrain.charterEmpty">No charter yet</div>
@@ -763,7 +787,7 @@
     <div class="chat-container" id="chatContainer">
       <div class="chat-inner" id="chatInner">
         <div class="welcome" id="welcome">
-          <div class="welcome-icon"><img src="static/icons/tofu-welcome.svg?v=0.17.0" data-brand-logo="1" alt="Tofu" width="64" height="64"></div>
+          <div class="welcome-icon"><img src="static/icons/tofu-welcome.svg?v=0.17.1" data-brand-logo="1" alt="Tofu" width="64" height="64"></div>
           <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
           <div class="feature-pills"><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="M12 18V5"/><path d="M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4"/><path d="M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5"/><path d="M17.997 5.125a4 4 0 0 1 2.526 5.77"/><path d="M18 18a4 4 0 0 0 2-7.464"/><path d="M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517"/><path d="M6 18a4 4 0 0 1-2-7.464"/><path d="M6.003 5.125a4 4 0 0 0-2.526 5.77"/></svg><span data-i18n="welcome.extendedThinking">深度思考</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg><span data-i18n="welcome.search">搜索</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg><span data-i18n="welcome.urlFetch">URL 抓取</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg><span data-i18n="welcome.imageInput">图片输入</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></svg><span data-i18n="welcome.coPilot">副驾驶</span></span><span class="feature-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-0.125em;flex-shrink:0"><path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"/><circle cx="12" cy="12" r="10"/></svg><span data-i18n="welcome.browser">浏览器</span></span></div>
         </div>
@@ -1341,10 +1365,9 @@
     <div class="settings-footer">
       <div class="settings-footer-hint" id="settingsStatusHint"></div>
       <div class="settings-footer-actions">
-        <a class="settings-mobile-client" id="settingsMobileClient" href="#" target="_blank" rel="noopener noreferrer" data-i18n-title="settings.mobileClientTitle" style="display:none;"></a>
         <span class="settings-version" id="settingsVersion"></span>
         <button class="btn btn-secondary" data-tofu-action="closeSettings()" data-i18n="settings.cancel">取消</button>
-        <button class="btn btn-primary" data-tofu-action="saveSettings()" data-i18n="settings.save">保存</button>
+        <button class="btn btn-primary" id="settingsSaveBtn" data-tofu-action="saveSettings()" data-i18n="settings.save">保存</button>
       </div>
     </div>
   </div>

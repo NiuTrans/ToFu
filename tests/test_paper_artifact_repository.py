@@ -264,4 +264,4 @@ def test_schema_33_repairs_version_32_ownerless_paper_tables(tmp_path):
         ).fetchone()[0] == 1
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION
+    assert int(version) == SCHEMA_VERSION == 51

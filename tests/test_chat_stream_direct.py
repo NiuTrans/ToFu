@@ -244,6 +244,85 @@ def test_dispatch_exception_is_redacted_from_public_sse():
     assert not objs[-2]['tofu_error'].get('detail')
 
 
+def test_terminal_resource_failure_refuses_verified_provider_success():
+    from lib.agent_core.execution_session import ExecutionPhase, ExecutionSession
+    from routes.api_v1.chat_direct import run_direct_stream
+
+    async def _dispatch(messages, *, on_content=None, **kwargs):
+        on_content('provider-success')
+        return ({'content': 'provider-success'}, 'stop', {})
+
+    session = ExecutionSession(
+        execution_id='direct-resource-failure',
+        kind='chat_direct',
+        owner_user_id=1,
+        deadline_seconds=60,
+    )
+    session.hold_resource(
+        'model_route',
+        lambda _context: (_ for _ in ()).throw(RuntimeError('dispose failed')),
+    )
+    terminal = {}
+
+    def _settle():
+        terminal['execution_receipt'] = session.settle(
+            ExecutionPhase.COMPLETED)
+
+    stream = run_direct_stream(
+        [{'role': 'user', 'content': 'hi'}],
+        model='test-model', cfg={'maxTokens': 100, 'temperature': 0},
+        completion_id='chatcmpl-resource-failure', dispatch_fn=_dispatch,
+        execution_session=session,
+        dispatch_terminal=terminal,
+        on_dispatch_settled=_settle,
+    )
+    objs = _frames_to_objs(_run(_drain(stream)))
+    assert objs[-2]['error']['code'] == 'terminal_resource_invariant_failed'
+    assert not any(
+        isinstance(obj, dict) and obj.get('choices')
+        and obj['choices'][0].get('finish_reason') == 'stop'
+        for obj in objs
+    )
+
+
+@pytest.mark.parametrize(
+    ('settler', 'cause'),
+    [
+        (lambda: None, 'dispatch_settlement_missing'),
+        (
+            lambda: (_ for _ in ()).throw(RuntimeError('settler failed')),
+            'dispatch_settlement_failed',
+        ),
+    ],
+)
+def test_missing_or_failed_terminal_settlement_refuses_provider_success(
+        settler, cause):
+    from lib.agent_core.execution_session import ExecutionSession
+    from routes.api_v1.chat_direct import run_direct_stream
+
+    async def _dispatch(messages, **kwargs):
+        return ({'content': ''}, 'stop', {})
+
+    session = ExecutionSession(
+        execution_id=f'direct-{cause}',
+        kind='chat_direct',
+        owner_user_id=1,
+        deadline_seconds=60,
+    )
+    stream = run_direct_stream(
+        [{'role': 'user', 'content': 'hi'}],
+        model='test-model', cfg={'maxTokens': 100, 'temperature': 0},
+        completion_id=f'chatcmpl-{cause}', dispatch_fn=_dispatch,
+        execution_session=session,
+        dispatch_terminal={},
+        on_dispatch_settled=settler,
+    )
+
+    objs = _frames_to_objs(_run(_drain(stream)))
+    assert objs[-2]['error']['code'] == cause
+    assert session.phase.value == 'failed'
+
+
 def test_worker_thread_callbacks_cross_the_loop_before_terminal_frame():
     async def _dispatch(messages, *, on_content=None, **kwargs):
         await asyncio.to_thread(on_content, 'thread-result')

@@ -114,11 +114,15 @@ def _record_list(session: Session, payload: Mapping[str, Any]) -> Any:
             "database_protocol_error", "Invalid prefix in storage request"
         )
     limit = _integer(payload, "limit", default=100, minimum=1, maximum=1000)
+    # The prefix is a literal byte prefix, not a SQL pattern: escape LIKE
+    # metacharacters so '_' and '%' inside it carry no wildcard meaning
+    # (backend-neutral; SQLite and PostgreSQL both honor ESCAPE '\').
+    escaped = prefix.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
     rows = session.fetch_all(
         "SELECT record_key, value_json, version, updated_at_ms "
-        "FROM storage_records WHERE namespace = ? AND record_key LIKE ? "
+        "FROM storage_records WHERE namespace = ? AND record_key LIKE ? ESCAPE '\\' "
         "ORDER BY record_key LIMIT ?",
-        (namespace, prefix + "%", limit),
+        (namespace, escaped + "%", limit),
     )
     return [
         {
@@ -257,6 +261,13 @@ def _task_results_summary_list(
     same operation contract).  ``scan_limit`` preserves a hard work bound;
     ``capped`` makes truncation explicit instead of silently pretending the
     result is exhaustive.
+
+    A ``conv_id`` scope additionally pushes a byte-level ``instr``
+    pre-filter into the page SQL (exact for ASCII ids, same SQLite-only
+    family as the GLOB event-type filter): non-matching megabyte values
+    are never decoded.  The post-decode comparison remains the semantic
+    filter; ``scanned`` then counts candidate matches, and ``capped``
+    still means "more matches may exist".
     """
     status = payload.get("status")
     if status is not None and (
@@ -302,12 +313,26 @@ def _task_results_summary_list(
     invalid = 0
     summaries: list[dict[str, Any]] = []
     exhausted = False
+    # Cheap byte-level pre-filter pushed into SQL when scoping to one
+    # conversation: task_results values average ~141 KB and can exceed
+    # 10 MiB (full answer + thinking + tool rounds), so decoding every row
+    # in the namespace to filter conv_id in Python took ~6 s warm (≈30 s
+    # live under write load) for what is usually a handful of matches.
+    # instr() on the raw BLOB is exact for ASCII conv ids; the post-decode
+    # check below stays as the semantic guarantee (and rejects false
+    # positives, e.g. a conv id quoted inside an answer body).
+    prefilter_sql = ""
+    prefilter_params: tuple = ()
+    if conv_id is not None:
+        prefilter_sql = " AND instr(value_json, ?) > 0"
+        prefilter_params = (conv_id,)
     while scanned < scan_limit:
         rows = session.fetch_all(
             "SELECT record_key, value_json, version, updated_at_ms "
             "FROM storage_records WHERE namespace=? AND record_key>? "
-            "ORDER BY record_key LIMIT ?",
-            ("task_results", after_key, min(page_size, scan_limit - scanned)),
+            + prefilter_sql + " ORDER BY record_key LIMIT ?",
+            ("task_results", after_key, *prefilter_params,
+             min(page_size, scan_limit - scanned)),
         )
         if not rows:
             exhausted = True
@@ -1366,18 +1391,15 @@ def _event_inspector_summary(session: Session, payload: Mapping[str, Any]) -> An
         raise StorageError("database_protocol_error", "too many task_ids")
     task_ids = tuple(_required_text({"task_id": value}, "task_id")
                      for value in raw_task_ids)
-    root_placeholders = ",".join("?" for _ in task_ids)
-    ranges = []
-    range_params: list[str] = []
-    for task_id in task_ids:
-        prefix = f"{task_id}#agent:"
-        ranges.append("(task_id >= ? AND task_id < ?)")
-        range_params.extend((prefix, f"{task_id}#agent;"))
-    ownership_predicate = (
-        f"task_id IN ({root_placeholders}) OR " + " OR ".join(ranges))
     structural_types = tuple(sorted(STRUCTURAL_EVENT_TYPES))
     structural_placeholders = ",".join("?" for _ in structural_types)
-    rows = session.fetch_all(
+    # One indexed equality probe per root plus one indexed range probe for
+    # its ``#agent:`` children. A single mega-query (roots IN (...) OR'd
+    # with dozens of prefix ranges) defeats the planner: measured on a
+    # 1M-row log it abandoned storage_events_task_idx entirely and scanned
+    # the stream_kind retention index — tens of seconds for what is
+    # milliseconds of key-range work per task.
+    select_cols = (
         "SELECT task_id, "
         "SUM(CASE WHEN event_type='messages_snapshot' "
         "AND event_kind='request' THEN 1 ELSE 0 END) AS request_count, "
@@ -1385,14 +1407,36 @@ def _event_inspector_summary(session: Session, payload: Mapping[str, Any]) -> An
         "AND event_kind='state' THEN 1 ELSE 0 END) AS state_count, "
         "SUM(CASE WHEN event_type='messages_snapshot' "
         "AND event_kind='' THEN 1 ELSE 0 END) AS legacy_count, "
-        "COUNT(*) AS event_count, MIN(created_at_ms) AS first_event_at_ms "
-        "FROM storage_events WHERE stream_kind=? AND ("
-        + ownership_predicate + ") AND (event_type IN ("
-        + structural_placeholders + ") OR event_type LIKE ?) "
-        "GROUP BY task_id ORDER BY task_id",
-        (TASK_STREAM_KIND, *task_ids, *range_params, *structural_types,
-         f'{LEGACY_FLOW_EVENT_PREFIX}%'),
-    )
+        "COUNT(*) AS event_count, MIN(created_at_ms) AS first_event_at_ms ")
+    from_where = "FROM storage_events WHERE stream_kind=? AND "
+    # INDEXED BY (SQLite only): statements are planned without parameter
+    # values, so the parameterized prefix range gets a pessimistic
+    # selectivity estimate — measured on a 1M-row log, the planner
+    # abandoned storage_events_task_idx for an EMPTY ``#agent:`` range and
+    # scanned the retention index instead (16 s). The task-leading index
+    # turns the probe into exactly the key-range rows it must count.
+    children_from_where = (
+        "FROM storage_events INDEXED BY storage_events_task_idx "
+        "WHERE stream_kind=? AND "
+        if session.backend == "sqlite" else from_where)
+    type_filter = (" AND (event_type IN (" + structural_placeholders +
+                   ") OR event_type LIKE ?) GROUP BY task_id")
+    summary_sql = select_cols + from_where + "task_id=?" + type_filter
+    children_sql = (select_cols + children_from_where +
+                    "task_id >= ? AND task_id < ?" + type_filter)
+    rows = []
+    for task_id in task_ids:
+        rows.extend(session.fetch_all(
+            summary_sql,
+            (TASK_STREAM_KIND, task_id, *structural_types,
+             f'{LEGACY_FLOW_EVENT_PREFIX}%'),
+        ))
+        rows.extend(session.fetch_all(
+            children_sql,
+            (TASK_STREAM_KIND, f"{task_id}#agent:", f"{task_id}#agent;",
+             *structural_types, f'{LEGACY_FLOW_EVENT_PREFIX}%'),
+        ))
+    rows.sort(key=lambda row: str(row["task_id"]))
     return {"records": [{
         "task_id": str(row["task_id"]),
         "request_count": int(row["request_count"] or 0),

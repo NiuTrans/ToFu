@@ -64,6 +64,33 @@ Extension downloads and agent installers mint a fresh device credential. If
 the credential authority is unavailable, download returns 503. Shipping a
 package known to be unable to connect is not a valid degraded mode.
 
+## Tofu-DB pre-authority account layout
+
+All seven `tenant.user.*` operations now compile through the experimental
+Tofu-DB Transaction IR for differential certification. Account IDs, normalized
+emails, and the owner-allocation sequence live in a tenant-global identity
+scope; callers still enter through the existing authenticated admin boundary.
+An exact-email witness protects the digest index from collision ambiguity.
+
+Large profile metadata and the password envelope are stored in one bounded,
+blob-capable profile. Role, status, and last-login state are separate compact
+entities, so suspension and login bookkeeping do not rewrite large blobs.
+Created-time and status/created-time indexes serve descending lists with a
+10,000-row scan ceiling, a 1,000-row page ceiling, and an 8 MiB response cap.
+The public projection never contains `password_hash`; only the dedicated
+authentication operation returns it. Creation publishes the profile, state,
+email claim, both list indexes, monotonic owner allocation, receipt, and
+encrypted logical outbox record in one OCC transaction.
+
+All eleven `credential.*` operations now use that pre-authority IR. A small
+immutable core, compact mutable state, and bounded blob-capable settings record
+share tenant-global exact-verified ID and SHA-256-hash indexes. The owner/tenant
+boundary has an exact live count capped at 1,000 and a descending created-time
+index; list responses fail closed above 8 MiB. Authentication and touch rewrite
+only compact state, while account status is witnessed in the same OCC
+transaction. Revocation atomically retires owner visibility and the live count
+but retains the hash tombstone needed by recovery-only identify.
+
 ## Change map
 
 | Change | First files | Required guard |

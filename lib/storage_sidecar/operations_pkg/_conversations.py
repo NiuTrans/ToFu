@@ -1335,81 +1335,99 @@ def _conversation_search_op(session: Session, payload: Mapping[str, Any]) -> Any
     radius = _integer(payload, "snippet_radius", default=40, minimum=0, maximum=400)
     if len(query) < 2:
         return []
-    turn_head = "lower(substr(s.search_text, 1, 10000))"
-
-    def _like(term: str) -> str:
-        return (
-            "%"
-            + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            + "%"
-        )
-
-    def _match_clause(terms: list[str]) -> tuple[str, list[Any]]:
-        likes = [_like(term) for term in terms]
-        turn_matches = " AND ".join(
-            "EXISTS (SELECT 1 FROM storage_search_turns AS s "
-            "WHERE s.conversation_id=c.id AND s.user_id=c.user_id "
-            "AND s.lane_id='main' AND "
-            f"{turn_head} LIKE ? ESCAPE '\\')"
-            for _ in terms
-        )
-        return turn_matches, likes
+    # Matching folds in Python because SQLite lower()/LIKE fold ASCII
+    # only while the contract is full-Unicode case-insensitive (Tofu-DB
+    # to_lowercase).  Conversations scan in rank order, chunk by chunk,
+    # stopping as soon as `fetch_limit` hits collect — the common case
+    # touches only the most recent chunk.
+    _SCAN_CHUNK = 50
+    _SCAN_CAP = 5000  # conversations per phase; bounds worst-case scans
 
     def _fetch(
         terms: list[str], excluded_ids: list[str], fetch_limit: int
-    ) -> list[dict[str, Any]]:
-        clauses, params = _match_clause(terms)
+    ) -> list[tuple[str, list[str]]]:
+        sql = (
+            "SELECT c.id FROM storage_search_conversations AS c "
+            "WHERE c.user_id = ?"
+        )
+        params: list[Any] = [user_id]
         if excluded_ids:
-            clauses += " AND c.id NOT IN (" + ",".join(
+            sql += " AND c.id NOT IN (" + ",".join(
                 "?" for _ in excluded_ids) + ")"
             params.extend(excluded_ids)
-        return session.fetch_all(
-            "SELECT c.id FROM storage_search_conversations AS c "
-            "WHERE c.user_id = ? AND "
-            + clauses
-            + " ORDER BY c.updated_at_ms DESC, c.id DESC LIMIT ?",
-            tuple([user_id, *params, fetch_limit]),
-        )
+        sql += " ORDER BY c.updated_at_ms DESC, c.id DESC LIMIT ? OFFSET ?"
+        hits: list[tuple[str, list[str]]] = []
+        scanned = 0
+        while len(hits) < fetch_limit and scanned < _SCAN_CAP:
+            chunk = session.fetch_all(
+                sql,
+                tuple([*params, min(_SCAN_CHUNK, _SCAN_CAP - scanned),
+                       scanned]),
+            )
+            if not chunk:
+                break
+            scanned += len(chunk)
+            ids = [row["id"] for row in chunk]
+            marks = ",".join("?" for _ in ids)
+            head_rows = session.fetch_all(
+                "SELECT s.conversation_id AS cid, "
+                "substr(s.search_text, 1, 10000) AS head "
+                "FROM storage_search_turns AS s "
+                "WHERE s.user_id = ? AND s.lane_id = 'main' "
+                f"AND s.conversation_id IN ({marks}) "
+                "ORDER BY s.conversation_id, s.ordinal",
+                tuple([user_id, *ids]),
+            )
+            heads_by_id: dict[str, list[str]] = {}
+            for head_row in head_rows:
+                heads_by_id.setdefault(head_row["cid"], []).append(
+                    str(head_row["head"] or ""))
+            for conversation_id in ids:
+                heads = heads_by_id.get(conversation_id)
+                if not heads:
+                    continue
+                folded = [head.lower() for head in heads]
+                if all(
+                    any(term in text for text in folded) for term in terms
+                ):
+                    hits.append((conversation_id, heads))
+                    if len(hits) >= fetch_limit:
+                        break
+        return hits
 
-    rows = _fetch([query], [], limit)
+    hits = _fetch([query], [], limit)
     words = query.split()
-    if len(rows) < limit and len(words) > 1:
-        found = [row["id"] for row in rows]
-        rows.extend(_fetch(words, found, limit - len(rows)))
+    if len(hits) < limit and len(words) > 1:
+        found = [conversation_id for conversation_id, _ in hits]
+        hits.extend(_fetch(words, found, limit - len(hits)))
 
-    width = 2 * radius + len(query)
+    snippet_terms = [query]
+    if words and words[0] != query:
+        snippet_terms.append(words[0])
     items = []
-    for row in rows:
-        snippet_terms = [query]
-        if words and words[0] != query:
-            snippet_terms.append(words[0])
-        snippet_where = " OR ".join(
-            f"{turn_head} LIKE ? ESCAPE '\\'" for _ in snippet_terms)
-        fragment = session.fetch_one(
-            "SELECT substr(s.search_text, 1, 10000) AS head "
-            "FROM storage_search_turns AS s "
-            "WHERE s.conversation_id=? AND s.user_id=? "
-            "AND s.lane_id='main' AND (" + snippet_where + ") "
-            "ORDER BY CASE WHEN " + turn_head
-            + " LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END, s.ordinal LIMIT 1",
-            tuple([
-                row["id"], user_id,
-                *[_like(term) for term in snippet_terms],
-                _like(query),
-            ]),
-        )
-        head = str(fragment["head"] or "") if fragment is not None else ""
+    for conversation_id, heads in hits:
+        head = ""
+        for term in snippet_terms:
+            for candidate in heads:
+                if term in candidate.lower():
+                    head = candidate
+                    break
+            if head:
+                break
         lowered = head.lower()
         pos = lowered.find(query)
+        located = query
         if pos < 0 and words:
             pos = lowered.find(words[0])
+            located = words[0]
         snippet = ""
         if pos >= 0 and radius > 0:
-            snippet = head[max(0, pos - radius) : pos - radius + width]
+            start = max(0, pos - radius)
+            snippet = head[start : start + 2 * radius + len(located)]
             snippet = snippet.replace("\n", " ").strip()
             if snippet:
                 snippet = "…" + snippet + "…"
-        items.append({"id": row["id"], "snippet": snippet})
+        items.append({"id": conversation_id, "snippet": snippet})
     return items
 
 

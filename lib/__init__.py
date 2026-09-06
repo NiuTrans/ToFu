@@ -3,7 +3,7 @@ import os
 
 # ── Public API ──
 __all__ = [
-    'LLM_API_KEYS', 'LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL',
+    'LLM_API_KEYS', 'LLM_BASE_URL', 'LLM_MODEL',
     'FALLBACK_MODEL',
     'QWEN_MODEL',
     'GEMINI_MODEL', 'GEMINI_PRO_MODEL', 'GEMINI_PRO_PREVIEW_MODEL',
@@ -99,7 +99,6 @@ def _parse_api_keys():
     return list(_DEFAULT_KEYS)
 
 LLM_API_KEYS = _parse_api_keys()
-LLM_API_KEY  = LLM_API_KEYS[0] if LLM_API_KEYS else ''  # backward compat alias
 
 def _resolve_base_url():
     """Resolve the legacy direct-call base URL from environment only."""
@@ -334,7 +333,6 @@ def reload_config():
 
     # ── Re-resolve all config values ──
     _mod.LLM_API_KEYS = _parse_api_keys()
-    _mod.LLM_API_KEY = _mod.LLM_API_KEYS[0] if _mod.LLM_API_KEYS else ''
     _mod.LLM_BASE_URL = _resolve_base_url()
     _mod.LLM_MODEL = _cfg(
         'LLM_MODEL', 'opus', 'gpt-4o', empty_env_is_unset=True)

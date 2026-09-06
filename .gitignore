@@ -120,6 +120,8 @@ __pycache__/
 !/scripts/check_i18n_usage.mjs
 !/scripts/check_lazy_runtime_bindings.mjs
 !/scripts/check_runtime_reachability.mjs
+!/scripts/check_frontend_tdz.mjs
+!/scripts/frontend_bundle_canary.py
 !/scripts/compose_frontend_runtime.mjs
 !/scripts/runtime_action_analysis.mjs
 !/scripts/compose_frontend_styles.mjs
@@ -137,6 +139,11 @@ __pycache__/
 !/scripts/gen_conversation_sync_contract.py
 !/scripts/gen_api_v4_contract.py
 !/scripts/gen_tool_inventory.py
+!/scripts/gen_storage_operation_catalog.py
+!/scripts/gen_storage_v2_contract.py
+!/scripts/gen_tofudb_ir_contract.py
+!/scripts/gen_tofudb_unicode_casefold.py
+!/scripts/gen_tofudb_unicode_simple_fold.py
 !/scripts/audit_tests.py
 !/scripts/bootstrap_rootless_qemu.sh
 !/scripts/rootless_qemu-conda-linux-64.lock
@@ -398,6 +405,7 @@ static/vite/
 # ── PyInstaller / desktop build artifacts ──
 build/
 dist/
+/packages/tofu-db/target/
 *.spec.bak
 installer_output/
 static/icons/tofu.ico

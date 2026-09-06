@@ -341,7 +341,7 @@ def test_schema_42_reclaims_legacy_events_and_adds_expiry_index(tmp_path):
     )
     connection.close()
 
-    assert version == SCHEMA_VERSION
+    assert version == SCHEMA_VERSION == 51
     assert 'expires_at_ms' in columns
     assert 'storage_rate_limit_bucket_idx' in indexes
     assert 'storage_rate_limit_expiry_idx' in indexes

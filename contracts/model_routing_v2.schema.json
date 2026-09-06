@@ -118,6 +118,7 @@
         "context_window": {"type": "integer", "minimum": 1},
         "quality_rank": {"type": "number"},
         "list_pricing": {"$ref": "#/$defs/pricing"},
+        "release_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}(-\\d{2})?$"},
         "lifecycle": {"enum": ["stable", "preview", "dated_snapshot", "retired"]}
       }
     },
@@ -270,6 +271,11 @@
         "offering_id": {"$ref": "#/$defs/identifier"},
         "connection_id": {"$ref": "#/$defs/identifier"},
         "wire_model_id": {"$ref": "#/$defs/identifier"},
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
         "enabled": {"type": "boolean"},
         "identity_confidence": {"enum": ["high", "medium", "low", "pending"]},
         "probe_status": {"enum": ["passed", "failed", "unprobed", "stale"]},

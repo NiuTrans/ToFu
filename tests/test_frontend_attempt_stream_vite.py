@@ -779,6 +779,56 @@ def test_native_turn_runtime_does_not_probe_an_unsaved_conversation(
     }
 
 
+def test_native_turn_runtime_wake_skips_local_only_draft(
+        page, assert_no_js_errors):
+    """Regression pin: wakeConversation used to hydrate a draft's sync
+    snapshot, so every visibilitychange/periodic reconcile 404'd with
+    'Conversation not found' until the first turn was submitted."""
+    page.wait_for_function(
+        "typeof window.createConversationTurnRuntime === 'function'",
+        timeout=30_000,
+    )
+
+    result = page.evaluate(r"""
+    async () => {
+      let snapshotCalls = 0;
+      const runtime = window.createConversationTurnRuntime({
+        api: {
+          async snapshot() {
+            snapshotCalls += 1;
+            throw Error('must not probe');
+          },
+          async createTurn() { throw Error('not used'); },
+          async createAttempt() { throw Error('not used'); },
+          eventsUrl() { throw Error('not used'); },
+          async updateTurn() { throw Error('not used'); },
+          async createLane() { throw Error('not used'); },
+          async deleteLane() { throw Error('not used'); },
+          async deleteTurns() { throw Error('not used'); },
+          async abortAttempt() { throw Error('not used'); },
+        },
+      });
+      const conversation = {
+        id:'local-only-wake', title:'New Chat', createdAt:10,
+        _localOnly:true,
+      };
+      const first = await runtime.wakeConversation(conversation);
+      const second = await runtime.wakeConversation(conversation);
+      return {
+        snapshotCalls,
+        sameStore: first === second,
+        localOnly: conversation._localOnly,
+      };
+    }
+    """)
+
+    assert result == {
+        'snapshotCalls': 0,
+        'sameStore': True,
+        'localOnly': True,
+    }
+
+
 def test_typed_turn_reducer_rejects_stale_ingress_and_replays_unknown_turn(
         page, assert_no_js_errors):
     page.wait_for_function(

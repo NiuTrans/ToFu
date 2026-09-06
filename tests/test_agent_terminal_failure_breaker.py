@@ -68,15 +68,15 @@ def test_typed_error_parser_is_strict_and_legacy_fails_open():
     }) is None
 
 
-def test_progress_ledger_uses_codes_not_changed_tool_arguments():
+def test_progress_ledger_resets_when_operation_scoped_signature_changes():
     from lib.agent_core.progress_ledger import ProgressLedgerV2
 
     ledger = ProgressLedgerV2()
-    assert ledger.observe_nonretryable_failures(['permission_required'])[
+    assert ledger.observe_nonretryable_failures(['permission_required:tool-a'])[
         'nonretryableFailureStreak'] == 1
-    assert ledger.observe_nonretryable_failures(['permission_required'])[
+    assert ledger.observe_nonretryable_failures(['permission_required:tool-a'])[
         'nonretryableFailureStreak'] == 2
-    assert ledger.observe_nonretryable_failures(['access_denied'])[
+    assert ledger.observe_nonretryable_failures(['permission_required:tool-b'])[
         'nonretryableFailureStreak'] == 1
     assert ledger.observe_nonretryable_failures([])[
         'nonretryableFailureStreak'] == 0
@@ -298,6 +298,23 @@ def test_swarm_round_note_requires_every_tool_to_be_terminal():
         _terminal_error('access_denied'),
         'successful legacy result',
     ]) == []
+    first_operation = [{
+        'function': {
+            'name': 'browser_execute_js',
+            'arguments': '{"tab_id":1}',
+        },
+    }]
+    second_operation = [{
+        'function': {
+            'name': 'browser_execute_js',
+            'arguments': '{"tab_id":2}',
+        },
+    }]
+    first_signature = _nonretryable_failure_signatures(
+        [_terminal_error('permission_required')], first_operation)
+    second_signature = _nonretryable_failure_signatures(
+        [_terminal_error('permission_required')], second_operation)
+    assert first_signature != second_signature
 
     agent = SubAgent.__new__(SubAgent)
     agent.messages = []
@@ -308,8 +325,11 @@ def test_swarm_round_note_requires_every_tool_to_be_terminal():
         [{'id': 't1', 'function': {'name': 'browser_execute_js'}}],
         round_num=1,
     )
-    assert note == {
-        'nonretryable_failure_signatures': ['permission_required']}
+    assert len(note['nonretryable_failure_signatures']) == 1
+    assert note['nonretryable_failure_signatures'][0].startswith(
+        'permission_required:')
+    assert note['result_evidence_complete'] is True
+    assert len(note['progress_evidence_ids']) == 1
     assert agent.messages[-1]['role'] == 'tool'
 
 

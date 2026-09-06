@@ -111,9 +111,11 @@ def test_semantic_change_is_committed_but_stable_waits_for_gate(
     assert row['status'] == 'committed'
     assert row['verification'] == 'required'
     assert row['stableUpdated'] is False
-    assert _head(repository) != base
+    assert _head(repository) == base
     assert _stable(repository) == base
-    assert _git(repository, 'status', '--porcelain').stdout == ''
+    assert 'app.py' in _git(repository, 'status', '--porcelain').stdout
+    assert checkpoint._revision(repository, row['checkpointRef']) == \
+        row['checkpointSha']
 
 
 def test_configured_gate_promotes_exact_semantic_checkpoint(
@@ -191,13 +193,18 @@ def test_bytes_written_during_capture_survive_for_next_checkpoint(
     row = first['repositories'][0]
     assert row['status'] == 'committed'
     assert row['verification'] == 'workspace_changed'
-    assert _git(repository, 'show', 'HEAD:app.py').stdout == 'VALUE = 5\n'
-    assert _git(repository, 'show', 'HEAD:README.md').stdout == 'base\n'
+    captured = row['checkpointSha']
+    assert _git(repository, 'show', f'{captured}:app.py').stdout == 'VALUE = 5\n'
+    assert _git(repository, 'show', f'{captured}:README.md').stdout == 'base\n'
     assert (repository / 'README.md').read_text(encoding='utf-8') == \
         'written after capture\n'
     assert 'README.md' in _git(repository, 'status', '--porcelain').stdout
 
     monkeypatch.setattr(checkpoint, '_stage_working_tree', real_stage)
+    monkeypatch.setenv(
+        'TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD',
+        f'{sys.executable} -c pass',
+    )
     second = _settle(repository, _task('task-capture-residue'))
     assert second['repositories'][0]['status'] == 'committed'
     assert _git(repository, 'show', 'HEAD:README.md').stdout == \
@@ -216,8 +223,7 @@ def test_external_head_move_skips_real_index_sync_without_losing_commit(
         if (
             not external_commit_created
             and args[:2] == ['update-ref', '-m']
-            and len(args) > 3
-            and str(args[3]).startswith('refs/heads/')
+            and '--stdin' in args
             and result.returncode == 0
         ):
             external_commit_created = True
@@ -257,10 +263,10 @@ def test_failed_task_is_preserved_as_wip_without_promoting_stable(
     assert row['status'] == 'committed'
     assert row['verification'] == 'task_failed'
     assert _stable(repository) == base
-    assert _head(repository) != base
-    assert _git(repository, 'status', '--porcelain').stdout == ''
+    assert _head(repository) == base
+    assert 'README.md' in _git(repository, 'status', '--porcelain').stdout
     assert 'Tofu WIP checkpoint: task-failed' in _git(
-        repository, 'log', '-1', '--format=%B').stdout
+        repository, 'show', '-s', '--format=%B', row['checkpointSha']).stdout
 
 
 def test_concurrent_settlements_serialize_git_not_project_writers(
@@ -288,7 +294,9 @@ def test_concurrent_settlements_serialize_git_not_project_writers(
     assert all(not thread.is_alive() for thread in threads)
     assert len(results) == 2
     rows = [result['repositories'][0] for result in results]
-    assert sorted(row['status'] for row in rows) == ['committed', 'no_changes']
+    assert sorted(row['status'] for row in rows) == ['committed', 'committed']
+    assert sorted(row['verification'] for row in rows) == [
+        'passed', 'workspace_changed']
     assert _git(repository, 'rev-list', '--count', 'HEAD').stdout.strip() == '2'
     assert _git(repository, 'status', '--porcelain').stdout == ''
 
@@ -445,3 +453,42 @@ def test_syntax_gate_accepts_esm_javascript(repository: Path):
 
     assert checkpoint._syntax_check(
         repository, ['module.js', 'value.js']) == (True, '')
+
+
+def test_unresolved_conflict_marker_stays_only_on_checkpoint_ref(
+        repository: Path):
+    base = _head(repository)
+    (repository / 'README.md').write_text(
+        '<<<<<<< Updated upstream\nleft\n=======\nright\n>>>>>>> Stash\n',
+        encoding='utf-8')
+
+    result = _settle(repository, _task('task-conflict-marker'))
+
+    row = result['repositories'][0]
+    assert row['verification'] == 'failed'
+    assert 'conflict marker' in row['verificationDetail']
+    assert _head(repository) == base
+    assert checkpoint._revision(repository, row['checkpointRef']) == \
+        row['checkpointSha']
+
+
+def test_ruff_redefinition_stays_only_on_checkpoint_ref(
+        repository: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        'TOFU_LINEAR_GIT_CHECKPOINT_TEST_CMD',
+        f'{sys.executable} -c pass',
+    )
+    base = _head(repository)
+    (repository / 'ruff.toml').write_text(
+        'target-version = "py310"\n', encoding='utf-8')
+    (repository / 'app.py').write_text(
+        'def duplicate():\n    return 1\n\n'
+        'def duplicate():\n    return 2\n',
+        encoding='utf-8')
+
+    result = _settle(repository, _task('task-ruff-redefinition'))
+
+    row = result['repositories'][0]
+    assert row['verification'] == 'failed'
+    assert 'F811' in row['verificationDetail']
+    assert _head(repository) == base

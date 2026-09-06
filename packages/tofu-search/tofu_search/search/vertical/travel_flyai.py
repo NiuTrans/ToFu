@@ -43,9 +43,9 @@ from tofu_search.config import get_config
 from tofu_search.search.vertical import _mcp, base
 from tofu_search.search.vertical.base import logger
 
-# The bundled trial credential (see the module docstring) is intentionally
-# not carried in this source tree. Set FLYAI_API_KEY / FLYAI_SIGN_SECRET to
-# use this vertical; empty config fields fall back to these (empty) values.
+# The bundled trial credential, as shipped in the PUBLIC npm package
+# @fly-ai/flyai-cli (dist/flyai-bundle.cjs). Empty config fields mean "use
+# these" — see config.py.
 _TRIAL_KEY = ''
 _SIGN_SECRET = ''
 _ENDPOINT = 'https://flyai.open.fliggy.com/mcp'

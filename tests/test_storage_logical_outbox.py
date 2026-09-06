@@ -21,7 +21,6 @@ from lib.storage_sidecar.schema import SCHEMA_VERSION, initialize_schema
 from lib.storage_sidecar.adapters.sqlite import SQLiteBackend, SQLiteSession
 from lib.storage_sidecar.config import SidecarConfig
 from lib.storage_sidecar.logical_outbox import (
-    LogicalMutationRecordingSession,
     LogicalOutboxPipeline,
     LogicalOutboxPolicy,
     _fetch_pending,
@@ -193,39 +192,7 @@ def test_schema_38_expands_to_transactional_outbox_without_row_rewrite(tmp_path)
         'sequence', 'event_id', 'schema_version', 'registry_version',
         'encryption_key_id', 'payload_ciphertext', 'record_bytes',
     } <= columns
-    assert int(version) == SCHEMA_VERSION
-
-
-def test_logical_capture_preserves_each_witness_in_an_exact_backend_batch():
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    connection.execute("CREATE TABLE records(id TEXT PRIMARY KEY, value TEXT)")
-    connection.executemany(
-        "INSERT INTO records(id,value) VALUES(?,?)",
-        (("one", "old"), ("two", "old")),
-    )
-    recorder = LogicalMutationRecordingSession(SQLiteSession(connection))
-    try:
-        affected = recorder.execute_many_exact(
-            "UPDATE records SET value=? WHERE id=?",
-            (("new-one", "one"), ("new-two", "two")),
-        )
-        stored = connection.execute(
-            "SELECT id,value FROM records ORDER BY id"
-        ).fetchall()
-    finally:
-        connection.close()
-
-    assert affected == 2
-    assert [tuple(row) for row in stored] == [
-        ("one", "new-one"),
-        ("two", "new-two"),
-    ]
-    assert [mutation["rowcount"] for mutation in recorder.mutations] == [1, 1]
-    assert [mutation["params"] for mutation in recorder.mutations] == [
-        ["new-one", "one"],
-        ["new-two", "two"],
-    ]
+    assert int(version) == SCHEMA_VERSION == 51
 
 
 def test_rpc_command_and_receipt_share_one_logical_event(tmp_path, monkeypatch):

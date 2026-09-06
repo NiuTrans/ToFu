@@ -9,10 +9,17 @@ accepted exclusively by :mod:`lib.model_routing.migration`.
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
+from lib.model_catalog._creator_identity import (
+    merge_keys,
+    strip_region_display_tag,
+    strip_routing_decoration,
+)
+from lib.model_info import release_date as _release_date
 from lib.provider_headers import sanitise_extra_headers
 
 
@@ -253,6 +260,100 @@ def parse_native_model_selection(payload: Mapping[str, Any]) -> NativeModelSelec
     return NativeModelSelection(model, provider_offering, preferred)
 
 
+# A pure date token makes a spelling a snapshot of the trained model, never
+# its canonical name: YYYYMMDD/YYMMDD count double, YYYY or 0MMD count once.
+_ALIAS_DATE_TOKEN = re.compile(
+    r'(?:^|[^a-z0-9])(20\d{6}|\d{6}|20\d{2}|0\d{3})(?:[^a-z0-9]|$)')
+_ALIAS_QUANT_SUFFIX = re.compile(
+    r'[-.](?:fp8|fp16|fp32|bf16|int4|int8|awq|gptq)$', re.IGNORECASE)
+
+
+def _alias_survivor_rank(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Least-decorated spelling wins: relay decoration, quant and snapshot
+    date markers all make an id a re-publication, and the more specific id
+    (the longer one) is otherwise the creator's own."""
+    model_id = str(row["model_id"])
+    lowered = model_id.lower()
+    penalty = 0
+    if strip_routing_decoration(lowered) != lowered:
+        penalty += 4
+    if _ALIAS_QUANT_SUFFIX.search(lowered):
+        penalty += 2
+    for match in _ALIAS_DATE_TOKEN.finditer(lowered):
+        penalty += 2 if len(match.group(1)) >= 6 else 1
+    return (penalty, -len(model_id), lowered)
+
+
+def _merge_trained_model_alias_rows(
+    model_by_ref: dict[ModelRef, dict[str, Any]],
+) -> dict[ModelRef, ModelRef]:
+    """Collapse provider respellings of one trained model into a survivor row.
+
+    Identity in the model collection is the trained model: relay SKUs
+    (``cerebras-llama-4-…``), dated snapshots, quant suffixes and publisher
+    namespaces are provider flower names for the same weights.  Returns the
+    alias map from absorbed refs to their survivor; capabilities are unioned
+    and context keeps the maximum so no offering validated against an
+    absorbed row can become invalid through the merge.
+    """
+    parent: dict[ModelRef, ModelRef] = {ref: ref for ref in model_by_ref}
+
+    def find(ref: ModelRef) -> ModelRef:
+        while parent[ref] != ref:
+            parent[ref] = parent[parent[ref]]
+            ref = parent[ref]
+        return ref
+
+    def union(first: ModelRef, second: ModelRef) -> None:
+        first_root, second_root = find(first), find(second)
+        if first_root != second_root:
+            parent[max(first_root, second_root)] = min(first_root, second_root)
+
+    key_owner: dict[tuple[str, str], ModelRef] = {}
+    for ref, row in model_by_ref.items():
+        for key in merge_keys(ref.model_id, row.get("display_name")):
+            index = (ref.creator_id, key)
+            owner = key_owner.get(index)
+            if owner is None:
+                key_owner[index] = ref
+            else:
+                union(ref, owner)
+
+    groups: dict[ModelRef, list[ModelRef]] = {}
+    for ref in parent:
+        groups.setdefault(find(ref), []).append(ref)
+
+    alias: dict[ModelRef, ModelRef] = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda ref: _alias_survivor_rank(model_by_ref[ref]))
+        survivor = members[0]
+        survivor_row = model_by_ref[survivor]
+        member_rows = [model_by_ref[ref] for ref in members]
+        survivor_row["capabilities"] = sorted({
+            capability
+            for row in member_rows
+            for capability in row["capabilities"]
+        })
+        survivor_row["context_window"] = max(
+            row["context_window"] for row in member_rows)
+        survivor_row["quality_rank"] = max(
+            row["quality_rank"] for row in member_rows)
+        if survivor_row["display_name"] == survivor_row["model_id"]:
+            for row in member_rows[1:]:
+                display = strip_region_display_tag(row["display_name"])
+                if display and display != row["model_id"]:
+                    survivor_row["display_name"] = display
+                    break
+        for row in member_rows[1:]:
+            for field, value in row.items():
+                survivor_row.setdefault(field, value)
+        for ref in members[1:]:
+            alias[ref] = survivor
+    return alias
+
+
 def normalize_document(
     raw: Mapping[str, Any], *, revision: int | None = None,
 ) -> dict[str, Any]:
@@ -307,7 +408,16 @@ def normalize_document(
                 field=f"models[{index}].quality_rank",
             )
         model["quality_rank"] = float(quality)
+        # release_date is derived vendor knowledge projected at read time by
+        # public_projection; never owner state — drop any client-echoed copy
+        # so a save round-trip cannot persist it into the aggregate.
+        model.pop("release_date", None)
         model_by_ref[ref] = model
+
+    alias_map = _merge_trained_model_alias_rows(model_by_ref)
+    if alias_map:
+        model_by_ref = {
+            ref: row for ref, row in model_by_ref.items() if ref not in alias_map}
 
     provider_by_id = _unique_index(providers, "provider_id", "providers")
     for index, provider in enumerate(providers):
@@ -472,20 +582,26 @@ def normalize_document(
                 f"credentials[{index}].authorization.models must be a bounded array",
                 field=f"credentials[{index}].authorization.models",
             )
+        seen_sources: set[ModelRef] = set()
         seen_models: set[ModelRef] = set()
         for model_index, raw_ref in enumerate(raw_models):
-            ref = ModelRef.from_value(
+            source_ref = ModelRef.from_value(
                 raw_ref, field=f"credentials[{index}].authorization.models[{model_index}]")
-            if ref not in model_by_ref:
-                raise ModelRoutingError(
-                    f"credential authorization references unknown model {ref}",
-                    field=f"credentials[{index}].authorization.models[{model_index}]",
-                )
-            if ref in seen_models:
+            if source_ref in seen_sources:
                 raise ModelRoutingError(
                     "credential authorization contains a duplicate model",
                     field=f"credentials[{index}].authorization.models",
                 )
+            seen_sources.add(source_ref)
+            ref = alias_map.get(source_ref, source_ref)
+            if ref not in model_by_ref:
+                raise ModelRoutingError(
+                    f"credential authorization references unknown model {source_ref}",
+                    field=f"credentials[{index}].authorization.models[{model_index}]",
+                )
+            if ref in seen_models:
+                # Provider respellings collapsed into one trained model.
+                continue
             seen_models.add(ref)
             authorized_models.append(ref.public_dict())
         credential["authorization"] = {
@@ -524,11 +640,13 @@ def normalize_document(
                     "confirmed offering cannot carry pending_model_id",
                     field=f"offerings[{index}].pending_model_id",
                 )
-            ref = ModelRef.from_value(offering.get("model"), field=f"offerings[{index}].model")
+            source_ref = ModelRef.from_value(
+                offering.get("model"), field=f"offerings[{index}].model")
+            ref = alias_map.get(source_ref, source_ref)
             official = model_by_ref.get(ref)
             if official is None:
                 raise ModelRoutingError(
-                    f"offering references unknown model {ref.creator_id}/{ref.model_id}",
+                    f"offering references unknown model {source_ref.creator_id}/{source_ref.model_id}",
                     field=f"offerings[{index}].model",
                 )
             unsupported = set(capabilities) - set(official["capabilities"])
@@ -594,6 +712,16 @@ def normalize_document(
         deployment["offering_id"] = offering_id
         deployment["connection_id"] = connection_id
         deployment["wire_model_id"] = wire_model_id
+        if deployment.get("max_output_tokens") is not None:
+            deployment["max_output_tokens"] = _positive_int(
+                deployment.get("max_output_tokens"),
+                f"deployments[{index}].max_output_tokens",
+            )
+            if deployment["max_output_tokens"] > 1_000_000:
+                raise ModelRoutingError(
+                    "deployment max_output_tokens exceeds the hard ceiling",
+                    field=f"deployments[{index}].max_output_tokens",
+                )
         deployment["priority"] = _non_negative_int(
             deployment.get("priority", 100), f"deployments[{index}].priority")
         deployment["enabled"] = bool(deployment.get("enabled"))
@@ -636,7 +764,9 @@ def normalize_document(
         "contract_version": CONTRACT_VERSION,
         "revision": normalized_revision,
         "creators": sorted(creators, key=lambda row: row["creator_id"]),
-        "models": sorted(models, key=lambda row: (row["creator_id"], row["model_id"])),
+        "models": sorted(
+            model_by_ref.values(),
+            key=lambda row: (row["creator_id"], row["model_id"])),
         "providers": sorted(providers, key=lambda row: row["provider_id"]),
         "provider_accesses": sorted(accesses, key=lambda row: row["provider_access_id"]),
         "connections": sorted(connections, key=lambda row: row["connection_id"]),
@@ -658,8 +788,18 @@ def public_projection(document: Mapping[str, Any]) -> dict[str, Any]:
     than secret material.  Keeping it in the public aggregate is required for
     lossless revision-CAS edits; the encrypted value remains accessible only
     through the repository's independent secret operation.
+
+    Model rows additionally carry the derived ``release_date`` fact from
+    :func:`lib.model_info.release_date` when the vendor date is known.  It is
+    stamped here, on the read boundary only, and stripped again by
+    :func:`normalize_document`, so it never becomes persisted owner state.
     """
-    return normalize_document(document)
+    projected = normalize_document(document)
+    for model in projected["models"]:
+        date = _release_date(model["model_id"])
+        if date:
+            model["release_date"] = date
+    return projected
 
 
 __all__ = [

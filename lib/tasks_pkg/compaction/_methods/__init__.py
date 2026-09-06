@@ -27,7 +27,7 @@ Methods
 
 Both are registered steps: select them via
 ``task['config']['compaction']['steps']``.  Both respect
-``ctx.is_in_cache_prefix`` and call ``ctx.stamp`` for durable placeholders,
+``ctx.is_in_cache_prefix`` and call ``ctx.stamp`` for request-local evidence,
 exactly like the built-ins, and neither calls the LLM.
 
 This package is a FACADE: the implementations live in cohesive submodules

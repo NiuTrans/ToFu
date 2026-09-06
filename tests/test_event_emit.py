@@ -48,8 +48,10 @@ class TestBuildEventByteIdentity(unittest.TestCase):
     def test_messages_snapshot(self):
         self._assert_identical(
             build_event(EventType.MESSAGES_SNAPSHOT, roundNum='fallback',
+                        kind='state', model='m1',
                         label='Fallback · 3条', messages=[{'role': 'user'}]),
             {'type': 'messages_snapshot', 'roundNum': 'fallback',
+             'kind': 'state', 'model': 'm1',
              'label': 'Fallback · 3条', 'messages': [{'role': 'user'}]})
 
     def test_project_external_edit(self):
@@ -61,9 +63,9 @@ class TestBuildEventByteIdentity(unittest.TestCase):
     def test_swarm_inbox_inject(self):
         self._assert_identical(
             build_event(EventType.SWARM_INBOX_INJECT, roundNum=2, count=1,
-                        agentIds=['a1']),
+                        agentIds=['a1'], previews=[{'agentId': 'a1', 'text': 'ok'}]),
             {'type': 'swarm_inbox_inject', 'roundNum': 2, 'count': 1,
-             'agentIds': ['a1']})
+             'agentIds': ['a1'], 'previews': [{'agentId': 'a1', 'text': 'ok'}]})
 
     def test_done_built_incrementally(self):
         # The done event is assembled with conditional keys; build_event(TYPE)

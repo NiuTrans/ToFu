@@ -278,7 +278,7 @@ class TestSwarmOnChassis(unittest.TestCase):
         self.assertIn('No substantive answer',
                       agent.result.final_answer or '')
 
-    def test_llm_error_with_genuine_partial_completes(self):
+    def test_llm_error_with_genuine_partial_stays_failed(self):
         from lib.swarm.types import SubAgentStatus
         calls = {'n': 0}
 
@@ -293,7 +293,7 @@ class TestSwarmOnChassis(unittest.TestCase):
 
         agent = _mk_agent(dispatch_fn=dispatch)
         agent._run_loop(time.time())
-        self.assertEqual(agent.result.status, SubAgentStatus.COMPLETED.value)
+        self.assertEqual(agent.result.status, SubAgentStatus.FAILED.value)
         self.assertIn('LLM call failed at round 2',
                       agent.result.error_message or '')
         self.assertIn('partial findings', agent.result.final_answer or '')

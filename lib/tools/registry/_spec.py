@@ -187,9 +187,9 @@ class ToolContext:
     def project_remote(self) -> bool:
         """True when this task's project is bound to a REMOTE worktree.
 
-        Tool names and parameter schemas stay identical; descriptions gain the
-        local-execution hint from :func:`lib.tools.project.with_remote_hint`.
-        The binding is evaluated live for every assembly.
+        Tool names, descriptions, and parameter schemas stay identical. The
+        environment provider emits the local-execution contract in tail user
+        context. The binding is evaluated live for every assembly.
         """
         from lib.desktop.remote import remote_worktree_binding
         return remote_worktree_binding(self.cfg) is not None
@@ -207,9 +207,9 @@ class ToolContext:
           1. The structured ``convRefs`` / ``convRefTexts`` field — the
              authoritative signal set by the send path when a reference is
              attached (present on raw conversation rows).
-          2. The server-injected wrapper signature
+          2. The server-projected wrapper signature
              ``[REFERENCED_CONVERSATION`` ... ``title="`` — what
-             ``conv_message_builder`` prepends to the user message after
+             ``conv_message_builder`` renders with the user message after
              resolving a ref (present on API-built messages, which no longer
              carry ``convRefs``). The ``title="`` guard distinguishes the
              real injected block from someone quoting the bare token.

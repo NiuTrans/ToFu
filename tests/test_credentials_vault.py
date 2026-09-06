@@ -415,11 +415,15 @@ def _run_inject(messages, *, has_real_tools=True):
 
 
 def _system_full_text(messages):
-    content = messages[0]['content']
-    if isinstance(content, list):
-        return '\n\n'.join(b.get('text', '') for b in content
-                           if isinstance(b, dict))
-    return content or ''
+    parts = []
+    for message in messages:
+        content = message.get('content')
+        if isinstance(content, list):
+            parts.extend(b.get('text', '') for b in content
+                         if isinstance(b, dict))
+        elif content:
+            parts.append(str(content))
+    return '\n\n'.join(parts)
 
 
 def test_vault_block_spliced_with_names_never_values(_isolated_vault):
@@ -453,8 +457,7 @@ def test_vault_block_absent_when_vault_empty(_isolated_vault):
 
 
 def test_vault_block_idempotent_and_own_cache_block(_isolated_vault):
-    """A second injection must not duplicate; and the block rides its OWN
-    content block so a vault CRUD never invalidates the static prefix."""
+    """A second injection replaces only the managed tail carrier."""
     v = _isolated_vault
     v.set_entry('github_token', _SECRET)
     messages = [{'role': 'system', 'content': 'Base.'}]
@@ -462,12 +465,12 @@ def test_vault_block_idempotent_and_own_cache_block(_isolated_vault):
     _run_inject(messages)
     full = _system_full_text(messages)
     assert full.count('<credential_vault>') == 1
-    content = messages[0]['content']
-    assert isinstance(content, list)
-    idx_blocks = [b.get('text', '') for b in content
-                  if isinstance(b, dict) and '<credential_vault>' in b.get('text', '')]
-    assert len(idx_blocks) == 1
-    assert 'Base.' not in idx_blocks[0]
+    assert messages[0]['content'] == 'Base.'
+    carriers = [message for message in messages
+                if message.get('_contextComposer')]
+    assert len(carriers) == 1
+    assert '<credential_vault>' in str(carriers[0]['content'])
+    assert 'Base.' not in str(carriers[0]['content'])
 
 
 def test_vault_block_in_run_command_env_end_to_end(_isolated_vault, monkeypatch):

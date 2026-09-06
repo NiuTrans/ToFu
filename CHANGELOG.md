@@ -1,237 +1,655 @@
 # Changelog
 
+- Activated all three `paper.podcast.*` operations for Tofu-DB. Large scripts
+  and metadata are isolated from compact mutable status documents, so startup
+  interruption never reads or rewrites generation payloads. An exact,
+  tenant-scoped generating index caps cross-owner interruption at 256 rows;
+  owner growth is capped at 4,096 artifacts. Upsert preserves the original
+  creation time and atomically maintains documents, counts, the generating
+  index, receipt, and content-redacted outbox record. Owner isolation,
+  cross-owner interruption, SQLite differential, lost-ACK replay, and
+  exhaustive syscall-error/short-write recovery certify the path. The
+  executable surface is 304/331; 27 operations remain default-denied.
+
+- Activated all eight owner-scoped `paper.report.*` operations and both
+  `paper.translation.*` operations for Tofu-DB. Report bodies and mutable
+  second-pass metadata use separate bounded blob documents, while direct
+  identities and one compact descending index keep reads independent of body
+  size and make accounting updates avoid report rewrites. Exact owner quotas,
+  prefix-safe identities, report-presence publication, receipts, and outbox
+  effects commit atomically. Reopen, bounded excerpts, latest-index integrity,
+  UTF-8 payload enforcement, SQLite differential, and exhaustive
+  syscall-error/short-write recovery tests certify the path. The executable
+  surface is 301/331; 30 operations remain default-denied.
+
+- Restored clean Rust release gates for Tofu-DB: `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings` now pass from a clean checkout.
+  Intentional paper-note domain naming, the bounded raw-archive request
+  envelope, and the explicit research-workspace CAS boundary carry narrow
+  documented lint decisions; a pre-existing integration event indentation
+  drift is formatted. The complete 499-test library suite remains green.
+
+- Activated all ten owner-scoped `paper.library.*` operations for Tofu-DB.
+  Large parsed text and auxiliary JSON live in bounded blob-capable core
+  documents while mutable metadata lives in compact state documents, so title
+  repair and index maintenance never rewrite paper bodies. Exact owner counts,
+  prefix-safe updated/hash/arXiv indexes, bounded fan-in projections, and a
+  64 MiB response ceiling keep reads and writes resource-safe. Upsert, delete,
+  title backfill, receipts, and outbox effects commit atomically. Reopen,
+  projection, owner-isolation, SQLite differential, and exhaustive
+  syscall-error/short-write recovery tests certify the path. The executable
+  surface is 291/331; 40 operations remain default-denied.
+- Activated all three owner-scoped `raw_archive.*` operations for Tofu-DB.
+  Parent Attempt fencing, tenant and Attempt byte accounting, exact owner and
+  conversation counts, and compact task/round/Attempt/conversation indexes
+  make capture, lazy reads, quota scrubbing, and deletion bounded without
+  scanning provider bodies. Compressed parts spill through owner-bound blobs;
+  strict zlib decoding rejects truncation, trailing bytes, malformed streams,
+  and decompression overflow. Conversation deletion atomically retires archive
+  state and releases identity claims with the legacy lifecycle. SQLite
+  differential and exhaustive syscall-error/short-write recovery tests certify
+  the path. The executable surface is 281/331; 50 operations remain
+  default-denied.
+
+- Activated all four owner-scoped `paper.note.*` operations for Tofu-DB.
+  Blob-capable note documents and a compact prefix-safe
+  paper/language/created index preserve chronological CRUD without scanning
+  note bodies. An exact 4,096-note owner quota and 64 MiB response ceiling
+  bound growth and reads; documents, indexes, counts, receipts, and outbox
+  effects commit atomically. Reopen, owner-isolation, SQLite differential, and
+  exhaustive syscall-error/short-write tests certify the path. The executable
+  surface is 278/331; 53 operations remain default-denied.
+
+- Activated all five owner-scoped `research.artifact`, `research.artifacts`,
+  `research.directions`, and `research.workspace` operations for Tofu-DB.
+  Research reports and workspaces use bounded blob-capable documents, while
+  compact prefix-safe state and descending-created indexes keep direction
+  discovery independent of multi-megabyte report bodies. Artifact quota,
+  workspace revision CAS, receipt, and outbox changes publish atomically.
+  Reopen, owner-isolation, SQLite differential, and exhaustive syscall-error
+  and short-write tests certify both write paths. The executable surface is
+  274/331; 57 operations remain default-denied.
+
+- Activated all ten owner-scoped `optimizer.proposal` and `optimizer.action`
+  operations for Tofu-DB. Blob-capable documents, exact owner counts, and
+  prefix-safe created/applied/proposal/expiry indexes preserve legacy CRUD,
+  joins, filters, expiry selection, and timestamp ordering while bounding each
+  owner at 4,096 proposals and 2,048 actions, list results at 500, and responses
+  at 8 MiB. Status-filtered proposal reads and active action/expiry reads use
+  dedicated compact indexes, so they never hydrate unrelated multi-MiB rows. Proposal
+  foreign-key checks, documents, indexes, receipts, and outbox effects commit
+  atomically; reopen, owner-isolation, SQLite differential, embedded-NUL index,
+  and exhaustive syscall-error/short-write tests certify the path. The
+  executable surface is 269/331; 62 operations remain default-denied.
+
+- Activated both `log_aggregate` operations for Tofu-DB. Bounded owner-scoped
+  documents, an age-leading sweep index, and a stable insertion sequence
+  preserve legacy merge, filter, ICU-LIKE, total, and tie-order behavior
+  without an unbounded table scan. Flush, sweep-index replacement, outbox,
+  and recovery publish atomically; deterministic syscall-error/short-write,
+  reopen, owner-isolation, and SQLite differential tests certify the path.
+  The executable surface is 259/331; 72 operations remain default-denied.
+
+- Activated bounded atomic `turn.visible.sync` for Tofu-DB. The executor's
+  accumulated Flow/Autopilot messages now converge through the same owner and
+  current-Attempt fence as live Turn events. Empty virtual-user ghosts are
+  removed before authority access; root replacement, deterministic child
+  Turns and terminal Attempts, stable tool segments, projection-head
+  retirement, indexes, search invalidation, Attempt/conversation replay, and
+  the conversation revision publish in one OCC transaction. The executable
+  surface is 257/331; 74 operations remain default-denied.
+
+- Activated atomic `turn.related.announce` for Tofu-DB. A bounded owner-scoped
+  read resolves the requested related Turns and Attempts, then advances the
+  exact live root through a head-consistent no-op projection patch. The root
+  revision, large-projection checkpoint/patch chain, Attempt event,
+  conversation replay event, conversation revision, and outbox publish in one
+  OCC transaction. Exhaustive syscall-error/short-write recovery and SQLite
+  differential coverage certify the bridge. The executable surface is
+  256/331; 75 operations remain default-denied.
+
+- Activated atomic `turn.steer.commit` for Tofu-DB. The command fences the
+  exact live, unqueued, task-bound Attempt and its current Turn before adding
+  one command-keyed operator injection. Projection replacement, checkpoint
+  retirement, conversation revision, compact replay patch, receipt, and
+  outbox now publish in one OCC transaction; duplicate command payloads and
+  lost acknowledgements preserve the frozen storage.v1 behavior. SQLite
+  differential coverage and exhaustive syscall-error/short-write recovery
+  certify the transition. The executable surface is 255/331; 76 operations
+  remain default-denied.
+
+- Activated atomic `turn.queue.activate` and `turn.queue.cancel` for Tofu-DB.
+  Both commands consume the exact queue/Turn/Attempt binding under one OCC
+  transaction. Activation installs recovery, dispatchable, and lane-live
+  indexes before publishing one revision and replay event; cancellation
+  removes only the never-started pair, its Attempt/event/index state, and the
+  queue row. Receipt replay, SQLite differential tests, and exhaustive syscall
+  failure/short-write recovery certify both transitions. The executable
+  surface is 254/331; 77 operations remain default-denied.
+
+- Activated atomic `turn.create_pair` for Tofu-DB. One OCC commit now creates
+  the submitted and pending Turns, their initial Attempt event streams, an
+  optional exact queue binding, one conversation revision, one replay event,
+  and all owner/global identity, recovery, timing, lane, activity, search,
+  receipt, and outbox state. A compact per-lane live-Attempt index makes the
+  idle fence independent of transcript size; command replay returns the
+  original pair after a lost ACK. The executable surface is 252/331; 79
+  operations remain default-denied.
+
+- Activated owner/revision/index-scoped `turn.image.get` for Tofu-DB. The
+  query materializes only the selected Turn, rejects live rows, returns a
+  stale revision witness before touching image data, and moves a valid direct
+  base64 value into one bounded streaming response. Legacy preview-only
+  PNG/JPEG/GIF/WebP payloads remain compatible; malformed, foreign, missing,
+  oversized, or out-of-range images fail closed without exporting the Turn.
+  The machine IR now owns the 20-image and 8 MiB source bounds, and exact
+  SQLite differential coverage exercises both historical encodings. The
+  executable surface is 251/331; 80 operations remain default-denied.
+
+- Activated bounded `turn.sync.prune` and `turn.events.prune` for Tofu-DB.
+  Every conversation-sync write now publishes an owner-scoped age marker;
+  Attempt replay envelopes also publish an exact Attempt/event reference in
+  the same OCC commit. Sync pruning processes at most 999 events and 64 MiB
+  per transaction, preserves the monotonic sync head, and carries enough
+  locator evidence to release references after conversation deletion has
+  retired the event range. Terminal Attempts maintain a settled-time cursor;
+  event pruning validates the exact Attempt, current Turn and projection-head
+  fences before retiring at most 64 Attempt ranges and 200,000 rows under a
+  64 MiB hydration ceiling. Both operations are resumable, owner isolated,
+  and leave permanent Turn projections untouched. SQLite differential replay,
+  conversation-delete coverage, and exhaustive syscall-error/short-write
+  crash recovery cover the boundary. Existing authorities will receive the
+  new indexes only through the explicit migration required before cutover;
+  startup never scans or backfills them. The executable surface is 250/331;
+  81 operations remain default-denied.
+
+- Activated atomic `turn.compact` for Tofu-DB. A new owner-scoped lane
+  covering index keeps validation proportional to compact identity, parent,
+  lifecycle, revision, and timestamp metadata instead of hydrating every
+  retained Turn blob. One transaction now validates the conversation CAS and
+  adjacent anchors, removes the bounded folded graph, rewrites retained
+  projections and ancestry, inserts the summary Turn, repairs counts and
+  indexes, and publishes a snapshot-required sync invalidation plus compact
+  content-digest outbox evidence. Compaction scans at most 100,000 metadata
+  rows, admits at most 2,000 combined structural mutations under a 64 MiB
+  hydration ceiling, and accepts at most 512 projection updates totaling
+  8 MiB. SQLite
+  differential replay and exhaustive syscall-error/short-write crash tests
+  cover the boundary. The executable surface is 248/331; 83 operations remain
+  default-denied.
+
+- Activated bounded `turn.recover` for Tofu-DB. A compact owner-scoped live
+  Attempt index makes restart work proportional to pending/running Attempts
+  instead of all historical Turn payloads. Each call scans at most 10,000
+  index rows, settles at most 500 Turns and 8 MiB of hydrated projections, and
+  preserves the legacy creation-time and live-task guards plus exact
+  `recovered`/`remaining` progress. Attempt and Turn settlement, projection
+  head retirement, search invalidation, conversation revision, terminal
+  event, sync replay, outbox effect, and live-index removal publish
+  atomically. SQLite differential replay and exhaustive syscall-error and
+  short-write crash recovery cover the boundary. The executable surface is
+  247/331; 84 operations remain default-denied.
+
+- Activated `turn.event.record` with exact revision-fenced projection patches,
+  cumulative text frames, first-event Attempt start, terminal settlement and
+  browser-receipt merge. Turn, Attempt, compact replay event, conversation
+  revision/sync, logical outbox, and the optional cold task-event carrier share
+  one OCC commit; external responses do not duplicate the internal sync frame.
+  Patch application is capped at 1 MiB, 65,536 operations, and depth 128.
+  Live projections above 64 KiB now leave the hot Turn row as a compact
+  descriptor over one immutable checkpoint and at most 64 exact patches; reads
+  use bounded point lookups, rollover retires one head generation, and terminal
+  settlement materializes once. Conversation trash/restore/purge carries this
+  state without startup scans, while missing or inconsistent head records fail
+  closed.
+  Conversation-sync envelopes retain the legacy top-level `turnId` and, for
+  Attempt changes, `attemptId`, so reducers route compact replay events without
+  hydrating payloads; aggregate deletion events omit an invented identity.
+  Sealed-secret reads also stop echoing internal owner/tenant boundary fields,
+  matching the established storage.v1 projection without weakening scoped
+  lookup validation.
+  Existing model-routing authorities accept receipt-only failed-migration
+  updates without requiring or rewriting the potentially 8-MiB route document;
+  only first creation requires the validated revision-zero document.
+  SQLite differential replay and exhaustive syscall-error recovery cover the
+  creation and terminal-retirement boundaries. A 128-KiB stable projection
+  keeps the physical Turn row below 8 KiB through reopen and the 64-patch
+  rollover boundary. The executable surface is 246/331; 85 operations remain
+  default-denied.
+
+- Activated `turn.perception.record` as Tofu-DB's narrowly scoped effectless
+  command. The owner-bound OCC write appends one closed, content-free browser
+  receipt to its generation Attempt, derives render/transport timing, adopts
+  only task-matched legacy receipt evidence, and enforces the shared 64-row,
+  96-KiB and saturating-counter limits. Observation IDs provide semantic
+  lost-ACK idempotency; no Turn blob, conversation revision, sync event,
+  command receipt, or logical outbox record is created. SQLite differential
+  replay and exhaustive syscall-error/short-write recovery cover the boundary.
+  The executable surface is 245/331; 86 operations remain default-denied.
+
+- Closed the native Turn deletion gap for historical generation Attempts. A
+  compact owner/conversation/Turn directory now tracks at most 64 Attempts in
+  64 KiB and is updated atomically with create, bind, claim, start, and timing
+  indexes. Turn and branch deletion remove every historical Attempt, event
+  range, dispatch/timing index and directory without materializing blob-sized
+  Attempt documents; versioned tombstones retain every Attempt claim until the
+  seven-day ABA fence expires. Conversation trash capsules retain the identity
+  directory and count for permanent purge and later deletion after restore,
+  while Attempt documents/events remain retired so stale work cannot execute.
+  Legacy one-Attempt rows and tombstones
+  remain read compatible and inconsistent multi-Attempt legacy state fails
+  closed. Focused lifecycle, resource-bound, SQLite differential and exhaustive
+  delete/restore fault tests cover the boundary.
+
+- Activated `turn.timing_trace.get/list` through compact owner-scoped
+  task/effective-time and conversation/created-time indexes maintained in the
+  same OCC transaction as Attempt bind, claim, and start. Discovery pages at
+  100 metadata-only rows without reading projection blobs; detail lookup
+  validates the indexed Attempt and Turn before returning the frozen trace or
+  its legacy projection fallback. Owner isolation, exclusive created-time
+  pagination, SQLite differential replay, and exhaustive bind/start
+  syscall-error and short-write recovery cover the boundary. The executable
+  surface is 244/331; 87 operations remain default-denied.
+
+- Activated `turn.attempt.dispatchable.list` and
+  `turn.attempt.dispatch_worker`. Conversation-executor attempts now maintain
+  a tenant-global, owner-bearing created-time index capped at 32 results; each
+  result is revalidated against exact owner Turn/attempt records in one MVCC
+  snapshot. Worker dispatch validates a canonical explicit principal and
+  atomically enqueues the deterministic durable job, binds the attempt, removes
+  discovery eligibility, and publishes attempt/sync/outbox state. Lost-ACK
+  replay requires the existing binding and job to agree. SQLite differential
+  replay and exhaustive syscall-error/short-write recovery cover the boundary.
+  The executable surface is 242/331; 89 operations remain default-denied.
+
+- Activated `turn.attempt.create` with exact per-conversation command replay,
+  owner-fenced attempt identity, projection CAS, bounded resume/checkpoint
+  validation, regenerate tail deletion, optional submitted-turn editing, and one
+  atomic Turn/attempt/event/sync/header/outbox commit. Deterministic
+  syscall-error and short-write recovery plus SQLite differential replay cover
+  the new boundary. The executable surface is 240/331; 91 operations remain
+  default-denied.
+
+- Activated `turn.attempt.bind`, `turn.attempt.start`, and `turn.events.list` on the same owner-bound
+  OCC lifecycle as dispatch claims. Pending binding and worker entry now
+  atomically rekey Turn indexes, advance conversation and projection revisions,
+  append exact-sequence attempt events, and publish replay envelopes; running
+  and lost-ACK repeats are stable no-ops. Event replay is owner-fenced, pages at
+  most 5,000 rows under the 8 MiB response ceiling, and hydrates only one
+  compatible page-tail projection while the attempt still owns its Turn.
+  Settled ingestion emits no synthetic event, matching the legacy authority.
+  The executable surface is 239/331, with 92 operations still default-denied.
+
+- Activated `turn.attempt.claim` with exact tenant-global locator resolution,
+  owner non-disclosure, pending/queue fencing, OCC race serialization, one-shot
+  legacy claims, and process-qualified lost-ACK replay. Native live-attempt and
+  SQLite terminal-attempt differential tests move the executable surface to
+  236/331 while the remaining 95 operations stay default-denied.
+
+- Activated all sixteen Git-integration workspace and event operations. The
+  tenant-global, owner-bearing queue uses exact natural/row identities,
+  oldest-first ready/integrating indexes, and one exact project claim so the
+  integration worker can claim across owners without allowing two active
+  integrations for one project. Workspace metadata remains user-visible but
+  is omitted from worker projections to preserve storage.v1 behavior. Event
+  history retains 300 records per owner/project and status returns the newest
+  30. SQLite differential coverage, multi-owner project serialization,
+  retention bounds, and exhaustive syscall-error/short-write recovery certify
+  document/index/event/receipt/outbox atomicity.
+
+- Activated all eight durable swarm-session operations. Blob-capable session
+  specifications and agent message/result cores are separated from compact
+  lifecycle and delivery state; delivery acknowledgement no longer rewrites
+  agent transcripts. Exact tenant-global swarm-key claims prevent cross-owner
+  aliasing, while owner-local resumable indexes make startup recovery
+  proportional only to useful work. A 512-session/1,000-agent hard budget,
+  SQLite differential coverage, the 1,000-agent page boundary, owner isolation,
+  and exhaustive checkpoint commit-fault recovery certify the new authority.
+
+- Activated all nineteen orchestration and Goal-run operations behind one
+  authority. Definitions use exact global identities and monotonic update CAS;
+  runs split immutable blob-capable inputs from compact mutable state and event
+  history. Tenant-global owner-bearing indexes support bounded startup recovery
+  without widening public owner scope, while an exact Goal-active claim makes
+  supersession O(1). Goal start atomically cancels the predecessor, appends both
+  events, publishes the replacement, receipt, and outbox effects. Full SQLite
+  differential coverage, cross-owner recovery tests, page-boundary tests, and
+  exhaustive syscall-error/short-write injection lock the new semantics.
+
+- Activated all sixteen conversation queue, lease, reap, and autopilot-marker
+  operations after freezing their bounded Schema IR. Large immutable payload
+  cores are separated from compact mutable lease/binding state; exact global ID
+  claims, owner-local order indexes, narrow owner-bearing worker/lease indexes,
+  and bounded marker feeds preserve isolation without scanning payloads. Real
+  messages atomically supersede synthetic continuation work, idle reap remains
+  receipt-free, and conversation deletion retires every queue and marker edge.
+  SQLite differential coverage plus exhaustive enqueue commit-fault recovery
+  lock ordering, dedupe, lease expiry, lifecycle, receipt, and outbox semantics.
+
+- Activated all twelve timer definition, active-feed, progress, and poll-ledger
+  operations after freezing their bounded Schema IR. Tenant-global owner-bearing
+  timer documents and ID claims support the internal oldest-first active feed;
+  owner-local status/conversation indexes and exact counts preserve isolation and
+  enforce a launch-probed 8–16 active-timer budget with a 64 hard ceiling. Poll
+  append and progress commit atomically, repeated poll IDs never double-advance,
+  and conversation deletion retires timer documents, claims, indexes, counts, and
+  conversation-prefixed poll partitions. Differential, page-boundary, lifecycle,
+  and exhaustive syscall-error/short-write recovery tests cover the new surface.
+
+- Activated all eleven scheduler task and poll operations after freezing the
+  shared physical Schema IR. Scheduled-task documents, tenant-global task-ID claims,
+  owner-local system-key claims, exact owner counts, created/enabled covering
+  indexes, globally sequenced poll documents, and bounded per-task poll
+  indexes now publish in one receipt-backed OCC transaction. Deterministic
+  syscall-error and short-write recovery proves one document/claim/count/index/
+  receipt/outbox prefix. System-key adoption keeps the oldest legacy identity
+  while atomically retiring duplicates; the internal cross-owner feed uses
+  tenant-global covering indexes without granting a tenant-wide scope. Due
+  claims, result accounting, and poll append/list now share the task snapshot,
+  and SQLite differential coverage locks results, errors, and ordering.
+
+- Activated all nineteen `project_brain.*` operations: projection and
+  active-work reads; work, narrative, checker, decision, watch, and cursor
+  transitions. Exact-verified projection documents, a descending owner-local
+  activity index, digest-bound chunked events, bounded checkpoints, receipts,
+  and outbox evidence publish in one OCC transaction. Repeated cursor prepares
+  are pure reads, checkpoint retirement continues incrementally, and native
+  rebuild verifies the retained checkpoint and every event chunk before the
+  projection replacement commits. Startup recovery now reads a bounded,
+  owner-scoped active-work snapshot from the same updated-project index without
+  creating a receipt, outbox record, or second authority. Format-native
+  Tofu-DB authorities are born cutover-complete; cutover calls return the
+  receipt-backed already-complete result and never scan for or fabricate
+  legacy SQL state.
+
+- Activated all five owner-scoped `daily_cost.*` operations. Chronological
+  entity keys bound month/latest reads, blob-capable documents preserve the
+  conversation breakdown, an exact count makes delete-all a range retirement,
+  and command receipt/outbox state commits with each mutation.
+
+- Activated the database-backed request rate limiter with an exact bounded
+  radix-256 sliding-window counter. Admission, event identity, 256-row expiry
+  pruning, bucket clock, receipt, and content-free outbox evidence now publish
+  atomically without scanning or rewriting the bucket's event history.
+
+- Activated `system.reclaim` as one explicit bounded Tofu-DB physical GC round.
+  The daemon now carries its launch-time volume-derived temporary-space budget
+  into authenticated execution; responses expose content-free block, segment,
+  byte, and continuation metrics while retaining the storage.v1 input bounds.
+
+- Exposed owner-scoped `tool_result_artifact.prune` through the same bounded
+  Transaction IR path used by background maintenance. Expiry scans now stop
+  before future rows, exact-verify index identities, and publish deletions with
+  logical outbox evidence atomically.
+
+- Completed the pre-authority `billing.*` surface with redemption-code mint,
+  list, and atomic consume plus indexed stale-reserve queries. Packed 4,096-shard
+  batch/locator/state directories preserve the 10,000-code mint contract below
+  point-witness and transaction-write ceilings.
+
+- Added all four `billing.payment.*` operations to pre-authority Tofu-DB,
+  including exact provider/ID idempotency claims, bounded blob-backed records,
+  created-time listing, and atomic settlement with wallet/ledger credit.
+
 All notable changes to tofu-open are documented in this file.
 
 ## [Unreleased]
 
 ### Changed
 
-- Upgraded slide and topic-video production with an auditable `director` mode:
-  two contrasting, fact-gated plans compete under one independent critic, with
-  deterministic fallback and mode-specific dedup/checkpoints; `standard`
-  remains the single-plan A/B control. Slide plans now carry visual modality,
-  anchors, and page handoffs; PPTD adds semantic metric/quote/comparison/
-  timeline/process/code components plus editable area/doughnut/radar charts.
-  Motion beats preserve real-media queries and renderer candidates, optionally
-  materialise bounded Pexels photo/video assets when configured, require those
-  assets to be used, and publish a credential-free attribution ledger.
-  Background slide jobs now mint one bounded owner-authorized text route for
-  outline, authoring, image, edit, and visual-QA calls, including worker-thread
-  pin propagation and deterministic disposal. An invalid first Connection is
-  recorded as route degradation and skipped so a later authorized candidate
-  can run instead of failing the whole deck. Metric and comparison components
-  also reserve explicit label/support/source regions to prevent dense content
-  from colliding with headline values. Portable slide export canonicalizes
-  audited CJK family aliases, reports every used/embedded/missing family, and
-  production fails closed instead of shipping a partially embedded deck.
-  Two-point arrows export as native PowerPoint connectors with shared marker
-  direction, while process chevrons pin the same geometry adjustment in HTML
-  and OOXML. Outline gates now enforce four layout and visual modalities for
-  decks long enough to support them.
-
-- Project Brain now derives one immutable-conversation work item from runtime
-  todo/file/isolation signals and projects it from the owner-scoped
-  `storage_events` authority. Board and Feed are read-only, the blocked/lease/
-  handoff/dispatch model and model-facing Project Brain tools are removed,
-  narrative context is acknowledged through a final user-role delta, and
-  executable Charter decisions require immutable argv-based Checker versions.
-  The backup-backed one-time cutover preserves Watch plus legacy intent as
-  non-prompt Attention and removes the former Board/Feed/Status authorities.
-
-- Unified queued Turn identity and durable provider diagnostics around the
-  owner-scoped Turn/Attempt model. Queue acceptance now creates the real Turn
-  pair and pending Attempt, activation preserves their presentation identity,
-  cancellation deletes the unstarted pair atomically, and Steer commits its
-  stable injection block before waking the worker. Conversation snapshots now
-  expose a shared thread scope and linked queue IDs. Request Inspector can
-  lazily read secret-scrubbed raw provider request/response archives under a
-  16 MiB-per-Attempt and launch-probed global disk budget, with explicit quota
-  truncation and no TTL or silent eviction. The conversation Surface preserves
-  keyed DOM nodes across provisional acceptance, queue activation, reconnect,
-  and authoritative convergence; concurrent sends choose Steer/Queue/Cancel
-  before composer mutation.
-
-- Generalized long-agent cost control around the actual billed prompt shape.
-  Automatic working sets now derive from provider/model context-price tiers
-  (90% of the last cheaper boundary, 128K fallback), fixed-policy compaction
-  payback follows bounded observed rewrite cadence instead of total task age,
-  and L1 keeps at most 40/48K tokens of cold tool results while protecting the
-  newest complete batch and warm cache prefix. Proactive economics price the
-  before/after tiers separately and count only observed warm-prefix replay.
-  First-dispatch admission scales with the resolved working set under a 256K
-  host ceiling. Turn totals now sum each API round under its own
-  model/provider/tier, and the collapsed footer exposes total, uncached,
-  cache-read, and output tokens together.
-- Added a backend-neutral private field codec for heavy
-  `storage_records/task_results` documents. Runtime checkpoint and generic
-  record writes now compress each controlled string (`segments`, `metadata`,
-  `tool_rounds`, `content`, `thinking`, or `error`) independently at 32 KiB,
-  using a versioned zlib level-1 envelope only when the complete stored field
-  is smaller. Owner, lifecycle, clocks, experiment ID, and other outer fields
-  remain directly queryable. Public `record.get`/`record.list` reads hydrate the
-  unchanged value; compact replay hydrates metadata/error and terminal
-  content/thinking only when requested, never the segment or tool-round history.
-  Summary, abort, and restart-recovery paths can inspect/update outer facts
-  without expanding heavy envelopes, while cost-experiment scans decode only
-  metadata and retain their plaintext top-level experiment prefilter. Reserved
-  key injection and malformed/future/base64/zlib/UTF-8/size-invalid envelopes
-  fail closed under the existing protocol/integrity errors, with one shared
-  64 MiB decoded and stored-payload budget across the selected fields. Physical
-  offline deep-clean now backfills
-  historical task results in metadata-first 64-row/64-MiB pages, proves a
-  canonical decode/encode/decode round trip, writes only strictly smaller
-  documents behind namespace/key/version/source-length CAS, preserves public
-  versions and timestamps, checkpoints each write page, and skips under
-  `--no-vacuum`. `--analyze` derives threshold candidates inside its existing
-  `storage_records` table scan and labels savings as requiring offline semantic
-  validation. A read-only shadow copy of all 1,906 live task results preserved
-  every public digest, version, and timestamp; 696 rows changed from
-  177,187,806 to 78,057,342 bytes, saving 99,130,464 bytes (56.0%) in 3.48
-  seconds. These are logical bytes on a disposable copy; no live row, database
-  page, deployment, or process was changed.
-- Consolidated compaction transcript storage behind the existing owner-scoped
-  `storage_compaction_archives` authority. New `archive.create` writes apply the
-  same backend-neutral per-message codec already used by frozen conversations;
-  reads and idempotency conflicts hydrate the unchanged public message shape,
-  while `payloadSize` remains an honest count of private stored message bytes.
-  Physical offline deep-clean now backfills current documents of at least
-  64 KiB only when canonical round-trip succeeds and bytes strictly decrease.
-  It also migrates only the exact retired
-  `storage_records/transcript_archive` shape: ownership must resolve uniquely
-  through an active or recoverable-trash header, and an existing target must
-  match every public transcript and metadata fact. Insert plus version/length-
-  fenced source retirement is one transaction. Missing/ambiguous owners,
-  malformed rows, duplicate identities, conflicting/oversize targets, and
-  over-64-MiB sources stay recoverable; metadata-first 64-row/64-MiB pages
-  checkpoint independently, and `--no-vacuum` skips the work. A read-only live
-  inventory found 22 current message documents (40,514,151 bytes) and 44 retired
-  documents (56,246,348 bytes), with no invalid codec input, owner ambiguity, or
-  archive-ID collision. Running the exact production path on a disposable copy
-  preserved all 66 public-message digests and all metadata: 6 current rows saved
-  1,046,816 bytes and the 44 migrated message documents saved 5,668,873 bytes.
-  These are logical-byte results on a temporary copy; no live row, database page,
-  deployment, or process was changed.
-- Extended physical offline deep-clean to backfill the already-shipped,
-  backend-neutral Turn projection codec on inactive inline rows of at least
-  64 KiB. This introduces no new stored format: it decodes with the production
-  reader, re-encodes with the production writer, proves canonical public
-  equality, and performs a revision/owner/conversation/length-fenced update
-  only when bytes strictly decrease. Every installed checkpoint/materialized
-  head counter must be inactive; malformed and over-64-MiB rows remain
-  byte-identical. Selection is metadata-first and bounded to 64 rows / 64 MiB
-  of source projection per WAL-checkpointed write page; `--no-vacuum` skips it.
-  `--analyze` derives the threshold candidate rows/source bytes inside its
-  existing Turn-table aggregate scan and labels actual savings as requiring
-  offline semantic validation, avoiding both duplicate I/O and false promises.
-  A read-only production-codec sweep validated all 2,948 current rows with
-  zero errors. The 379 rows at or above the threshold contain 469,166,433 of
-  488,183,469 projection bytes; 300 become strictly smaller, saving exactly
-  65,234,859 bytes (to 403,931,574 bytes). Scanning the other 2,569 rows would
-  save only 2,164,919 more bytes, so the threshold captures 96.79% of possible
-  savings while avoiding 87.14% of row hydrations. The largest improvement is
-  11,377,719 to 8,755,011 bytes. These are read-only logical-byte results; no
-  live Turn, database page, deployment, or process was changed.
-- Removed the frozen header `search_text` copy from every runtime
-  `conversation.get`/`conversation.list` SQL projection. The public metadata
-  shape keeps an empty compatibility placeholder, while search continues to
-  read only the independently rebuilt, owner-scoped
-  `storage_search_conversations`/`storage_search_turns` projection. A read-only
-  live inventory found 4,548 non-empty legacy header copies totaling
-  255,688,300 encoded bytes (largest 11,730,584). On that largest header, a
-  25-run warm local fetch/serialization proxy changed from 12.490 ms median,
-  35,194,962 traced peak bytes and 11,846,724 result bytes to 0.108 ms,
-  3,443 peak bytes and 1,063 result bytes. The physical offline deep-clean now
-  validates each frozen transcript and clears its rebuildable header copy in
-  the same CAS-fenced write as archive compaction; search-only rows retain
-  `messages_json` byte-for-byte, while malformed or over-budget transcripts
-  retain both recovery witnesses. `--analyze` reports exact candidate rows and
-  bytes plus a `rebuildable_conversation_search_text` reason, deriving both the
-  archive total and search subtotal in one table scan. `--no-vacuum` still
-  skips the rewrite. These are local read/reclaim proxies; no live row was
-  rewritten, no disk space was claimed as already returned, and nothing was
-  deployed or restarted.
-- Added bounded per-message compression to the frozen pre-Turn transcript
-  maintenance path. Explicit physical offline deep-clean now interns exact
-  projection copies, gives each message of at least 64 KiB one zlib level-1
-  attempt, and stores a versioned JSON envelope only when it is smaller. The
-  top-level array and message boundaries remain visible, so 128 KiB-budgeted
-  head/tail scans can decode only selected envelopes; SQLite JSONDOC and
-  PostgreSQL JSONB share the same representation. Envelope base64 and declared
-  decoded sizes are capped at 64 MiB; malformed/future/truncated/trailing/nested envelopes fail
-  closed, every update passes a canonical semantic round-trip, and a repeat is
-  write-free. A read-only production-encoder sweep validated all 4,544 current
-  rows with zero invalid/oversize documents: 3,429 become strictly smaller and
-  5,697,009,096 source bytes encode to at most 2,526,642,300 bytes, saving at
-  least 3,170,366,796 bytes (-55.65%). Exact projection interning contributes
-  453,554,222 bytes and compression another 2,716,399,403 bytes. The largest
-  row changes from 62,997,304 to 18,400,552 bytes (-70.79%); its full decode
-  trades 0.154 for 0.353 seconds. A 1,163-message sample changes from
-  12,122,003 to 10,079,123 bytes (-16.85%) while its exact two-message tail
-  remains on the fast path (1.042 versus 1.008 ms). These are stopped-server
-  storage/CPU proxies; no live row was rewritten, deployed, or restarted.
-- Made deep-clean recovery accounting include the known operator-owned
-  directories it previously skipped. `--analyze` now performs independent
-  256-entry, non-recursive, non-symlink scans of retired `db_snapshots`,
-  `pg_backups`, and `retired_migration_artifacts-*`, reports per-file logical,
-  allocated, mtime, and hard-link facts plus per-owner lifecycle, and includes
-  their bytes in the recovery total without generating a deletion command.
-  On the current volume this reveals 19 files / 1,653,562,933,308 allocated
-  bytes that the shallow report omitted, changing total attributed recovery
-  material from 546,554,521,088 to 2,200,117,454,396 bytes. No file content was
-  read and no artifact was mutated or retired.
-- Restored the retired SQLite backup owner's interrupted-copy lifecycle at the
-  canonical Sidecar backup boundary. Before capacity admission, online,
-  fastpath, and offline backup paths now scan at most 256 `db_snapshots`
-  entries and reclaim only unpublished names with the exact historical
-  timestamp/PID/UUID grammar after the shared temporary TTL and a dead-owner
-  check. Published snapshots, near matches, live/fresh files, malformed job
-  manifests, symlinks, and non-regular companions all fail closed; companion
-  removal precedes the large primary and the directory is fsynced. The current
-  two proven-dead partial copies plus journals occupy 343,090,825,216 bytes
-  (about 319.53 GiB). This change schedules safe reclamation on the next backup;
-  it did not delete those files, deploy, restart, or claim a latency/API saving.
-- Closed the last durable `round_usage` bypass at the Sidecar authority and
-  added bounded historical repair to verified-copy/low-space deep clean. New
-  generic or atomic event producers now reuse the same copy-on-change projector
-  as the manager; retained typed or recovered legacy rows remove only private
-  `_wire_*` usage graphs, preserve unknown public fields, and report exact
-  decoded input/output savings. Malformed typed history remains byte-identical,
-  and a repeat pass is write-free. A read-only projection of the current 3,812
-  retained rows changed 3,788 without decode errors and reduced encoded payload
-  from 197,109,232 to 5,220,451 bytes (-97.35%, 191,888,781 bytes). This is a
-  local storage projection, not an already reclaimed live file or deployed
-  latency/RSS/API-billing measurement.
-- Reduced the marginal storage cost of permanent exactly-once command receipts
-  without adding a TTL or weakening replay. Schema 52 creates an empty v2 table;
-  new rows replace arbitrary command IDs with a domain-separated 32-byte key and
-  hexadecimal request digests with 32 binary bytes, while retaining operation
-  attribution and the existing bounded response. A single indexed lookup reads
-  both formats, legacy rows remain byte-for-byte replayable, cross-format
-  duplicates fail closed, and upgrade performs no receipt scan or backfill.
-  SQLite stores the v2 primary key `WITHOUT ROWID`; PostgreSQL renders the same
-  logical schema with `BYTEA`. Reprojecting 380,131 live read-only rows into two
-  temporary SQLite tables reduced table-plus-primary-key pages from 126,812,160
-  to 78,000,128 bytes (-38.49%, 48,812,032 bytes). This is a local physical
-  projection of future row shape, not an immediate live-file shrink, deployed
-  PostgreSQL measurement, end-to-end latency, RSS, or API-billing result.
-- Removed duplicate durable AttemptEvent envelopes from new Conversation Sync
-  replay rows. Schema 51 adds a nullable attempt sequence and a compact partial
-  index without backfill; one fenced JOIN reconstructs the identical public
-  change while old inline rows remain readable. Sync references protect their
-  source from online/offline retention, and turn deletion advances the replay
-  floor before removing events; expired sync keys delete in 256-row batches.
-  Offline recovery probes for the discriminator so a schema-50 authority can
-  still be inspected or cleaned safely before its startup migration.
-  In one real read-only 15,424,589-byte change,
-  a temporary-SQLite proxy reduced encode peak from 30,809,982 to 1,225 bytes,
-  median transaction time from 20.243 to 0.263 ms (77.05x), and WAL from
-  15,540,672 to 12,392 bytes (-99.92%); median hydrated read time was
-  33.765 vs 32.479 ms. These are local storage proxies, not deployed RSS,
-  end-to-end latency, or API-billing savings.
+- Added the seven wallet/ledger `billing.*` operations to pre-authority
+  Tofu-DB. Immutable ledger entries, globally exact ID/ref claims, wallet
+  balance, constant-time recompute aggregates, descending user indexes, and
+  active-reserve projections commit atomically. Signed arithmetic and all
+  scans are bounded; exhaustive syscall/short-write recovery and SQLite
+  differential coverage protect the money prefix.
+- Added all eleven `credential.*` operations to the pre-authority Tofu-DB
+  surface. Tenant-global exact-verified ID/hash indexes, an exact bounded live
+  count and descending owner index now commit atomically with credential core,
+  blob-capable settings, compact mutable state, receipts, and outbox effects.
+  Authentication/touch avoid rewriting large metadata, account suspension is
+  witnessed transactionally, public reads redact hashes, and revocation keeps
+  identify-only tombstones. SQLite differential and exhaustive deterministic
+  syscall/short-write recovery tests cover the full lifecycle.
+- Added all seven `tenant.user.*` operations to the pre-authority Tofu-DB
+  surface. Tenant-global account/email claims and monotonic owner allocation
+  now commit atomically with receipt/outbox effects. Blob-capable immutable
+  profiles are split from compact role/status/login state, exact-email digest
+  indexes prevent collision ambiguity, and bounded created/status indexes
+  avoid profile scans. Public reads never expose password hashes; exhaustive
+  syscall/short-write recovery and SQLite differential tests cover the full
+  account lifecycle.
+- Added all seven `task_results` authority operations to Tofu-DB.
+  Checkpoints use an authenticated owner-bound, tenant-global 64 MiB blob path
+  with version CAS and identical stale-version lost-ACK replay. Compact headers,
+  replay projections, owner-local summaries, live-task indexes, and hashed
+  experiment indexes let replay/list/abort/restart recovery/cost reporting
+  avoid scanning or rewriting full result payloads. Recovery increments the
+  same semantic version and atomically retires its live index; checkpoint
+  metadata changes atomically rekey experiment membership, and experiment
+  responses fail closed above an 8 MiB aggregate. Guarded-v1 checkpoint now
+  folds parent existence, owner/status/recovery
+  fences, task CAS, monotonic cache HWM, and replay-safe last-read LWW into the
+  same OCC transaction; only an exact guard/cache contract echo lets rolling
+  task managers remove compatibility reads. The storage.v2 transport reserves
+  the declared aggregate once and streams up to 64 one-MiB
+  chunks without a second chunk list or final response copy. Differential,
+  cross-reopen, pressure, exhaustive fault, and SQLite differential tests keep
+  all task-result transitions and maintenance queries executable.
+- Bounded Tofu-DB v2 authority acquisition by each admitted request's remaining
+  request/operation deadline. Semantic admission now runs before the authority
+  mutex, so invalid and already-expired frames cannot queue behind a long blob
+  write; a request that exhausts its acquisition budget returns
+  `deadline_elapsed` and never executes after subsequently acquiring the lock.
+- Added receipt-backed `conversation.clone` as one bounded MVCC transaction.
+  It snapshots at most 2,000 Turns/8 MiB of projection, creates a new header,
+  exact count, lane graph, indexes and global Turn claims, remaps Turn/task/
+  archive/parent identities from a command-stable seed, and copies no attempt,
+  run or approval latch. Live source Turns become interrupted static
+  projections with nonterminal tools aborted while source execution continues
+  unchanged. Tests cover source isolation, owner scope, lost-ACK replay, blob
+  projections, and every observed syscall error and write shortfall.
+- Tofu-DB event retention now releases immutable stream prefixes instead of
+  retaining every pruned event block forever. A physical-position index finds
+  the earliest surviving event despite non-monotonic timestamps, metadata v2
+  records a retained cursor while decoding v1, and an owner-scoped durable
+  queue retires at most 128 complete segments per transaction. Logical index
+  deletion, queue progress, and catalog-reference deletion share one OCC
+  commit; exhaustive syscall/short-write recovery verifies the old or new
+  complete state, retired cursors fail explicitly, and appends continue at the
+  original monotonic end.
+- Added explicit bounded Tofu-DB history compaction. A checksummed v2 history
+  manifest can retain a complete immutable segment suffix while preserving the
+  global checkpoint hash; one small CONTROL republication installs it without
+  touching the active WAL. Deterministic syscall, short-write, and lost-sync
+  faults recover only the old or new complete manifest. Backup retention now
+  marks each generation independently across compaction boundaries, and
+  Entity-root reachability follows persisted stream segments plus versioned
+  document, command-receipt, and logical-outbox blob graphs, so live semantic
+  data no longer depends on an unbounded transaction history. The existing
+  single low-priority worker now installs the suffix only when the active WAL
+  is already empty, retaining 16 segments in the lean profile or 64 with a
+  complete launch probe; it never forces a foreground checkpoint.
+- Added explicit authority block garbage collection with a 256 MiB/65,536
+  block victim bound and on-volume mark spill capped at `min(1 GiB, 2% free)`
+  or a 64 MiB lean fallback. It refuses any live in-memory MVCC handle, marks
+  current Entity/capsule/semantic/history/active-WAL references, republishes
+  unchanged CONTROL state so both recovery slots share roots, and only then
+  removes candidates. Repeated rounds converge after partial deletion; fault
+  injection covers every I/O error, short write, and lost sync, while semantic
+  stream and receipt blobs survive history retirement and process reopen. The
+  explicit `collect-garbage` operator command opens only an existing authority,
+  defaults to a non-deleting plan, and requires `--execute` to reclaim blocks.
+- Added owner-scoped site observations for generic authenticated browser
+  research. Authorized runs retain only a query-free, 4 KiB non-executable
+  structural projection with 30-day expiry and a 200-row per-owner LRU;
+  repeated stable observations can reserve 256 KiB of the existing network
+  body budget for matching passive responses, while current URL policy remains
+  authoritative and captured endpoints are never replayed.
+- Expanded the pre-authority Tofu-DB semantic surface from 20 to 46 operations
+  with atomic settled-Turn ingestion plus owner-scoped Turn exists/get/list and
+  conversation revision reads. Ingestion now commits the blob-capable Turn,
+  lane ordinal/head, non-human attempt, conversation header/index/count,
+  search invalidation, sync record, receipt, and outbox together; conversation
+  reads derive full and windowed legacy transcripts from the same authority;
+  bounded sync snapshot/page/changes and attempt lookup expose that committed
+  state with replay-head fencing and no full-history scan on the linear tail.
+  Turn delta reads use an owner/conversation/time revision index to deduplicate
+  overlap retries before materializing large projections and fail closed above
+  their 2,000-row or 8 MiB response budgets. Atomic Turn deletion expands the
+  bounded branch-lane closure before writing, rejects active attempts, removes
+  Turn/attempt/index state, repairs exact lane and conversation counts, and
+  publishes revision- and age-ordered tombstones plus one sync event. Lane
+  allocation remains monotonic across deletion gaps and reconnects new Turns
+  to the latest surviving predecessor; identity claims remain fenced through
+  tombstone retention to prevent delete/recreate ABA. An owner-scoped
+  age-leading index reclaims at most 256 expired tombstones and verified claims
+  per delete, and a 160 MiB aggregate reservation remains the governing
+  memory ceiling while the write cardinality cap rises to 14,336 so the
+  declared 2,000-Turn atomic closure is representable. Settled projection
+  replacement now preserves the `turn_projection_stale`/`turn_in_progress`
+  error taxonomy and atomically rekeys the blob-capable document, lane and
+  delta indexes, conversation revision, search invalidation, receipt-free
+  outbox effect, and compact `turn.patch` replay event. Projection replay uses
+  deterministic append/set/remove/truncate operations instead of copying the
+  full historic Turn into the sync log. Branch create/delete now share that
+  projection-CAS path: server-issued lane identities are stable for a command,
+  nested lane deletion is bounded to 2,000 Turns/256 lanes, and descendant
+  tombstones plus the parent patch publish under one conversation revision and
+  one sync event. Empty branches remain deletable without fabricating Turns.
+  All six compaction-archive operations now use a bounded owner-scoped
+  entity/blob table with a chronological index, exact counts, and
+  tenant-global identity claims. Transcript, summary, and receipt documents
+  are physically separated: summary completion cannot rewrite a large frozen
+  transcript, while conversation clone reuses its content-addressed blob and
+  remaps archive/task identities. Delete/restore detach and reattach history;
+  purge removes its documents and claim. Exhaustive syscall-error and
+  short-write matrices cover archive creation and archive-bearing clone.
+  `system.schema_version` now reports the frozen storage schema directly from
+  generated authority metadata, giving Supervisor and migration tooling a
+  database-independent compatibility probe without physical-store access.
+- Added transactionally installed, authority-bounded persistent Entity root
+  pins. Pinned owner snapshots survive reopen, backup, restore, and retention
+  reachability; immutable IDs, monotonic sequence checks, reserved identity
+  scope, and deterministic commit-fault coverage keep the primitive
+  fail-closed. A transactional count catalog makes create/remove point-read
+  operations and raises the durable ceiling to one million; stores without the
+  catalog may scan and atomically upgrade at most 64 legacy pins.
+- Added exact-root-witnessed Entity range retirement. One commit accepts at
+  most 64 sorted non-overlapping ranges, detaches wholly covered B+Tree
+  subtrees without reading their rows, rewrites only boundary paths, rejects
+  overlapping writes, and publishes a persistent recovery root atomically.
+  A 10,000-key test retires 6,000 keys under fixed read/write ceilings, with
+  exhaustive syscall-error and short-write prefix recovery.
+- Persistent pins can now target a 64-range capsule instead of a whole
+  authority root. Extraction reuses fully covered immutable subtrees, filters
+  only boundary leaves, normalizes mixed-depth fragments with bounded unary
+  wrappers, and commits every new capsule reference before publication; a
+  10,000-key test proves unrelated pages are absent after reopen and backup.
+- Range capsules now restore through a versioned, content-addressed root
+  directory instead of row replay. Up to 64 non-overlapping mounts overlay a
+  base COW tree, base writes and tombstones win, ordinary roots keep the direct
+  page format, and a 6,000-row restore publishes one block. Repeated
+  retire/snapshot cycles, reopen, ordered scans, and every observed syscall or
+  short-write commit fault recover only the complete pre- or post-mount root;
+  retiring the last base row now publishes a real empty root rather than a
+  synthetic tombstone that could hide restored data.
+- Restored range mounts now have an explicit lazy consolidation primitive.
+  Each maintenance commit materializes at most 999 logical rows and 8 MiB,
+  atomically advances the mounted prefix, preserves base overrides and
+  tombstones, and collapses the directory to a direct B+Tree root when done.
+  A 4,000-row test converges in five bounded commits; deterministic failures
+  at every observed syscall and short write recover either equivalent root.
+- The supervised daemon now starts one bounded low-priority mount-maintenance
+  worker only after publishing readiness. It round-robins explicit owner
+  scopes, uses nonblocking authority admission so active foreground work wins,
+  performs at most one bounded consolidation transaction per round, and backs
+  empty authorities from the launch-profile interval up to 60 seconds. Its
+  content-free metrics expose deferrals, failures, rows, bytes, and completed
+  mounts; terminal maintenance faults stop daemon admission. Unit tests cover
+  foreground contention, two-owner fairness, idle backoff and poisoned state,
+  while a cross-process daemon test proves the restored mount is consolidated.
+- New Tofu-DB generation-attempt documents are physically clustered by
+  owner/conversation rather than random attempt ID, removing the primary-key
+  obstacle to constant-boundary conversation retirement. The tenant-global
+  attempt claim now stores a versioned owner/conversation locator, so exact
+  attempt lookup remains bounded and owner-filtered. Legacy eight-byte owner
+  claims and their old document keys remain read-compatible without startup
+  migration. Sync snapshot/page receive only the narrowly required claim-read
+  scope; malformed locators fail closed. Deterministic settled-Turn and delete
+  fault matrices continue to recover only complete semantic prefixes.
+- Added pre-authority `conversation.delete` as an atomic, receipt-backed range
+  lifecycle commit. It pins only the header and conversation-clustered Turn
+  ranges in a durable trash capsule, retires active indexes plus attempt/sync
+  execution state without walking transcript rows, decrements the exact owner
+  count, and publishes bounded trash metadata and an age-leading retention
+  key. Active reads become missing in the same commit, identity claims remain
+  fenced, large blob-backed Turns stay readable through the capsule after
+  reopen, and legacy randomly keyed attempts are hidden by an active-header
+  authorization check. Exhaustive syscall-error and short-write injection
+  converges through command replay to one complete lifecycle state. Restore,
+  purge, and history-compaction publication remain disabled gates.
+- Backup copy and GC marking now derive blob reachability directly from active
+  and persistently pinned Entity graphs. Their explicit streaming walk detects
+  the reserved versioned-document envelope, validates owner-bound bounded blob
+  manifests, and follows every content-addressed chunk without relying on old
+  transaction envelopes. Blob materialization reached through an authoritative
+  Entity value uses the same manifest/owner/content witnesses without a history
+  scan, while arbitrary standalone blob handles retain the stricter transaction
+  witness. A retired range-capsule test proves a 20 KiB blob graph is copied and
+  independently traversable using only the current root; normal open and
+  foreground conversation deletion remain free of value scans.
+- Added receipt-backed `conversation.restore` without row replay. It mounts the
+  recoverable capsule, replaces the header covering index, advances revision
+  and a conversation execution epoch, repairs the exact owner count, removes
+  trash metadata/pin, and dirties search in one commit. Every Turn records its
+  epoch; restored older epochs project with null attempt, empty run identity,
+  interrupted live status, stripped runtime keys, aborted nonterminal tool
+  presentation, and no internal epoch leakage. New post-restore Turns inherit
+  the new epoch and remain fully executable. Reopen, prefix-neighbor isolation,
+  large blob projection, receipt replay, and exhaustive syscall/short-write
+  recovery tests cover the complete delete→restore boundary.
+- Closed the commit sequencer before exposing any restart-required WAL error
+  to a caller. This removes a race that could admit one more transaction after
+  the caller had already observed an ambiguous durability failure; the fault
+  regression now passes 25 consecutive isolated repetitions.
+  Tenant-global OCC claims now preserve SQLite's cross-owner `turn_id` and
+  `attempt_id` uniqueness without widening ordinary owner read authority.
+  Deterministic syscall-error and short-write injection verifies recovery to a
+  complete append, delete, branch-create, or branch-delete prefix across every
+  observed commit operation.
+- Added receipt-backed `conversation.purge` for active or trashed authorities.
+  It bounds identity enumeration to 2,000 Turns, removes the range capsule,
+  trash-age records, and owner-verified global conversation/Turn/attempt claims
+  in one commit, and permits safe identity reuse only after that commit. Turn
+  tombstones now carry their minimal attempt identity and remain inside the
+  trash capsule so purge evidence survives delete and reopen. Deterministic
+  I/O-error and short-write injection converges to one absent identity graph.
+  Owner-scoped `conversation.trash.prune` reuses the same invariant for at
+  most 64 oldest `(deleted_at, identity)` entries and reports whether another
+  bounded page remains; its fault matrix proves replay convergence without a
+  partially purged conversation.
+- Made runtime prompt projection append-only with respect to conversation
+  history: Layer-1 tool-result compaction now changes only the request-local
+  working copy, context/lifecycle/URL/local-routing guidance is emitted as
+  managed tail user messages, and canonical tool schemas/descriptions no
+  longer vary with project roots, remote bindings, memory scope, swarm limits,
+  local PTC routing, or schema budgets. The cache-oriented tool-result sorter
+  is retired to a compatibility no-op, preserving produced history order.
+- Made managed context itself content-addressed and append-only. Recomposition
+  now reuses surviving block bytes, appends only changed versions or explicit
+  retraction tombstones, and restores only blocks removed by compaction.
+  Provider-only PTC/multi-agent tail messages were removed because their
+  position drifted every round; stable policy now lives in the persistent
+  composer carrier. Claude OAuth user-system context uses one fixed carrier
+  after the first user so later history grows behind a stable wire prefix.
+  Programmatic/multi-agent tool projection is now first-decision latched and
+  additive, so serial-gateway trials and ToolScript fallback state no longer
+  rewrite the tool-schema prefix during a task.
 - Fixed an external Turn-checkpoint revision split that made the first
   byte-identical follow-up event advance the Turn while leaving its checkpoint
   one revision behind. The writer now retains that event as an explicit empty
-  patch head; schema 50 repairs only the exact one-revision/no-head cohort by
+  patch head; schema 51 repairs only the exact one-revision/no-head cohort by
   changing fenced metadata without decoding or rewriting checkpoint JSON.
   Conversation-authority `database_integrity` failures now cooperatively abort
   the worker at the next provider/tool gate instead of withholding thousands of

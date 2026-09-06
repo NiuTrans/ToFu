@@ -133,6 +133,7 @@ def test_refresh_preserves_user_policy_while_updating_discovered_facts() -> None
         "enabled": False,
         "priority": 9,
         "extra_headers": {"X-Local-Route": "desk"},
+        "thinking_format": "enable_thinking",
     })
     edited["credentials"][0].update({
         "enabled": False,
@@ -181,6 +182,7 @@ def test_refresh_preserves_user_policy_while_updating_discovered_facts() -> None
     assert document["connections"][0]["priority"] == 9
     assert document["connections"][0]["extra_headers"] == {
         "X-Local-Route": "desk"}
+    assert document["connections"][0]["thinking_format"] == "enable_thinking"
     assert document["credentials"][0]["enabled"] is False
     assert document["credentials"][0]["quota_policy"] == {"rpm": 5}
     offerings = {

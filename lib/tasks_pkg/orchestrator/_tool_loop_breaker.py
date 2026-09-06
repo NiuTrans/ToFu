@@ -22,27 +22,28 @@ Classification is structural, never based on the model's prose:
 * a real state-changing tool clears the semantic episode and read coverage.
 
 
-Three extended stagnation detectors cover loop shapes the two base guards
+Two extended stagnation detectors cover loop shapes the two base guards
 cannot see, all derived from the completed tool rows only:
 
-* persistent identical failure (``TOFU_LOOP_FAIL_*``): an opaque shell
-  command keeps exiting non-zero with the same normalized error tail across
-  rounds, even while edits happen in between;
-* success polling (``TOFU_LOOP_POLL_*``): the same command set exits 0 again
-  and again with no intervening state change (verification theatre);
-* observation-only stall (``TOFU_LOOP_OBS_*``): many consecutive rounds that
-  only inspect — read-only tools or provably side-effect-free shell
-  commands — without ever acting on the evidence.
+* persistent identical failure (``TOFU_LOOP_FAIL_*``): the same opaque shell
+  command keeps exiting non-zero with the same normalized error tail in
+  consecutive rounds with no intervening action;
+* success polling (``TOFU_LOOP_POLL_*``): the same command set returns the
+  same successful visible result again and again with no intervening state
+  change (verification theatre).
 
 Each escalates the same way: one corrective user-lane message, a bounded
-grace window, then termination.  Success polling terminates as a CLEAN
+grace window, then termination. Success polling terminates as a CLEAN
 finish (``_toolLoopCleanFinish`` settles finishReason=stop downstream): the
-verified state is the deliverable.  The other two stop with a tool_loop
-error.  Classification always errs toward "the round did something real":
+verified state is the deliverable. Persistent failure stops with a tool_loop
+error. Classification always errs toward "the round did something real":
 any unrecognized shell command counts as a potential state change and
-resets the observation/poll streaks, so exploratory or unusual-but-
-productive commands are never punished.  ``TOFU_LOOP_EXTENDED=0`` disables
-all three; every threshold is env-overridable.
+resets the failure/poll streaks, so exploratory or unusual-but-productive
+commands are never punished. Read-only exploration is deliberately not a
+stall signal: incident ``mtjka09o7g8mit`` produced 33 unique calls and 33
+unique visible results across 24 read-only rounds before the old counter
+stopped it immediately before an edit. ``TOFU_LOOP_EXTENDED=0`` disables both
+extended detectors; every threshold is env-overridable.
 """
 
 from __future__ import annotations
@@ -124,8 +125,6 @@ _AUDIT_KEY = '_toolLoopBreakerAudit'
 _AUDIT_MAX = 64
 
 _STAGNATION_DEFAULTS = {
-    'obs_nudge': ('TOFU_LOOP_OBS_NUDGE', 16),
-    'obs_grace': ('TOFU_LOOP_OBS_GRACE', 8),
     'fail_nudge': ('TOFU_LOOP_FAIL_NUDGE', 4),
     'fail_grace': ('TOFU_LOOP_FAIL_GRACE', 2),
     'poll_nudge': ('TOFU_LOOP_POLL_NUDGE', 4),
@@ -301,12 +300,8 @@ def _guard_state(task: dict[str, Any]) -> dict[str, Any]:
     state.setdefault('read_result_by_request', {})
     state.setdefault('read_evidence_ids', {})
     state.setdefault('pending_artifacts_by_scope', {})
-    state.setdefault('obs_only_streak', 0)
-    state.setdefault('obs_nudged', False)
-    state.setdefault('obs_after_nudge', 0)
     state.setdefault('fail_fp', '')
     state.setdefault('fail_fp_rounds', 0)
-    state.setdefault('fail_fp_mutated', False)
     state.setdefault('fail_fp_nudged', False)
     state.setdefault('fail_fp_after_nudge', 0)
     state.setdefault('poll_sig', '')
@@ -1082,11 +1077,13 @@ def _shell_exit_code(row: dict[str, Any]) -> int | None:
 
 
 def _failure_fingerprint(row: dict[str, Any]) -> str:
-    """Normalized (exit code, error tail) identity for one failed shell row.
+    """Normalized call + (exit code, error tail) identity for one failure.
 
     Timestamps and whitespace are volatile; the last 400 normalized chars
-    carry the actual diagnostic.  A changed fingerprint means the failure
-    MOVED, which is progress and must not count toward the stall.
+    carry the actual diagnostic. Tool identity and canonical arguments are
+    part of the fingerprint so two different probes returning the same generic
+    error can never manufacture a failure streak. A changed fingerprint means
+    the failure moved, which is progress and must not count toward the stall.
     """
     envelope = _tool_result_v2(row)
     text = str(envelope.get('summary') or '') if envelope is not None else ''
@@ -1098,8 +1095,24 @@ def _failure_fingerprint(row: dict[str, Any]) -> str:
     tail = _TIMESTAMP_RE.sub('<TS>', tail)
     tail = re.sub(r'\s+', ' ', tail).strip().lower()
     digest = hashlib.sha256(
-        f'{exit_code}\x00{tail[-400:]}'.encode('utf-8', 'replace'))
+        (f'{row.get("toolName") or ""}\x00{_canonical_args(row)}\x00'
+         f'{exit_code}\x00{tail[-400:]}').encode('utf-8', 'replace'))
     return digest.hexdigest()[:16]
+
+
+def _visible_round_fingerprint(rows: list[dict[str, Any]]) -> str:
+    """Hash ordered calls and the exact model-visible completed outcomes."""
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(str(row.get('toolName') or '').encode('utf-8', 'replace'))
+        digest.update(b'\x00')
+        digest.update(_canonical_args(row).encode('utf-8', 'replace'))
+        digest.update(b'\x00')
+        digest.update(str(row.get('status') or '').encode('utf-8', 'replace'))
+        digest.update(b'\x00')
+        digest.update(_outcome_text(row).encode('utf-8', 'replace'))
+        digest.update(b'\x01')
+    return digest.hexdigest() if rows else ''
 
 
 def _classify_round_rows(
@@ -1154,8 +1167,6 @@ def _update_stagnation_detectors(
         return None
     kinds = _classify_round_rows(task, rows)
     has_mutation = 'mutation' in kinds
-    all_observation = all(
-        kind in ('observation', 'shell_obs') for kind in kinds)
     opaque_rows = [
         row for row, kind in zip(rows, kinds) if kind == 'shell_opaque']
     failing = [
@@ -1163,30 +1174,27 @@ def _update_stagnation_detectors(
         if (_shell_exit_code(row) or 0) != 0
         and _shell_exit_code(row) is not None
     ]
-    opaque_succeeded = any(
-        _shell_exit_code(row) == 0 for row in opaque_rows)
-
     # ── Persistent identical failure ──
-    if failing:
+    # Only uninterrupted, single-failure rounds qualify. A write, inspection,
+    # changed command, mixed batch, or successful command is progress/ambiguity
+    # and resets the detector. This intentionally fails open for active
+    # debugging instead of treating repeated symptoms as proof of stagnation.
+    if len(rows) == 1 and len(failing) == 1:
         fingerprint = _failure_fingerprint(failing[0])
         if fingerprint != state['fail_fp']:
             state['fail_fp'] = fingerprint
             state['fail_fp_rounds'] = 1
-            state['fail_fp_mutated'] = False
             state['fail_fp_nudged'] = False
             state['fail_fp_after_nudge'] = 0
         else:
             state['fail_fp_rounds'] += 1
             if state['fail_fp_nudged']:
                 state['fail_fp_after_nudge'] += 1
-    elif opaque_succeeded:
+    else:
         state['fail_fp'] = ''
         state['fail_fp_rounds'] = 0
-        state['fail_fp_mutated'] = False
         state['fail_fp_nudged'] = False
         state['fail_fp_after_nudge'] = 0
-    if has_mutation and state['fail_fp']:
-        state['fail_fp_mutated'] = True
 
     # ── Success polling ──
     poll_sig = ''
@@ -1196,14 +1204,10 @@ def _update_stagnation_detectors(
             and not failing
             and all(_shell_exit_code(row) == 0 for row in opaque_rows)
             and not any(_row_failed(row) for row in rows)):
-        commands = sorted(
-            re.sub(r'\s+', ' ', str(
-                _parse_args(row).get('command') or '').strip())
-            for row, kind in zip(rows, kinds)
-            if kind in ('shell_obs', 'shell_opaque'))
-        poll_sig = hashlib.sha256(
-            '\x00'.join(commands).encode('utf-8', 'replace')
-        ).hexdigest()[:16]
+        # Command equality alone is not stagnation: build/test output, process
+        # state, and remote jobs can legitimately advance while the polling
+        # command stays fixed. Only an identical visible result accumulates.
+        poll_sig = _visible_round_fingerprint(rows)[:16]
     if poll_sig and poll_sig == state['poll_sig']:
         state['poll_streak'] += 1
         if state['poll_nudged']:
@@ -1219,17 +1223,7 @@ def _update_stagnation_detectors(
         state['poll_nudged'] = False
         state['poll_after_nudge'] = 0
 
-    # ── Observation-only stall ──
-    if all_observation:
-        state['obs_only_streak'] += 1
-        if state['obs_nudged']:
-            state['obs_after_nudge'] += 1
-    else:
-        state['obs_only_streak'] = 0
-        state['obs_nudged'] = False
-        state['obs_after_nudge'] = 0
-
-    # ── Trigger priority: failure > success poll > observation stall ──
+    # ── Trigger priority: failure > success poll ──
     if (state['fail_fp'] and not state['fail_fp_nudged']
             and state['fail_fp_rounds'] >= thresholds['fail_nudge']):
         return ('fail_fp', 'nudge')
@@ -1242,12 +1236,6 @@ def _update_stagnation_detectors(
     if (state['poll_nudged']
             and state['poll_after_nudge'] >= thresholds['poll_grace']):
         return ('poll', 'finish')
-    if (not state['obs_nudged']
-            and state['obs_only_streak'] >= thresholds['obs_nudge']):
-        return ('obs', 'nudge')
-    if (state['obs_nudged']
-            and state['obs_after_nudge'] >= thresholds['obs_grace']):
-        return ('obs', 'stop')
     return None
 
 
@@ -1360,8 +1348,7 @@ def _execute_stagnation_action(
 
     if detector == 'fail_fp':
         signature = (f'fp={state["fail_fp"]} '
-                     f'rounds={state["fail_fp_rounds"]} '
-                     f'mutated={state["fail_fp_mutated"]}')
+                     f'rounds={state["fail_fp_rounds"]}')
         if kind == 'nudge':
             state['fail_fp_nudged'] = True
             state['fail_fp_after_nudge'] = 0
@@ -1434,42 +1421,12 @@ def _execute_stagnation_action(
             ),
             signature=signature,
         )
-
-    signature = f'streak={state["obs_only_streak"]}'
-    if kind == 'nudge':
-        state['obs_nudged'] = True
-        state['obs_after_nudge'] = 0
-        prompt = (
-            '[SYSTEM: OBSERVATION-ONLY STALL DETECTED]\n'
-            f'The last {state["obs_only_streak"]} tool rounds only '
-            'inspected files, search results, or read-only shell output '
-            'without changing any state or running a substantive command.\n\n'
-            'Act on the evidence now: make the change, run the check, or '
-            'finish and report your findings. If you are blocked, say so '
-            'concretely. Further inspection-only rounds '
-            f'({thresholds["obs_grace"]} more) will be stopped by the '
-            'harness.'
-        )
-        _inject_stagnation_nudge(
-            task, state, messages, detector='observation_stall',
-            prompt=prompt, signature=signature, round_num=round_num,
-            tid=tid)
-        return False
-    _audit_stagnation(
-        task, detector='observation_stall', action='stop',
-        signature=signature, round_num=round_num)
-    return _force_stop(
-        task, rs, round_num=round_num, tid=tid,
-        reason='semantic_observation_stall',
-        detail=(
-            'The model spent many consecutive tool rounds only inspecting '
-            'files, search results, or read-only shell output without '
-            'changing any state, including after a corrective instruction '
-            'to act or finish. The task was stopped instead of spending '
-            'more requests.'
-        ),
-        raw=f'observation_stall {signature}',
-    )
+    # Unknown detector state is not evidence of model stagnation. Fail open so
+    # a damaged/old checkpoint cannot terminate productive work.
+    logger.warning(
+        '[%s] conv=%s Ignoring unknown stagnation action: detector=%s kind=%s',
+        tid, task.get('convId', ''), detector, kind)
+    return False
 
 
 def _artifact_resource_scope(row: dict[str, Any]) -> str:

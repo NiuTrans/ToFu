@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -59,6 +60,8 @@ import com.tofu.client.session.ServerLifecycle
 import com.tofu.client.session.ServerState
 import com.tofu.client.session.ServerUrl
 import com.tofu.client.session.SessionManager
+import com.tofu.client.ui.theme.CardShape
+import com.tofu.client.ui.theme.TofuButtonShape
 
 /**
  * Home — the server list / switcher.
@@ -216,10 +219,14 @@ private fun ServerCard(
 
     Card(
         onClick = { onActivate(profile) },
-        shape = RoundedCornerShape(16.dp),
+        shape = CardShape,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface,
         ),
+        // Zero elevation + surface-on-background fill is ~4% contrast in the
+        // dark theme; the hairline is what actually separates card from page
+        // (same role --border plays on the web's cards).
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -363,7 +370,7 @@ private fun EmptyState(onAdd: () -> Unit) {
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(24.dp))
-        FilledTonalButton(onClick = onAdd) {
+        FilledTonalButton(onClick = onAdd, shape = TofuButtonShape) {
             Icon(Icons.Default.Add, null, Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
             Text("Add your first server")

@@ -311,6 +311,25 @@ class TestBuildBody:
         assert body.get('temperature') == 0.6
         assert 'reasoning_effort' not in body
 
+    def test_kimi_k27_code_never_emits_thinking_disabled(self):
+        """K2.7 Code always thinks — ``{'type': 'disabled'}`` is an API
+        error, so depth 'off' must OMIT the thinking field entirely
+        (platform.kimi.ai, 2026-09-03)."""
+        from lib.llm import build_body
+
+        for model in ('kimi-k2.7-code', 'kimi-k2.7-code-highspeed'):
+            body = build_body(model, self.DUMMY_MSGS, max_tokens=4096,
+                              thinking_enabled=True, stream=False)
+            assert body.get('thinking') == {'type': 'enabled', 'keep': 'all'}
+            assert body.get('temperature') == 1.0
+            assert 'reasoning_effort' not in body
+            assert 'top_p' not in body
+            body = build_body(model, self.DUMMY_MSGS, max_tokens=4096,
+                              thinking_enabled=False, stream=False)
+            assert 'thinking' not in body, (model, body)
+            assert body.get('temperature') == 1.0
+            assert 'reasoning_effort' not in body
+
     def test_fable_detected_as_claude_family(self):
         """Anthropic Fable models take the Claude thinking shape."""
         from lib.llm import build_body, is_claude

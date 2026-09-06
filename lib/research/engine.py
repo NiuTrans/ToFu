@@ -38,7 +38,7 @@ def _emit(task: dict, event: dict) -> None:
 #: Task fields persisted so a crashed process can re-spawn this job.
 _MANIFEST_FIELDS = (
     'task_id', 'user_id', 'direction', 'lang', 'n_ideas', 'seed_arxiv_ids',
-    'conv_id', 'workdir')
+    'model', 'conv_id', 'workdir')
 
 
 def _write_manifest(task: dict, state: str) -> None:
@@ -68,6 +68,7 @@ def run_research_task(task: dict) -> None:
                 lang=task.get('lang') or 'en',
                 user_id=int(task['user_id']), n_ideas=task.get('n_ideas'),
                 seed_arxiv_ids=task.get('seed_arxiv_ids'),
+                model=task.get('model') or None,
                 abort_event=task.get('abort_event'),
                 emit=lambda ev: _emit(task, {'type': 'stage', **ev}))
 
@@ -112,11 +113,12 @@ def resume_interrupted_research() -> int:
         request = normalize_research_request(
             m.get('direction') or '', lang=m.get('lang') or 'en',
             n_ideas=m.get('n_ideas'),
-            seed_arxiv_ids=m.get('seed_arxiv_ids'))
+            seed_arxiv_ids=m.get('seed_arxiv_ids'), model=m.get('model'))
         task = _new_research_task(
             task_id, direction=request.direction, workdir=workdir,
             lang=request.lang, n_ideas=request.n_ideas,
             seed_arxiv_ids=request.seed_arxiv_ids,
+            model=request.model,
             conv_id=m.get('conv_id') or '', user_id=user_id)
         _research_runtime.spawn(task_id, run_research_task, task)
 
@@ -128,6 +130,7 @@ def resume_interrupted_research() -> int:
 
 def produce_research(direction: str, *, lang: str = 'en', n_ideas: int = 6,
                      conv_id: str = '', seed_arxiv_ids=None,
+                     model: str | None = None,
                      user_id: int) -> dict:
     """Create + spawn an auto-research job; return {task_id, deduped}.
 
@@ -145,7 +148,7 @@ def produce_research(direction: str, *, lang: str = 'en', n_ideas: int = 6,
     owner_user_id = require_user_id(user_id, context='produce research')
     request = normalize_research_request(
         direction, lang=lang, n_ideas=n_ideas,
-        seed_arxiv_ids=seed_arxiv_ids)
+        seed_arxiv_ids=seed_arxiv_ids, model=model)
     key = request.dedup_key(owner_user_id)
     tid = _research_task_id()
     wd = os.path.join(research_root(), 'jobs', tid)
@@ -153,6 +156,7 @@ def produce_research(direction: str, *, lang: str = 'en', n_ideas: int = 6,
         key, tid, direction=request.direction, workdir=wd,
         lang=request.lang, n_ideas=request.n_ideas,
         seed_arxiv_ids=request.seed_arxiv_ids,
+        model=request.model,
         conv_id=conv_id, user_id=owner_user_id)
     if existing:
         return {'task_id': existing, 'deduped': True}
@@ -163,7 +167,7 @@ def produce_research(direction: str, *, lang: str = 'en', n_ideas: int = 6,
         _research_runtime.finish(
             tid, error=exc, error_context='research:start')
         raise
-    logger.info('[Research] started %s direction=%r lang=%s ideas=%d seeds=%d',
+    logger.info('[Research] started %s direction=%r lang=%s ideas=%d seeds=%d model=%s',
                 tid, request.direction[:60], request.lang, request.n_ideas,
-                len(request.seed_arxiv_ids))
+                len(request.seed_arxiv_ids), request.model or 'auto')
     return {'task_id': tid, 'deduped': False}

@@ -268,6 +268,10 @@
           "kind": "function"
         },
         {
+          "name": "_modelBrand",
+          "kind": "function"
+        },
+        {
           "name": "_modelShortName",
           "kind": "function"
         },
@@ -910,6 +914,10 @@
           "kind": "function"
         },
         {
+          "name": "_modelBrand",
+          "kind": "function"
+        },
+        {
           "name": "_getCurrentTheme",
           "kind": "function"
         },
@@ -1007,6 +1015,14 @@
           "kind": "function"
         },
         {
+          "name": "newChat",
+          "kind": "function"
+        },
+        {
+          "name": "updateSendButton",
+          "kind": "function"
+        },
+        {
           "name": "getActiveConv",
           "kind": "function"
         },
@@ -1047,6 +1063,14 @@
         {
           "source": "settings/provider_render.js",
           "path": "settings/provider_render.js"
+        },
+        {
+          "source": "settings/local_deploy.js",
+          "path": "settings/local_deploy.js"
+        },
+        {
+          "source": "settings/access_matrix.js",
+          "path": "settings/access_matrix.js"
         },
         {
           "source": "settings/visibility_defaults.js",

@@ -38,6 +38,7 @@ export const ERROR_KIND_LABELS: Readonly<Record<string, string>> = Object.freeze
   internal: 'Internal error',
   generic: 'Error',
   bad_request: 'Bad request',
+  not_found: 'Not found',
   content_refused: 'Quality check failed',
   upstream_error: 'Upstream error',
   worker_lost: 'Worker lost',

@@ -11,6 +11,16 @@ import {
 } from '../../feature-registry';
 import type { I18nKey } from '../../i18n';
 import { createLifecycleScope, type LifecycleScope } from '../../lifecycle';
+import type {
+  ModelRoutingConnection,
+  ModelRoutingCredentialMetadata,
+  ModelRoutingDocument,
+  ModelRoutingModelRef,
+  ModelRoutingOffering,
+  ModelRoutingProvider,
+  ModelRoutingProviderAccess,
+  ProviderBundle as ContractProviderBundle,
+} from '../../api/api-v1-model-routing.generated';
 
 type SttKind = 'openai' | 'groq' | 'omni' | 'custom';
 type SttCapability = 'transcription' | 'audio_chat';
@@ -22,82 +32,22 @@ interface SttProviderMeta {
   defaultModel: string;
 }
 
-interface RoutingProvider {
-  provider_id: string;
-  name: string;
-  scope: 'public' | 'owner';
-  brand?: string;
-}
+type RoutingProvider = ModelRoutingProvider;
+type RoutingAccess = ModelRoutingProviderAccess;
+type RoutingConnection = ModelRoutingConnection;
+type RoutingCredential = ModelRoutingCredentialMetadata;
+type RoutingDocument = ModelRoutingDocument;
 
-interface RoutingAccess {
-  provider_access_id: string;
-  provider_id: string;
-  enabled: boolean;
-  quota_policy: Record<string, unknown>;
-}
-
-interface RoutingConnection {
-  connection_id: string;
-  provider_access_id: string;
-  base_url: string;
-  protocol: string;
-  enabled: boolean;
-  priority: number;
-  extra_headers: Record<string, string>;
-}
-
-interface RoutingCredential {
-  credential_id: string;
-  provider_access_id: string;
-  kind: 'api_key' | 'local_identity';
-  secret_reference: string;
-  key_hint: string;
-  enabled: boolean;
-  authorization: {
-    connection_ids: string[];
-    models: Array<{ creator_id: string; model_id: string }>;
-  };
-  quota_policy: Record<string, unknown>;
-}
-
-interface RoutingOffering {
-  offering_id: string;
-  provider_access_id: string;
+interface RoutingOffering extends ModelRoutingOffering {
   identity_state: 'confirmed';
-  model: { creator_id: string; model_id: string };
-  enabled: boolean;
+  model: ModelRoutingModelRef;
   stale: boolean;
-  capabilities: string[];
-  context_window: number;
-  priority: number;
 }
 
-interface RoutingDocument {
-  contract_version: string;
-  creators: Array<{ creator_id: string; name: string }>;
-  models: Array<{
-    creator_id: string;
-    model_id: string;
-    display_name: string;
-    capabilities: string[];
-    context_window: number;
-    quality_rank: number;
-  }>;
-  providers: RoutingProvider[];
-  provider_accesses: RoutingAccess[];
-  connections: RoutingConnection[];
-  credentials: RoutingCredential[];
-  offerings: RoutingOffering[];
-}
-
-interface ProviderBundle {
-  provider: RoutingProvider;
+interface ProviderBundle extends ContractProviderBundle {
   provider_access: RoutingAccess;
-  connections: RoutingConnection[];
-  credentials: RoutingCredential[];
   credential_secrets: Record<string, string>;
   offerings: RoutingOffering[];
-  deployments: Array<Record<string, unknown>>;
   creators: Array<{ creator_id: string; name: string }>;
   models: RoutingDocument['models'];
 }
@@ -126,7 +76,7 @@ interface SttProjection {
   access: RoutingAccess;
   connection: RoutingConnection | null;
   credential: RoutingCredential | null;
-  offering: RoutingOffering | null;
+  offering: ModelRoutingOffering | null;
 }
 
 type SpeechWindow = Window & {
@@ -324,7 +274,7 @@ export function populateSpeechTab(_config?: unknown): void {
 
   if (projection?.offering && projection.connection) {
     const suffix = sttSuffix(kind);
-    setValue(`settingSttModel${suffix}`, projection.offering.model.model_id);
+    setValue(`settingSttModel${suffix}`, projection.offering.model?.model_id || '');
     setValue(`settingSttBase${suffix}`, projection.connection.base_url);
     setValue(`settingSttKey${suffix}`, '');
   }

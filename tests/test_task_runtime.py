@@ -700,6 +700,46 @@ def test_cleanup_stale():
     _ok('cleanup_stale() purges only finished tasks past TTL')
 
 
+def test_terminal_persistence_debt_fences_cleanup_discard_and_capacity():
+    rt = TaskRuntime('durability-fence', ttl=0, max_tasks=1, push_channel='')
+    retained = rt.create(user_id=1, task_id='terminal-persist-pending')
+    retained['status'] = 'error'
+    retained['finished_at'] = time.time() - 60
+    retained['_terminalPersistencePending'] = True
+
+    assert rt.cleanup_stale(max_age=0) == 0
+    assert rt.discard(retained['id']) is None
+    assert rt.get(retained['id']) is retained
+
+    newer = rt.create(user_id=1, task_id='newer-task')
+    assert rt.get(retained['id']) is retained
+    assert rt.get(newer['id']) is newer
+
+    retained.pop('_terminalPersistencePending')
+    assert rt.cleanup_stale(max_age=0) == 1
+    assert rt.get(retained['id']) is None
+    _ok('terminal persistence debt fences every registry eviction path')
+
+
+def test_chat_finalize_latch_fences_cleanup_discard_and_capacity():
+    rt = TaskRuntime('chat-finalize-fence', ttl=0, max_tasks=1, push_channel='')
+    retained = rt.create(user_id=1, task_id='chat-finalize-inflight')
+    retained['status'] = 'done'
+    retained['finished_at'] = time.time() - 60
+    retained['_finalize_started_at'] = time.time()
+
+    assert rt.cleanup_stale(max_age=0) == 0
+    assert rt.discard(retained['id']) is None
+    newer = rt.create(user_id=1, task_id='newer-during-finalize')
+    assert rt.get(retained['id']) is retained
+    assert rt.get(newer['id']) is newer
+
+    retained.pop('_finalize_started_at')
+    assert rt.cleanup_stale(max_age=0) == 1
+    assert rt.get(retained['id']) is None
+    _ok('chat terminal publication latch fences every registry eviction path')
+
+
 def test_stats():
     rt = TaskRuntime('test')
     rt.create(user_id=1)  # pending

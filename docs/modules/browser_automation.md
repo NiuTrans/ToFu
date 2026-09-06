@@ -20,7 +20,7 @@ not alternate browser authorities.
 | Generic deep research | extension `research_url`, `lib/browser/research.py` |
 | DevTools Bridge | extension CDP broker, `lib/browser/handlers/_devtools.py`, `browser_devtools` |
 | Site adapter schema/runtime | `lib/browser/adapters.py` |
-| Site-specific knowledge and health | `lib/site_knowledge.py`, `lib/site_doctor.py` |
+| Site observations, verified knowledge and health | `lib/browser/site_observations.py`, `lib/site_knowledge.py`, `lib/site_doctor.py` |
 | Model-facing browser tools | `lib/tools/browser.py`, `lib/browser/dispatch.py` |
 | Settings/status UI | browser settings and Local Control frontend modules |
 | Extension installation/release | `browser_extension/`, extension release scripts |
@@ -50,9 +50,9 @@ existing host-provider interface.
 5. Load-waiting navigation starts bounded CDP Network capture before leaving `about:blank`, then waits for DOM and network stability. The Tofu client tab (`isClient`, URL under the server origin) is never a navigation target or working-tab seed; targeting it opens a new foreground tab whose id the server re-binds as the working tab.
 6. Poll atomically claims only commands addressed to that owner/device.
 7. Server and extension re-check current tab/domain and grant before every page action.
-8. API/WebSocket evidence is type-filtered, ranked, authorized per URL, redacted, and merged under one context budget.
+8. API/WebSocket evidence is type-filtered, ranked, authorized per URL, redacted, and merged under one context budget. A `research_hints` client may reserve 256 KiB of the unchanged 1 MiB body ceiling for up to five high-confidence passive endpoint templates; it never issues a hinted request, and unmatched current evidence retains the remaining budget.
 9. A URL-addressed file that needs browser cookies is streamed from the response body to bounded server staging; it never enters Chrome's download manager.
-10. Deep research may accumulate virtual-list/hydration data and recognized same-origin pagination in an owned background tab; cross-origin traversal stops.
+10. Deep research may accumulate virtual-list/hydration data and recognized same-origin pagination in an owned background tab; cross-origin traversal stops. After authorization it may retain only the owner-scoped, query-free, non-executable structural projection defined by `contracts/browser_site_observation_v1.schema.json`; raw content and session material remain transient.
 11. DevTools, network, screenshot and trusted input share one serialized per-tab CDP lease; the last holder detaches.
 12. Settlement verifies claim ownership; timeout/cancel/release closes captures, transfers and ephemeral tabs. All leases share one launch-probed process capacity (`TOFU_BROWSER_SESSION_LEASE_CAPACITY`: lean personal 64, distributed 2,048, adaptive personal aligned with the device registry). One lifecycle sweeper orders timed leases instead of one sleeping thread per lease; persistent leases hold capacity until owner release, and failed admission never displaces an existing owner/device lease.
 
@@ -181,7 +181,7 @@ Negotiated DevTools shows “ready”; invocations retain their timeline badge, 
 - Network bodies are transient, bounded, redacted, and independently checked
   against the owner's read policy before entering model context.
 - Deep research is one bounded background-tab lifecycle; it never persists a
-  crawl frontier, captured body, hydration state, or per-site session global.
+  crawl frontier, captured body, hydration state, credential, or session global. Its advisory observation expires, is LRU-bounded to 200 rows per owner, and never authorizes access or replays an endpoint.
 - Adapter schemas are the single machine-readable command contract.
 - One broker owns each tab's CDP attachment; subsystems hold bounded leases and
   never attach/detach behind one another.
@@ -203,7 +203,7 @@ Negotiated DevTools shows “ready”; invocations retain their timeline badge, 
 | Browser-to-server file export | `file_transfer.py`, bridge routes, extension | owner/device/token isolation, same-response reuse, chunk/total/disk bounds, atomic commit, cleanup, typed location |
 | Protocol capability | `protocol.py` + extension | parity, rejection, upgrade UI |
 | SPA/network evidence | extension + `network_evidence.py` | pre-navigation capture, bounds, redaction, per-URL policy |
-| Generic deep research | extension + `research.py` | traversal bounds, endpoint shapes, redirect stops, cleanup |
+| Generic deep research and observations | extension + `research.py`, `site_observations.py`, Sidecar browser domain | traversal/storage bounds, owner isolation, redaction, decay, redirect stops, cleanup |
 | DevTools Bridge | extension + `_devtools.py` | CDP reuse, capability gate, object/console bounds, pause failsafe, redaction |
 | Consent or redirect policy | `access.py`, Sidecar domain | exact scope, revocation, redirect race |
 | Adapter | `adapters.py`, site module | schema, domain, audit, bound provider |

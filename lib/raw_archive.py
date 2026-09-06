@@ -15,6 +15,7 @@ import os
 import shutil
 import tempfile
 from typing import Any
+import time
 import uuid
 import zlib
 
@@ -23,6 +24,7 @@ import orjson
 from lib.log import get_logger
 from lib.log_redaction import redact_text, sensitive_field_name
 from lib.raw_archive_contract import RAW_ARCHIVE_FREE_SPACE_WIRE_MAX_BYTES
+from lib.storage.errors import StorageError
 
 
 logger = get_logger(__name__)
@@ -120,6 +122,36 @@ def _configured_min_free_bytes() -> int:
         value = fallback
     return max(0, min(1024 * 1024 * 1024 * 1024, value))
 
+
+_COMMIT_RETRYABLE_CODES = frozenset(
+    {'database_timeout', 'database_busy', 'database_unavailable'})
+_COMMIT_MAX_ATTEMPTS = 3
+
+
+def _commit_with_retry(
+    client: Any,
+    payload: dict[str, Any],
+    command_id: str,
+) -> Any:
+    # Evidence persistence is not user-latency-critical: the 'event' lane's
+    # 10s acquisition cap (vs 2s for 'user') matches a network-filesystem
+    # writer under cgroup pressure. raw_archive.put is idempotent (same
+    # archive_id + digests replays to idempotentReplay), so a classified
+    # transient failure is retried in place instead of dropping the archive
+    # after a single 2s acquisition miss.
+    for attempt in range(_COMMIT_MAX_ATTEMPTS):
+        try:
+            return client.command(
+                'raw_archive.put', payload, command_id,
+                priority='event', deadline=60)
+        except StorageError as exc:
+            retryable = exc.retryable and exc.code in _COMMIT_RETRYABLE_CODES
+            if not retryable or attempt + 1 >= _COMMIT_MAX_ATTEMPTS:
+                raise
+            delay = min(max((exc.retry_after_ms or 0) / 1000.0, 0.25), 2.0)
+            time.sleep(delay)
+    raise StorageError(  # unreachable: the loop either returns or raises
+        'database_internal', 'Raw archive retry loop exited unexpectedly')
 
 class RawArchiveCapture:
     """One provider transport attempt with bounded temporary response state."""
@@ -251,8 +283,8 @@ class RawArchiveCapture:
 
             from lib.storage import get_storage_client
 
-            return get_storage_client(write=True).command(
-                "raw_archive.put",
+            return _commit_with_retry(
+                get_storage_client(write=True),
                 {
                     "archive_id": self.archive_id,
                     "user_id": int(self.context["userId"]),
@@ -282,7 +314,6 @@ class RawArchiveCapture:
                     "available_free_bytes": available_free_bytes,
                 },
                 "raw-archive:" + self.archive_id,
-                deadline=60,
             )
         except Exception as exc:
             # Request Inspector evidence must never replace a provider result.

@@ -642,6 +642,108 @@ def test_enforcer_redrive_on_incomplete_todos(monkeypatch):
     assert 'unfinished item' in messages[-1]['content']
 
 
+def test_enforcer_snapshots_vetoed_answer_as_continuation_prose(monkeypatch):
+    """★ The vetoed final answer is recorded on the task at nudge time.
+
+    Regression pin for the 2026-09-02 lost-report incident: the model
+    stopped with a long report while checklist items were incomplete; the
+    enforcer re-drove the loop; the next tool round's _discard_pretool_prose
+    zeroed task['content'] — and the report vanished from the turn.
+    """
+    monkeypatch.setenv('TOFU_TODO_CONTINUATION_MAX', '3')
+    report = '全部完成。矩阵已恢复并验证通过，硬刷新即可用。'
+    task = _task(_attemptId='attempt-1', _todos=[
+        {'id': '2', 'content': 'unfinished item', 'status': 'pending'},
+    ])
+    messages = [{'role': 'user', 'content': 'do the thing'}]
+    decision = _run(task, messages, content=report)
+    assert decision['action'] == 'continue'
+    entries = task.get('_continuation_prose')
+    assert isinstance(entries, list) and len(entries) == 1
+    assert entries[0]['content'] == report
+    assert entries[0]['llmRound'] == 2          # _run uses round_num=2
+    assert entries[0]['attemptId'] == 'attempt-1'
+
+
+def test_continuation_prose_survives_pretool_discard_in_assembly():
+    """★ Incident replay at the assembly boundary.
+
+    Round 97 stops prose-only and is vetoed (snapshot taken); round 98
+    streams thinking, then issues a tool call — the prelude stamps the batch
+    and _discard_pretool_prose zeroes the accumulators. The assembled
+    segments must still show the vetoed answer BETWEEN the two rounds, the
+    deliverable projection must stay narration-free, and the replay rounds
+    view must not re-attach it to the next round (the wire row appended at
+    nudge time already carries it).
+    """
+    from lib.tasks_pkg.segments import (
+        _rounds_view_from_segments, assemble_segments, derive_content,
+        record_continuation_prose,
+    )
+
+    report = '全部完成。矩阵已恢复并验证通过，硬刷新即可用。'
+    task = _task()
+    record_continuation_prose(task, llm_round=97, content=report,
+                              thinking='rep-think')
+    task['toolRounds'] = [{
+        'toolCallId': 'call_98', 'toolName': 'todo_write',
+        'toolArgs': '{}', 'toolContent': 'ok', 'status': 'done',
+        'llmRound': 98, 'thinking': 'r98-think',
+    }]
+    task['content'] = ''       # post-_discard_pretool_prose
+    task['thinking'] = ''
+    segments = assemble_segments(task)
+    assert [(s['type'], s.get('llmRound')) for s in segments] == [
+        ('thinking', 97), ('text', 97), ('thinking', 98), ('tool_use', 98)]
+    assert segments[1]['text'] == report
+    assert segments[1]['deliverable'] is False
+    assert segments[1]['blockId'] == 'text:continuation-0'
+    assert derive_content(segments) == ''
+    rounds_view = _rounds_view_from_segments(segments)
+    assert len(rounds_view) == 1
+    assert rounds_view[0].get('assistantContent') is None
+    assert rounds_view[0].get('thinking') == 'r98-think'
+
+    # The terminal answer then lands AFTER the preserved record.
+    task['content'] = 'final closer'
+    task['thinking'] = 'final think'
+    segments = assemble_segments(task)
+    assert [s.get('text') for s in segments if s['type'] == 'text'] == [
+        report, 'final closer']
+    assert segments[-1]['deliverable'] is True
+    assert segments[-1]['terminal'] is True
+    assert derive_content(segments) == 'final closer'
+
+
+def test_second_nudge_does_not_duplicate_first_round_prose(monkeypatch):
+    """Two consecutive vetoes record each round ONCE (accumulator reset-free).
+
+    task['content'] is NOT zeroed between continuations, so snapshotting the
+    accumulator would duplicate round N's prose into round N+1's entry; the
+    per-round source keeps entries disjoint and ordered.
+    """
+    monkeypatch.setenv('TOFU_TODO_CONTINUATION_MAX', '3')
+    task = _task(_todos=[
+        {'id': '2', 'content': 'unfinished item', 'status': 'pending'},
+    ])
+    messages = [{'role': 'user', 'content': 'x'}]
+    first = analyse_stream_result(
+        assistant_msg=_stop_msg('answer one'), last_finish_reason='stop',
+        task=task, tid='testtask', model='test-model',
+        round_num=2, _premature_retry_count=0, messages=messages,
+        usage=_clean_usage())
+    assert first['action'] == 'continue'
+    second = analyse_stream_result(
+        assistant_msg=_stop_msg('answer two'), last_finish_reason='stop',
+        task=task, tid='testtask', model='test-model',
+        round_num=3, _premature_retry_count=0, messages=messages,
+        usage=_clean_usage())
+    assert second['action'] == 'continue'
+    entries = task['_continuation_prose']
+    assert [e['content'] for e in entries] == ['answer one', 'answer two']
+    assert [e['llmRound'] for e in entries] == [2, 3]
+
+
 def test_enforcer_allows_stop_when_all_complete(monkeypatch):
     """All todos completed → normal break, no injection."""
     monkeypatch.setenv('TOFU_TODO_CONTINUATION_MAX', '3')

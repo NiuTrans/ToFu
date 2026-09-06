@@ -221,8 +221,8 @@ class DeliverablesTest(unittest.TestCase):
 
     def test_zero_deliverable_guard_injects_directive(self):
         # Worker only explores (read_files) every turn; critic keeps saying
-        # CONTINUE. After 2 zero-deliverable turns the guard must inject the
-        # "start executing" directive into the worker's NEXT context, and it
+        # CONTINUE. After 2 zero-deliverable turns the guard must inject a
+        # focused-next-step directive into the worker's NEXT context, and it
         # must SKIP the critic that turn (synthetic continue).
         worker_ctx = []
         critic_calls = {'n': 0}
@@ -241,7 +241,9 @@ class DeliverablesTest(unittest.TestCase):
             self._loop_definition(max_iter=5), agent_runner=runner,
             on_event=events.append).run()
         # The directive reached a later worker context (the core behavior).
-        self.assertTrue(any('START EXECUTING' in c for c in worker_ctx))
+        self.assertTrue(any(
+            'Do not mutate state merely to satisfy this guard' in c
+            for c in worker_ctx))
         # The guard event fired after the zero-deliverable streak.
         guard_events = [e for e in events if e['type'] == 'zero_deliverable_guard']
         self.assertTrue(guard_events)
@@ -491,7 +493,7 @@ class ReplanTest(unittest.TestCase):
 
 
 class StuckTest(unittest.TestCase):
-    """Flow loops break when verifier feedback repeats without progress."""
+    """Repeated verifier prose changes strategy but never proves a stall."""
 
     def _loop_definition(self, max_iter=10):
         return {'schema': 'tofu.orchestration/v1', 'name': 'Loop', 'nodes': [
@@ -502,9 +504,9 @@ class StuckTest(unittest.TestCase):
                       {'from': 'w', 'to': 'c'}, {'from': 'c', 'to': 'l'},
                       {'from': 'l', 'to': 'e'}]}
 
-    def test_repeating_feedback_breaks_loop(self):
-        # critic emits the SAME CONTINUE feedback every turn → stuck → break
-        # well before the max_iterations=10 cap.
+    def test_repeating_feedback_nudges_once_but_runs_to_cap(self):
+        # The same CONTINUE wording is a weak signal only. It earns one
+        # strategy nudge, while the finite iteration cap remains authoritative.
         events = []
         def runner(node, ctx, it):
             role = node.get('role')
@@ -514,10 +516,14 @@ class StuckTest(unittest.TestCase):
             return {'output': 'work', 'status': 'completed', 'error': ''}
         out = FlowExecutor(self._loop_definition(), agent_runner=runner,
                            on_event=events.append).run()
-        self.assertTrue(any(e['type'] == 'stuck_detected' for e in events))
+        repetition_events = [
+            e for e in events if e['type'] == 'stuck_detected']
+        self.assertEqual(len(repetition_events), 1)
+        self.assertEqual(repetition_events[0]['action'], 'strategy_nudge')
         worker_runs = sum(1 for e in events if e['type'] == 'step_start'
                           and e.get('role') == 'worker')
-        self.assertLess(worker_runs, 10)   # broke early
+        self.assertEqual(worker_runs, 10)
+        self.assertEqual(out['stop_reason'], 'max_iterations')
 
     def test_varied_feedback_does_not_trip_stuck(self):
         # distinct feedback each turn → no stuck; stops on STOP at iter 3.

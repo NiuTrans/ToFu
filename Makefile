@@ -44,6 +44,9 @@ architecture-check: ## Reject retired surfaces and incident-only source notation
 contracts-check: ## Reject generated API client and server drift
 	python3 scripts/gen_conversation_sync_contract.py --check
 	python3 scripts/gen_api_v4_contract.py --check
+	python3 scripts/gen_api_v1_model_routing_contract.py --check
+	python3 scripts/gen_event_contract.py --check
+	python3 scripts/gen_wire_fixtures.py --check
 
 monorepo-check: ## Validate first-party package, version and dependency boundaries
 	python3 scripts/check_monorepo.py

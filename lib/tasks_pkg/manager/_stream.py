@@ -122,7 +122,8 @@ _WAIT_CAUSE_KEYS = {
 
 
 def _append_dispatch_retry_phase(task, event_budget, *, model, attempt,
-                                 reason='', status_code=0):
+                                 reason='', status_code=0,
+                                 strict_model=True, provider_id=''):
     """Refresh exact liveness and persist only sampled retry phase frames."""
     # Dispatch invokes this callback on every direct 429 retry (~3/s). Keep the
     # independent liveness clock exact even when a durable/UI frame is sampled
@@ -138,8 +139,12 @@ def _append_dispatch_retry_phase(task, event_budget, *, model, attempt,
         legacy = (f'⏳ 模型 {model} 限流中，正在排队重试 '
                   f'(第 {attempt} 次)…')
     elif reason == _GATEWAY_RETRY_TOKEN:
-        legacy = (f'⚠️ 后端网关暂时不可用，正在等待恢复'
-                  f'（模型保持 {model}，不会自动切换）… 第 {attempt} 次')
+        if strict_model:
+            legacy = (f'⚠️ 后端网关暂时不可用，正在等待恢复'
+                      f'（模型保持 {model}，不会自动切换）… 第 {attempt} 次')
+        else:
+            legacy = (f'⚠️ 池救援候选 {model} 的上游暂时不可用，'
+                      f'正在尝试其它可用路由… 第 {attempt} 次')
     elif reason:
         legacy = f'Retrying… {reason} ({model}, attempt {attempt})'
     else:
@@ -159,6 +164,8 @@ def _append_dispatch_retry_phase(task, event_budget, *, model, attempt,
         attempt=attempt,
         statusCode=status_code,
         model=model,
+        providerId=str(provider_id or '')[:160],
+        dispatchMode='strict_model' if strict_model else 'pool_rescue',
     ))
 
 
@@ -685,7 +692,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
                     len(_c), len(_round_base_content),
                     len(_t), len(_round_base_thinking))
 
-    def _on_retry(attempt, reason='', status_code=0):
+    def _on_retry(attempt, reason='', status_code=0, *, attempt_model='',
+                  provider_id='', strict_model=True):
         """Emit SSE phase event so user sees retry status instead of 'Waiting…'.
 
         We attach the MODEL name and current cycle count so a long wait
@@ -706,10 +714,12 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         _append_dispatch_retry_phase(
             task,
             _retry_phase_budget,
-            model=model,
+            model=_display_model_name(attempt_model or model),
             attempt=attempt,
             reason=reason,
             status_code=status_code,
+            strict_model=strict_model,
+            provider_id=provider_id,
         )
 
     def _on_waiting(*, status=None, elapsed=None, slot=None):
@@ -741,7 +751,8 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
         _status_kind = str(getattr(status, 'kind', '') or '')
         _secs = max(0, int(_request_elapsed or 0))
         _idle_secs = max(0, int(_semantic_idle or 0))
-        _label = _display_model_name(model)
+        _attempt_model = getattr(slot, 'model', '') if slot is not None else ''
+        _label = _display_model_name(_attempt_model or model)
         if not _status_kind:
             with task['content_lock']:
                 _started = bool(task['content'] != _round_base_content
@@ -770,7 +781,7 @@ def stream_llm_response(task, body, tag='', on_tool_call_ready=None,
             detail=_detail,
             detailKey=_detail_key,
             detailArgs=_args,
-            model=model,
+            model=_attempt_model or model,
         ))
 
     # ── Consume unusable-stream force-rotate signal ──

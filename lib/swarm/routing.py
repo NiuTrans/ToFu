@@ -21,7 +21,6 @@ Entry points: :func:`resolve_multi_agent_backend`,
 
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import Any
 
 from lib.swarm.resource_policy import swarm_max_agents_per_wave
@@ -131,31 +130,17 @@ def project_multi_agent_wire_tools(
         return visible
 
     try:
-        maximum = max(1, min(
+        max(1, min(
             int(max_concurrent_agents),
             8,
             swarm_max_agents_per_wave(),
         ))
     except (TypeError, ValueError):
-        maximum = 3
-    spawn = deepcopy(source)
-    function = spawn.get('function')
-    if not isinstance(function, dict):
-        function = spawn
-    # ``programmatic_workers`` remains an input for caller/API compatibility
-    # and orchestration telemetry, but never changes provider schema bytes.
-    guidance = _local_swarm_guidance(stage, maximum)
-    function['description'] = (
-        guidance + '\n\n' + str(function.get('description') or '')).strip()
-    parameters = function.get('parameters')
-    if isinstance(parameters, dict):
-        properties = parameters.get('properties')
-        agents = properties.get('agents') if isinstance(properties, dict) else None
-        if isinstance(agents, dict):
-            agents['maxItems'] = maximum
-            agents['description'] = (
-                f'Read-only workstreams for this wave (maximum {maximum}). '
-                + str(agents.get('description') or '')).strip()
+        pass
+    # Runtime stage and capacity guidance is appended to the request's trailing
+    # user context by the dispatch boundary. Keep the canonical declaration
+    # byte-identical so routing changes never rewrite the tool prefix.
+    spawn = source
 
     out: list[dict[str, Any]] = []
     inserted = False

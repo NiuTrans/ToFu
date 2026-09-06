@@ -32,7 +32,7 @@ def test_package_import_keeps_dispatch_implementation_dormant():
         '"lib.http_client" in sys.modules, "requests" in sys.modules)'
     )
     assert proc.returncode == 0, proc.stderr[-1200:]
-    assert "DISPATCH-PACKAGE 34 True False False False False False" in proc.stdout
+    assert "DISPATCH-PACKAGE 33 True False False False False False" in proc.stdout
 
 
 @pytest.mark.unit

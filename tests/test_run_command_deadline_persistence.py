@@ -18,9 +18,9 @@ reducer test perfectly green, and each is pinned below:
      test_cold_projection_preserves_deadline).
   2. Neither periodic checkpoint fires during a long command — the
      orchestrator's runs after a round COMPLETES, the stream's on a content
-     delta — so whether a running round reached the DB at all was a race. The
-     spawn callback now forces one write (see `_make_run_command_spawn_cb`),
-     proven end-to-end by
+     delta — so whether a running round reached the DB at all was a race. Once
+     a command outlives the short-command grace window, the spawn lifecycle
+     forces one write (see `_make_run_command_spawn_cb`), proven end-to-end by
      test_running_round_with_deadline_survives_a_real_db_roundtrip.
   3. Both checkpoint writers early-returned when content+thinking were empty,
      which is exactly a tool-only turn
@@ -134,6 +134,30 @@ def test_a_raising_spawn_callback_never_breaks_the_command():
     assert 'survived' in out and 'exit code: 0' in out
 
 
+def test_spawn_callback_sees_registered_pid_on_both_runners():
+    """Stop can target the process even while on_spawn is doing slow work."""
+    import lib.project_mod.run_command as rc
+
+    for stdin_callback in (None, lambda _prompt: None):
+        task = {}
+        seen = []
+
+        def _on_spawn(_start, _deadline):
+            seen.append((task.get('_subprocess_pid'),
+                         task.get('_subprocess_pgid')))
+
+        out = rc.tool_run_command(
+            '/tmp', 'printf registered', task=task,
+            stdin_callback=stdin_callback, on_spawn=_on_spawn)
+
+        assert 'registered' in out
+        assert len(seen) == 1
+        assert isinstance(seen[0][0], int) and seen[0][0] > 0
+        assert isinstance(seen[0][1], int) and seen[0][1] > 0
+        assert '_subprocess_pid' not in task
+        assert '_subprocess_pgid' not in task
+
+
 # ══════════════════════════════════════════════════════════════════
 #  1b. The PROJECT-mode dispatch wires the spawn callback
 # ══════════════════════════════════════════════════════════════════
@@ -144,35 +168,29 @@ def test_a_raising_spawn_callback_never_breaks_the_command():
 # ever happened exactly where they mattered. The same shape as the pet-drag
 # lesson recorded in JOURNAL: N entrances, N-1 implementations.
 
-def test_project_mode_run_command_publishes_deadline_and_checkpoints():
-    """Drive the REAL project-mode handler with a real subprocess and assert
-    the two things the owner demands: (1) the round ends up carrying
-    deadlineTs (from the spawn frame), (2) a checkpoint was forced."""
+def test_project_mode_short_command_collapses_intermediate_writes(monkeypatch):
+    """A short command keeps its clocks but emits only its terminal result."""
     import lib.tasks_pkg.handlers.code_exec as ce
     from lib.tasks_pkg.handlers.project import _handle_project_tool
     from lib.tasks_pkg.manager import create_task
 
     events = []
-    orig_append = ce.append_event
-    ce.append_event = lambda task, ev: events.append(dict(ev))
     checkpoints = []
     import lib.tasks_pkg.manager as mgr
-    orig_ckpt = mgr.checkpoint_task_partial
-    mgr.checkpoint_task_partial = lambda task, force=False: checkpoints.append(force)
-    try:
-        round_entry = {'query': 'run_command', 'toolCallId': 'tc-proj-1',
-                       'status': 'searching'}
-        # A REAL task dict — the checkpoint/event machinery reaches for
-        # events_lock etc., which a bare dict does not have.
-        task = create_task('conv-proj-spawn',
-                           [{'role': 'user', 'content': 'run it'}], {}, user_id=1)
-        _handle_project_tool(
-            task, {}, 'run_command', 'tc-proj-1',
-            {'command': 'echo proj-ok', 'timeout': 9}, 1, round_entry,
-            None, '/tmp', True)
-    finally:
-        ce.append_event = orig_append
-        mgr.checkpoint_task_partial = orig_ckpt
+    monkeypatch.setattr(ce, 'RUN_COMMAND_LIVE_GRACE_MS', 5_000)
+    monkeypatch.setattr(
+        ce, 'append_event', lambda _task, ev: events.append(dict(ev)))
+    monkeypatch.setattr(
+        mgr, 'checkpoint_task_partial',
+        lambda _task, force=False: checkpoints.append(force))
+    round_entry = {'query': 'run_command', 'toolCallId': 'tc-proj-1',
+                   'status': 'searching'}
+    task = create_task('conv-proj-spawn',
+                       [{'role': 'user', 'content': 'run it'}], {}, user_id=1)
+    _handle_project_tool(
+        task, {}, 'run_command', 'tc-proj-1',
+        {'command': 'echo proj-ok', 'timeout': 9}, 1, round_entry,
+        None, '/tmp', True)
 
     assert 'proj-ok' in (round_entry.get('results') or [{}])[0].get('output', ''), (
         'sanity: the project-mode command did not actually run')
@@ -183,12 +201,42 @@ def test_project_mode_run_command_publishes_deadline_and_checkpoints():
     assert round_entry.get('execStartTs'), (
         'execStartTs missing on the project-mode round — the elapsed chip '
         'would anchor on tStart (round ANNOUNCE) and over-report execution.')
-    spawn_evs = [e for e in events
-                 if e.get('type') == 'tool_progress' and e.get('deadlineTs')]
-    assert spawn_evs, 'no tool_progress frame carried the deadline on the wire'
-    assert any(checkpoints), (
-        'no forced checkpoint fired at spawn — switching conversations '
-        'mid-command is still a race in project mode.')
+    assert not events, 'short command paid for an unnecessary progress write'
+    assert not checkpoints, 'short command paid for a running checkpoint'
+
+
+def test_project_mode_long_command_publishes_and_checkpoints(monkeypatch):
+    """After the grace period, countdown and reconnect durability still work."""
+    import lib.tasks_pkg.handlers.code_exec as ce
+    from lib.tasks_pkg.handlers.project import _handle_project_tool
+    from lib.tasks_pkg.manager import create_task
+    import lib.tasks_pkg.manager as mgr
+
+    events = []
+    checkpoints = []
+    monkeypatch.setattr(ce, 'RUN_COMMAND_LIVE_GRACE_MS', 10)
+    monkeypatch.setattr(
+        ce, 'append_event', lambda _task, ev: events.append(dict(ev)))
+    monkeypatch.setattr(
+        mgr, 'checkpoint_task_partial',
+        lambda _task, force=False: checkpoints.append(force))
+    round_entry = {'query': 'run_command', 'toolCallId': 'tc-proj-long',
+                   'status': 'searching'}
+    task = create_task('conv-proj-long',
+                       [{'role': 'user', 'content': 'run it'}], {}, user_id=1)
+
+    _handle_project_tool(
+        task, {}, 'run_command', 'tc-proj-long',
+        {'command': 'sleep 0.08; echo proj-live', 'timeout': 9},
+        1, round_entry, None, '/tmp', True)
+
+    assert 'proj-live' in (round_entry.get('results') or [{}])[0].get(
+        'output', '')
+    spawn_events = [
+        event for event in events
+        if event.get('type') == 'tool_progress' and event.get('deadlineTs')]
+    assert spawn_events, 'long command published no countdown frame'
+    assert any(checkpoints), 'long command has no recoverable running snapshot'
 
 
 def test_every_run_command_dispatch_point_wires_the_spawn_callback():

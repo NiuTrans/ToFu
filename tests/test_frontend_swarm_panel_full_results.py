@@ -145,6 +145,21 @@ const failHtml = _buildSwarmPanelHTML(failRound, [failRound]);
 check('error_head_rendered', failHtml.includes(EHEAD));
 check('error_tail_rendered', failHtml.includes(ETAIL));
 check('error_full_body_rendered', failHtml.includes(bigErr));
+check('all_failed_header_is_failed', failHtml.includes('> Failed</span>'));
+check('terminal_progress_says_finished', failHtml.includes('1/1 agents finished'));
+
+// A mixed terminal set is not a successful completion either.
+const mixedRound = {
+  roundNum: 31, _swarm: true, _swarmActive: false, status: 'done',
+  _swarmAgents: [
+    { id: 'ok', role: 'coder', status: 'done', preview: 'ok' },
+    { id: 'bad', role: 'coder', status: 'failed', preview: 'bad' },
+  ],
+};
+const mixedHtml = _buildSwarmPanelHTML(mixedRound, [mixedRound]);
+check('mixed_header_reports_errors', mixedHtml.includes('Completed with errors'));
+check('mixed_progress_says_finished', mixedHtml.includes('2/2 agents finished'));
+check('mixed_header_not_plain_complete', !mixedHtml.includes('> Complete</span>'));
 
 // ── Criterion 4: canonical agent IDs are never shortened ──
 const idRound = {
@@ -194,7 +209,7 @@ def test_panel_renders_full_results():
     assert proc.returncode == 0, f'node failed: {proc.stderr}\n{output}'
     fails = [ln for ln in output.splitlines() if ln.startswith('FAIL')]
     assert not fails, 'Swarm panel truncated a result:\n' + output
-    assert output.count('PASS') >= 19, f'expected >=19 PASS, got:\n{output}'
+    assert output.count('PASS') >= 24, f'expected >=24 PASS, got:\n{output}'
 
 
 @pytest.mark.skipif(not _node_deps_available(),

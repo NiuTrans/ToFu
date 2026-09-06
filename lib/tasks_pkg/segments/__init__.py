@@ -42,6 +42,12 @@ Pure functions; no Flask, no DB, no LLM.
 # All implementations live in the sub-modules listed above.
 
 from lib.tasks_pkg.segments._types import (  # noqa: E402,F401
+    CONTINUATION_PROSE_FIELD,
+    INJECTED_NOTES_FIELD,
+    NOTE_INTENT_STALL,
+    NOTE_TODO_CONTINUATION,
+    NOTE_KINDS,
+    SEG_SYSTEM_NOTE,
     SEG_THINKING,
     SEG_TEXT,
     SEG_TOOL_USE,
@@ -53,6 +59,8 @@ from lib.tasks_pkg.segments._types import (  # noqa: E402,F401
 
 from lib.tasks_pkg.segments._assemble import (  # noqa: E402,F401
     assemble_segments,
+    record_continuation_prose,
+    record_injected_note,
     tool_use_segment_from_round,
     _merged_rounds,
 )
@@ -83,7 +91,15 @@ from lib.tasks_pkg.segments._serde import (  # noqa: E402,F401
 
 __all__ = [
     'assemble_segments',
+    'record_continuation_prose',
+    'record_injected_note',
     'tool_use_segment_from_round',
+    'CONTINUATION_PROSE_FIELD',
+    'INJECTED_NOTES_FIELD',
+    'NOTE_INTENT_STALL',
+    'NOTE_TODO_CONTINUATION',
+    'NOTE_KINDS',
+    'SEG_SYSTEM_NOTE',
     'derive_content',
     'derive_thinking',
     'derive_tool_rounds',

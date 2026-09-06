@@ -28,6 +28,7 @@ RETIRED_HTTP_PATHS = {
     '/api/v1/project/board/post', '/api/v1/project/board/complete',
     '/api/v1/project/board/block', '/api/v1/project/board/reopen',
     '/api/v1/project/board/delete', '/api/v1/project/board/answer',
+    '/api/v1/project/brain/attention', '/api/v1/project/brain/attention/add',
     '/api/v1/project/charter/commit', '/api/v1/project/charter/pending',
     '/api/v1/project/charter/dismiss',
     '/api/v1/project/charter/decision/update',
@@ -447,15 +448,14 @@ def test_overlap_advice_is_next_round_only_bounded_and_never_persisted(
     assert not any(item['kind'] == 'path_overlap'
                    for item in brain.feed_projection(
                        project, user_id=1)['events'])
-    assert brain.attention_projection(project, user_id=1)['items'] == []
 
 
-def test_checker_versions_gate_charter_and_failure_only_adds_attention(
+def test_checker_versions_gate_charter_and_failure_only_adds_narrative(
         chat_sidecar, tmp_path):
     del chat_sidecar
     from lib.conversations.project_brain import (
-        attention_projection, board_projection, charter_projection,
-        feed_projection, promote_decision, register_checker,
+        board_projection, charter_projection,
+        feed_projection, promote_decision, read_projection, register_checker,
         run_all_enabled_checkers, run_checker, run_matching_checkers,
     )
 
@@ -504,7 +504,7 @@ def test_checker_versions_gate_charter_and_failure_only_adds_attention(
     }, user_id=1)
     failed = run_checker(project, 'python-fail', 1, user_id=1, work_id='pw_test')
     assert failed['ok'] is False
-    assert attention_projection(project, user_id=1)['items'][-1]['kind'] == 'checker'
+    assert 'attention' not in read_projection(project, user_id=1)
     assert feed_projection(project, user_id=1)['events'][0]['kind'] == 'checker_failed'
     # Checker failure has no authority to create or revive work state.
     assert board_projection(project, user_id=1)['active'] == []
@@ -554,8 +554,7 @@ def test_retired_tools_have_zero_schema_and_mutation_routes_are_unregistered():
     assert {
         '/api/v1/project/board', '/api/v1/project/feed',
         '/api/v1/project/charter', '/api/v1/project/brain/status',
-        '/api/v1/project/brain/attention', '/api/v1/project/brain/watch',
-        '/api/v1/project/brain/attention/add',
+        '/api/v1/project/brain/watch',
         '/api/v1/project/brain/checkers',
         '/api/v1/project/brain/checkers/run',
         '/api/v1/project/charter/decision/promote',

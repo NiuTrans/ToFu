@@ -121,7 +121,7 @@ def test_research_job_starts_over_http_without_the_llm_tool_path(monkeypatch):
     monkeypatch.setitem(
         tasks_mod._STARTERS, 'research',
         {'start': _fake_start, 'input': 'direction',
-         'params': ('lang', 'n_ideas', 'seed_arxiv_ids')})
+         'params': ('lang', 'n_ideas', 'seed_arxiv_ids', 'model')})
 
     app = _client()
 
@@ -130,7 +130,7 @@ def test_research_job_starts_over_http_without_the_llm_tool_path(monkeypatch):
             '/api/v1/tasks/start',
             json={'kind': 'research',
                   'direction': 'long-context KV cache compression',
-                  'lang': 'en', 'n_ideas': 4})
+                  'lang': 'en', 'n_ideas': 4, 'model': 'kimi-k3'})
         return r.status_code, await r.get_json()
 
     code, body = _run(go())
@@ -141,6 +141,7 @@ def test_research_job_starts_over_http_without_the_llm_tool_path(monkeypatch):
         "the route dropped or mangled the user's direction")
     assert seen['kw'].get('lang') == 'en'
     assert seen['kw'].get('n_ideas') == 4
+    assert seen['kw'].get('model') == 'kimi-k3'
 
 
 def test_start_route_projects_capability_validation_as_bad_request(monkeypatch):

@@ -48,7 +48,7 @@ def advance_zero_deliverable_streak(
 
 
 def should_inject_zero_deliverable(streak: int) -> bool:
-    """Return whether the shared execute-now safety threshold was reached."""
+    """Return whether the shared convergence-nudge threshold was reached."""
     return streak >= MAX_ZERO_DELIVERABLE_TURNS
 
 

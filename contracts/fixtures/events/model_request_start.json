@@ -1,0 +1,9 @@
+{
+  "emittedAt": 1.5,
+  "model": "s",
+  "providerId": "s",
+  "requestTag": "s",
+  "roundNum": 1,
+  "spanId": "s",
+  "type": "model_request_start"
+}

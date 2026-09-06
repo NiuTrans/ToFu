@@ -3135,7 +3135,7 @@
 /* Model-routing v2 settings: Models are identities; Providers are suppliers. */
 .stg-v2-intro{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin:0 0 12px;padding:10px 0;border-bottom:1px solid var(--border,#ddd)}
 .stg-v2-intro strong{font-size:13px}
-.stg-v2-intro span,.stg-v2-body-head span,.stg-v2-manager-brand span,.stg-v2-diagnostic-note span{color:var(--text-muted,#777);font-size:12px}
+.stg-v2-intro span,.stg-v2-manager-brand span{color:var(--text-muted,#777);font-size:12px}
 
 /* The v2 card reuses the legacy .stg-provider-card chrome (hard border, offset
    shadow, cream head hover) from the application shell; the rules below only
@@ -3145,10 +3145,10 @@ summary.stg-provider-head-v2::-webkit-details-marker{display:none}
 summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993f);outline-offset:-3px}
 .stg-provider-card-v2 .stg-chevron{flex:0 0 auto;transition:transform .18s ease;color:var(--s-ink-soft,#3d362c)}
 .stg-provider-card-v2[open] .stg-chevron{transform:rotate(180deg)}
-.stg-provider-card-v2 .stg-provider-badges .stg-badge{background:rgba(99,102,241,.1);color:#6366f1}
-.stg-provider-card-v2 .stg-provider-badges .stg-badge-models{background:rgba(74,222,128,.12);color:#16a34a}
-.stg-provider-card-v2 .stg-provider-badges .stg-badge.off{background:rgba(248,113,113,.1);color:var(--s-blocked,#c92a2a)}
-.stg-provider-v2-foot{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:9px 13px;border-top:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 28%,transparent);background:var(--s-cream,#f2ecda)}
+.stg-provider-card-v2 .stg-provider-badges .stg-badge{background:rgba(99,102,241,.12);color:#4f46e5}
+.stg-provider-card-v2 .stg-provider-badges .stg-badge-models{background:rgba(22,163,74,.12);color:#15803d}
+.stg-provider-card-v2 .stg-provider-badges .stg-badge.off{background:rgba(220,38,38,.1);color:#b91c1c}
+.stg-provider-v2-foot{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:9px 13px;border-top:1px solid var(--s-line,rgba(26,24,20,.08));background:var(--s-cream,#f2ecda)}
 
 /* Expanded body — v0.15.0 layout: name/Base URL fields, one row per
    credential, and full-width model cards. All rules are card-scoped so the
@@ -3157,86 +3157,99 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
    .stg-provider-body globally (06-file-changes-settings-shell.css) and the v2
    card expands via native <details open>, never the .expanded class. Closed
    details still suppress rendering via UA behavior. */
-.stg-provider-card-v2 .stg-provider-body{display:block;padding:12px 13px 4px;border-top:1.5px solid var(--s-ink,#1a1814);background:var(--s-white,#faf8f3)}
+.stg-provider-card-v2 .stg-provider-body{display:block;padding:14px 16px 6px;border-top:1px solid var(--s-line,rgba(26,24,20,.08));background:var(--s-white,#faf8f3)}
 .stg-provider-card-v2 .stg-field-grid{margin-bottom:2px}
-.stg-provider-card-v2 .stg-models-section{margin-top:12px;padding-top:12px;border-top:2px dashed color-mix(in srgb,var(--s-ink-soft,#3d362c) 70%,transparent)}
+.stg-provider-card-v2 .stg-models-section{margin-top:14px;padding-top:14px;border-top:1px solid var(--s-line,rgba(26,24,20,.08))}
 .stg-provider-card-v2 .stg-models-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
 .stg-provider-card-v2 .stg-models-title{color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}
 .stg-provider-card-v2 .stg-model-list{display:flex;flex-direction:column;gap:8px}
 .stg-provider-card-v2 .stg-empty-sm{margin:0;padding:10px 0;color:var(--s-ink-soft,#3d362c);font-size:11px;font-weight:600;text-align:center}
-.stg-provider-card-v2 .stg-mcard{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1.5px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);box-shadow:var(--s-shadow-xs,2px 2px 0 #1a1814);transition:transform .1s,box-shadow .1s}
-.stg-provider-card-v2 .stg-mcard:hover{transform:translate(-1px,-1px);box-shadow:4px 4px 0 var(--s-ink,#1a1814)}
-.stg-provider-card-v2 .stg-mcard.disabled{opacity:.55;background:var(--s-cream,#f2ecda)}
+.stg-provider-card-v2 .stg-mcard{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--s-line,rgba(26,24,20,.08));border-radius:10px;background:#fff;box-shadow:var(--s-shadow-xs,0 1px 2px rgba(26,24,20,.05));transition:border-color .14s,box-shadow .14s}
+.stg-provider-card-v2 .stg-mcard:hover{border-color:var(--s-line-strong,rgba(26,24,20,.15));box-shadow:var(--s-shadow-sm,0 1px 2px rgba(26,24,20,.04),0 3px 8px rgba(26,24,20,.06))}
+.stg-provider-card-v2 .stg-mcard.disabled{opacity:.55;background:rgba(26,24,20,.02)}
 .stg-provider-card-v2 .stg-mcard.disabled .stg-mcard-id{text-decoration:line-through;text-decoration-thickness:1.5px}
 .stg-provider-card-v2 .stg-mcard-icon{display:flex;align-items:center;justify-content:center;flex-shrink:0;width:24px;height:24px;margin-top:1px}
 .stg-provider-card-v2 .stg-mcard-body{flex:1;min-width:0}
 .stg-provider-card-v2 .stg-mcard-main{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .stg-provider-card-v2 .stg-mcard-id{overflow:hidden;color:var(--s-ink,#1a1814);font:800 12px/1.35 'JetBrains Mono',ui-monospace,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
 .stg-provider-card-v2 .stg-mcard-caps{display:flex;align-items:center;gap:4px;margin-top:5px;flex-wrap:wrap}
-.stg-provider-card-v2 .stg-cap{padding:2px 7px;border:1px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-cream,#f2ecda);color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase}
-.stg-provider-card-v2 .stg-cap.text{color:#2563eb;background:rgba(96,165,250,.12);border-color:#2563eb}
-.stg-provider-card-v2 .stg-cap.vision{color:#7c3aed;background:rgba(167,139,250,.12);border-color:#7c3aed}
-.stg-provider-card-v2 .stg-cap.cheap{color:#16a34a;background:rgba(74,222,128,.12);border-color:#16a34a}
-.stg-provider-card-v2 .stg-cap.image_gen{color:#db2777;background:rgba(244,114,182,.12);border-color:#db2777}
-.stg-provider-card-v2 .stg-cap.embedding{color:#0d9488;background:rgba(45,212,191,.12);border-color:#0d9488}
-.stg-provider-card-v2 .stg-cap.thinking{color:#c2410c;background:rgba(251,146,60,.12);border-color:#c2410c}
+.stg-provider-card-v2 .stg-cap,.stg-v2-manager .stg-cap{padding:2px 8px;border:0;border-radius:999px;background:rgba(26,24,20,.06);color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase}
+.stg-provider-card-v2 .stg-cap.text,.stg-v2-manager .stg-cap.text{color:#2563eb;background:rgba(96,165,250,.14)}
+.stg-provider-card-v2 .stg-cap.vision,.stg-v2-manager .stg-cap.vision{color:#7c3aed;background:rgba(167,139,250,.14)}
+.stg-provider-card-v2 .stg-cap.cheap,.stg-v2-manager .stg-cap.cheap{color:#15803d;background:rgba(74,222,128,.14)}
+.stg-provider-card-v2 .stg-cap.image_gen,.stg-v2-manager .stg-cap.image_gen{color:#db2777;background:rgba(244,114,182,.14)}
+.stg-provider-card-v2 .stg-cap.embedding,.stg-v2-manager .stg-cap.embedding{color:#0d9488;background:rgba(45,212,191,.14)}
+.stg-provider-card-v2 .stg-cap.thinking,.stg-v2-manager .stg-cap.thinking{color:#c2410c;background:rgba(251,146,60,.15)}
 .stg-provider-card-v2 .stg-mcard-stat{overflow:hidden;color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
 .stg-provider-card-v2 .stg-mcard-pricing{margin-top:5px;color:var(--s-ink-soft,#3d362c);font:10px/1.45 'JetBrains Mono',ui-monospace,Menlo,monospace}
 .stg-provider-card-v2 .stg-mcard-aliases{margin-top:5px;font:600 10px/1.45 'JetBrains Mono',ui-monospace,Menlo,monospace}
+.stg-provider-card-v2 .stg-cap-toggle{cursor:default}
+.stg-provider-card-v2 .stg-cap-toggle.thinking.off{border:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 30%,transparent);opacity:.75;color:var(--s-ink-soft,#3d362c);background:transparent}
+.stg-provider-card-v2 .stg-price-label{color:var(--s-ink-soft,#3d362c)}
+.stg-provider-card-v2 .stg-price-val{padding:0 3px;border:1px solid;border-radius:3px;font-weight:800}
+.stg-provider-card-v2 .stg-price-val.in{color:#2563eb;background:rgba(96,165,250,.12);border-color:#2563eb}
+.stg-provider-card-v2 .stg-price-val.out{color:#c2410c;background:rgba(251,146,60,.12);border-color:#c2410c}
+.stg-provider-card-v2 .stg-price-sep{padding:0 4px;color:var(--s-ink-soft,#3d362c)}
+.stg-provider-card-v2 .stg-price-unit{padding-left:6px;color:var(--s-ink-soft,#3d362c);font-size:9px}
+.stg-provider-card-v2 .stg-price-na{color:var(--s-ink-soft,#3d362c);opacity:.7}
+.stg-provider-card-v2 .stg-price-free{color:#16a34a;font-weight:800}
+.stg-provider-card-v2 .stg-aliases-label,.stg-v2-manager .stg-aliases-label{color:var(--s-ink-soft,#3d362c)}
+.stg-provider-card-v2 .stg-alias-chip,.stg-v2-manager .stg-alias-chip{display:inline-flex;align-items:center;gap:3px;margin:1px 4px 1px 0;padding:1px 6px;border:1px solid var(--s-line,rgba(26,24,20,.08));border-radius:6px;background:var(--s-cream,#f2ecda);color:var(--s-gold-dim,#a87d2e)}
+.stg-provider-card-v2 .stg-alias-chip.pending,.stg-v2-manager .stg-alias-chip.pending{border-style:dashed;opacity:.7}
+.stg-provider-card-v2 .stg-alias-x,.stg-v2-manager .stg-alias-x{padding:0 2px;color:var(--s-ink-soft,#3d362c);cursor:pointer;font-weight:800}
+.stg-provider-card-v2 .stg-alias-x:hover,.stg-v2-manager .stg-alias-x:hover{color:#b04c4c}
+.stg-provider-card-v2 .stg-alias-add,.stg-v2-manager .stg-alias-add{margin:1px 0;padding:1px 7px;border:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 30%,transparent);border-radius:6px;background:transparent;color:var(--s-ink-soft,#3d362c);font:inherit;cursor:pointer}
+.stg-provider-card-v2 .stg-alias-add:hover,.stg-v2-manager .stg-alias-add:hover{border-style:solid;border-color:var(--s-gold-dim,#a87d2e);color:var(--s-gold-dim,#a87d2e)}
+.stg-provider-card-v2 .stg-mcard-toggle{margin:0}
 .stg-provider-card-v2 .stg-mcard-actions{display:flex;align-items:center;align-self:center;flex-direction:column;flex-shrink:0;gap:4px}
-.stg-provider-card-v2 .stg-v2-cred-secret{width:100%;min-height:32px;margin-top:6px;padding:6px 9px;border:1.5px solid color-mix(in srgb,var(--s-ink,#1a1814) 45%,transparent);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace}
-.stg-provider-card-v2 .stg-v2-cred-secret:focus{border-color:var(--s-ink,#1a1814);box-shadow:var(--s-shadow-xs,2px 2px 0 #1a1814);outline:none}
+.stg-provider-card-v2 .stg-v2-cred-secret{width:100%;min-height:32px;margin-top:6px;padding:6px 9px;border:1px solid var(--s-line-strong,rgba(26,24,20,.15));border-radius:8px;background:#fff;color:var(--s-ink,#1a1814);font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;transition:border-color .12s,box-shadow .12s}
+.stg-provider-card-v2 .stg-v2-cred-secret:focus{border-color:var(--s-gold,#c9993f);box-shadow:0 0 0 3px var(--s-gold-glow,rgba(201,153,63,.18));outline:none}
 .stg-v2-foot-spacer{flex:1}
-.stg-provider-model-alias,.stg-v2-model-alias,.stg-tpl-wizard-alias{color:var(--s-gold-dim,#a87d2e)!important}
-.stg-provider-cross-candidate{flex:0 0 auto;padding:4px 6px;border:1.5px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-gold,#c9993f);color:var(--s-ink,#1a1814);font-size:9px;font-weight:900;white-space:nowrap;box-shadow:1px 1px 0 var(--s-ink,#1a1814)}
-.stg-provider-model-more{width:100%;min-height:34px;border:0;border-top:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 30%,transparent);background:var(--s-cream,#f2ecda);color:var(--s-ink-soft,#3d362c);font:800 10px/1.2 inherit;cursor:pointer}
+.stg-provider-model-alias,.stg-tpl-wizard-alias{color:var(--s-gold-dim,#a87d2e)!important}
+.stg-provider-cross-candidate{flex:0 0 auto;padding:4px 8px;border:0;border-radius:999px;background:rgba(201,153,63,.16);color:var(--s-gold-dim,#a87d2e);font-size:9px;font-weight:900;white-space:nowrap}
+.stg-provider-model-more{width:100%;min-height:34px;border:0;border-top:1px solid var(--s-line,rgba(26,24,20,.08));background:var(--s-cream,#f2ecda);color:var(--s-ink-soft,#3d362c);font:800 10px/1.2 inherit;cursor:pointer}
 .stg-provider-model-more:hover{background:color-mix(in srgb,var(--s-gold,#c9993f) 20%,var(--s-cream,#f2ecda))}
 .stg-provider-model-more:focus-visible{outline:3px solid var(--s-gold,#c9993f);outline-offset:-3px}
 
-.stg-v2-close,.stg-v2-manager-tabs button,.stg-v2-more{border:1px solid var(--border,#ddd);background:var(--bg-primary,#fff);color:var(--text-primary,#222);font:600 12px/1.2 inherit;cursor:pointer}
-.stg-v2-manager-tabs button:hover,.stg-v2-more:hover{background:var(--bg-hover,#f3f3f3)}
-.stg-v2-close:focus-visible,.stg-v2-manager-tabs button:focus-visible,.stg-v2-more:focus-visible{outline:2px solid var(--accent,#6d5dfc);outline-offset:2px}
+.stg-v2-close,.stg-v2-more{border:1px solid var(--border,#ddd);background:var(--bg-primary,#fff);color:var(--text-primary,#222);font:600 12px/1.2 inherit;cursor:pointer}
+.stg-v2-more:hover{background:var(--bg-hover,#f3f3f3)}
+.stg-v2-close:focus-visible,.stg-v2-more:focus-visible{outline:2px solid var(--accent,#6d5dfc);outline-offset:2px}
 /* Card-foot 管理 button — dashed tofu action chip, same family as the legacy
    provider-card action buttons. */
-.stg-v2-manage{padding:7px 12px;border:1.5px dashed color-mix(in srgb,var(--s-ink,#1a1814) 45%,transparent);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font:800 11px/1.2 inherit;cursor:pointer;white-space:nowrap}
-.stg-v2-manage:hover{border-style:solid;background:color-mix(in srgb,var(--s-gold,#c9993f) 22%,var(--s-white,#faf8f3))}
+.stg-v2-manage{padding:7px 12px;border:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 30%,transparent);border-radius:8px;background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font:800 11px/1.2 inherit;cursor:pointer;white-space:nowrap;transition:border-color .14s,color .14s,background .14s}
+.stg-v2-manage:hover{border-color:var(--s-gold-dim,#a87d2e);color:var(--s-gold-dim,#a87d2e);background:rgba(201,153,63,.07)}
 .stg-v2-manage:focus-visible{outline:3px solid var(--s-gold,#c9993f);outline-offset:2px}
 .stg-v2-switch,.stg-v2-inline-check{display:inline-flex!important;align-items:center;gap:6px;margin:0!important;color:var(--text-secondary,#555);font-size:12px;white-space:nowrap}
 .stg-v2-switch input,.stg-v2-inline-check input{inline-size:auto!important}
 
 .stg-v2-manager-overlay{position:fixed;inset:0;z-index:12000;display:grid;place-items:center;padding:24px;background:rgba(10,12,14,.42);backdrop-filter:blur(2px)}
-.stg-v2-manager{display:grid;grid-template-rows:auto auto minmax(0,1fr);width:min(860px,94vw);max-height:min(760px,88vh);overflow:hidden;border:2px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);box-shadow:8px 8px 0 rgba(0,0,0,.34)}
-.stg-v2-manager-head{display:flex;align-items:center;justify-content:space-between;padding:15px 18px;border-bottom:2px solid var(--s-ink,#1a1814);background:var(--s-cream,#f2ecda)}
+.stg-v2-manager{display:grid;grid-template-rows:auto auto minmax(0,1fr);width:min(860px,94vw);max-height:min(760px,88vh);overflow:hidden;border:1px solid rgba(26,24,20,.18);border-radius:var(--s-radius-lg,14px);background:var(--s-white,#faf8f3);box-shadow:0 24px 70px rgba(26,24,20,.3),0 6px 22px rgba(26,24,20,.14)}
+.stg-v2-manager-head{display:flex;align-items:center;justify-content:space-between;padding:15px 18px;border-bottom:1px solid var(--s-line,rgba(26,24,20,.08));background:var(--s-cream,#f2ecda)}
 .stg-v2-manager-brand{display:flex;align-items:center;gap:10px}
 .stg-v2-manager-brand div{display:grid;gap:2px}
 .stg-v2-manager-brand strong{font-size:14px}
 .stg-v2-close{width:32px;height:32px;border:0;border-radius:6px;background:transparent;font-size:22px}
-.stg-v2-manager-tabs{display:flex;gap:4px;padding:8px 12px;border-bottom:1.5px solid var(--s-ink,#1a1814);overflow-x:auto;background:var(--s-white,#faf8f3)}
-.stg-v2-manager-tabs button{min-height:34px;padding:7px 12px;border-color:transparent;border-radius:6px;color:var(--text-secondary,#555);white-space:nowrap}
-.stg-v2-manager-tabs button.active{border-color:var(--s-ink,#1a1814);background:var(--s-gold,#c9993f);color:var(--s-ink,#1a1814);box-shadow:2px 2px 0 var(--s-ink,#1a1814)}
 .stg-v2-manager-body{min-height:300px;overflow:auto;padding:16px 18px 20px}
 
-.stg-v2-toolbar,.stg-v2-body-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.stg-v2-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
 .stg-v2-toolbar input,#stgModelCatalogSearch{width:min(420px,100%);min-height:38px}
 .stg-v2-toolbar>span{color:var(--text-muted,#777);font-size:11px}
-.stg-v2-body-head>div{display:grid;gap:4px}
-.stg-v2-body-head strong{font-size:13px}
 .stg-v2-list,.stg-v2-catalog-list{border-top:1px solid var(--border,#ddd)}
-.stg-v2-model-row,.stg-v2-detail-row,.stg-v2-catalog-row{display:grid;align-items:center;gap:12px;min-width:0;padding:11px 4px;border-bottom:1px solid var(--border,#ddd)}
-.stg-v2-model-row{grid-template-columns:minmax(190px,1.5fr) minmax(140px,1fr) minmax(140px,.9fr) auto}
+.stg-v2-model-row,.stg-v2-catalog-row{display:grid;align-items:center;gap:12px;min-width:0;padding:11px 4px;border-bottom:1px solid var(--border,#ddd)}
+.stg-v2-model-row{grid-template-columns:minmax(170px,1fr) minmax(0,1.8fr) auto}
 .stg-v2-model-row.is-pending{background:color-mix(in srgb,#f59f00 6%,transparent)}
-.stg-v2-model-identity,.stg-v2-detail-main,.stg-v2-catalog-identity{display:grid;min-width:0;gap:3px}
-.stg-v2-model-identity strong,.stg-v2-detail-main strong,.stg-v2-catalog-identity strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}
-.stg-v2-model-identity span,.stg-v2-detail-main span,.stg-v2-catalog-identity span,.stg-v2-detail-meta,.stg-v2-model-price{overflow:hidden;color:var(--text-muted,#777);font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
-.stg-v2-model-alias{font-size:9px!important}
+.stg-v2-model-row.is-disabled{opacity:.55}
+.stg-v2-model-row.is-disabled .stg-v2-model-identity strong{text-decoration:line-through;text-decoration-thickness:1.5px}
+.stg-v2-model-detail{display:grid;min-width:0;gap:5px}
+.stg-v2-model-stat{white-space:nowrap}
+.stg-v2-model-aliases{display:flex;flex-wrap:wrap;align-items:center;font:600 10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+.stg-v2-model-actions{display:flex;align-items:center;gap:10px}
+.stg-v2-model-identity,.stg-v2-catalog-identity{display:grid;min-width:0;gap:3px}
+.stg-v2-model-identity strong,.stg-v2-catalog-identity strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.stg-v2-model-identity span,.stg-v2-catalog-identity span,.stg-v2-model-price{overflow:hidden;color:var(--text-muted,#777);font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
 .stg-v2-model-meta{display:flex;flex-wrap:wrap;gap:4px 8px;color:var(--text-secondary,#555);font-size:11px}
-.stg-v2-detail-row{grid-template-columns:minmax(150px,.7fr) minmax(180px,1.2fr) minmax(150px,.9fr) auto}
-.stg-v2-detail-row>label:not(.stg-v2-inline-check){display:grid;gap:4px;margin:0;color:var(--text-muted,#777);font-size:10px}
-.stg-v2-detail-row input:not([type="checkbox"]){width:100%;min-width:0}
-.stg-v2-diagnostic-row input:not([type="checkbox"]){font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 
-.stg-v2-note,.stg-v2-diagnostic-note,.stg-v2-pending{margin:0 0 12px;padding:10px 12px;border:1px solid var(--border,#ddd);border-radius:7px;background:var(--bg-secondary,#f7f7f7);color:var(--text-secondary,#555);font-size:12px}
-.stg-v2-diagnostic-note{display:grid;gap:4px}
+.stg-v2-pending{margin:0 0 12px;padding:10px 12px;border:1px solid var(--border,#ddd);border-radius:7px;background:var(--bg-secondary,#f7f7f7);color:var(--text-secondary,#555);font-size:12px}
 .stg-v2-more{width:100%;margin-top:10px;padding:9px;border-radius:6px}
 .stg-v2-catalog-tools{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:0 0 12px}
 .stg-v2-catalog-count{margin:0 0 8px;color:var(--text-muted,#777);font-size:11px}
@@ -3249,16 +3262,16 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
 .stg-tpl-wizard{width:min(720px,94vw)}
 .stg-tpl-wizard .stg-modal-body{display:grid;gap:12px}
 .stg-tpl-wizard-keylabel{display:grid;gap:6px;color:var(--s-ink,#1a1814);font-size:12px;font-weight:800}
-.stg-tpl-wizard-key{width:100%;min-height:38px;padding:8px 10px;border:var(--s-border-sm,1.5px solid #1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace}
-.stg-tpl-wizard-key:focus,.stg-tpl-wizard-search:focus{outline:none;box-shadow:var(--s-shadow-xs,2px 2px 0 #1a1814)}
+.stg-tpl-wizard-key{width:100%;min-height:38px;padding:8px 10px;border:var(--s-border,1px solid rgba(26,24,20,.15));border-radius:8px;background:#fff;color:var(--s-ink,#1a1814);font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace}
+.stg-tpl-wizard-key:focus,.stg-tpl-wizard-search:focus{outline:none;border-color:var(--s-gold,#c9993f);box-shadow:0 0 0 3px var(--s-gold-glow,rgba(201,153,63,.18))}
 .stg-tpl-wizard-keyhint{color:var(--s-ink-soft,#3d362c);font-size:11px;font-weight:500}
 .stg-tpl-wizard-toolbar{display:flex;align-items:center;gap:8px}
-.stg-tpl-wizard-search{flex:1;min-width:0;min-height:36px;padding:7px 10px;border:var(--s-border-sm,1.5px solid #1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font-size:12px}
+.stg-tpl-wizard-search{flex:1;min-width:0;min-height:36px;padding:7px 10px;border:var(--s-border,1px solid rgba(26,24,20,.15));border-radius:8px;background:#fff;color:var(--s-ink,#1a1814);font-size:12px}
 .stg-tpl-wizard-count{color:var(--s-ink-soft,#3d362c);font-size:11px;font-weight:700;white-space:nowrap}
 .stg-tpl-wizard-link{padding:2px 4px;border:0;background:transparent;color:var(--s-gold-dim,#a87d2e);font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap}
 .stg-tpl-wizard-link:hover{color:var(--s-gold,#c9993f)}
 .stg-tpl-wizard-link:focus-visible{outline:2px solid var(--s-gold,#c9993f);outline-offset:2px}
-.stg-tpl-wizard-list{display:grid;max-height:min(470px,55vh);overflow:auto;border:1.5px solid var(--s-ink,#1a1814);border-radius:var(--s-radius,4px);background:var(--s-white,#faf8f3)}
+.stg-tpl-wizard-list{display:grid;max-height:min(470px,55vh);overflow:auto;border:var(--s-border,1px solid rgba(26,24,20,.15));border-radius:10px;background:#fff}
 .stg-tpl-wizard-row{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(120px,.65fr);align-items:center;gap:10px;min-height:52px;padding:8px 10px;border-bottom:1px solid color-mix(in srgb,var(--s-ink,#1a1814) 18%,transparent);cursor:pointer}
 .stg-tpl-wizard-row:last-child{border-bottom:0}
 .stg-tpl-wizard-row:hover{background:var(--s-cream,#f2ecda)}
@@ -3266,6 +3279,12 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
 .stg-tpl-wizard-mid{overflow:hidden;color:var(--s-ink,#1a1814);font:800 12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
 .stg-tpl-wizard-alias{overflow:hidden;font:10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
 .stg-tpl-wizard-meta{color:var(--s-ink-soft,#3d362c);font-size:10px;text-align:right}
+.stg-local-endpoints-input{width:100%;min-height:96px;padding:8px 10px;border:var(--s-border,1px solid rgba(26,24,20,.15));border-radius:8px;background:#fff;color:var(--s-ink,#1a1814);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
+.stg-local-endpoints-input:focus{outline:none;border-color:var(--s-gold,#c9993f);box-shadow:0 0 0 3px var(--s-gold-glow,rgba(201,153,63,.18))}
+.stg-local-endpoint-results{display:grid;gap:6px}
+.stg-local-endpoint-row{padding:6px 8px;border-radius:8px;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+.stg-local-endpoint-row.is-ok{background:rgba(22,163,74,.08);color:#16a34a;border:1px solid rgba(22,163,74,.22)}
+.stg-local-endpoint-row.is-fail{background:rgba(239,68,68,.08);color:var(--s-blocked,#b42318);border:1px solid rgba(239,68,68,.22)}
 
 @media (max-width:760px){
   .stg-section-actions{width:100%;flex-wrap:wrap}
@@ -3285,8 +3304,8 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
   .stg-v2-manager-overlay{align-items:end;padding:0}
   .stg-v2-manager{width:100%;max-height:92dvh;border-radius:10px 10px 0 0}
   .stg-v2-manager-body{min-height:240px;padding:14px}
-  .stg-v2-model-row,.stg-v2-detail-row{grid-template-columns:minmax(0,1fr) auto}
-  .stg-v2-model-meta,.stg-v2-model-price,.stg-v2-detail-meta,.stg-v2-wide-field,.stg-v2-secret-field{grid-column:1/-1}
+  .stg-v2-model-row{grid-template-columns:minmax(0,1fr) auto}
+  .stg-v2-model-detail{grid-column:1/-1}
   .stg-v2-catalog-row{grid-template-columns:24px minmax(0,1fr)}
   .stg-v2-catalog-tools{align-items:stretch;flex-direction:column}
   #stgModelCatalogSearch{width:100%}
@@ -3297,3 +3316,392 @@ summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993
 }
 
 @media (prefers-reduced-motion:reduce){.stg-v2-manager-overlay{backdrop-filter:none}}
+/* ── Access matrix (per-credential × per-model grant grid) ──
+   Restored from the pre-v2 settings design; dead rules from that era
+   (inline key-name inputs, cell override editor, badge chips) are not
+   carried over. Column headers are static credential labels now. */
+
+/* Active state for the card-toolbar "访问矩阵" toggle button. */
+.stg-matrix-toggle.active {
+  background: var(--s-ink);
+  color: var(--s-white);
+  border-color: var(--s-ink);
+}
+
+.stg-matrix { margin-top: 10px; }
+.stg-matrix-toolbar {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.stg-matrix-tools {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+/* Probe status / error line: its own full-width row under the toolbar so a
+   long message (contract errors, counts) never squeezes the tool buttons. */
+.stg-mx-status {
+  margin: -2px 0 8px;
+  font-size: 11px; font-weight: 700; color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.stg-mx-status.running { color: #b45309; }
+.stg-mx-status.error { color: #b91c1c; }
+.stg-mx-probe.running { animation: stg-mx-spin 0.7s linear infinite; }
+.stg-mx-apply {
+  background: rgba(74, 222, 128, 0.14) !important;
+  border-color: #16a34a !important;
+  color: #15803d !important;
+}
+.stg-matrix-legend {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 10px; color: var(--s-ink-soft); font-weight: 700;
+}
+.stg-mx-leg { display: inline-flex; align-items: center; gap: 4px; }
+.stg-mx-leg .stg-mx-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid var(--s-ink);
+}
+.stg-mx-leg.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; }
+.stg-mx-leg.off .stg-mx-dot { background: var(--s-white); }
+.stg-matrix-scroll {
+  overflow-x: auto;
+  border: 2px solid var(--s-ink);
+  border-radius: var(--s-radius);
+  /* A shadow CANNOT overflow its own element's border-radius, so both fade
+     masks live on the single scroll wrapper: the ::before block is
+     position:sticky so it paints the right-edge fade and stays pinned to
+     the visible corner while content scrolls underneath. */
+  position: relative;
+}
+/* Right-edge fade: a sticky zero-size block with the shadow drawn by its
+   ::before. The block is sticky right:0 so it tracks the visible right
+   edge while content scrolls left. */
+.stg-matrix-scroll::before {
+  content: '';
+  display: block;
+  position: sticky;
+  float: right;
+  right: 0;
+  width: 0; height: 0;
+  margin-right: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+/* The fade itself, hung off the zero-size anchor. Right/bottom inset 2px
+   so it starts inside the border, not on top of it. */
+.stg-matrix-scroll::after {
+  content: '';
+  position: absolute;
+  top: 0; right: 2px; bottom: 2px;
+  width: 56px;
+  background: linear-gradient(to right, transparent, rgba(28,25,23,0.13));
+  pointer-events: none;
+  z-index: 3;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.stg-matrix-scroll.can-scroll-right::after { opacity: 1; }
+/* Left-edge fade sits over the sticky first column when content is
+   scrolled: implemented via a ::before on the table wrapper is not
+   possible (sticky columns), so a class toggled from scroll events
+   lights a shadow on the first column's right border instead. */
+.stg-matrix-table {
+  border-collapse: collapse;
+  font-size: 11px;
+  width: max-content;
+  min-width: 100%;
+}
+/* Wide-screen relief: when an OPEN matrix would overflow the settings
+   panel, widen the panel itself instead of forcing horizontal scrolling.
+   Applied/removed by _fitMatrixPanelWidth() on render, poll and resize.
+   The 6vw cap keeps the panel from blowing past the viewport when a
+   provider has many credentials; the matrix's own scroller takes over
+   beyond that. */
+@media (min-width: 1100px) {
+  .modal.settings-panel.stg-matrix-wide {
+    width: min(1160px, 94vw);
+    max-width: 94vw;
+    /* The widen must not be instant: on settings pages with several
+       matrices (long page, inner overlay scroll) each matrix re-fit lands
+       in the SAME frame, and a 180ms width transition re-fires
+       ResizeObserver on every step — with all observers mutating panel
+       width that's a loop. A short transition still reads as a smooth
+       grow. */
+    transition: width 0.18s ease, max-width 0.18s ease;
+  }
+}
+.stg-matrix-table th, .stg-matrix-table td {
+  border-bottom: 1px solid var(--s-border);
+  border-right: 1px solid var(--s-border);
+  padding: 4px 6px;
+}
+.stg-matrix-table thead th {
+  background: var(--s-cream);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--s-ink-soft);
+  border-bottom: 2px solid var(--s-ink);
+  position: sticky; top: 0; z-index: 2;
+}
+.stg-mx-corner {
+  text-align: left;
+  position: sticky; left: 0; z-index: 4 !important;
+  background: var(--s-cream);
+  min-width: 170px;
+  max-width: 260px;
+}
+/* Credential column headers: a static label (序号 + kind) with a reserved
+   right lane for the column probe trigger. */
+.stg-mx-keyhead {
+  position: relative;
+  min-width: 92px;
+  padding-right: 28px !important;
+  text-align: center;
+}
+.stg-mx-credname {
+  display: block;
+  font-size: 10.5px; font-weight: 800;
+  color: var(--s-ink);
+  text-transform: none; letter-spacing: normal;
+}
+.stg-mx-credkind {
+  display: block;
+  font-size: 8.5px; font-weight: 700;
+  color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: none; letter-spacing: normal;
+  margin-top: 1px;
+}
+/* Model label cells: sticky first column, brand icon + id. */
+.stg-mx-model {
+  position: sticky; left: 0;
+  background: var(--s-white);
+  text-align: left;
+  min-width: 170px;
+  max-width: 260px;
+  z-index: 1;
+  /* Reserve a right lane for the row probe button so it never overlaps id text. */
+  padding-right: 28px !important;
+}
+/* A model whose offering is disabled keeps its column clickable but is
+   clearly dimmed. */
+.stg-mx-model.model-off .stg-mx-mid,
+.stg-mx-model.model-off .stg-mx-brand { opacity: 0.45; }
+.stg-mx-gtoggle {
+  margin-right: 5px;
+  vertical-align: -4px;
+  transform: scale(0.8);
+  transform-origin: left center;
+}
+.stg-mx-brand {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  margin-right: 5px;
+  vertical-align: -3px;
+  flex-shrink: 0;
+}
+.stg-mx-mid {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 700;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-block;
+  max-width: 150px;
+  vertical-align: middle;
+}
+.stg-mx-aliascount {
+  margin-left: 5px;
+  font-size: 8.5px; font-weight: 800; line-height: 1;
+  padding: 1.5px 5px; border-radius: 4px;
+  border: 1.5px solid var(--s-ink); color: var(--s-ink-soft);
+  background: var(--s-white);
+  vertical-align: 2px;
+  white-space: nowrap;
+}
+/* The trailing border of the sticky label column doubles as the row-group
+   separator; rows of one offering read as a unit. */
+.stg-mx-row { border-bottom: none; }
+.stg-mx-row td { border-bottom: 1px dashed rgba(0,0,0,0.08); }
+.stg-mx-row.group-end td { border-bottom: 2px solid var(--s-ink); }
+.stg-mx-row:not(.grouped):not(.is-alias) td { border-bottom: 1.5px solid var(--s-ink); }
+/* ── Logical root row: the canonical model id of an offering whose every
+   deployment routes to a DIFFERENT upstream id. It is not sent on the
+   wire, so it renders as a header strip (global toggle + count, no
+   per-credential cells). ── */
+.stg-mx-model.logical { background: var(--s-cream); }
+.stg-mx-cell.logical {
+  background: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(0,0,0,0.05) 6px, rgba(0,0,0,0.05) 12px);
+}
+.stg-mx-preset {
+  margin-left: 6px;
+  font-size: 8px; font-weight: 800; line-height: 1;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 5px; border-radius: 3px;
+  border: 1.5px dashed var(--s-ink-soft); color: var(--s-ink-soft);
+  background: none;
+  vertical-align: 1px;
+}
+/* ── Wire-id rows: a concrete id mapping under an offering ── */
+.stg-mx-row.is-alias .stg-mx-model.alias {
+  padding-left: 14px !important;
+  background: linear-gradient(90deg,
+    hsla(var(--alias-hue, 265), 70%, 55%, 0.10), transparent 55%);
+}
+.stg-mx-tree {
+  display: inline-block; width: 14px;
+  color: var(--s-ink-soft); font-weight: 700;
+  font-family: 'JetBrains Mono', monospace; margin-right: 2px;
+}
+.stg-mx-aliasidx {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 16px; padding: 0 4px; margin-right: 6px;
+  font-size: 9px; font-weight: 900; line-height: 1;
+  font-family: 'JetBrains Mono', monospace;
+  border-radius: 4px;
+  color: hsl(var(--alias-hue, 265), 65%, 40%);
+  background: hsla(var(--alias-hue, 265), 70%, 55%, 0.16);
+  border: 1.5px solid hsl(var(--alias-hue, 265), 60%, 55%);
+}
+.stg-mx-mid.alias-id { font-weight: 600; font-size: 10.5px; }
+.stg-mx-row.is-alias .stg-mx-brand { opacity: 0.85; }
+/* ── Attempts selector (false-429 filter) ── */
+/* Specificity must beat the global form resets `.modal label` / `.modal
+   select` (0,1,1): they otherwise flip the label to display:block with
+   uppercase text and stretch the select to width:100%, which overflows the
+   label's dashed border and covers the probe button beside it. */
+.stg-matrix-toolbar .stg-mx-attempts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px; font-weight: 700; color: var(--s-ink-soft);
+  line-height: 1;
+  text-transform: none;
+  letter-spacing: normal;
+  height: 30px;
+  margin: 0;
+  padding: 0 8px;
+  border: 2px dashed var(--s-ink-soft);
+  border-radius: var(--s-radius);
+  background: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+.stg-matrix-toolbar .stg-mx-attempts select {
+  width: auto;
+  flex: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 800;
+  height: 22px;
+  margin: 0;
+  padding: 0 4px;
+  border: 1.5px solid var(--s-ink);
+  border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  cursor: pointer;
+  box-sizing: border-box;
+  vertical-align: middle;
+  line-height: 1;
+  box-shadow: none;
+}
+.stg-matrix-toolbar .stg-mx-attempts select:focus {
+  box-shadow: none;
+  transform: none;
+}
+/* ── Cells ── */
+.stg-mx-cell {
+  position: relative;
+  text-align: center;
+  vertical-align: middle;
+  height: 44px;
+  min-width: 92px;
+  transition: background 0.12s;
+}
+.stg-mx-cell.on { background: rgba(74, 222, 128, 0.10); }
+.stg-mx-cell.off { background: repeating-linear-gradient(45deg, var(--s-cream), var(--s-cream) 5px, rgba(0,0,0,0.04) 5px, rgba(0,0,0,0.04) 10px); }
+.stg-mx-toggle {
+  border: none; background: none; cursor: pointer;
+  padding: 4px; display: inline-flex; align-items: center; justify-content: center;
+}
+.stg-mx-cell .stg-mx-dot {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 1.5px solid var(--s-ink);
+  transition: transform 0.1s, background 0.12s;
+}
+.stg-mx-cell.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; box-shadow: 0 0 0 3px rgba(74,222,128,0.25); }
+.stg-mx-cell.off .stg-mx-dot { background: var(--s-white); }
+.stg-mx-toggle:hover .stg-mx-dot { transform: scale(1.18); }
+/* Probe-status health pip (top-right of a cell) */
+.stg-mx-probe-pip {
+  position: absolute; top: 2px; right: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  font-size: 9px; font-weight: 900; line-height: 1;
+  border-radius: 4px;
+  border: 1.5px solid currentColor;
+  font-family: 'JetBrains Mono', monospace;
+  pointer-events: auto;
+}
+.stg-mx-probe-pip.ok     { color: #16a34a; background: rgba(74,222,128,0.18); }
+.stg-mx-probe-pip.rate   { color: #c2410c; background: rgba(251,146,60,0.20); }
+.stg-mx-probe-pip.unauth { color: #b91c1c; background: rgba(248,113,113,0.20); }
+.stg-mx-probe-pip.nf     { color: #6b7280; background: rgba(156,163,175,0.20); }
+.stg-mx-probe-pip.skip   { color: #6b7280; background: rgba(156,163,175,0.20); }
+.stg-mx-probe-pip.down   { color: #a16207; background: rgba(250,204,21,0.20); }
+.stg-mx-probe-pip.err    { color: #b91c1c; background: rgba(248,113,113,0.20); }
+/* When a cell is flagged (non-ok pip) but still enabled, nudge attention. */
+.stg-mx-cell:has(.stg-mx-probe-pip.rate) .stg-mx-dot,
+.stg-mx-cell:has(.stg-mx-probe-pip.unauth) .stg-mx-dot,
+.stg-mx-cell:has(.stg-mx-probe-pip.down) .stg-mx-dot { box-shadow: 0 0 0 2px rgba(194,65,12,0.25); }
+
+/* ── Scoped probe triggers (row / column / cell) — one shared mini bolt
+   button in the matrix's hover-reveal language ── */
+.stg-mx-zap {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0;
+  border: 1.5px solid var(--s-ink); border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.1s, background 0.12s;
+  box-sizing: border-box;
+}
+.stg-mx-zap svg { width: 10px; height: 10px; display: block; }
+.stg-mx-zap:hover { background: var(--s-gold); transform: scale(1.12); }
+.stg-mx-zap:disabled { opacity: 0.3; cursor: default; transform: none; background: var(--s-cream); }
+.stg-mx-zap.probing { pointer-events: none; opacity: 1; background: var(--s-gold); }
+.stg-mx-zap.probing svg { animation: stg-mx-spin 0.7s linear infinite; }
+/* Column scope: vertically centered in the header's reserved right lane. */
+.stg-mx-zap.col { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0.4; }
+.stg-mx-keyhead:hover .stg-mx-zap.col { opacity: 1; }
+/* Row scope: right edge of the (sticky) model label cell, hover-revealed. */
+.stg-mx-zap.row { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0; }
+.stg-mx-model:hover .stg-mx-zap.row { opacity: 0.9; }
+.stg-mx-zap.row.probing { opacity: 1; }
+/* Cell scope: bottom-left corner, hover-revealed (only when no pip yet —
+   once a verdict exists the pip itself is the re-probe trigger). */
+.stg-mx-zap.cell { position: absolute; bottom: 2px; left: 3px; opacity: 0; }
+.stg-mx-cell:hover .stg-mx-zap.cell { opacity: 0.9; }
+.stg-mx-zap.cell.probing { opacity: 1; }
+/* The verdict pip doubles as the re-probe trigger for its own cell. */
+.stg-mx-probe-pip.clickable { cursor: pointer; transition: transform 0.1s; }
+.stg-mx-probe-pip.clickable:hover { transform: scale(1.2); }
+
+@keyframes stg-mx-spin {
+  to { transform: rotate(360deg); }
+}
+
+.stg-matrix-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  border: 1.5px dashed var(--s-ink);
+  border-radius: var(--s-radius);
+  margin-top: 8px;
+}
+
+@media (max-width: 640px) {
+  .stg-mx-keyhead, .stg-mx-cell { min-width: 76px; }
+}

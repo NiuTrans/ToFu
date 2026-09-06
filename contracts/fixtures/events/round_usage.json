@@ -1,0 +1,10 @@
+{
+  "model": "s",
+  "roundNum": 1,
+  "tag": "s",
+  "tokensIn": 1,
+  "tokensOut": 1,
+  "turn": "s",
+  "type": "round_usage",
+  "usage": {}
+}

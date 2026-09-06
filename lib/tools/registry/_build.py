@@ -90,9 +90,6 @@ def _build_read_files(ctx: ToolContext) -> list[dict]:
     # paths (images, PDFs, Office docs, text), so the model can read local
     # content even with no project attached.
     from lib.tools.project import READ_FILES_TOOL
-    if ctx.project_enabled and ctx.multiroot_active:
-        from lib.tools.project import with_multiroot_hint
-        return with_multiroot_hint([READ_FILES_TOOL])
     return [READ_FILES_TOOL]
 
 
@@ -102,9 +99,6 @@ def _build_inspect_image(ctx: ToolContext) -> list[dict]:
     # initial downscale discarded. No project / vision toggle gates it; the
     # dispatch path drops the resulting image for text-only models anyway.
     from lib.tools.image_edit import INSPECT_IMAGE_TOOL
-    if ctx.project_enabled and ctx.multiroot_active:
-        from lib.tools.project import with_multiroot_hint
-        return with_multiroot_hint([INSPECT_IMAGE_TOOL])
     return [INSPECT_IMAGE_TOOL]
 
 
@@ -123,20 +117,39 @@ def _build_project_or_code_exec(ctx: ToolContext) -> list[dict]:
     # detaching Project Brain changes the next assembled tool surface directly.
     from lib.tools.code_exec import CODE_EXEC_TOOL
     from lib.tools.project import project_tools_for_runtime
-    project_tools = project_tools_for_runtime()
+    # create_project is contributed by its own searchable spec
+    # (``project_scaffold``) — the absolute-path-write auto-register made the
+    # eager resident schema near-dead weight, so it no longer rides the
+    # default project surface.
+    project_tools = [
+        tool for tool in project_tools_for_runtime()
+        if str((tool.get('function') or {}).get('name') or '')
+        != 'create_project'
+    ]
     if ctx.project_ready:
-        if ctx.project_remote:
-            # RWA 拍板 3A:同名 schema + 本地执行提示;远程绑定是单一根,
-            # multiroot 提示不适用(远程侧永远 root-relative)。
-            from lib.tools.project import with_remote_hint
-            logger.debug('[Task %s] 🌐 remote worktree bound — project tools '
-                         'carry the local-execution hint', ctx.tid)
-            return with_remote_hint(project_tools)
-        if ctx.multiroot_active:
-            from lib.tools.project import with_multiroot_hint
-            return with_multiroot_hint(project_tools)
+        # Environment-specific routing guidance belongs in the context
+        # composer's trailing user carrier. Tool declarations stay canonical
+        # across local/remote and single/multi-root requests.
         return list(project_tools)
     return [CODE_EXEC_TOOL]
+
+
+def _build_project_scaffold(ctx: ToolContext) -> list[dict]:
+    # create_project — pre-create an empty workspace root / register an extra
+    # root. Only meaningful with a project attached (its handler refuses
+    # without a primary root); discoverable through Tool Search instead of
+    # resident on the wire.
+    if not ctx.project_ready:
+        return []
+    from lib.tools.project import PROJECT_TOOL_CREATE_PROJECT
+    tools = [PROJECT_TOOL_CREATE_PROJECT]
+    if ctx.project_remote:
+        from lib.tools.project import with_remote_hint
+        return with_remote_hint(tools)
+    if ctx.multiroot_active:
+        from lib.tools.project import with_multiroot_hint
+        return with_multiroot_hint(tools)
+    return tools
 
 
 def _build_browser(ctx: ToolContext) -> list[dict]:
@@ -284,26 +297,10 @@ def _build_memory(ctx: ToolContext) -> list[dict]:
         return []
     from copy import deepcopy
     from lib.memory.tools import ALL_MEMORY_TOOLS
-    tools = deepcopy(ALL_MEMORY_TOOLS)
-    if not (ctx.project_enabled and ctx.project_path):
-        # Memory remains useful in a non-project conversation, but a project
-        # target is physically impossible there. The old static schema still
-        # advertised project as the default, so a perfectly valid omitted
-        # ``scope`` became a guaranteed ``project_path required`` tool error.
-        # Constrain the model contract at assembly time; the handler keeps the
-        # same context-sensitive default as a defensive boundary.
-        for tool in tools:
-            fn = tool.get('function') or {}
-            if fn.get('name') not in ('create_memory', 'merge_memories'):
-                continue
-            scope = (((fn.get('parameters') or {}).get('properties') or {})
-                     .get('scope'))
-            if isinstance(scope, dict):
-                scope['enum'] = ['global']
-                scope['description'] = (
-                    "Store in global memory. This conversation has no active "
-                    "project, so project scope is unavailable. Default: global")
-    return tools
+    # Project availability is runtime context, not a reason to rewrite the
+    # declaration. The composer tells no-project turns to use global scope;
+    # the handler remains the authority boundary.
+    return deepcopy(ALL_MEMORY_TOOLS)
 
 
 def _build_skills(ctx: ToolContext) -> list[dict]:
@@ -436,7 +433,10 @@ def _build_mcp(ctx: ToolContext) -> list[dict]:
         from lib.mcp import get_bridge
         bridge = get_bridge()
         if bridge.connected:
-            mcp_tools = bridge.get_openai_tool_defs()
+            # The bridge cache is process-shared. Give each task an isolated
+            # catalog before any provider projection can add/remove fields.
+            from copy import deepcopy
+            mcp_tools = deepcopy(bridge.get_openai_tool_defs())
             if mcp_tools:
                 catalog_fingerprint = ''
                 try:

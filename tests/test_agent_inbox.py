@@ -54,6 +54,14 @@ def test_has_pending():
     assert agent_inbox.has_pending('t1')
 
 
+def test_has_pending_can_probe_one_mode_without_consuming():
+    agent_inbox.enqueue('t1', 'agent result', mode='swarm-update')
+    assert not agent_inbox.has_pending('t1', modes=['user-steer'])
+    agent_inbox.enqueue('t1', 'operator message', mode='user-steer')
+    assert agent_inbox.has_pending('t1', modes=['user-steer'])
+    assert agent_inbox.peek('t1') == 2
+
+
 # ── Per-task isolation ───────────────────────────────────────
 
 def test_drain_is_scoped_per_task():

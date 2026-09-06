@@ -1146,10 +1146,9 @@ class TestTTLLatch:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestToolResultOrdering:
-    """sort_tool_results ensures deterministic prefix for automatic caching."""
+    """The retired sorter preserves historical result order."""
 
-    def test_sorts_consecutive_tool_results(self):
-        """Consecutive tool results are sorted by tool_call_id."""
+    def test_preserves_consecutive_tool_results(self):
         from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
         messages = [
@@ -1167,11 +1166,9 @@ class TestToolResultOrdering:
 
         sort_tool_results(messages)
 
-        # Tool results should now be sorted by tool_call_id
         tool_msgs = [m for m in messages if m.get('role') == 'tool']
-        assert tool_msgs[0]['tool_call_id'] == 'tc_a'
-        assert tool_msgs[1]['tool_call_id'] == 'tc_b'
-        assert tool_msgs[2]['tool_call_id'] == 'tc_c'
+        assert [m['tool_call_id'] for m in tool_msgs] == [
+            'tc_c', 'tc_a', 'tc_b']
 
     def test_preserves_non_tool_messages(self):
         """Non-tool messages are not affected by sorting."""
@@ -1189,8 +1186,7 @@ class TestToolResultOrdering:
 
         assert messages == original
 
-    def test_handles_multiple_tool_runs(self):
-        """Multiple separate runs of tool results are each sorted independently."""
+    def test_handles_multiple_tool_runs_without_reordering(self):
         from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
         messages = [
@@ -1208,12 +1204,10 @@ class TestToolResultOrdering:
 
         sort_tool_results(messages)
 
-        # First batch sorted
-        assert messages[2]['tool_call_id'] == 'tc_1'
-        assert messages[3]['tool_call_id'] == 'tc_2'
-        # Second batch sorted
-        assert messages[5]['tool_call_id'] == 'tc_3'
-        assert messages[6]['tool_call_id'] == 'tc_4'
+        assert messages[2]['tool_call_id'] == 'tc_2'
+        assert messages[3]['tool_call_id'] == 'tc_1'
+        assert messages[5]['tool_call_id'] == 'tc_4'
+        assert messages[6]['tool_call_id'] == 'tc_3'
 
     def test_single_tool_result_unchanged(self):
         """A single tool result (no consecutive run) is not moved."""
@@ -1556,15 +1550,15 @@ class TestL1DoesNotMaskRealBreak:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestSortToolResultsPrefixGate:
-    """A tool-result run inside the cached prefix must be left in place;
-    only the out-of-prefix tail may be sorted."""
+    """The compatibility API never reorders any prefix or tail run."""
 
     def test_prefix_run_not_reordered(self, monkeypatch):
         import lib.tasks_pkg.cache_tracking._prefix as ct
 
         # Pretend the first 4 messages are inside the cache prefix.
-        monkeypatch.setattr(ct, 'get_cache_prefix_count',
-                            lambda cid, current_msg_count=None: 4)
+        monkeypatch.setattr(
+            ct, 'get_cache_prefix_count',
+            lambda cid, current_msg_count=None, *, user_id: 4)
         messages = [
             {'role': 'system', 'content': 'sys'},
             {'role': 'assistant', 'tool_calls': [{'id': 'b'}]},
@@ -1573,25 +1567,36 @@ class TestSortToolResultsPrefixGate:
             {'role': 'tool', 'tool_call_id': 'z', 'content': 'Z'},
             {'role': 'tool', 'tool_call_id': 'y', 'content': 'Y'},
         ]
-        ct.sort_tool_results(messages, conv_id='gate-1')
+        ct.sort_tool_results(messages, conv_id='gate-1', user_id=7)
         # Indices 2,3 are inside the prefix → must stay B,A (unsorted).
         assert messages[2]['tool_call_id'] == 'b'
         assert messages[3]['tool_call_id'] == 'a'
 
-    def test_tail_run_still_sorted(self, monkeypatch):
+    def test_tail_run_not_sorted(self, monkeypatch):
         import lib.tasks_pkg.cache_tracking._prefix as ct
 
-        # No prefix tracked → sort everywhere (legacy behaviour).
-        monkeypatch.setattr(ct, 'get_cache_prefix_count',
-                            lambda cid, current_msg_count=None: 0)
+        # No prefix tracked still preserves author/model result order.
+        monkeypatch.setattr(
+            ct, 'get_cache_prefix_count',
+            lambda cid, current_msg_count=None, *, user_id: 0)
         messages = [
             {'role': 'assistant', 'tool_calls': [{'id': 'z'}]},
             {'role': 'tool', 'tool_call_id': 'z', 'content': 'Z'},
             {'role': 'tool', 'tool_call_id': 'a', 'content': 'A'},
         ]
-        ct.sort_tool_results(messages, conv_id='gate-2')
-        assert messages[1]['tool_call_id'] == 'a'
-        assert messages[2]['tool_call_id'] == 'z'
+        ct.sort_tool_results(messages, conv_id='gate-2', user_id=7)
+        assert messages[1]['tool_call_id'] == 'z'
+        assert messages[2]['tool_call_id'] == 'a'
+
+    def test_missing_owner_fails_closed_without_reordering(self):
+        import lib.tasks_pkg.cache_tracking._prefix as ct
+
+        messages = [
+            {'role': 'tool', 'tool_call_id': 'b', 'content': 'B'},
+            {'role': 'tool', 'tool_call_id': 'a', 'content': 'A'},
+        ]
+        ct.sort_tool_results(messages, conv_id='owned-conversation')
+        assert [row['tool_call_id'] for row in messages] == ['b', 'a']
 
 
 class TestTaskIdPassthrough:

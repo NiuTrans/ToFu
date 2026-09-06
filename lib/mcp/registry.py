@@ -1221,6 +1221,7 @@ def build_server_config(server_id: str, env_values: dict[str, str] | None = None
     # Special handling: some servers take args from env vars
     # e.g. filesystem server takes allowed dirs as CLI args, not env
     env_specs = entry.get('env_specs', [])
+    spec_keys = {spec['key'] for spec in env_specs if spec.get('key')}
     env: dict[str, str] = {}
     extra_args: list[str] = []
 
@@ -1263,6 +1264,12 @@ def build_server_config(server_id: str, env_values: dict[str, str] | None = None
             if val:
                 env[key] = val
 
+    # Hand-added keys absent from env_specs (e.g. a toolset gate documented
+    # only in the server's README) must survive catalog-install round-trips,
+    # which rebuild the whole config row from scratch.
+    for key, val in (env_values or {}).items():
+        if key not in spec_keys and isinstance(val, str) and val.strip():
+            env[key] = val
     if extra_args:
         config.setdefault('args', []).extend(extra_args)
     if env:

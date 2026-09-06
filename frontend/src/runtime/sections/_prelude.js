@@ -41,12 +41,19 @@ import {
 import { createCompactionHistoryState } from '../core/compaction-history-state';
 import { HTTP_RESULT } from '../core/http-result';
 import { createCurrentUserIdentityController } from '../core/current-user';
-import { frameBelongsToOwner } from '../core/frame-identity';
+import {
+  frameBelongsToOwner,
+  narrowConvCatalogFrame,
+  narrowFoldersChangedFrame,
+} from '../core/frame-identity';
 import {
   CHAT_EXCLUDED_CAPS_FALLBACK,
   createModelCapabilityTaxonomy,
 } from '../core/model-capability-taxonomy';
-import { detectModelBrand } from '../core/model-brand-detection';
+import {
+  createModelBrandResolver,
+  detectModelBrand,
+} from '../core/model-brand-detection';
 import { brandIconHtml } from '../core/model-brand-icons';
 import { createModelDisplayNames } from '../core/model-display-names';
 import { createModelGroupPolicy } from '../core/model-group';
@@ -55,6 +62,10 @@ import { createRecentModelsController } from '../core/recent-models';
 import { createRoleAvatarIcons } from '../core/role-avatar-icons';
 import { createCookieCaptureConsentController } from '../core/cookie-capture-consent';
 import { createBuildWatchController } from '../core/build-watch-controller';
+import {
+  NATIVE_BRIDGE_POLICY,
+  createNativeVisibility,
+} from '../core/native-bridge';
 import { clientLogFlushBaseDelayMs, createClientLogFlushScheduler } from '../core/client-log-flush-scheduler';
 import { createDebugRuntimeOwner } from '../core/debug-runtime-owner';
 import { TRANSLATION_CLAIMS } from '../core/translation-claim-registry';
@@ -210,6 +221,11 @@ import { createSendStartupLease } from '../core/send-startup';
 import {
   DOMPurify, ensureHljsLanguage, hljs, loadHtml2Canvas, loadKatex, marked,
 } from '../vendor-runtime';
+// The retained service registry is infrastructure, not a feature initialized
+// in manifest order. Declare it before any eager composition so adding a new
+// publisher can never create an import-time temporal-dead-zone failure.
+const runtimeScope = Object.create(null);
+runtimeScope.t = t;
 installMarkdownPolicy(marked);
 // Temporary lexical names consumed by retained sections. The typed icon owner
 // remains module-private; only `Icon` is injected into declared lazy features.
@@ -450,13 +466,40 @@ const availabilityHealthProbe = createAvailabilityHealthProbeCoordinator({
     signal: AbortSignal.timeout(timeoutMs),
   }),
 });
+
+// Android native shell bridge: a WebView keeps document.visibilityState
+// 'visible' while the app is backgrounded, so the shell's
+// tofu:native-visibility flips are the only background signal. Fold them
+// into one effective-hidden predicate every budget layer below shares.
+const nativeVisibility = createNativeVisibility({
+  subscribeNativeVisibility: (listener) => {
+    document.addEventListener(NATIVE_BRIDGE_POLICY.visibilityEvent, (event) => {
+      listener(
+        /** @type {CustomEvent|undefined} */ (event)?.detail?.hidden === true,
+      );
+    });
+  },
+  documentHidden: () => document.hidden === true,
+  native: /** @type {any} */ (window).TofuNative,
+  onError: (error) => console.warn('[native-bridge]', error),
+});
+// Re-run every visibilitychange consumer on a shell flip: layers that read
+// the effective predicate suspend/resume correctly; layers still reading
+// document.visibilityState directly observe exactly what they see today.
+nativeVisibility.subscribe(() => {
+  try {
+    document.dispatchEvent(new Event('visibilitychange'));
+  } catch (error) {
+    console.warn('[native-bridge] visibilitychange relay failed:', error);
+  }
+});
 const backendAvailabilityMonitor = createBackendAvailabilityMonitor({
   document,
   browserEvents: window,
   schedule: backendAvailabilitySchedule,
   log: console,
   offlineIconHtml: () => iconHtml('bot', 18),
-  isVisible: () => document.visibilityState === 'visible',
+  isVisible: () => !nativeVisibility.isEffectivelyHidden(),
   isNetworkOnline: () => navigator.onLine !== false,
   probeHealth: availabilityHealthProbe.probe,
   subscribePushReading: (listener) => (
@@ -520,7 +563,7 @@ const storageAvailabilityMonitor = createStorageAvailabilityMonitor({
   schedule: backendAvailabilitySchedule,
   log: console,
   warningIconHtml: () => iconHtml('alertTriangle', 18),
-  isVisible: () => document.visibilityState === 'visible',
+  isVisible: () => !nativeVisibility.isEffectivelyHidden(),
   probeHealth: availabilityHealthProbe.probe,
   copy: {
     unavailableTitle: () => t('conn.storageUnavailableTitle'),
@@ -727,6 +770,20 @@ import {
 // composed once; no compatibility name is published to `window`.
 const _detectBrand = detectModelBrand;
 const _brandSvg = brandIconHtml;
+// The one brand-resolution interface for every model surface: explicit
+// Creator identity wins, the registered-models catalog covers id-only
+// callers, and name-pattern detection remains as the fallback for ids the
+// catalog has never seen.
+const modelBrandResolver = createModelBrandResolver({
+  lookupCreatorId(modelId) {
+    const match = Array.isArray(_registeredModels)
+      ? _registeredModels.find((model) => model
+        && model.model_id === modelId && model.creator_id)
+      : null;
+    return match ? match.creator_id : '';
+  },
+});
+const _modelBrand = modelBrandResolver.modelBrand;
 const modelDisplayNames = createModelDisplayNames({
   lookupModelDisplayName(modelId) {
     const pricing = _modelPricingCache && _modelPricingCache[modelId];
@@ -753,8 +810,7 @@ const {
 
 // Former file-scope exports live here instead of leaking onto `window`.
 // The ESM entry exposes only selected functions through TofuModules v3.
-const runtimeScope = Object.create(null);
-runtimeScope.t = t;
+runtimeScope.nativeVisibility = nativeVisibility;
 runtimeScope.BackendAvailabilityRestartScope = backendAvailabilityRestartScope;
 retainedCompositionLifecycle.add(() => {
   if (runtimeScope.BackendAvailabilityRestartScope ===

@@ -1075,20 +1075,16 @@ class TestMemoryPrefetch:
                 task=task,
             )
 
-        # System message has compact instructions and storage guidance.
-        sys_content = messages[0]['content']
-        if isinstance(sys_content, list):
-            sys_text = '\n\n'.join(b['text'] for b in sys_content if isinstance(b, dict))
-        else:
-            sys_text = sys_content
-        assert 'memory_accumulation' in sys_text
-        assert '42 accumulated memories' in sys_text
-        assert '<available_memories>' not in sys_text
+        assert messages[0]['content'] == 'Base'
+        tail_text = str(messages[-1]['content'])
+        assert 'memory_accumulation' in tail_text
+        assert '42 accumulated memories' in tail_text
+        assert '<available_memories>' not in tail_text
         # No skills LISTING is injected. The anchor is the block's CLOSING
         # tag, not the bare noun: the static memory_accumulation prose itself
         # mentions `<available_skills>` (in backticks, no closing tag), while
         # a real build_skills_index listing always ends with the close tag.
-        assert '</available_skills>' not in sys_text
+        assert '</available_skills>' not in tail_text
 
     def test_skills_index_not_suppressed_by_memory_prose(self):
         """REGRESSION (found via this suite's own failing assertion): the
@@ -1125,7 +1121,7 @@ class TestMemoryPrefetch:
                     has_real_tools=True, conv_id='', task=task)
 
         _assemble()
-        sc = messages[0]['content']
+        sc = messages[-1]['content']
         st = '\n\n'.join(b['text'] for b in sc if isinstance(b, dict)) \
             if isinstance(sc, list) else sc
         # THE regression assertion: the listing LANDS on a memory-enabled turn.
@@ -1136,7 +1132,7 @@ class TestMemoryPrefetch:
         # Idempotency: a second assembly of the same messages must NOT
         # double-splice (the close-tag marker is what catches it).
         _assemble()
-        sc2 = messages[0]['content']
+        sc2 = messages[-1]['content']
         st2 = '\n\n'.join(b['text'] for b in sc2 if isinstance(b, dict)) \
             if isinstance(sc2, list) else sc2
         assert st2.count('</available_skills>') == 1, (

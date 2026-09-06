@@ -82,10 +82,27 @@ class TofuProbeTest {
     }
 
     @Test
-    fun `transport and 5xx are unreachable`() {
+    fun `transport and non-edge 5xx are unreachable`() {
         assertEquals(TofuProbe.Verdict.UNREACHABLE, TofuProbe.classify(0, null))
-        assertEquals(TofuProbe.Verdict.UNREACHABLE, TofuProbe.classify(502, ""))
+        // 500 means SOMETHING answered and failed — not a cold proxy edge.
+        assertEquals(TofuProbe.Verdict.UNREACHABLE, TofuProbe.classify(500, ""))
         assertEquals(TofuProbe.Verdict.NOT_TOFU, TofuProbe.classify(418, "teapot"))
+    }
+
+    @Test
+    fun `502 503 504 are a waking sandbox, not a wrong address`() {
+        // Behind the vscode proxy these statuses mean "nothing listens yet".
+        // NEUTER: map them to UNREACHABLE and the guidance tells the user to
+        // "check the network and the address" — chasing a non-existent typo
+        // while the sandbox simply boots.
+        assertEquals(TofuProbe.Verdict.WAKING, TofuProbe.classify(502, ""))
+        assertEquals(TofuProbe.Verdict.WAKING, TofuProbe.classify(503, "Bad Gateway"))
+        assertEquals(TofuProbe.Verdict.WAKING, TofuProbe.classify(504, null))
+        assertTrue(TofuProbe.isProblem(TofuProbe.Verdict.WAKING, AuthType.NONE, false))
+        assertTrue(
+            TofuProbe.guidance(TofuProbe.Verdict.WAKING, AuthType.NONE, false)
+                .contains("waking"),
+        )
     }
 
     // ── isProblem / guidance: honest per-auth reading ─────────────────────

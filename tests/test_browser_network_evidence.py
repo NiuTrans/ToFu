@@ -124,6 +124,51 @@ def test_friday_shaped_api_data_is_ranked_redacted_deduplicated_and_scoped(
     assert 'denied-sentinel' not in out
 
 
+def test_non_http_scheme_responses_never_render(monkeypatch):
+    from lib.browser.network_evidence import render_network_evidence
+
+    # Permissive policy on purpose: the scheme gate must reject the row even
+    # when the owner read policy would allow it.
+    monkeypatch.setattr(
+        'lib.browser.access.is_read_allowed', lambda owner, url: True)
+    payload = {
+        'network': {
+            'responses': [
+                {
+                    'url': (
+                        'chrome-extension://bpoadfkcbjbfhfodiogcnhhhpibjhbnh'
+                        '/default_config.content.json'
+                    ),
+                    'method': 'GET',
+                    'status': 200,
+                    'contentType': 'application/json',
+                    'responsePreview': json.dumps({
+                        'data': {'list': [{
+                            'id': 'ext-cfg',
+                            'name': 'extension-sentinel',
+                            'description': 'add-on config, not page evidence',
+                            'url': 'https://config.example/',
+                        }]},
+                    }),
+                },
+                {
+                    'url': 'https://friday.internal.example.com/api/skills/market',
+                    'method': 'GET',
+                    'status': 200,
+                    'contentType': 'application/json',
+                    'responsePreview': json.dumps(
+                        _skills_body(), ensure_ascii=False),
+                },
+            ],
+        },
+    }
+    out = render_network_evidence(payload, owner_user_id='41', max_chars=20_000)
+
+    assert 'friday-skill-a' in out
+    assert 'extension-sentinel' not in out
+    assert 'chrome-extension' not in out
+
+
 def test_network_evidence_fails_closed_and_honors_one_context_budget(
         monkeypatch):
     from lib.browser.network_evidence import (

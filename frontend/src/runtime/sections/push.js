@@ -48,7 +48,11 @@ const _push = (() => {
   }
 
   function _pageHidden() {
-    return typeof document !== 'undefined' && !!document.hidden;
+    // The Android WebView reports visible while backgrounded; the shell's
+    // nativeVisibility bridge is the only reliable pocket signal there.
+    return (typeof document !== 'undefined' && !!document.hidden)
+      || (typeof runtimeScope !== 'undefined'
+        && runtimeScope.nativeVisibility?.isHidden() === true);
   }
 
   function _pingIntervalMs() {

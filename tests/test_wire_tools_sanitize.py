@@ -474,6 +474,20 @@ class TestPrepareRequestBoundary:
         assert all(isinstance(t, dict) for t in wire_tools)
         assert [t['function']['name'] for t in wire_tools] == ['ok_tool']
 
+    def test_route_limit_identity_stays_internal_but_survives_projection(self):
+        from lib.llm._sse_core import prepare_request
+
+        plan = prepare_request({
+            'model': 'gpt-5.6',
+            'messages': [{'role': 'user', 'content': 'hi'}],
+            '_route_output_limit_key': '["provider","offering","",'
+                                       '"openai","gpt-5.6"]',
+        }, log_prefix='[route-limit]')
+
+        assert '_route_output_limit_key' not in plan.body
+        assert plan.route_output_limit_key == (
+            '["provider","offering","","openai","gpt-5.6"]')
+
     def test_missing_type_repaired_on_wire(self):
         plan = self._prepare([{'function': {'name': 'custom_tool'}}])
         wire_tools = plan.body.get('tools') or []

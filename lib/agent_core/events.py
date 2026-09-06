@@ -52,8 +52,11 @@ type, new optional field) do NOT bump it.  Mirrors the ``/api/v1`` policy.
 
 from __future__ import annotations
 
+import os
+import sys
+import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from lib.log import get_logger
 
@@ -82,6 +85,33 @@ class EventCategory:
 
 
 @dataclass(frozen=True)
+class FieldSpec:
+    """Machine-readable contract for ONE payload field of a schema'd event.
+
+    Parameters
+    ----------
+    name:
+        The wire field name (``type`` is implicit and never listed).
+    kind:
+        A tiny type DSL: one or more ``|``-separated alternatives of
+        ``str`` / ``bool`` / ``int`` / ``number`` (int or float, bool
+        excluded) / ``dict`` / ``list`` / ``None``.  Example:
+        ``'int | None'``.  The vocabulary is deliberately closed — the
+        conformance test rejects unknown alternatives, so a typo'd kind can
+        never silently pass validation.
+    required:
+        True if every conforming emission MUST carry the field.  Keep this
+        set minimal: a field that any real emitter legitimately omits (e.g.
+        the success path omits ``status``) is optional, or the strict gate
+        would raise on conforming traffic.
+    """
+
+    name: str
+    kind: str
+    required: bool = False
+
+
+@dataclass(frozen=True)
 class EventSpec:
     """Describes one event ``type``.
 
@@ -103,6 +133,14 @@ class EventSpec:
         and omitted.  Documents the shape without enforcing it.
     since:
         Contract version in which the event was introduced (for changelogs).
+    schema:
+        Optional machine-readable field contract — a tuple of
+        :class:`FieldSpec`.  When present, :func:`build_event` validates every
+        construction against it (strict under pytest / ``TOFU_EVENT_SCHEMA=
+        strict``, warn-and-log in production) and the conformance suite
+        (:mod:`tests/test_event_schema.py`) keeps it in exact sync with the
+        prose ``fields`` map.  ``None`` means the event has not been migrated
+        to a field-level contract yet; the wire stays permissive for it.
     """
 
     type: str
@@ -112,6 +150,7 @@ class EventSpec:
     requires_response: bool = False
     fields: dict[str, str] = field(default_factory=dict)
     since: int = 1
+    schema: tuple[FieldSpec, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -236,6 +275,8 @@ class EventType:
     PEER_INBOX_INJECT = 'peer_inbox_inject'
     # ── human steering (mid-turn human interjection) ──
     USER_STEER_INJECT = 'user_steer_inject'
+    # ── detached run_command completion (background command) ──
+    BACKGROUND_COMMAND_INJECT = 'background_command_inject'
     # ── artifact / scheduler / transport ──
     ARTIFACT = 'artifact'
     TIMER_POLL_CHECK = 'timer_poll_check'
@@ -286,6 +327,8 @@ class Phase:
     AUDIO = 'audio'
     # ── research / longform channels (shared value) ──
     START = 'start'
+    # research action runtime: the tool-epoch agent loop is executing
+    AGENT = 'agent'
 
 
 # ── Tool-lifecycle timing contract ──────────────────────────────────
@@ -333,7 +376,20 @@ _SPECS: tuple[EventSpec, ...] = (
                       'phase': '(optional, running tasks only) authoritative '
                                'current phase snapshot — same shape as the poll '
                                'fallback task.phase, so reconnects resume the real '
-                               'working label instead of a bare waiting placeholder'}),
+                               'working label instead of a bare waiting placeholder'},
+              # No in-process emitter: the frame is served by the replay/
+              # reconnect path. All fields optional (forward-compatible).
+              schema=(
+                  FieldSpec('content', 'str'),
+                  FieldSpec('thinking', 'str'),
+                  FieldSpec('status', 'str'),
+                  FieldSpec('toolRounds', 'list'),
+                  FieldSpec('error', 'dict'),
+                  FieldSpec('finishReason', 'str'),
+                  FieldSpec('usage', 'dict'),
+                  FieldSpec('model', 'str'),
+                  FieldSpec('phase', 'str'),
+              )),
     EventSpec(EventType.PHASE, _C.LIFECYCLE,
               'Progress / status hint for the current turn.',
               fields={'phase': 'phase key — the declared vocabulary lives in '
@@ -350,6 +406,10 @@ _SPECS: tuple[EventSpec, ...] = (
                       'detailArgs': '(optional) interpolation args for `detailKey` '
                                     '(e.g. {"round": 3, "model": "claude-4"})',
                       'model': '(optional) resolved model id',
+                      'providerId': '(optional, retrying) physical provider '
+                                    'for the current attempt',
+                      'dispatchMode': '(optional, retrying) strict_model or '
+                                      'pool_rescue',
                       'modelRoute': '(optional) selected→resolved orchestration '
                                     'route (selectedModel/resolvedModel/role/'
                                     'tier/kind)',
@@ -364,7 +424,107 @@ _SPECS: tuple[EventSpec, ...] = (
                       'toolContextTools': '(optional) the structured raw tool '
                                           'names behind `toolContext` — compose '
                                           'the suffix in the UI language from '
-                                          'THESE when present'}),
+                                          'THESE when present',
+                      # Production-channel and retry/queue phase fields (the
+                      # PhaseSpec registry below carries the per-phase prose;
+                      # the schema is the UNION every phase value may ride).
+                      'attempt': '(optional) retry/nudge counter',
+                      'max': '(optional) retry/nudge budget',
+                      'bucket': '(optional) retry signature bucket',
+                      'backoff_s': '(optional) backoff seconds before retry',
+                      'errorKind': '(optional) typed transient failure kind',
+                      'continuationMode': '(optional) retry continuation mode',
+                      'statusCode': '(optional) HTTP status that triggered the cycle',
+                      'incomplete': '(optional) todo-continuation incomplete count',
+                      'stats': '(optional) tool-history rebuild stats',
+                      'overhead': '(optional) tool-history rebuild token overhead',
+                      'queuePosition': '(optional) executor FIFO position',
+                      'queued': '(optional) executor queued root-task count',
+                      'active': '(optional) executor active worker count',
+                      'capacity': '(optional) executor worker-slot capacity',
+                      'waitSeconds': '(optional) executor FIFO residence seconds',
+                      'topic': '(optional, motion_video) job topic',
+                      'scenes': '(optional, motion_video) scene list or count',
+                      'timed_from_audio': '(optional, motion_video) SRT timing source',
+                      'cues': '(optional, motion_video) parsed cue count',
+                      'span_s': '(optional, motion_video) [start, end] seconds',
+                      'degraded': '(optional, motion_video) narration degraded flag',
+                      'reused': '(optional, motion_video) manifest-reuse flag',
+                      'authored': '(optional, motion_video) agent-authored scene count',
+                      'templated': '(optional, motion_video) template-fallback count',
+                      'gate_failed_scenes': '(optional, motion_video) advisory '
+                                            'gate finding scene ids',
+                      'duration_s': '(optional, motion_video) clip seconds',
+                      'mode': '(optional, motion_video) concat mode',
+                      'auto': '(optional, motion_video) auto burn-in flag',
+                      'scene_id': '(optional, motion_video) regen target scene',
+                      'regen_of': '(optional, motion_video) regen source job id',
+                      'total': '(optional, podcast) audio segment count',
+                      'direction': '(optional, research) mined direction',
+                      'action': '(optional, research) workspace action',
+                      'toolCount': '(optional, research) bound tool-epoch size',
+                      'routeId': '(optional, retrying) credential-free concrete '
+                                 'network route id',
+                      'routeMode': '(optional, retrying) direct|proxy|env|'
+                                   'desktop|unknown',
+                      'failureStage': '(optional, retrying) connect/'
+                                      'provider_response/midstream/progress stage',
+                      'creative_mode': '(optional, motion_video) scene-author '
+                                       'creative mode',
+                      'director': '(optional, motion_video) director brief'},
+              schema=(
+                  FieldSpec('phase', 'str', required=True),
+                  FieldSpec('detail', 'str'),
+                  FieldSpec('detailKey', 'str'),
+                  FieldSpec('detailArgs', 'dict'),
+                  FieldSpec('model', 'str'),
+                  FieldSpec('providerId', 'str'),
+                  FieldSpec('dispatchMode', 'str'),
+                  FieldSpec('modelRoute', 'dict'),
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('tools', 'list'),
+                  FieldSpec('toolContext', 'str'),
+                  FieldSpec('toolContextTools', 'list'),
+                  FieldSpec('attempt', 'int'),
+                  FieldSpec('max', 'int'),
+                  FieldSpec('bucket', 'str'),
+                  FieldSpec('backoff_s', 'number'),
+                  FieldSpec('errorKind', 'str'),
+                  FieldSpec('continuationMode', 'str'),
+                  FieldSpec('statusCode', 'int'),
+                  FieldSpec('incomplete', 'int'),
+                  FieldSpec('stats', 'dict'),
+                  FieldSpec('overhead', 'int'),
+                  FieldSpec('queuePosition', 'int'),
+                  FieldSpec('queued', 'int'),
+                  FieldSpec('active', 'int'),
+                  FieldSpec('capacity', 'int'),
+                  FieldSpec('waitSeconds', 'number'),
+                  FieldSpec('topic', 'str'),
+                  FieldSpec('scenes', 'int | list'),
+                  FieldSpec('timed_from_audio', 'bool'),
+                  FieldSpec('cues', 'int'),
+                  FieldSpec('span_s', 'list'),
+                  FieldSpec('degraded', 'bool'),
+                  FieldSpec('reused', 'bool'),
+                  FieldSpec('authored', 'int'),
+                  FieldSpec('templated', 'int'),
+                  FieldSpec('gate_failed_scenes', 'list'),
+                  FieldSpec('duration_s', 'number'),
+                  FieldSpec('mode', 'str'),
+                  FieldSpec('auto', 'bool'),
+                  FieldSpec('scene_id', 'str'),
+                  FieldSpec('regen_of', 'str'),
+                  FieldSpec('total', 'int'),
+                  FieldSpec('direction', 'str'),
+                  FieldSpec('action', 'str'),
+                  FieldSpec('toolCount', 'int'),
+                  FieldSpec('routeId', 'str'),
+                  FieldSpec('routeMode', 'str'),
+                  FieldSpec('failureStage', 'str'),
+                  FieldSpec('creative_mode', 'str'),
+                  FieldSpec('director', 'dict'),
+              )),
     EventSpec(EventType.ROUND_START, _C.LIFECYCLE,
               'Explicit start boundary of an LLM round (the orchestrator loop '
               'index). Emitted at the TOP of every round the model actually '
@@ -373,7 +533,10 @@ _SPECS: tuple[EventSpec, ...] = (
               'off a real boundary instead of inferring it from the first '
               '`tool_start` (a round with no tools had NO signal before). '
               'Non-terminal.',
-              fields={'roundNum': 'the round index this boundary opens'}),
+              fields={'roundNum': 'the round index this boundary opens'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+              )),
     EventSpec(EventType.ROUND_END, _C.LIFECYCLE,
               'Explicit end boundary of an LLM round — the complement of '
               '`round_start`. Emitted when a round concludes on EVERY exit path: '
@@ -384,20 +547,115 @@ _SPECS: tuple[EventSpec, ...] = (
               'Non-terminal (a `done` still follows on the terminal path).',
               fields={'roundNum': 'the round index this boundary closes',
                       'reason': 'tools|final|aborted|budget|error|tool_timeout|'
-                                'tool_loop|success_poll — why the round ended'}),
+                                'tool_loop|success_poll — why the round ended'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('reason', 'str', required=True),
+              )),
     EventSpec(EventType.DONE, _C.LIFECYCLE,
               'Terminal event — the turn finished (success or, with `error`, failure).',
               terminal=True,
               fields={'error': 'error envelope if failed (else absent)',
                       'finishReason': 'provider/normalized terminal reason',
                       'streamState': 'closed ProviderStreamState evidence; '
-                                     'provider_finished is the only success state'}),
+                                     'provider_finished is the only success state',
+                      'taskId': '(optional) owning task id (orchestrator '
+                                'post-loop settle path)',
+                      'usage': '(optional) accumulated token usage',
+                      'preset': '(optional) generation preset name',
+                      'model': '(optional) model id that produced the answer',
+                      'thinkingDepth': '(optional) resolved thinking depth',
+                      'toolSummary': '(optional) tool-summary text carried on '
+                                     'the terminal frame',
+                      'todoState': '(optional) public checklist state when the '
+                                   'turn drove a todo list',
+                      'todoBlocked': '(optional) true when the checklist '
+                                     'blocked completion',
+                      'waitingOn': '(optional) structured wait descriptor '
+                                   '(e.g. a pending sub-agent set)',
+                      'incomplete': '(optional) true when the flow loop '
+                                    'finished with finishReason=incomplete',
+                      'flowReason': '(optional) flow loop stop reason '
+                                    '(orchestration terminal path only)',
+                      'flowMode': '(optional) true when stamped by the flow '
+                                  'orchestration terminal path',
+                      'flowProjection': '(optional) orchestration projection '
+                                        'label (orchestration path only)',
+                      'orchestrationOutcome': '(optional) TerminalOutcome '
+                                              'dict (orchestration path only)',
+                      'actualModel': '(optional) server-authoritative model '
+                                     'after mid-turn fallback/preset switch',
+                      'actualDepth': '(optional) server-authoritative '
+                                     'thinking depth at done',
+                      'actualModes': '(optional) active mode labels '
+                                     '(flow/goal) as {label,tone} dicts',
+                      'userMsgId': '(optional) stable _msgId of the user '
+                                   'turn that triggered this task',
+                      'apiRounds': '(optional) per-API-round evidence dicts '
+                                   '(usage/model/provider/cost per round)',
+                      'fallbackModel': '(optional) model fell back to',
+                      'fallbackFrom': '(optional) model fell back from',
+                      'fallbackReason': '(optional) why fallback happened',
+                      'fallbackKind': '(optional) fallback classification',
+                      'modifiedFiles': '(optional) checkpoint-merged '
+                                       'modified path list',
+                      'modifiedFileList': '(optional) checkpoint-merged '
+                                          'rich modified-file dicts',
+                      'cost': '(optional) priced cost snapshot for the turn',
+                      'costExperiment': '(optional) cost-experiment outcome '
+                                        'dict when an arm is active',
+                      'latestLiveTaskId': '(optional) successor live task id '
+                                          '(autopilot VU chain)',
+                      'latestLiveTaskIsVu': '(optional) true when the '
+                                            'successor is a VU sub-task',
+                      '_diagnostics': '(optional) internal loop-exit '
+                                      'diagnostics on suspicion'},
+              schema=(
+                  FieldSpec('error', 'dict'),
+                  FieldSpec('finishReason', 'str'),
+                  FieldSpec('streamState', 'str'),
+                  FieldSpec('taskId', 'str'),
+                  FieldSpec('usage', 'dict'),
+                  FieldSpec('preset', 'str'),
+                  FieldSpec('model', 'str'),
+                  FieldSpec('thinkingDepth', 'str'),
+                  FieldSpec('toolSummary', 'str'),
+                  FieldSpec('todoState', 'dict'),
+                  FieldSpec('todoBlocked', 'bool'),
+                  FieldSpec('waitingOn', 'dict'),
+                  FieldSpec('incomplete', 'bool'),
+                  FieldSpec('flowReason', 'str'),
+                  FieldSpec('flowMode', 'bool'),
+                  FieldSpec('flowProjection', 'str'),
+                  FieldSpec('orchestrationOutcome', 'dict'),
+                  FieldSpec('actualModel', 'str'),
+                  FieldSpec('actualDepth', 'str'),
+                  FieldSpec('actualModes', 'list'),
+                  FieldSpec('userMsgId', 'str'),
+                  FieldSpec('apiRounds', 'list'),
+                  FieldSpec('fallbackModel', 'str'),
+                  FieldSpec('fallbackFrom', 'str'),
+                  FieldSpec('fallbackReason', 'str'),
+                  FieldSpec('fallbackKind', 'str'),
+                  FieldSpec('modifiedFiles', 'list'),
+                  FieldSpec('modifiedFileList', 'list'),
+                  FieldSpec('cost', 'dict'),
+                  FieldSpec('costExperiment', 'dict'),
+                  FieldSpec('latestLiveTaskId', 'str'),
+                  FieldSpec('latestLiveTaskIsVu', 'bool'),
+                  FieldSpec('_diagnostics', 'dict'),
+              )),
     EventSpec(EventType.ERROR, _C.LIFECYCLE,
               'Legacy terminal error envelope. New fatal paths normally emit '
               'a `done` with `error`, but Turn authority still settles this '
               'frame for compatibility.',
               terminal=True,
-              fields={'content': 'error text', 'detail': 'structured detail'}),
+              fields={'content': 'error text', 'detail': 'structured detail'},
+              # No in-process emitter (Turn authority compat frame) — optional.
+              schema=(
+                  FieldSpec('content', 'str'),
+                  FieldSpec('detail', 'dict'),
+              )),
     EventSpec(EventType.RETRY_RESET, _C.LIFECYCLE,
               'A transient-error turn is being auto-re-run from scratch. The '
               'client MUST clear the live bubble\'s accumulated content / '
@@ -408,7 +666,13 @@ _SPECS: tuple[EventSpec, ...] = (
               fields={'attempt': 'whole-turn retry number (1-based)',
                       'max': 'retry budget',
                       'kind': 'error kind that triggered the re-run',
-                      'contentEpoch': 'monotonic text generation after this reset'}),
+                      'contentEpoch': 'monotonic text generation after this reset'},
+              schema=(
+                  FieldSpec('attempt', 'int', required=True),
+                  FieldSpec('max', 'int', required=True),
+                  FieldSpec('kind', 'str', required=True),
+                  FieldSpec('contentEpoch', 'int', required=True),
+              )),
     EventSpec(EventType.MODEL_REQUEST_START, _C.LIFECYCLE,
               'A logical model dispatch started. This low-frequency boundary '
               'opens the durable activity span used to correlate subsequent '
@@ -417,7 +681,17 @@ _SPECS: tuple[EventSpec, ...] = (
                       'model': 'requested model id',
                       'providerId': '(optional) provider id when already known',
                       'roundNum': '(optional) model round number',
-                      'requestTag': 'task-local request label (R1/FALLBACK/etc.)'}),
+                      'requestTag': 'task-local request label (R1/FALLBACK/etc.)',
+                      'emittedAt': 'epoch ms when the backend handed this frame '
+                                   'to the event chokepoint'},
+              schema=(
+                  FieldSpec('spanId', 'str', required=True),
+                  FieldSpec('model', 'str', required=True),
+                  FieldSpec('providerId', 'str'),
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('requestTag', 'str', required=True),
+                  FieldSpec('emittedAt', 'number'),
+              )),
     EventSpec(EventType.MODEL_REQUEST_COMPLETE, _C.LIFECYCLE,
               'A logical model-dispatch span settled successfully or failed. '
               'This is diagnostic state only and does not itself settle the Turn.',
@@ -438,7 +712,34 @@ _SPECS: tuple[EventSpec, ...] = (
                       'routeDecision': '(optional) why this route was selected',
                       'failureStage': '(optional) connect/provider_response/midstream/progress stage',
                       'roundNum': '(optional) model round number',
-                      'requestTag': 'task-local request label'}),
+                      'requestTag': 'task-local request label',
+                      'observerIsolation': '(optional) '
+                                           'tofu.provider-ingress-isolation/v1 '
+                                           'receipt when provider dispatches were '
+                                           'guarded this span',
+                      'emittedAt': 'epoch ms when the backend handed this frame '
+                                   'to the event chokepoint'},
+              schema=(
+                  FieldSpec('spanId', 'str', required=True),
+                  FieldSpec('model', 'str', required=True),
+                  FieldSpec('providerId', 'str'),
+                  FieldSpec('status', 'str', required=True),
+                  FieldSpec('finishReason', 'str'),
+                  FieldSpec('streamState', 'str'),
+                  FieldSpec('durationMs', 'int', required=True),
+                  FieldSpec('errorKind', 'str'),
+                  FieldSpec('errorDetail', 'str'),
+                  FieldSpec('errorUrl', 'str'),
+                  FieldSpec('statusCode', 'int'),
+                  FieldSpec('routeId', 'str'),
+                  FieldSpec('routeMode', 'str'),
+                  FieldSpec('routeDecision', 'str'),
+                  FieldSpec('failureStage', 'str'),
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('requestTag', 'str', required=True),
+                  FieldSpec('observerIsolation', 'dict'),
+                  FieldSpec('emittedAt', 'number'),
+              )),
     EventSpec(EventType.MODEL_FALLBACK, _C.LIFECYCLE,
               'The primary model failed and the turn is being re-streamed on '
               'the configured fallback model. Emitted EARLY, at the decision '
@@ -451,12 +752,25 @@ _SPECS: tuple[EventSpec, ...] = (
                       'fallbackFrom': 'the original model that failed',
                       'fallbackKind': 'error kind that triggered the fallback',
                       'fallbackReason': 'human-readable reason (kind: detail, '
-                                        'capped at 300 chars)'}),
+                                        'capped at 300 chars)',
+                      'emittedAt': 'epoch ms when the backend handed this frame '
+                                   'to the event chokepoint'},
+              schema=(
+                  FieldSpec('fallbackModel', 'str', required=True),
+                  FieldSpec('fallbackFrom', 'str', required=True),
+                  FieldSpec('fallbackKind', 'str', required=True),
+                  FieldSpec('fallbackReason', 'str', required=True),
+                  FieldSpec('emittedAt', 'number'),
+              )),
     # ───────────────────────── content ─────────────────────────
     EventSpec(EventType.DELTA, _C.CONTENT,
               'Incremental assistant output — append to the live bubble.',
               fields={'content': 'text delta (may be absent)',
-                      'thinking': 'reasoning delta (may be absent)'}),
+                      'thinking': 'reasoning delta (may be absent)'},
+              schema=(
+                  FieldSpec('content', 'str'),
+                  FieldSpec('thinking', 'str'),
+              )),
     EventSpec(EventType.DELTA_RESET, _C.CONTENT,
               'The just-ended LLM round issued TOOL CALLS, so any prose it '
               'streamed before those calls was inter-round narration (e.g. '
@@ -473,11 +787,19 @@ _SPECS: tuple[EventSpec, ...] = (
               '(still keeping tool rounds).',
               fields={'roundNum': 'the tool-call round number whose prose is dropped',
                       'discard': 'optional; true = unconditional clear, no prose-capture',
-                      'contentEpoch': 'monotonic text generation after this reset'}),
+                      'contentEpoch': 'monotonic text generation after this reset'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('discard', 'bool'),
+                  FieldSpec('contentEpoch', 'int', required=True),
+              )),
     # ───────────────────────── tool ─────────────────────────
     EventSpec(EventType.TOOL_START, _C.TOOL,
               'A tool call began executing.',
               fields={'roundNum': 'round index', 'toolName': 'tool name',
+                      'agentId': '(optional, swarm emissions) owning sub-agent '
+                                 'id; the Request Inspector stream for this '
+                                 'call is `{parentTaskId}#agent:{agentId}`',
                       'toolCallId': 'tool-call id', 'query': 'display string',
                       'toolArgs': 'serialized args',
                       'caller': '(optional) Responses nested-call owner',
@@ -488,16 +810,85 @@ _SPECS: tuple[EventSpec, ...] = (
                                        'or interactive semantic importance',
                       'status': "(optional) 'rejected' when the tool was a "
                                 'hallucination and never ran',
+                      'llmRound': '(optional, swarm emissions) provider LLM '
+                                  'round index when it differs from the task '
+                                  'roundNum',
                       '_rejected': '(optional) {attempted, suggestions} for a '
                                    'rejected hallucinated tool',
                       '_contractError': '(optional) stable ToolContractV2 '
                                         'error for a call rejected before '
                                         'execution',
-                      **_TOOL_CLOCK_FIELDS}),
+                      '_toolRoot': '(optional) resolved workspace root for '
+                                   'multi-root fs tools (path display)',
+                      'source': '(optional) provider wire origin '
+                                '(native_direct/program/…), stamped on every '
+                                'parsed call',
+                      'rejection': '(optional) typed rejection descriptor '
+                                   'when status=rejected',
+                      'assistantContent': '(optional, first call of the round) '
+                                          'prose the model emitted alongside '
+                                          'its tool calls',
+                      'thinking': '(optional, first call of the round) '
+                                  'reasoning text for Continue replay',
+                      'thinkingSignature': '(optional, first call of the '
+                                           'round) thinking-continuity '
+                                           'signature',
+                      '_batchQueries': '(optional) full query list of a '
+                                       'batch web_search call for '
+                                       'structured rendering',
+                      '_batchUrls': '(optional) full URL list of a batch '
+                                    'fetch call for structured rendering',
+                      '_artifactOrigin': '(optional) structured provenance '
+                                         'twin of the display label on a '
+                                         'continuation round (origin chip)',
+                      '_hiddenToolAdapter': '(optional) true when this row '
+                                            'is the presentation adapter of '
+                                            'a hidden gateway call '
+                                            '(execute_tools)',
+                      '_mcpLinks': '(optional) {label → href} clickable-link '
+                                   'map re-keyed to fresh MCP labels',
+                      '_serverDownload': '(optional) true when the file is '
+                                         'staged server-side for download',
+                      '_swarm': '(optional) true on the spawn_agents round '
+                                '(swarm panel presentation)',
+                      **_TOOL_CLOCK_FIELDS},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('toolName', 'str'),
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('toolCallId', 'str'),
+                  FieldSpec('query', 'str', required=True),
+                  FieldSpec('toolArgs', 'str | dict'),
+                  FieldSpec('caller', 'dict'),
+                  FieldSpec('programCallId', 'str'),
+                  FieldSpec('parentToolCallId', 'str'),
+                  FieldSpec('attentionKind', 'str'),
+                  FieldSpec('status', 'str'),
+                  FieldSpec('llmRound', 'int'),
+                  FieldSpec('_rejected', 'dict'),
+                  FieldSpec('_contractError', 'dict'),
+                  FieldSpec('_toolRoot', 'str'),
+                  FieldSpec('source', 'str'),
+                  FieldSpec('rejection', 'dict'),
+                  FieldSpec('assistantContent', 'str'),
+                  FieldSpec('thinking', 'str'),
+                  FieldSpec('thinkingSignature', 'str'),
+                  FieldSpec('_batchQueries', 'list'),
+                  FieldSpec('_batchUrls', 'list'),
+                  FieldSpec('_artifactOrigin', 'dict'),
+                  FieldSpec('_hiddenToolAdapter', 'bool'),
+                  FieldSpec('_mcpLinks', 'dict'),
+                  FieldSpec('_serverDownload', 'bool'),
+                  FieldSpec('_swarm', 'bool'),
+                  FieldSpec('tStart', 'number'),
+                  FieldSpec('emittedAt', 'number'),
+              )),
     EventSpec(EventType.TOOL_PROGRESS, _C.TOOL,
               'Streaming progress emitted by a long-running tool.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
                       'detail': 'progress text',
+                      'agentId': '(optional, swarm emissions) owning sub-agent '
+                                 'id (see tool_start)',
                       'execStartTs': '(optional) epoch ms when the subprocess '
                                      'was actually SPAWNED. Distinct from '
                                      'tStart (round ANNOUNCE time): a write '
@@ -539,10 +930,76 @@ _SPECS: tuple[EventSpec, ...] = (
                                    'rides with query on the display-patch '
                                    'frame so the row gains the auto-fixed '
                                    'badge together with the new text',
-                      **_TOOL_CLOCK_FIELDS}),
+                      'toolName': '(optional) tool name (stream/batch frames)',
+                      'elapsed': '(optional) heartbeat-reported elapsed '
+                                 'seconds',
+                      'contractVersion': '(optional) stream-chunk payload '
+                                         'contract tag '
+                                         '(tool_runtime/progress, e.g. '
+                                         "'tofu.tool-progress/v1')",
+                      'version': '(optional) stream-chunk format version',
+                      'taskId': '(optional) owning task id (stream-chunk '
+                                'frames stamp their own before the transport '
+                                'setdefault)',
+                      'seq': '(optional) per-tool stream-chunk sequence '
+                             '(stream-chunk frames stamp their own before '
+                             'the transport re-assigns)',
+                      'stream': '(optional) stdout|stderr for stream chunks',
+                      'chunk': '(optional) stream chunk text',
+                      'bytes': '(optional) chunk byte length',
+                      'chars': '(optional) chunk char length',
+                      'spooling': '(optional) true while output is being '
+                                  'spooled',
+                      'truncated': '(optional) true when the chunk tail was '
+                                   'truncated',
+                      'terminalReason': '(optional) why the stream group '
+                                        'closed (final frame only)',
+                      'grepSearchIntercepted': '(optional) true on the '
+                                               'display-only frame published '
+                                               'when run_command delegates a '
+                                               'file grep to the runtime '
+                                               'grep_search engine',
+                      **_TOOL_CLOCK_FIELDS},
+              # tool_runtime/progress builds the frame EMPTY and mutates it
+              # afterwards, so NOTHING here may be required (construction-time
+              # validation sees only the type + emittedAt).
+              schema=(
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('toolCallId', 'str'),
+                  FieldSpec('detail', 'str'),
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('execStartTs', 'number'),
+                  FieldSpec('deadlineTs', 'number'),
+                  FieldSpec('batchItem', 'str'),
+                  FieldSpec('batchDone', 'int'),
+                  FieldSpec('batchTotal', 'int'),
+                  FieldSpec('batchOk', 'bool'),
+                  FieldSpec('_selfTick', 'bool'),
+                  FieldSpec('query', 'str'),
+                  FieldSpec('_repaired', 'dict'),
+                  FieldSpec('toolName', 'str'),
+                  FieldSpec('elapsed', 'int'),
+                  FieldSpec('contractVersion', 'str'),
+                  FieldSpec('version', 'int'),
+                  FieldSpec('taskId', 'str'),
+                  FieldSpec('seq', 'int'),
+                  FieldSpec('stream', 'str'),
+                  FieldSpec('chunk', 'str'),
+                  FieldSpec('bytes', 'int'),
+                  FieldSpec('chars', 'int'),
+                  FieldSpec('spooling', 'bool'),
+                  FieldSpec('truncated', 'bool'),
+                  FieldSpec('terminalReason', 'str'),
+                  FieldSpec('grepSearchIntercepted', 'bool'),
+                  FieldSpec('tStart', 'number'),
+                  FieldSpec('emittedAt', 'number'),
+              )),
     EventSpec(EventType.TOOL_RESULT, _C.TOOL,
               'A tool produced a (possibly partial) result payload.',
-              fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
+              fields={'roundNum': 'round index',
+                      'agentId': '(optional, swarm emissions) owning sub-agent '
+                                 'id (see tool_start)',
+                      'toolCallId': 'tool-call id',
                       'toolName': 'canonical tool name',
                       'results': 'list of {toolName,title,snippet,source}',
                       'query': 'display string',
@@ -562,7 +1019,64 @@ _SPECS: tuple[EventSpec, ...] = (
                       '_contractError': '(optional) stable ToolContractV2 '
                                         'error preserved when validation '
                                         'rejected the call',
-                      **_TOOL_CLOCK_FIELDS, **_TOOL_END_CLOCK_FIELD}),
+                      'rejection': '(optional) normalized tool-rejection '
+                                   'descriptor (see tool_complete)',
+                      '_repaired': '(optional) {label, detail, patterns} — '
+                                   'args auto-repair badge metadata',
+                      'llmRound': '(optional, swarm emissions) provider LLM '
+                                  'round index when it differs from the task '
+                                  'roundNum',
+                      'cacheSource': '(optional) prefetch|cache — the result '
+                                     'was served from a cached tool call',
+                      'engineBreakdown': '(optional) per-engine result counts '
+                                         'on a cache-hit search frame',
+                      'verticals': '(optional) batch web_search vertical list',
+                      'vertical': '(optional) structured vertical of a '
+                                  'cache-hit search (academic/finance/…)',
+                      'searchDiag': '(optional) search-diagnostics dict '
+                                    'carried through a cache hit',
+                      'toolSearchTotal': '(optional) search_tools total '
+                                         'catalogue hits',
+                      'toolSearchNextCursor': '(optional) search_tools '
+                                              'pagination cursor (null = end)',
+                      'toolSearchFailOpen': '(optional) true when '
+                                            'search_tools degraded to '
+                                            'fail-open listing',
+                      '_providerAttemptDiscarded': '(optional) true on an '
+                                                   'orphan early-announced '
+                                                   'round superseded by a '
+                                                   'provider retry',
+                      '_batchQueries': '(optional) full query list of a '
+                                       'batch web_search call for '
+                                       'structured rendering',
+                      **_TOOL_CLOCK_FIELDS, **_TOOL_END_CLOCK_FIELD},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('toolCallId', 'str'),
+                  FieldSpec('toolName', 'str'),
+                  FieldSpec('results', 'list', required=True),
+                  FieldSpec('query', 'str', required=True),
+                  FieldSpec('status', 'str'),
+                  FieldSpec('_rejected', 'dict'),
+                  FieldSpec('_contractError', 'dict'),
+                  FieldSpec('rejection', 'dict'),
+                  FieldSpec('_repaired', 'dict'),
+                  FieldSpec('llmRound', 'int'),
+                  FieldSpec('cacheSource', 'str'),
+                  FieldSpec('engineBreakdown', 'dict'),
+                  FieldSpec('verticals', 'list'),
+                  FieldSpec('vertical', 'str'),
+                  FieldSpec('searchDiag', 'dict'),
+                  FieldSpec('toolSearchTotal', 'int'),
+                  FieldSpec('toolSearchNextCursor', 'str | None'),
+                  FieldSpec('toolSearchFailOpen', 'bool'),
+                  FieldSpec('_providerAttemptDiscarded', 'bool'),
+                  FieldSpec('_batchQueries', 'list'),
+                  FieldSpec('tStart', 'number'),
+                  FieldSpec('tEnd', 'number'),
+                  FieldSpec('emittedAt', 'number'),
+              )),
     EventSpec(EventType.TOOL_COMPLETE, _C.TOOL,
               'A tool call finished; carries the final tool message.',
               fields={'roundNum': 'round index', 'toolCallId': 'tool-call id',
@@ -583,6 +1097,17 @@ _SPECS: tuple[EventSpec, ...] = (
                       'toolResultEvidence': '(optional) bounded non-model '
                                             'tofu.tool-result-evidence/v1 '
                                             'sidecar for runtime/evaluation',
+                      'llmRound': '(optional, swarm emissions) provider LLM '
+                                  'round index when it differs from the task '
+                                  'roundNum',
+                      'agentId': '(optional, swarm emissions) owning sub-agent '
+                                 'id (see tool_start)',
+                      'rejection': '(optional) normalized tool-rejection '
+                                   'descriptor (kind/tool/reason/suggestions); '
+                                   'stamped together with the `_rejected` '
+                                   'legacy alias by stamp_tool_rejection',
+                      '_rejected': '(optional) legacy alias of `rejection` '
+                                   '(same normalized descriptor object)',
                       'isError': 'bool',
                       'status': "(optional) terminal NON-SUCCESS verdict — "
                                 "'rejected' / 'aborted' / 'error' (tool raised "
@@ -590,7 +1115,37 @@ _SPECS: tuple[EventSpec, ...] = (
                                 "timeout incident). ABSENT on success; the "
                                 "client must never promote a verdict-bearing "
                                 "round to 'done'",
-                      **_TOOL_CLOCK_FIELDS, **_TOOL_END_CLOCK_FIELD}),
+                      **_TOOL_CLOCK_FIELDS, **_TOOL_END_CLOCK_FIELD},
+              # The FIRST field-level wire contract (the pilot). Covers every
+              # field the two real emitters (chat pipeline settle + swarm
+              # agent) can put on the frame, including the post-construction
+              # stamps the pipeline adds by mutation (status / rejection /
+              # compaction fields). tests/test_event_schema.py keeps this
+              # tuple in exact sync with the prose map above and validates
+              # real pipeline emissions against it.
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('toolCallId', 'str', required=True),
+                  FieldSpec('toolName', 'str', required=True),
+                  FieldSpec('toolContent', 'str', required=True),
+                  FieldSpec('toolTokens', 'int'),
+                  FieldSpec('compactionLayer', 'str'),
+                  # The L0 lane assigns these via ``round_entry.get(...)`` —
+                  # a missing source value lands on the wire as null.
+                  FieldSpec('compactedFromChars', 'int | None'),
+                  FieldSpec('compactedToChars', 'int | None'),
+                  FieldSpec('rawToolTokens', 'int'),
+                  FieldSpec('toolResultEvidence', 'dict'),
+                  FieldSpec('isError', 'bool'),
+                  FieldSpec('status', 'str'),
+                  FieldSpec('rejection', 'dict'),
+                  FieldSpec('_rejected', 'dict'),
+                  FieldSpec('llmRound', 'int'),
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('tStart', 'number'),
+                  FieldSpec('tEnd', 'number'),
+                  FieldSpec('emittedAt', 'number'),
+              )),
     EventSpec(EventType.TOOL_SCHEMA_REJECTED, _C.TOOL,
               'A malformed provider-visible tool schema was isolated before '
               'the request left the process. The tool is omitted for this '
@@ -601,8 +1156,21 @@ _SPECS: tuple[EventSpec, ...] = (
                       'detail': 'bounded structural validation detail',
                       'action': 'omitted',
                       'model': 'request model id',
-                      'parentSpanId': '(optional) owning model request span',
-                      'roundNum': '(optional) model round number'}),
+                      'parentSpanId': 'owning model request span',
+                      'roundNum': '(optional) model round number',
+                      'emittedAt': 'epoch ms when the backend handed this frame '
+                                   'to the event chokepoint'},
+              schema=(
+                  FieldSpec('toolName', 'str', required=True),
+                  FieldSpec('stage', 'str', required=True),
+                  FieldSpec('reasonCode', 'str', required=True),
+                  FieldSpec('detail', 'str', required=True),
+                  FieldSpec('action', 'str', required=True),
+                  FieldSpec('model', 'str', required=True),
+                  FieldSpec('parentSpanId', 'str', required=True),
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('emittedAt', 'number'),
+              )),
     EventSpec(EventType.TOOL_WIRE_PROJECTION, _C.TOOL,
               'Bounded Request Inspector evidence for the final provider tool '
               'surface. This diagnostic grants no execution authority and '
@@ -619,7 +1187,22 @@ _SPECS: tuple[EventSpec, ...] = (
                       'budgetDroppedNames': 'names omitted by explicit budget',
                       'compactedNames': 'names annotation-compacted by budget',
                       'executableToolCount': 'server-authorized catalog size',
-                      'parentSpanId': 'owning model request span'}),
+                      'parentSpanId': 'owning model request span'},
+              schema=(
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('turn', 'str', required=True),
+                  FieldSpec('model', 'str', required=True),
+                  FieldSpec('backend', 'str', required=True),
+                  FieldSpec('toolNames', 'list', required=True),
+                  FieldSpec('toolCount', 'int', required=True),
+                  FieldSpec('schemaTokens', 'int', required=True),
+                  FieldSpec('schemaFingerprint', 'str', required=True),
+                  FieldSpec('schemaBudgetTokens', 'int', required=True),
+                  FieldSpec('budgetDroppedNames', 'list', required=True),
+                  FieldSpec('compactedNames', 'list', required=True),
+                  FieldSpec('executableToolCount', 'int', required=True),
+                  FieldSpec('parentSpanId', 'str', required=True),
+              )),
     EventSpec(EventType.TOOL_COMPACTED, _C.TOOL,
               'A prior tool result was compacted out of context to save tokens.',
               fields={'toolCallId': 'tool-call id', 'roundNum': 'round index',
@@ -630,13 +1213,30 @@ _SPECS: tuple[EventSpec, ...] = (
                       'toolTokens': 'replacement model-visible tokens',
                       'compactedContent': 'replacement model-visible result',
                       'toolResultEvidence': '(optional) replacement bounded '
-                                            'non-model evidence sidecar'}),
+                                            'non-model evidence sidecar'},
+              schema=(
+                  FieldSpec('toolCallId', 'str', required=True),
+                  FieldSpec('roundNum', 'int | None'),
+                  FieldSpec('toolName', 'str', required=True),
+                  FieldSpec('compactionLayer', 'str', required=True),
+                  FieldSpec('compactedFromChars', 'int', required=True),
+                  FieldSpec('compactedToChars', 'int', required=True),
+                  FieldSpec('toolTokens', 'int', required=True),
+                  FieldSpec('compactedContent', 'str', required=True),
+                  FieldSpec('toolResultEvidence', 'dict'),
+              )),
     EventSpec(EventType.TOOL_CALL_REPLAY, _C.TOOL,
               'A previously settled idempotent tool call was reused without '
               'executing the tool again.',
               fields={'toolName': 'canonical tool name',
                       'content': 'replayed settled result',
-                      'badge': 'replayed'}),
+                      'badge': 'replayed'},
+              # Registry-only (no in-process emitter) — all optional.
+              schema=(
+                  FieldSpec('toolName', 'str'),
+                  FieldSpec('content', 'str'),
+                  FieldSpec('badge', 'str'),
+              )),
     EventSpec(EventType.PROGRAM_START, _C.TOOL,
               'A native or local orchestration program started. Its nested '
               'function calls remain ordinary tool lifecycle events.',
@@ -649,7 +1249,20 @@ _SPECS: tuple[EventSpec, ...] = (
                       'limits': 'enforced calls/output/continuation ceilings',
                       'source': 'openai_ptc or execute_program',
                       'backend': 'native_openai or local_toolscript',
-                      'status': 'running', 'tStart': 'program start epoch ms'}),
+                      'status': 'running', 'tStart': 'program start epoch ms'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('llmRound', 'int | None'),
+                  FieldSpec('programCallId', 'str', required=True),
+                  FieldSpec('code', 'str', required=True),
+                  FieldSpec('childCallIds', 'list', required=True),
+                  FieldSpec('childToolNames', 'list', required=True),
+                  FieldSpec('limits', 'dict', required=True),
+                  FieldSpec('source', 'str', required=True),
+                  FieldSpec('backend', 'str', required=True),
+                  FieldSpec('status', 'str', required=True),
+                  FieldSpec('tStart', 'number | None'),
+              )),
     EventSpec(EventType.PROGRAM_OUTPUT, _C.TOOL,
               'A native or local program produced its aggregate output.',
               fields={'roundNum': 'display-only parent round index',
@@ -662,16 +1275,41 @@ _SPECS: tuple[EventSpec, ...] = (
                       'source': 'openai_ptc or execute_program',
                       'backend': 'native_openai or local_toolscript',
                       'tStart': 'program start epoch ms',
-                      'tEnd': 'program completion epoch ms'}),
+                      'tEnd': 'program completion epoch ms'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('llmRound', 'int | None'),
+                  FieldSpec('programCallId', 'str', required=True),
+                  FieldSpec('result', 'str | dict | None', required=True),
+                  FieldSpec('status', 'str', required=True),
+                  FieldSpec('childCallIds', 'list', required=True),
+                  FieldSpec('childToolNames', 'list', required=True),
+                  FieldSpec('source', 'str', required=True),
+                  FieldSpec('backend', 'str', required=True),
+                  FieldSpec('tStart', 'number | None'),
+                  FieldSpec('tEnd', 'number', required=True),
+              )),
     # ───────────────────────── context ─────────────────────────
     EventSpec(EventType.ROUND_USAGE, _C.CONTEXT,
               'Token-usage accounting for a completed round.',
               fields={'usage': 'usage dict', 'roundNum': 'round number',
-                      'model': 'model id'}),
+                      'model': 'model id',
+                      'tag': 'request label (R1/FALLBACK/etc.)',
+                      'turn': 'flow phase label (empty when no flow)',
+                      'tokensIn': 'input tokens this round',
+                      'tokensOut': 'output tokens this round'},
+              schema=(
+                  FieldSpec('usage', 'dict', required=True),
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('model', 'str', required=True),
+                  FieldSpec('tag', 'str', required=True),
+                  FieldSpec('turn', 'str', required=True),
+                  FieldSpec('tokensIn', 'int', required=True),
+                  FieldSpec('tokensOut', 'int', required=True),
+              )),
     EventSpec(EventType.ROUND_COMMITTED, _C.CONTEXT,
               'A round was persisted server-side (durable checkpoint).',
               fields={
-                  'roundNum': 'round number',
                   'taskId': 'owning task id',
                   'snapshotId': 'file-history snapshot id when available',
                   'gitSha': 'legacy alias for snapshotId',
@@ -679,11 +1317,48 @@ _SPECS: tuple[EventSpec, ...] = (
                   'modifiedFiles': 'task-attributed changed-path count',
                   'linearGitCheckpoint': (
                       'single-checkout checkpoint/stable settlement receipt'),
-              }),
+                  'addedByGit': 'paths the file-history diff attributes to '
+                                'this round beyond the task-attributed list',
+              },
+              schema=(
+                  FieldSpec('taskId', 'str', required=True),
+                  FieldSpec('snapshotId', 'str'),
+                  FieldSpec('gitSha', 'str'),
+                  FieldSpec('modifiedFileList', 'list | None'),
+                  FieldSpec('modifiedFiles', 'int | None'),
+                  FieldSpec('linearGitCheckpoint', 'dict'),
+                  FieldSpec('addedByGit', 'list'),
+              )),
     EventSpec(EventType.MESSAGES_SNAPSHOT, _C.CONTEXT,
               'A point-in-time copy of the message list (fallback/branch sync).',
-              fields={'messages': 'message list', 'roundNum': 'round id/label (may be a string label like final/fallback)',
-                      'label': 'human label'}),
+              fields={'messages': 'message list',
+                      'kind': 'request|state — pre-flight request vs post-hoc '
+                              'state snapshot',
+                      'model': 'model id',
+                      'roundNum': 'round id/label (may be a string label like final/fallback)',
+                      'label': 'human label',
+                      'contextManifest': '(optional) bounded context-manifest '
+                                         'entries',
+                      'turn': '(optional) flow phase label',
+                      'params': '(optional, request kind) sampling params '
+                                '{maxTokens, temperature, thinkingEnabled, …}',
+                      'tools': '(optional, request kind) provider-visible '
+                               'tool schemas',
+                      'agentId': '(optional, swarm) owning sub-agent id',
+                      'agentRole': '(optional, swarm) sub-agent role'},
+              schema=(
+                  FieldSpec('messages', 'list', required=True),
+                  FieldSpec('kind', 'str', required=True),
+                  FieldSpec('model', 'str', required=True),
+                  FieldSpec('roundNum', 'int | str', required=True),
+                  FieldSpec('label', 'str', required=True),
+                  FieldSpec('contextManifest', 'list'),
+                  FieldSpec('turn', 'str'),
+                  FieldSpec('params', 'dict'),
+                  FieldSpec('tools', 'list'),
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('agentRole', 'str'),
+              )),
     EventSpec(EventType.COMPACTION, _C.CONTEXT,
               'A pre-compaction transcript snapshot was archived.',
               fields={
@@ -700,7 +1375,22 @@ _SPECS: tuple[EventSpec, ...] = (
                   'reason': 'bounded trigger explanation',
                   'snapshotKind': 'pre_compaction_transcript',
                   'ts': 'epoch seconds',
-              }),
+              },
+              schema=(
+                  FieldSpec('archiveId', 'str | int', required=True),
+                  FieldSpec('convId', 'str', required=True),
+                  FieldSpec('trigger', 'str', required=True),
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('tokensBefore', 'int', required=True),
+                  FieldSpec('tokensAfter', 'int', required=True),
+                  FieldSpec('tokenCountKind', 'str', required=True),
+                  FieldSpec('msgsBefore', 'int', required=True),
+                  FieldSpec('msgsAfter', 'int', required=True),
+                  FieldSpec('model', 'str', required=True),
+                  FieldSpec('reason', 'str', required=True),
+                  FieldSpec('snapshotKind', 'str', required=True),
+                  FieldSpec('ts', 'int', required=True),
+              )),
     EventSpec(EventType.COMPACTION_DONE, _C.CONTEXT,
               'A compaction archive received its final estimated counts.',
               fields={
@@ -715,17 +1405,56 @@ _SPECS: tuple[EventSpec, ...] = (
                   'reductionPct': 'estimated percentage token reduction',
                   'roundNum': 'task round number',
                   'receipt': 'bounded tofu.compaction-receipt/v1 result',
-              }),
+              },
+              schema=(
+                  FieldSpec('archiveId', 'str', required=True),
+                  FieldSpec('convId', 'str', required=True),
+                  FieldSpec('trigger', 'str', required=True),
+                  FieldSpec('tokensBefore', 'int', required=True),
+                  FieldSpec('tokensAfter', 'int', required=True),
+                  FieldSpec('tokenCountKind', 'str', required=True),
+                  FieldSpec('msgsBefore', 'int', required=True),
+                  FieldSpec('msgsAfter', 'int', required=True),
+                  FieldSpec('reductionPct', 'number', required=True),
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('receipt', 'dict', required=True),
+              )),
     EventSpec(EventType.MEMORY_PREFETCH, _C.CONTEXT,
               'Memory-prefetch pipeline stage update.',
-              fields={'stage': 'pipeline stage', 'results': 'retrieved notes'}),
+              fields={'phase': 'started|done|skipped|failed',
+                      'reason': '(skipped/failed) why the prefetch did not run',
+                      'total_memories': '(started) memory catalogue size',
+                      'candidate_target': '(started) selection budget',
+                      'strategy': '(started/done) selection strategy label',
+                      'selected': '(done) memories injected',
+                      'candidates': '(done) candidate count considered',
+                      'rejectedLowConfidence': '(done) candidates dropped by '
+                                               'the confidence floor',
+                      'total_ms': '(done) pipeline wall time',
+                      'auxiliaryLlmCalls': '(done) extra LLM calls spent',
+                      'memories': '(done) selected {name, description, reason}'},
+              schema=(
+                  FieldSpec('phase', 'str', required=True),
+                  FieldSpec('reason', 'str'),
+                  FieldSpec('total_memories', 'int'),
+                  FieldSpec('candidate_target', 'int'),
+                  FieldSpec('strategy', 'str'),
+                  FieldSpec('selected', 'int'),
+                  FieldSpec('candidates', 'int'),
+                  FieldSpec('rejectedLowConfidence', 'int'),
+                  FieldSpec('total_ms', 'int'),
+                  FieldSpec('auxiliaryLlmCalls', 'int'),
+                  FieldSpec('memories', 'list'),
+              )),
     EventSpec(EventType.PREFERENCES_APPLIED, _C.CONTEXT,
               'The bounded structured user context was injected into this '
               'turn (all categories always-on and cache-safe).',
               fields={'chars': 'profile size in chars',
-                      'items': 'flat list of injected bullets (core + relevant detail) for the chip',
-                      'core': 'always-on core-tier bullets injected this turn',
-                      'detail': 'relevance-selected detail-tier bullets (empty on an irrelevant turn)'}),
+                      'items': 'flat list of injected bullets (core + relevant detail) for the chip'},
+              schema=(
+                  FieldSpec('chars', 'int', required=True),
+                  FieldSpec('items', 'list', required=True),
+              )),
     EventSpec(EventType.PREFERENCE_LEARNED, _C.CONTEXT,
               'A durable user-context item was learned or updated by the '
               'post-turn consolidation pass and can be undone.',
@@ -735,7 +1464,16 @@ _SPECS: tuple[EventSpec, ...] = (
                       'id': 'legacy alias for change_id',
                       'change_id': 'bounded undo-log change identifier',
                       'item_id': 'stable context item identifier',
-                      'context_type': 'identity|work_rule|response_preference'}),
+                      'context_type': 'identity|work_rule|response_preference'},
+              schema=(
+                  FieldSpec('kind', 'str', required=True),
+                  FieldSpec('summary', 'str', required=True),
+                  FieldSpec('pending', 'bool', required=True),
+                  FieldSpec('id', 'str', required=True),
+                  FieldSpec('change_id', 'str', required=True),
+                  FieldSpec('item_id', 'str', required=True),
+                  FieldSpec('context_type', 'str', required=True),
+              )),
     EventSpec(EventType.RELATED_CONVERSATIONS, _C.CONTEXT,
               'The bounded cross-conversation project digest (sibling '
               'conversations of the same project) was injected into this turn '
@@ -745,7 +1483,13 @@ _SPECS: tuple[EventSpec, ...] = (
               fields={'count': 'number of siblings surfaced',
                       'items': 'list of {id, title, summary}',
                       'toolsAvailable': 'whether get_conversation/'
-                                        'list_conversations were registered this turn'}),
+                                        'list_conversations were registered this turn'},
+              # Registry-only (no in-process emitter) — all optional.
+              schema=(
+                  FieldSpec('count', 'int'),
+                  FieldSpec('items', 'list'),
+                  FieldSpec('toolsAvailable', 'bool'),
+              )),
     EventSpec(EventType.PROJECT_EXTERNAL_EDIT, _C.CONTEXT,
               'Off-agent (IDE) drift to a tracked file was snapshotted into '
               'file-history. Pure audit/provenance record — the frontend '
@@ -753,85 +1497,363 @@ _SPECS: tuple[EventSpec, ...] = (
               "undo the UI had no path for; the snapshot's real consumer is "
               'the file-history timeline itself).',
               fields={'files': 'list of drifted project-relative paths',
-                      'sha': 'file-history snapshot id'}),
+                      'sha': 'file-history snapshot id (null when the drift '
+                             'snapshot could not be written)'},
+              schema=(
+                  FieldSpec('files', 'list', required=True),
+                  FieldSpec('sha', 'str | None', required=True),
+              )),
     EventSpec(EventType.WORKSPACE_ROOT_ADDED, _C.CONTEXT,
               'An absolute-path write auto-registered a NEW extra workspace '
               'root (the silent workspace expansion that was previously '
               'invisible — no tool round, only an app.log line). Surfaces a '
               'brief "added workspace root X" notice so the user knows the '
               'agent widened the project scope.',
-              fields={'roots': 'list of {rootName, path} auto-registered this tool call'}),
+              fields={'roots': 'list of {rootName, path} auto-registered this tool call'},
+              schema=(
+                  FieldSpec('roots', 'list', required=True),
+              )),
     # ─────────────────── interaction (need client reply) ───────────────────
     EventSpec(EventType.HUMAN_GUIDANCE_REQUEST, _C.INTERACTION,
               'Agent asked the human a question (ask_human tool); turn pauses.',
               requires_response=True,
-              fields={'question': 'prompt text', 'requestId': 'reply correlation id'}),
+              fields={'roundNum': 'round index',
+                      'toolCallId': 'ask_human tool-call id',
+                      'guidanceId': 'reply correlation id',
+                      'question': 'prompt text',
+                      'responseType': 'free_text|choice',
+                      'options': 'choice options (normalized dicts)'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('toolCallId', 'str', required=True),
+                  FieldSpec('guidanceId', 'str', required=True),
+                  FieldSpec('question', 'str', required=True),
+                  FieldSpec('responseType', 'str', required=True),
+                  FieldSpec('options', 'list', required=True),
+              )),
     EventSpec(EventType.WRITE_APPROVAL_REQUEST, _C.INTERACTION,
               'A write/exec tool needs explicit approval before running.',
               requires_response=True,
-              fields={'toolName': 'tool', 'toolCallId': 'id', 'preview': 'diff/preview'}),
+              fields={'roundNum': 'round index',
+                      'toolCallId': 'id of the tool call awaiting approval',
+                      'approvalId': 'reply correlation id',
+                      'meta': '{approvalId, toolName, path, description, + '
+                              'tool-specific enricher fields} preview payload'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('toolCallId', 'str', required=True),
+                  FieldSpec('approvalId', 'str', required=True),
+                  FieldSpec('meta', 'dict', required=True),
+              )),
     EventSpec(EventType.APPROVAL_REQUIRED, _C.INTERACTION,
               'Generic approval gate (mode-based backends).',
               requires_response=True,
-              fields={'detail': 'what needs approval'}),
+              fields={'detail': 'what needs approval'},
+              # Registry-only (no in-process emitter) — all optional.
+              schema=(
+                  FieldSpec('detail', 'str'),
+              )),
     EventSpec(EventType.STDIN_REQUEST, _C.INTERACTION,
               'A running command requested interactive stdin.',
               requires_response=True,
-              fields={'prompt': 'stdin prompt', 'requestId': 'reply correlation id'}),
+              fields={'roundNum': 'round index',
+                      'toolCallId': 'run_command tool-call id',
+                      'stdinId': 'reply correlation id',
+                      'prompt': 'stdin prompt',
+                      'command': 'bounded command line awaiting input'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('toolCallId', 'str', required=True),
+                  FieldSpec('stdinId', 'str', required=True),
+                  FieldSpec('prompt', 'str', required=True),
+                  FieldSpec('command', 'str', required=True),
+              )),
     EventSpec(EventType.STDIN_RESOLVED, _C.INTERACTION,
               'A pending stdin request was satisfied (clears the prompt UI).',
-              fields={'requestId': 'correlation id'}),
+              fields={'roundNum': 'round index',
+                      'toolCallId': 'run_command tool-call id',
+                      'stdinId': 'correlation id'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('toolCallId', 'str', required=True),
+                  FieldSpec('stdinId', 'str', required=True),
+              )),
     # ───────────────────────── flow ─────────────────────────
     EventSpec(EventType.FLOW_ITERATION, _C.FLOW,
               'Flow loop entered a new Planner/Worker/Critic/VU iteration.',
-              fields={'iteration': 'index', 'phase': 'planner|worker|critic'}),
+              fields={'iteration': 'index', 'phase': 'planner|worker|critic',
+                      'flowProjection': '(optional) orchestration projection '
+                                        'label (absent on the synthetic guard '
+                                        'frame)',
+                      'turnRole': '(optional) planner|worker|virtual_user '
+                                  'turn role',
+                      'emits': '(optional) declared emit surface of the role',
+                      'vuMsgId': '(optional, virtual_user role) VU bubble id',
+                      'autopilotRunId': '(optional) owning autopilot run id'},
+              schema=(
+                  FieldSpec('iteration', 'int', required=True),
+                  FieldSpec('phase', 'str', required=True),
+                  FieldSpec('flowProjection', 'str'),
+                  FieldSpec('turnRole', 'str'),
+                  FieldSpec('emits', 'str'),
+                  FieldSpec('vuMsgId', 'str'),
+                  FieldSpec('autopilotRunId', 'str'),
+              )),
     EventSpec(EventType.FLOW_PLANNER_DONE, _C.FLOW,
-              'Planner produced a plan.', fields={'plan': 'plan content'}),
+              'Planner produced a plan.',
+              fields={'content': 'plan content',
+                      'thinking': 'planner reasoning text'},
+              schema=(
+                  FieldSpec('content', 'str', required=True),
+                  FieldSpec('thinking', 'str', required=True),
+              )),
     EventSpec(EventType.FLOW_CRITIC_MSG, _C.FLOW,
               'Critic verdict + feedback.',
-              fields={'next_phase': 'planner|worker|stop',
-                      'should_stop': '(legacy) bool', 'feedback': 'critic text'}),
+              fields={'iteration': 'flow iteration index',
+                      'content': 'critic verdict text',
+                      'thinking': '(optional) critic reasoning (absent on the '
+                                  'synthetic guard frame)',
+                      'next_phase': 'planner|worker|stop',
+                      'discard': '(optional) true when the VU discarded this '
+                                 'candidate',
+                      'synthetic': '(optional) true on the backend guard frame',
+                      'flowProjection': '(optional) orchestration projection '
+                                        'label',
+                      'turnRole': '(optional) turn role',
+                      'emits': '(optional) declared emit surface of the role',
+                      'vuMsgId': '(optional, virtual_user role) VU bubble id',
+                      'autopilotRunId': '(optional) owning autopilot run id'},
+              schema=(
+                  FieldSpec('iteration', 'int', required=True),
+                  FieldSpec('content', 'str', required=True),
+                  FieldSpec('thinking', 'str'),
+                  FieldSpec('next_phase', 'str', required=True),
+                  FieldSpec('discard', 'bool'),
+                  FieldSpec('synthetic', 'bool'),
+                  FieldSpec('flowProjection', 'str'),
+                  FieldSpec('turnRole', 'str'),
+                  FieldSpec('emits', 'str'),
+                  FieldSpec('vuMsgId', 'str'),
+                  FieldSpec('autopilotRunId', 'str'),
+              )),
     EventSpec(EventType.FLOW_NEW_TURN, _C.FLOW,
               'A fresh Worker/Planner turn began (new assistant bubble).',
-              fields={'phase': 'planner|worker'}),
+              fields={'phase': 'planner|worker'},
+              # Registry-only (no in-process emitter) — all optional.
+              schema=(
+                  FieldSpec('phase', 'str'),
+              )),
     EventSpec(EventType.FLOW_COMPLETE, _C.FLOW,
-              'Flow loop terminated (approved or replan-capped).',
-              fields={'iterations': 'total count'}),
+              'Flow loop terminated (approved or replan-capped). Sole '
+              'emitter: OrchestrationChatCompletion.finish.',
+              fields={'totalIterations': 'flow iteration count',
+                      'reason': 'loop stop reason',
+                      'replanCount': 'replans consumed (always 0 today)',
+                      'flowProjection': 'orchestration projection label',
+                      'orchestrationOutcome': 'TerminalOutcome dict'},
+              schema=(
+                  FieldSpec('totalIterations', 'int'),
+                  FieldSpec('reason', 'str'),
+                  FieldSpec('replanCount', 'int'),
+                  FieldSpec('flowProjection', 'str'),
+                  FieldSpec('orchestrationOutcome', 'dict'),
+              )),
     # ───────────────────────── swarm ─────────────────────────
     EventSpec(EventType.SWARM_PHASE, _C.SWARM,
               'Top-level swarm orchestration phase.',
-              fields={'phase': 'phase', 'detail': 'detail'}),
+              fields={'phase': 'spawning|error|complete|spawn_more',
+                      'content': 'human-readable phase detail',
+                      'swarmKey': '(optional) swarm grouping key',
+                      'agents': '(optional) spawned agent descriptors '
+                                '{agentId, role, objective, model, depends_on}',
+                      'error': '(optional) driver error text',
+                      'agentCount': '(complete) total agents',
+                      'failedCount': '(complete) failed agents',
+                      'totalTokens': '(complete) aggregate token usage'},
+              schema=(
+                  FieldSpec('phase', 'str', required=True),
+                  FieldSpec('content', 'str', required=True),
+                  FieldSpec('swarmKey', 'str'),
+                  FieldSpec('agents', 'list'),
+                  FieldSpec('error', 'str'),
+                  FieldSpec('agentCount', 'int'),
+                  FieldSpec('failedCount', 'int'),
+                  FieldSpec('totalTokens', 'int'),
+              )),
     EventSpec(EventType.SWARM_INBOX_INJECT, _C.SWARM,
               'A completed sub-agent result was injected into the main thread.',
-              fields={'agentId': 'sub-agent id', 'summary': 'result preview'}),
+              fields={'roundNum': 'round index the results were injected '
+                                  'before',
+                      'count': 'number of sub-agent results injected',
+                      'agentIds': 'delivering sub-agent ids',
+                      'previews': 'list of {agentId, text} result previews'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('count', 'int', required=True),
+                  FieldSpec('agentIds', 'list', required=True),
+                  FieldSpec('previews', 'list', required=True),
+              )),
     EventSpec(EventType.SWARM_AGENT_PHASE, _C.SWARM,
               'A sub-agent changed phase (e.g. running).',
-              fields={'agentId': 'sub-agent id', 'phase': 'phase'}),
+              fields={'agentId': 'sub-agent id', 'phase': 'phase',
+                      'content': 'human-readable phase detail',
+                      'role': '(optional) sub-agent role',
+                      'objective': '(optional) sub-agent objective',
+                      'model': '(optional) sub-agent model id',
+                      'status': '(optional) retrying marker on agent_retry',
+                      'duration_s': '(optional) elapsed seconds',
+                      'tokens': '(optional) aggregate tokens',
+                      'roundNum': '(optional) sub-agent round index',
+                      'total_agents': '(optional) swarm size',
+                      'completed_agents': '(optional) settled count'},
+              # Constructed build-then-mutate in SwarmEvent.to_legacy
+              # (build_event(TYPE, content=…) then camelCase keys land by
+              # mutation) — only `content` is a construction-time guarantee;
+              # the rest is enforced at the append_event delivery seam.
+              schema=(
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('phase', 'str'),
+                  FieldSpec('content', 'str', required=True),
+                  FieldSpec('role', 'str'),
+                  FieldSpec('objective', 'str'),
+                  FieldSpec('model', 'str'),
+                  FieldSpec('status', 'str'),
+                  FieldSpec('duration_s', 'number'),
+                  FieldSpec('tokens', 'int'),
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('total_agents', 'int'),
+                  FieldSpec('completed_agents', 'int'),
+              )),
     EventSpec(EventType.SWARM_AGENT_PROGRESS, _C.SWARM,
               'Sub-agent progress update.',
-              fields={'agentId': 'sub-agent id', 'detail': 'progress'}),
+              fields={'agentId': 'sub-agent id',
+                      'content': 'progress text',
+                      'status': 'running',
+                      'phase': 'done|tool_use|stalled|no_progress|'
+                               'tool_authority',
+                      'roundNum': 'sub-agent round index',
+                      'role': 'sub-agent role',
+                      'preview': '(optional, done) full final answer',
+                      'toolNames': '(optional, tool_use) tools in flight'},
+              # build-then-mutate via SwarmEvent.to_legacy (see
+              # swarm_agent_phase) — `content` only at construction.
+              schema=(
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('content', 'str', required=True),
+                  FieldSpec('status', 'str'),
+                  FieldSpec('phase', 'str'),
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('role', 'str'),
+                  FieldSpec('preview', 'str'),
+                  FieldSpec('toolNames', 'list'),
+              )),
     EventSpec(EventType.SWARM_AGENT_COMPLETE, _C.SWARM,
               'Sub-agent finished (status may be error).',
               fields={'agentId': 'sub-agent id', 'status': 'ok|error',
-                      'result': 'result/preview'}),
+                      'content': 'result/preview',
+                      'role': '(optional) sub-agent role',
+                      'objective': '(optional) sub-agent objective',
+                      'model': '(optional) sub-agent model id',
+                      'elapsed': '(optional) wall-clock seconds',
+                      'tokens': '(optional) aggregate tokens',
+                      'summary': '(optional) bounded result summary',
+                      'error': '(optional) error text on failure',
+                      'modifiedFiles': '(optional) changed-path count'},
+              # build-then-mutate via SwarmEvent.to_legacy (see
+              # swarm_agent_phase) — `content` only at construction.
+              schema=(
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('status', 'str'),
+                  FieldSpec('content', 'str', required=True),
+                  FieldSpec('role', 'str'),
+                  FieldSpec('objective', 'str'),
+                  FieldSpec('model', 'str'),
+                  FieldSpec('elapsed', 'number'),
+                  FieldSpec('tokens', 'int'),
+                  FieldSpec('summary', 'str'),
+                  FieldSpec('error', 'str'),
+                  FieldSpec('modifiedFiles', 'int'),
+              )),
     EventSpec(EventType.SWARM_AGENT_ERROR, _C.SWARM,
               'Sub-agent errored.',
-              fields={'agentId': 'sub-agent id', 'error': 'error text'}),
+              fields={'agentId': 'sub-agent id', 'error': 'error text'},
+              # Registry-only (failures fold into swarm_agent_complete) — all
+              # optional.
+              schema=(
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('error', 'str'),
+              )),
     EventSpec(EventType.SWARM_AGENT_TOOL_CALL, _C.SWARM,
               'A sub-agent invoked a tool (for live trace UI).',
-              fields={'agentId': 'sub-agent id', 'toolName': 'tool'}),
+              fields={'agentId': 'sub-agent id', 'toolName': 'tool',
+                      'content': 'display text',
+                      'status': 'running',
+                      'phase': 'tool_use',
+                      'roundNum': 'sub-agent round index',
+                      'role': 'sub-agent role',
+                      'callId': 'tool-call correlation id',
+                      'argsBrief': 'bounded args summary',
+                      'callStatus': 'running|done|error status',
+                      'callElapsed': '(finish) call wall-clock seconds',
+                      'preview': '(finish) bounded result preview',
+                      'previewTruncated': '(finish) preview was truncated',
+                      'previewFullChars': '(finish) untruncated preview chars',
+                      'error': '(finish, failure) bounded error text',
+                      'errorTruncated': '(finish) error was truncated',
+                      'errorFullChars': '(finish) untruncated error chars'},
+              # build-then-mutate via SwarmEvent.to_legacy (see
+              # swarm_agent_phase) — `content` only at construction; the
+              # call lifecycle keys arrive by metadata mutation.
+              schema=(
+                  FieldSpec('agentId', 'str'),
+                  FieldSpec('toolName', 'str'),
+                  FieldSpec('content', 'str', required=True),
+                  FieldSpec('status', 'str'),
+                  FieldSpec('phase', 'str'),
+                  FieldSpec('roundNum', 'int'),
+                  FieldSpec('role', 'str'),
+                  FieldSpec('callId', 'str'),
+                  FieldSpec('argsBrief', 'str'),
+                  FieldSpec('callStatus', 'str'),
+                  FieldSpec('callElapsed', 'number'),
+                  FieldSpec('preview', 'str'),
+                  FieldSpec('previewTruncated', 'bool'),
+                  FieldSpec('previewFullChars', 'int'),
+                  FieldSpec('error', 'str'),
+                  FieldSpec('errorTruncated', 'bool'),
+                  FieldSpec('errorFullChars', 'int'),
+              )),
     # ───────────────────────── autopilot ─────────────────────────
     EventSpec(EventType.AUTOPILOT_VU_START, _C.AUTOPILOT,
               'Autopilot kicked in — create the simulated-user bubble eagerly '
               '(in-memory only; not persisted until autopilot_vu_done).',
-              fields={'vuMsgId': 'stable id for the VU message bubble'}),
+              fields={'vuMsgId': 'stable id for the VU message bubble'},
+              schema=(
+                  FieldSpec('vuMsgId', 'str', required=True),
+              )),
     EventSpec(EventType.AUTOPILOT_VU_EVENT, _C.AUTOPILOT,
               'Autopilot value-unit progress event.',
-              fields={'detail': 'vu detail'}),
+              fields={'vuMsgId': 'owning VU bubble id',
+                      'inner': 'the wrapped forward event dict '
+                               '(delta/phase/tool_* /interaction)'},
+              schema=(
+                  FieldSpec('vuMsgId', 'str', required=True),
+                  FieldSpec('inner', 'dict', required=True),
+              )),
     EventSpec(EventType.AUTOPILOT_VU_DONE, _C.AUTOPILOT,
-              'Autopilot value-unit completed.', fields={}),
+              'Autopilot value-unit completed.',
+              fields={'vuMsgId': 'owning VU bubble id',
+                      'vuMessage': 'persisted VU message row'},
+              schema=(
+                  FieldSpec('vuMsgId', 'str', required=True),
+                  FieldSpec('vuMessage', 'dict', required=True),
+              )),
     EventSpec(EventType.AUTOPILOT_VU_CANCEL, _C.AUTOPILOT,
-              'Autopilot value-unit cancelled.', fields={'reason': 'why'}),
+              'Autopilot value-unit cancelled.',
+              fields={'vuMsgId': 'owning VU bubble id'},
+              schema=(
+                  FieldSpec('vuMsgId', 'str', required=True),
+              )),
     EventSpec(EventType.AUTOPILOT_RUN_CONCLUDED, _C.AUTOPILOT,
               'An autopilot run reached its terminal boundary — the single '
               'BACKEND-AUTHORITATIVE "this run is over" fact the frontend folds '
@@ -852,7 +1874,11 @@ _SPECS: tuple[EventSpec, ...] = (
                                 '"concluded", reason:"task_done"|"stopped", '
                                 'content?, translatedContent?, ts, _summaryId} '
                                 '— NOT a message (no role, no _msgId); content '
-                                'is absent on a manual stop'}),
+                                'is absent on a manual stop'},
+              schema=(
+                  FieldSpec('runId', 'str', required=True),
+                  FieldSpec('record', 'dict', required=True),
+              )),
     # ───────────────────────── presence ─────────────────────────
     EventSpec(EventType.PRESENCE, _C.PRESENCE,
               'Cross-conversation live-presence delta — the "who is working in '
@@ -882,7 +1908,14 @@ _SPECS: tuple[EventSpec, ...] = (
                                   'peerKey is convId or convId#agentId — so a '
                                   'sub-agent-vs-sub-agent overlap within ONE '
                                   'conversation is flagged like a cross-'
-                                  'conversation one'}),
+                                  'conversation one'},
+              schema=(
+                  FieldSpec('kind', 'str', required=True),
+                  FieldSpec('root', 'str', required=True),
+                  FieldSpec('peer', 'dict'),
+                  FieldSpec('peers', 'list'),
+                  FieldSpec('conflict', 'dict'),
+              )),
     EventSpec(EventType.PEER_INBOX_INJECT, _C.PRESENCE,
               'A peer message from a sibling conversation was delivered at a '
               'round boundary of THIS live turn (the fast-path lane of Pillar '
@@ -896,7 +1929,12 @@ _SPECS: tuple[EventSpec, ...] = (
               fields={'roundNum': 'round number the peer message was injected before',
                       'count': 'number of peer messages injected this round',
                       'previews': 'list of {fromConv, text} — sender short-id + '
-                                  'the original (unframed) message text'}),
+                                  'the original (unframed) message text'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('count', 'int', required=True),
+                  FieldSpec('previews', 'list', required=True),
+              )),
     EventSpec(EventType.USER_STEER_INJECT, _C.LIFECYCLE,
               'A human "steer" message the user sent WHILE this turn was still '
               'generating (composer inject-mode = steer) was drained from the '
@@ -914,11 +1952,68 @@ _SPECS: tuple[EventSpec, ...] = (
               'mirroring peer_inbox_inject.',
               fields={'roundNum': 'round number the steer was injected before',
                       'count': 'number of steer messages injected this round',
-                      'previews': 'list of {text} — the steer message text'}),
+                      'previews': 'list of {text} — the steer message text'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('count', 'int', required=True),
+                  FieldSpec('previews', 'list', required=True),
+              )),
+    # ───────────────── artifact / scheduler / transport ─────────────────
+    EventSpec(EventType.BACKGROUND_COMMAND_INJECT, _C.LIFECYCLE,
+              'A run_command call that was handed off to a daemon worker for '
+              'an operator steer has finished, and its authoritative result '
+              'reached the model MID-TURN: the fast-path inbox twin was '
+              'drained at a round boundary, injected as a user-role message '
+              '(coalesced with any swarm/peer/steer items), and the LLM call '
+              'confirmed consumption (deferred-confirm — this chip fires only '
+              'after that confirmation). The durable message_queue row (the '
+              'delivery authority) is deleted in the same step (de-dup by '
+              'queueId); an abort before it re-dispatches the row as a fresh '
+              'turn instead, so the result is delivered exactly once. '
+              'Mirrors peer_inbox_inject; the settled-turn queue-lane case '
+              'renders as a normal queued-turn user message instead.',
+              fields={'roundNum': 'round number the completion was injected before',
+                      'count': 'number of background-command completions injected this round',
+                      'previews': 'list of {commandId, text} — the detached '
+                                  'command id + its result payload'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('count', 'int', required=True),
+                  FieldSpec('previews', 'list', required=True),
+              )),
     # ───────────────── artifact / scheduler / transport ─────────────────
     EventSpec(EventType.ARTIFACT, _C.ARTIFACT,
               'An artifact (document/canvas) was created or updated.',
-              fields={'artifactId': 'id', 'title': 'title', 'kind': 'artifact kind'}),
+              fields={'id': 'artifact id',
+                      'conv_id': 'owning conversation id',
+                      'task_id': 'owning task id',
+                      'msg_id': 'owning message id',
+                      'source': 'write_file|inline_fence|inline_doc',
+                      'source_ref': 'producer-specific source reference',
+                      'format': 'markdown|html|svg',
+                      'title': 'artifact title',
+                      'size_bytes': 'payload size in bytes',
+                      'version': 'artifact version counter',
+                      'parent_id': 'parent artifact id (empty when root)',
+                      'pinned': 'true when pinned',
+                      'created_at': 'epoch ms creation stamp',
+                      'url': '/api/artifacts/<id>/raw fetch URL'},
+              schema=(
+                  FieldSpec('id', 'str', required=True),
+                  FieldSpec('conv_id', 'str', required=True),
+                  FieldSpec('task_id', 'str', required=True),
+                  FieldSpec('msg_id', 'str', required=True),
+                  FieldSpec('source', 'str', required=True),
+                  FieldSpec('source_ref', 'dict', required=True),
+                  FieldSpec('format', 'str', required=True),
+                  FieldSpec('title', 'str', required=True),
+                  FieldSpec('size_bytes', 'int', required=True),
+                  FieldSpec('version', 'int', required=True),
+                  FieldSpec('parent_id', 'str', required=True),
+                  FieldSpec('pinned', 'bool', required=True),
+                  FieldSpec('created_at', 'int', required=True),
+                  FieldSpec('url', 'str', required=True),
+              )),
     EventSpec(EventType.TIMER_POLL_CHECK, _C.SCHEDULER,
               'Inline timer/scheduler poll heartbeat — one per poll cycle.',
               fields={'roundNum': 'tool round index', 'toolCallId': 'tool-call id',
@@ -940,12 +2035,44 @@ _SPECS: tuple[EventSpec, ...] = (
                       'toolTrace': 'list of {name,argsBrief,elapsed,isError} the poll agent invoked',
                       'pollInterval': '(started) seconds between polls',
                       'maxPolls': '(started) poll ceiling',
-                      'nextPollTs': 'epoch-ms of the next scheduled poll'}),
+                      'conditionCommand': '(started) command gating code-tier '
+                                          'decisions',
+                      'background': '(started) true — polls run in background',
+                      'nextPollTs': 'epoch-ms of the next scheduled poll'},
+              schema=(
+                  FieldSpec('roundNum', 'int', required=True),
+                  FieldSpec('toolCallId', 'str', required=True),
+                  FieldSpec('timerId', 'str', required=True),
+                  FieldSpec('pollNum', 'int', required=True),
+                  FieldSpec('pollId', 'str'),
+                  FieldSpec('decision', 'str', required=True),
+                  FieldSpec('reason', 'str', required=True),
+                  FieldSpec('conditionKind', 'str', required=True),
+                  FieldSpec('rawContent', 'str'),
+                  FieldSpec('tokensUsed', 'int'),
+                  FieldSpec('checkInstruction', 'str', required=True),
+                  FieldSpec('checkCommand', 'str', required=True),
+                  FieldSpec('cmdOutput', 'str'),
+                  FieldSpec('parseError', 'bool'),
+                  FieldSpec('model', 'str'),
+                  FieldSpec('toolTrace', 'list'),
+                  FieldSpec('pollInterval', 'int', required=True),
+                  FieldSpec('maxPolls', 'int', required=True),
+                  FieldSpec('conditionCommand', 'str', required=True),
+                  FieldSpec('background', 'bool', required=True),
+                  FieldSpec('nextPollTs', 'int', required=True),
+              )),
     EventSpec(EventType.SSE_TIMEOUT, _C.TRANSPORT,
               'Server signalled the stream idle-timed-out; client may reconnect.',
-              fields={}),
+              fields={},
+              # Registry-only (client-side construct; no backend emitter).
+              schema=()),
     EventSpec(EventType.PING, _C.TRANSPORT,
-              'Keepalive frame on the push WebSocket (ignore).', fields={}),
+              'Keepalive frame on the push WebSocket (ignore).',
+              fields={'channel': 'push channel (system)'},
+              schema=(
+                  FieldSpec('channel', 'str'),
+              )),
 )
 
 # Indexes
@@ -998,7 +2125,9 @@ _PHASE_SPECS: tuple[PhaseSpec, ...] = (
                       'continuationMode': '(optional) assistant_prefill or '
                                           'continuation_nudge',
                       'statusCode': '(optional) HTTP status that triggered the cycle',
-                      'model': '(optional) raw model id'}),
+                      'model': '(optional) physical attempt model id',
+                      'providerId': '(optional) physical attempt provider id',
+                      'dispatchMode': '(optional) strict_model|pool_rescue'}),
     PhaseSpec(Phase.WAITING_MODEL, (_CHAT,),
               'Request dispatched and awaiting the first semantic provider '
               'progress; heartbeat frames keep this current.',
@@ -1109,7 +2238,15 @@ _PHASE_SPECS: tuple[PhaseSpec, ...] = (
     PhaseSpec(Phase.START, ('research', 'longform'),
               'The job started (research: idea mining; longform: report).',
               fields={'direction': '(research) the mined direction',
-                      'topic': '(longform) the report topic'}),
+                      'topic': '(longform) the report topic',
+                      'action': '(research action runtime) the workspace '
+                                'action being executed'}),
+    PhaseSpec(Phase.AGENT, ('research',),
+              'The research action runtime bound its tool epoch and the '
+              'agent loop is executing against the workspace.',
+              fields={'action': 'the workspace action being executed',
+                      'toolCount': 'executable tool schemas in the bound '
+                                   'epoch'}),
 )
 
 _PHASE_BY_VALUE: dict[str, PhaseSpec] = {s.phase: s for s in _PHASE_SPECS}
@@ -1146,6 +2283,182 @@ def now_ms() -> float:
     return _time.time() * 1000.0
 
 
+# ── Field-level wire contract enforcement ─────────────────────────
+# The registry used to document payload fields as PROSE (EventSpec.fields),
+# which let a field ride the wire undeclared (the rawToolTokens incident:
+# emitted, consumed by the frontend badge, absent from the contract —
+# discovered by a user, not by a gate). EventSpec.schema closes that gap for
+# migrated events: build_event validates EVERY construction, and delivery
+# seams call check_event() on the final (post-mutation) frame.
+#
+# Enforcement modes (TOFU_EVENT_SCHEMA):
+#   strict — raise EventContractError (default under pytest: drift fails CI
+#            at the emitting line, not at a confused frontend)
+#   warn   — log once per distinct violation signature (production default:
+#            a contract nit must never fail a user turn)
+#   off    — no validation (emergency escape hatch)
+
+
+class EventContractError(ValueError):
+    """A wire event violated its declared field-level contract."""
+
+
+_FIELD_KIND_SCALARS: dict[str, type] = {
+    'str': str,
+    'bool': bool,
+    'dict': dict,
+    'list': list,
+}
+
+#: The closed kind vocabulary (``None`` plus the entries above plus the
+#: numeric kinds). Exported for the conformance test / generators.
+FIELD_KINDS: frozenset[str] = frozenset(
+    tuple(_FIELD_KIND_SCALARS) + ('int', 'number', 'None'))
+
+
+def _field_value_matches(value: Any, kind: str) -> bool:
+    """True if *value* satisfies one ``|``-separated alternative of *kind*.
+
+    ``bool`` is deliberately NOT an ``int``/``number`` (Python's isinstance
+    disagrees with the wire's JSON semantics), and unknown alternatives match
+    NOTHING — a typo'd kind fails closed, and the conformance test rejects it
+    at registry load.
+    """
+    for alternative in kind.split('|'):
+        alternative = alternative.strip()
+        if alternative == 'None':
+            if value is None:
+                return True
+        elif alternative == 'int':
+            if isinstance(value, int) and not isinstance(value, bool):
+                return True
+        elif alternative == 'number':
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return True
+        elif alternative in _FIELD_KIND_SCALARS:
+            if isinstance(value, _FIELD_KIND_SCALARS[alternative]):
+                return True
+    return False
+
+
+def _schema_violations(
+        event: dict, schema: tuple[FieldSpec, ...], *,
+        undeclared_hint: str) -> tuple[str, ...]:
+    """Field-level check shared by stream events and push frames."""
+    declared = {f.name: f for f in schema}
+    violations: list[str] = []
+    for name, value in event.items():
+        if name == 'type':
+            continue
+        field_spec = declared.get(name)
+        if field_spec is None:
+            violations.append(
+                f'undeclared field {name!r} ({undeclared_hint})')
+        elif not _field_value_matches(value, field_spec.kind):
+            violations.append(
+                f'field {name!r} expects {field_spec.kind}, got '
+                f'{type(value).__name__}')
+    for field_spec in schema:
+        if field_spec.required and field_spec.name not in event:
+            violations.append(f'missing required field {field_spec.name!r}')
+    return tuple(violations)
+
+
+def validate_event(event: Any) -> tuple[str, ...]:
+    """Field-level contract check; return the violations (empty = conforming).
+
+    Pure and side-effect free — callers decide enforcement.  Events whose
+    type is unregistered or has no schema return ``()`` (the wire stays
+    forward-compatible; registration is enforced by the drift test, field
+    contracts migrate event-by-event).
+    """
+    if not isinstance(event, dict):
+        return (f'event is {type(event).__name__}, not a dict',)
+    type_ = event.get('type')
+    spec = _BY_TYPE.get(type_) if isinstance(type_, str) else None
+    if spec is None or spec.schema is None:
+        return ()
+    return _schema_violations(
+        event, spec.schema,
+        undeclared_hint='add it to the EventSpec schema + fields prose in '
+                        'lib/agent_core/events.py')
+
+
+_violation_lock = threading.Lock()
+_violation_warned: set[tuple[str, tuple[str, ...]]] = set()
+# Test/conformance hook: listeners observe EVERY violation (any mode) without
+# changing enforcement. Install with add_event_violation_listener.
+_violation_listeners: list[Callable[[dict, tuple[str, ...]], None]] = []
+
+
+def add_event_violation_listener(
+        listener: Callable[[dict, tuple[str, ...]], None]) -> None:
+    """Observe every contract violation (conformance harnesses)."""
+    with _violation_lock:
+        _violation_listeners.append(listener)
+
+
+def remove_event_violation_listener(
+        listener: Callable[[dict, tuple[str, ...]], None]) -> None:
+    with _violation_lock:
+        try:
+            _violation_listeners.remove(listener)
+        except ValueError:
+            pass
+
+
+def _schema_enforcement() -> str:
+    raw = (os.environ.get('TOFU_EVENT_SCHEMA') or '').strip().lower()
+    if raw in ('strict', 'warn', 'off'):
+        return raw
+    # Under pytest the default is strict: contract drift must fail the run at
+    # the emitting line. In production it is warn: a schema nit must never
+    # fail a user turn.
+    return 'strict' if (os.environ.get('PYTEST_CURRENT_TEST')
+                        or 'pytest' in sys.modules) else 'warn'
+
+
+def _handle_violations(event: dict, violations: tuple[str, ...]) -> None:
+    with _violation_lock:
+        listeners = tuple(_violation_listeners)
+    for listener in listeners:
+        try:
+            listener(event, violations)
+        except Exception:  # a broken observer must never mask the violation
+            logger.debug('[events] violation listener failed', exc_info=True)
+    mode = _schema_enforcement()
+    if mode == 'off':
+        return
+    detail = '; '.join(violations)
+    if mode == 'strict':
+        raise EventContractError(
+            f"event {event.get('type')!r} violates its wire contract: "
+            f'{detail}')
+    signature = (str(event.get('type')), violations)
+    with _violation_lock:
+        if signature in _violation_warned:
+            return
+        _violation_warned.add(signature)
+    logger.warning('[events] wire contract violation on %r: %s',
+                   event.get('type'), detail)
+
+
+def check_event(event: Any) -> None:
+    """Validate a FINAL, fully-stamped frame at a delivery seam.
+
+    Construction-time validation in :func:`build_event` sees only kwargs;
+    emitters legitimately stamp conditional fields by mutation afterwards
+    (the pipeline adds ``status`` / ``rejection`` / compaction fields to
+    ``tool_complete`` after building it). Delivery seams — the manager's
+    ``append_event`` and any private push fan-out — call this so the shape
+    that actually reaches the wire is what gets checked. Never raises in
+    production (warn mode); under pytest the strict default applies.
+    """
+    violations = validate_event(event)
+    if violations and isinstance(event, dict):
+        _handle_violations(event, violations)
+
+
 def build_event(type_: str, **fields: Any) -> dict[str, Any]:
     """Construct a wire event dict ``{'type': type_, **fields}``.
 
@@ -1173,13 +2486,209 @@ def build_event(type_: str, **fields: Any) -> dict[str, Any]:
 
     Unregistered types are allowed (the wire stays forward-compatible) but log
     a debug line — the drift test is what enforces registration at CI time.
+
+    Events with a field-level :class:`FieldSpec` schema (see
+    :func:`validate_event`) are validated on EVERY construction: an
+    undeclared field, a missing required field, or a type mismatch raises
+    :class:`EventContractError` under pytest (``TOFU_EVENT_SCHEMA=strict``)
+    and logs a warning in production. Delivery seams re-check the final
+    post-mutation frame via :func:`check_event`.
     """
     if type_ not in _BY_TYPE:
         logger.debug('[events] build_event for unregistered type=%r '
                      '(add an EventSpec to lib/agent_core/events.py)', type_)
     if type_ in _CLOCK_STAMPED_TYPES and 'emittedAt' not in fields:
         fields['emittedAt'] = now_ms()
-    return {'type': type_, **fields}
+    event = {'type': type_, **fields}
+    spec = _BY_TYPE.get(type_)
+    if spec is not None and spec.schema is not None:
+        violations = validate_event(event)
+        if violations:
+            _handle_violations(event, violations)
+    return event
+
+
+# ── Push-channel frames — owner-scoped wake hints outside the task stream ──
+#
+# Push frames ride the WebSocket push hub (``lib/agent_core/push.py``), NOT
+# the chat task stream: they are best-effort, owner-scoped wake hints and
+# receipts — never durable authority, and every consumer must keep a bounded
+# reconciliation path for a lost frame.  ``PushFrameSpec.schema`` +
+# :func:`build_push_frame` give them exactly the field-level contract
+# discipline the stream has: one machine-readable authority, one construction
+# gate, one generated TypeScript mirror.
+
+#: Bump only on a breaking change to an EXISTING push frame's shape.
+PUSH_FRAME_CONTRACT_VERSION = 1
+
+
+@dataclass(frozen=True)
+class PushFrameSpec:
+    """Describes one push-channel frame ``type``.
+
+    Parameters
+    ----------
+    type:
+        The wire ``type`` string.
+    channel:
+        The push-hub channel the frame is published on.
+    task:
+        Task-id routing semantics — a literal (``'codex-reset'``), a
+        sentinel (``'__folders__'``), or a description of the dynamic key
+        (``'conversation-id'``).
+    purpose:
+        One-line human description.
+    fields:
+        Prose map of payload field name → short description, kept in exact
+        key sync with ``schema`` by the conformance suite.
+    schema:
+        Machine-readable :class:`FieldSpec` tuple — the contract
+        :func:`build_push_frame` validates every construction against.
+    since:
+        Contract version in which the frame was introduced.
+    """
+
+    type: str
+    channel: str
+    task: str
+    purpose: str
+    fields: dict[str, str] = field(default_factory=dict)
+    schema: tuple[FieldSpec, ...] | None = None
+    since: int = 1
+
+
+PUSH_FRAME_SPECS: tuple[PushFrameSpec, ...] = (
+    PushFrameSpec(
+        type='conv_changed',
+        channel='notify',
+        task='conversation-id',
+        purpose='Wake hint: a conversation catalog entry or transcript '
+                'changed; clients reconcile exclusively through Conversation '
+                'Sync v3, so a lost/duplicated hint never loses data.',
+        fields={
+            'convId': 'Changed conversation id.',
+            'userId': 'Owner user id; the browser frame-ownership check is '
+                      'mandatory.',
+            'rev': 'Positive transcript-revision hint; lets the browser '
+                   'suppress a catalog read it has already reached.',
+        },
+        schema=(
+            FieldSpec('convId', 'str', required=True),
+            FieldSpec('userId', 'int', required=True),
+            FieldSpec('rev', 'int'),
+        ),
+    ),
+    PushFrameSpec(
+        type='conv_deleted',
+        channel='notify',
+        task='conversation-id',
+        purpose='Wake hint: a conversation was deleted; clients dispose '
+                'local state without a fetch.',
+        fields={
+            'convId': 'Deleted conversation id.',
+            'userId': 'Owner user id; the browser frame-ownership check is '
+                      'mandatory.',
+        },
+        schema=(
+            FieldSpec('convId', 'str', required=True),
+            FieldSpec('userId', 'int', required=True),
+        ),
+    ),
+    PushFrameSpec(
+        type='folders_changed',
+        channel='notify',
+        task='__folders__',
+        purpose='Folder tree changed (create/rename/delete); clients '
+                'refresh the tree in place.  With deletedFolderId every '
+                'device unassigns local conversations off the removed '
+                'folder, not just the one that clicked delete.',
+        fields={
+            'userId': 'Owner user id; the browser frame-ownership check is '
+                      'mandatory.',
+            'deletedFolderId': 'Present only when a folder was deleted.',
+        },
+        schema=(
+            FieldSpec('userId', 'int', required=True),
+            FieldSpec('deletedFolderId', 'str'),
+        ),
+    ),
+    PushFrameSpec(
+        type='codex.reset_offer.updated',
+        channel='oauth',
+        task='codex-reset',
+        purpose='Passive completion receipt: the bounded earned-reset '
+                'daemon settled.  reset_offer is byte-compatible with the '
+                'projection on GET /api/v1/oauth/status (length-bounded, no '
+                'token or raw account id).  Never durable authority: '
+                'consumers keep a bounded HTTP reconciliation path and must '
+                'never redeem a credit from the frame.',
+        fields={
+            'provider': "Always 'codex'.",
+            'reset_offer': 'Account-scoped reset-offer projection mirroring '
+                           'the OAuth status endpoint.',
+        },
+        schema=(
+            FieldSpec('provider', 'str', required=True),
+            FieldSpec('reset_offer', 'dict', required=True),
+        ),
+    ),
+)
+
+_PUSH_BY_TYPE: dict[str, PushFrameSpec] = {
+    spec.type: spec for spec in PUSH_FRAME_SPECS}
+
+
+def all_push_frame_specs() -> tuple[PushFrameSpec, ...]:
+    """Every declared push-channel frame (the generated-mirror authority)."""
+    return PUSH_FRAME_SPECS
+
+
+def get_push_frame_spec(type_: str) -> PushFrameSpec | None:
+    """The :class:`PushFrameSpec` for *type_*, or None when undeclared."""
+    return _PUSH_BY_TYPE.get(type_)
+
+
+def validate_push_frame(frame: Any) -> tuple[str, ...]:
+    """Field-level contract check for a push frame (empty = conforming).
+
+    Undeclared types return ``()`` — the hub also carries self-contained
+    producer↔consumer pairs outside this shared vocabulary (cookie-capture,
+    project hints, timer ticks); they migrate frame-by-frame like the
+    stream did.
+    """
+    if not isinstance(frame, dict):
+        return (f'frame is {type(frame).__name__}, not a dict',)
+    type_ = frame.get('type')
+    spec = _PUSH_BY_TYPE.get(type_) if isinstance(type_, str) else None
+    if spec is None or spec.schema is None:
+        return ()
+    return _schema_violations(
+        frame, spec.schema,
+        undeclared_hint='add it to the PushFrameSpec schema + fields prose '
+                        'in lib/agent_core/events.py')
+
+
+def build_push_frame(type_: str, **fields: Any) -> dict[str, Any]:
+    """Construct a push-channel frame ``{'type': type_, **fields}``.
+
+    The push-side twin of :func:`build_event`: same byte-identity guarantee
+    (keyword order is preserved), same contract gate — an undeclared field,
+    a missing required field, or a type mismatch raises
+    :class:`EventContractError` under pytest (``TOFU_EVENT_SCHEMA=strict``)
+    and logs a warning in production.  No ``emittedAt`` stamp: these frames
+    are wake hints, not transport-duration samples.
+    """
+    if type_ not in _PUSH_BY_TYPE:
+        logger.debug('[events] build_push_frame for undeclared type=%r '
+                     '(add a PushFrameSpec to lib/agent_core/events.py)',
+                     type_)
+    frame = {'type': type_, **fields}
+    spec = _PUSH_BY_TYPE.get(type_)
+    if spec is not None and spec.schema is not None:
+        violations = validate_push_frame(frame)
+        if violations:
+            _handle_violations(frame, violations)
+    return frame
 
 
 def emit(task: Any, type_: str, **fields: Any) -> Any:
@@ -1301,6 +2810,9 @@ def to_capabilities_dict() -> dict[str, Any]:
             'terminal': s.terminal,
             'requires_response': s.requires_response,
             'fields': s.fields,
+            'schema': ([{'name': f.name, 'kind': f.kind,
+                         'required': f.required} for f in s.schema]
+                       if s.schema is not None else None),
             'since': s.since,
         })
     by_domain: dict[str, list[dict]] = {}
@@ -1332,22 +2844,36 @@ def to_capabilities_dict() -> dict[str, Any]:
 
 __all__ = [
     'EVENT_CONTRACT_VERSION',
+    'FIELD_KINDS',
     'EventCategory',
+    'EventContractError',
     'EventSpec',
     'EventType',
+    'FieldSpec',
     'Phase',
     'PhaseSpec',
+    'PushFrameSpec',
+    'PUSH_FRAME_CONTRACT_VERSION',
+    'PUSH_FRAME_SPECS',
     'TRANSPORT_TYPES',
+    'add_event_violation_listener',
     'build_event',
     'build_phase',
+    'build_push_frame',
+    'check_event',
     'emit',
     'emit_phase',
+    'remove_event_violation_listener',
+    'validate_event',
+    'validate_push_frame',
     'all_event_specs',
     'all_phase_specs',
+    'all_push_frame_specs',
     'event_types',
     'phase_values',
     'get_event_spec',
     'get_phase_spec',
+    'get_push_frame_spec',
     'is_registered',
     'is_registered_phase',
     'terminal_types',

@@ -7,6 +7,7 @@ placement, deduplication, budgeting, and observability belong to the renderer.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import time
 import threading
@@ -189,7 +190,10 @@ def _profile_block(request: ComposeRequest) -> str:
     cfg = (request.task or {}).get("config") or {}
     from lib.agent_core.personal_scope import resolve_preferences_enabled
 
-    if not resolve_preferences_enabled(cfg):
+    preferences_enabled = resolve_preferences_enabled(cfg)
+    if isinstance(request.task, dict):
+        request.task['_preferencesEnabledResolved'] = preferences_enabled
+    if not preferences_enabled:
         return ""
     try:
         from lib.memory.user_profile import (
@@ -211,7 +215,7 @@ def _profile_block(request: ComposeRequest) -> str:
         return block or ""
     except Exception as exc:
         logger.warning("[ContextComposer] preference profile unavailable: %s", exc)
-        return ""
+        raise
 
 
 def _skill_index(request: ComposeRequest) -> str:
@@ -250,7 +254,7 @@ def _skill_index(request: ComposeRequest) -> str:
         return snapshot
     except Exception as exc:
         logger.warning("[ContextComposer] skill index unavailable: %s", exc)
-        return ""
+        raise
 
 
 def _memory_guidance(request: ComposeRequest) -> str:
@@ -282,7 +286,7 @@ def _memory_guidance(request: ComposeRequest) -> str:
         )
     except Exception as exc:
         logger.warning("[ContextComposer] memory guidance unavailable: %s", exc)
-        return ""
+        raise
 
 
 def _swarm_guidance(request: ComposeRequest, query: str) -> str:
@@ -298,7 +302,7 @@ def _swarm_guidance(request: ComposeRequest, query: str) -> str:
             return ""
     except Exception as exc:
         logger.debug("[ContextComposer] swarm task-shape gate failed: %s", exc)
-        return ""
+        raise
     return """<parallel_execution>
 For two or more independent branches, use one spawn_agents call; keep sequential
 work local. The tool schema is the sole authority for roles and their live
@@ -307,24 +311,54 @@ call await_agents only when no useful local work remains.
 </parallel_execution>"""
 
 
+def _programmatic_guidance(request: ComposeRequest) -> str:
+    """Return one conversation-stable PTC boundary, without round state."""
+    if not request.has_real_tools:
+        return ""
+    try:
+        from lib.context_experiment_flags import normalize_context_experiment_flags
+
+        mode = normalize_context_experiment_flags(
+            (request.task or {}).get("config") or {}
+        )["tools"]["programmaticCalling"]
+        if mode == "off":
+            return ""
+    except Exception as exc:
+        logger.debug("[ContextComposer] programmatic mode unavailable: %s", exc)
+        return ""
+    return """<programmatic_execution>
+When programmatic tool calling is available, use it only for bounded read-only
+filtering, joining, ranking, deduplication, aggregation, or validation. Keep
+writes, approvals, semantic judgment, and final artifact validation in direct
+tool calls. Exact schemas and execution authority remain authoritative.
+</programmatic_execution>"""
+
+
 def _project_blocks(request: ComposeRequest, query: str) -> list[ContextBlock]:
     del query
     if not (request.project_enabled and request.project_path):
-        return []
-    task_config = (request.task or {}).get('config') or {}
-    if task_config.get('_storageFreeRuntime'):
-        return []
-    try:
-        from lib.conversations.project_brain import prepare_project_context
-        context = prepare_project_context(
-            request.project_path,
-            request.conv_id or '',
-            user_id=request.user_id,
-            task=request.task,
-        )
-    except Exception as exc:
-        logger.debug('[ContextComposer] Project Context unavailable: %s', exc)
-        context = ''
+        context = ""
+        reason = "project_disabled"
+    elif ((request.task or {}).get('config') or {}).get('_storageFreeRuntime'):
+        context = ""
+        reason = "project_disabled"
+    else:
+        try:
+            from lib.conversations.project_brain import prepare_project_context
+            context = prepare_project_context(
+                request.project_path,
+                request.conv_id or '',
+                user_id=request.user_id,
+                task=request.task,
+            )
+            reason = '' if context else 'empty'
+        except Exception as exc:
+            logger.debug('[ContextComposer] Project Context unavailable: %s', exc)
+            context = ''
+            # Acquisition failure is not evidence that an earlier project
+            # context stopped being true. The renderer retains its last
+            # content-addressed version instead of retracting it.
+            reason = 'provider_unavailable'
     return [
         _block(
             'project_context',
@@ -336,7 +370,7 @@ def _project_blocks(request: ComposeRequest, query: str) -> list[ContextBlock]:
             lifecycle='task',
             priority=10,
             max_tokens=1800,
-            reason='' if context else 'empty',
+            reason=reason,
             layer='objective_constraints',
             required=True,
         )
@@ -455,7 +489,7 @@ def collect_context_blocks(
             return build_vault_index() or ""
         except Exception as exc:
             logger.debug("[ContextComposer] vault index unavailable: %s", exc)
-            return ""
+            raise
 
     # Providers get a detached task snapshot. A callable that outlives the
     # request deadline can finish safely, but it cannot mutate the live task or
@@ -643,13 +677,21 @@ def collect_context_blocks(
     if request.task is not None:
         request.task["_promptProfileV1"] = dict(prompt_evidence)
 
+    rules_reason = ""
+    if not rules:
+        if statuses.get("project_rules") != "ok":
+            rules_reason = "provider_unavailable"
+        elif not (request.project_enabled and request.project_path):
+            rules_reason = "project_disabled"
+        else:
+            rules_reason = "project_empty"
     blocks.append(
         _block(
             "platform_static",
             "system_prompt_cc",
             static,
             authority="platform",
-            placement="system",
+            placement="tail",
             stability="static",
             lifecycle="conversation",
             priority=0,
@@ -659,9 +701,27 @@ def collect_context_blocks(
             required=True,
         )
     )
+    swarm_reason = ""
+    if not swarm:
+        if statuses.get("swarm") != "ok":
+            swarm_reason = "provider_unavailable"
+        else:
+            try:
+                from lib.context_experiment_flags import (
+                    normalize_context_experiment_flags,
+                )
+                swarm_mode = normalize_context_experiment_flags(
+                    (request.task or {}).get("config") or {}
+                )["orchestration"]["multiAgent"]
+                swarm_reason = (
+                    "multi_agent_disabled"
+                    if swarm_mode == "off" else "not_applicable"
+                )
+            except Exception:
+                swarm_reason = "provider_unavailable"
     blocks.append(
         _block(
-            f"role_{role_name or 'none'}",
+            "role_directive",
             "endpoint.role",
             role_content,
             authority="workflow",
@@ -683,17 +743,25 @@ def collect_context_blocks(
             "project.AGENTS_CLAUDE",
             rules,
             authority="project",
-            placement="head",
+            placement="tail",
             stability="conversation",
             lifecycle="conversation",
             priority=0,
             max_tokens=8000,
-            reason="" if rules else "project_off_or_empty",
+            reason=rules_reason,
             provenance={"path": request.project_path},
             layer="objective_constraints",
             required=True,
         )
     )
+    profile_reason = ""
+    if not user_context:
+        if statuses.get("profile") != "ok":
+            profile_reason = "provider_unavailable"
+        elif (provider_task or {}).get('_preferencesEnabledResolved') is False:
+            profile_reason = "preferences_disabled"
+        else:
+            profile_reason = "profile_empty"
     blocks.extend(
         [
             _block(
@@ -701,13 +769,12 @@ def collect_context_blocks(
                 "memory.user_context",
                 user_context,
                 authority="preference",
-                placement="head",
+                placement="tail",
                 stability="conversation",
                 lifecycle="conversation",
                 priority=20,
                 max_tokens=1000,
-                reason=("" if user_context
-                        else "preferences_disabled_or_empty"),
+                reason=profile_reason,
                 layer="objective_constraints",
             ),
         ]
@@ -719,12 +786,14 @@ def collect_context_blocks(
             "memory",
             memory,
             authority="ambient",
-            placement="system",
+            placement="tail",
             stability="conversation",
             lifecycle="conversation",
             priority=60,
             max_tokens=700,
-            reason="" if memory else "memory_disabled_or_no_tools",
+            reason=("" if memory else "memory_disabled"
+                    if not (request.has_real_tools and request.memory_enabled)
+                    else "provider_unavailable"),
             layer="cold_history",
         )
     )
@@ -734,12 +803,16 @@ def collect_context_blocks(
             "skills.registry",
             skills,
             authority="workflow",
-            placement="system",
+            placement="tail",
             stability="conversation",
             lifecycle="conversation",
             priority=40,
             max_tokens=1400,
-            reason="" if skills else "no_enabled_skills",
+            reason=("" if skills else "skills_disabled"
+                    if not request.has_real_tools
+                    else "provider_unavailable"
+                    if statuses.get("skills") != "ok"
+                    else "no_enabled_skills"),
             layer="cold_history",
         )
     )
@@ -749,12 +822,16 @@ def collect_context_blocks(
             "credentials_vault",
             vault,
             authority="user",
-            placement="system",
+            placement="tail",
             stability="conversation",
             lifecycle="conversation",
             priority=30,
             max_tokens=1000,
-            reason="" if vault else "empty_or_no_tools",
+            reason=("" if vault else "vault_disabled"
+                    if not request.has_real_tools
+                    else "provider_unavailable"
+                    if statuses.get("vault") != "ok"
+                    else "vault_empty"),
             layer="cold_history",
         )
     )
@@ -764,12 +841,46 @@ def collect_context_blocks(
             "swarm",
             swarm,
             authority="workflow",
-            placement="system",
+            placement="tail",
             stability="static",
             lifecycle="conversation",
             priority=50,
             max_tokens=128,
-            reason="" if swarm else "empty",
+            reason=swarm_reason,
+            layer="cold_history",
+        )
+    )
+    programmatic = _programmatic_guidance(request)
+    programmatic_reason = ""
+    if not programmatic:
+        if not request.has_real_tools:
+            programmatic_reason = "programmatic_disabled"
+        else:
+            try:
+                from lib.context_experiment_flags import (
+                    normalize_context_experiment_flags,
+                )
+                programmatic_mode = normalize_context_experiment_flags(
+                    (request.task or {}).get("config") or {}
+                )["tools"]["programmaticCalling"]
+                programmatic_reason = (
+                    "programmatic_disabled"
+                    if programmatic_mode == "off" else "provider_unavailable"
+                )
+            except Exception:
+                programmatic_reason = "provider_unavailable"
+    blocks.append(
+        _block(
+            "programmatic_execution",
+            "tools.programmatic",
+            programmatic,
+            authority="workflow",
+            placement="tail",
+            stability="static",
+            lifecycle="conversation",
+            priority=55,
+            max_tokens=128,
+            reason=programmatic_reason,
             layer="cold_history",
         )
     )
@@ -869,30 +980,60 @@ def collect_context_blocks(
         try:
             import os
 
+            _cfg = (request.task or {}).get("config") or {}
+            _project_paths = _cfg.get("projectPaths") or []
+            _extra_roots = (
+                [str(path) for path in _project_paths[1:] if path]
+                if isinstance(_project_paths, (list, tuple)) else []
+            )
             environment = system_prompt_cc.section_environment(
                 cwd=env_cwd,
                 is_git=bool(env_cwd and os.path.isdir(os.path.join(env_cwd, ".git"))),
                 model=request.model,
+                extra_roots=_extra_roots,
                 has_real_tools=request.has_real_tools,
             )
+            if _extra_roots:
+                environment += (
+                    "\n - Multi-root path rule: use an absolute path or "
+                    "`rootname:subdir`; a bare relative path uses the primary root."
+                )
+            if _cfg.get("project_remote"):
+                environment += (
+                    "\n - Remote worktree: project tools execute on the user's "
+                    "local machine through the desktop agent. Paths are relative "
+                    "to that bound root. Server-vault credentials are unavailable; "
+                    "configure credentials on the desktop agent."
+                )
+            if request.memory_enabled and not (
+                    request.project_enabled and request.project_path):
+                environment += (
+                    "\n - Memory scope: no project is attached; use global "
+                    "scope for create_memory and merge_memories."
+                )
             environment_reason = "" if environment else "empty"
         except Exception as exc:
             environment_reason = "build_failed"
             logger.warning("[ContextComposer] environment block failed: %s", exc)
     task = request.task or {}
+    project_path_change = ""
+    project_path_change_id = ""
     previous_path, path_changed = _tail_transition(
         _tail_transition_scope(request), "project_path", env_cwd)
     if path_changed:
         task["_projectPathChange"] = {
             "from": str(previous_path or ""), "to": env_cwd}
-        if environment:
-            shown_old = str(previous_path or "") or "(none)"
-            shown_new = env_cwd or "(none)"
-            environment += (
-                f"\n\nNote: the project path changed from \"{shown_old}\" to "
-                f"\"{shown_new}\" since your previous turn. Use the new path "
-                "for file operations; absolute paths in earlier tool results "
-                "may be stale.")
+        shown_old = str(previous_path or "") or "(none)"
+        shown_new = env_cwd or "(none)"
+        project_path_change = (
+            f"The project path changed from \"{shown_old}\" to "
+            f"\"{shown_new}\" since your previous turn. Use the new path "
+            "for file operations; absolute paths in earlier tool results "
+            "may be stale.")
+        transition_digest = hashlib.sha256(
+            f"{shown_old}\0{shown_new}".encode("utf-8")
+        ).hexdigest()[:12]
+        project_path_change_id = f"project_path_change_{transition_digest}"
     else:
         task.pop("_projectPathChange", None)
     blocks.append(
@@ -911,6 +1052,26 @@ def collect_context_blocks(
             required=True,
         )
     )
+    if project_path_change:
+        # A path move is a historical event, not part of the current
+        # environment snapshot. Give each transition a stable unique id so it
+        # is appended once and never makes the environment change a second
+        # time when the note naturally stops being emitted next turn.
+        blocks.append(
+            _block(
+                project_path_change_id,
+                "platform.environment.transition",
+                project_path_change,
+                authority="platform",
+                placement="tail",
+                stability="turn",
+                lifecycle="task",
+                priority=79,
+                max_tokens=160,
+                layer="hot_tail",
+                required=True,
+            )
+        )
     mcp_delta, mcp_delta_reason, mcp_delta_provenance = _mcp_tools_delta(request)
     blocks.append(
         _block(

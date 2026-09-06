@@ -25,9 +25,34 @@
       "guard": "tests/test_identity_contract.py"
     },
     {
+      "path": "contracts/storage_operations_v1.json",
+      "guard": "tests/test_tofudb_pre_authority.py",
+      "generator": "scripts/gen_storage_operation_catalog.py"
+    },
+    {
+      "path": "contracts/storage_v2.json",
+      "guard": "tests/test_tofudb_pre_authority.py",
+      "generator": "scripts/gen_storage_v2_contract.py"
+    },
+    {
+      "path": "contracts/tofudb_ir_v1.json",
+      "guard": "tests/test_tofudb_pre_authority.py",
+      "generator": "scripts/gen_tofudb_ir_contract.py"
+    },
+    {
       "path": "contracts/conversation_sync_v3.yaml",
       "guard": "tests/test_conversation_sync_v3.py",
       "generator": "scripts/gen_conversation_sync_contract.py"
+    },
+    {
+      "path": "contracts/api_v1_model_routing.yaml",
+      "guard": "tests/test_api_v1_model_routing_contract.py",
+      "generator": "scripts/gen_api_v1_model_routing_contract.py"
+    },
+    {
+      "path": "contracts/fixtures/",
+      "guard": "tests/test_wire_fixtures.py",
+      "generator": "scripts/gen_wire_fixtures.py"
     },
     {
       "path": "contracts/conversation_lifecycle_v1.yaml",
@@ -48,6 +73,11 @@
     {
       "path": "contracts/log_incident_v1.schema.json",
       "guard": "tests/test_log_diagnostics_pipeline.py"
+    }
+,
+    {
+      "path": "contracts/browser_site_observation_v1.schema.json",
+      "guard": "tests/test_browser_site_observations.py"
     }
 ,
     {

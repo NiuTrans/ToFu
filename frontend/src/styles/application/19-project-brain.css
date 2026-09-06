@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════
    Project Brain — signal-driven read model (2026-09 redesign).
-   Board / Feed / Attention / Charter / Status are READ-ONLY projections of
+   Board / Feed / Charter / Status are READ-ONLY projections of
    the storage event authority; the only owned commands are Watch maintenance
    and versioned Checker registration/execution. The Integration tab keeps its
    own operational density in static/project-integration.css.
@@ -68,7 +68,6 @@
 .pb-tab:hover{color:var(--text-secondary)}
 .pb-tab-active{color:var(--text-primary);border-bottom-color:var(--accent)}
 .pb-tab-active::before{opacity:1}
-.pb-tab[data-pb-tab="attention"].pb-tab-active{color:var(--pb-red)}
 .pb-tab[data-pb-tab="charter"].pb-tab-active{color:var(--accent)}
 .pb-tab[data-pb-tab="board"].pb-tab-active{color:var(--pb-green)}
 .pb-tab[data-pb-tab="activity"].pb-tab-active{color:var(--pb-amber)}
@@ -109,15 +108,15 @@
 /* Empty states — a centered, quiet dashed frame instead of bare text.
    .pb-board-empty doubles as the shared placeholder: project-brain.js renders
    it through _empty() on every surface. */
-.pb-attn-empty,.pb-charter-empty,.pb-board-empty,.pb-activity-empty,.pb-status-empty{flex:1;display:flex;align-items:center;justify-content:center;min-height:200px;color:var(--text-tertiary);font-size:13px;text-align:center;padding:24px;margin:2px;border:1px dashed var(--border);border-radius:var(--pb-radius);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent)}
+.pb-charter-empty,.pb-board-empty,.pb-activity-empty,.pb-status-empty{flex:1;display:flex;align-items:center;justify-content:center;min-height:200px;color:var(--text-tertiary);font-size:13px;text-align:center;padding:24px;margin:2px;border:1px dashed var(--border);border-radius:var(--pb-radius);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent)}
 
 /* ── Shared card grammar ──
    One shape for every projected item — board work card, feed event, charter
-   decision/checker row, attention card, watch item — so the eye learns the
-   surface once. Status and severity read from the leading rail, never from
-   saturated fills. */
-.pb-board-card,.pb-activity-item,.pb-charter-decision,.pb-attn-card,.pb-watch-item{background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);padding:11px 13px;margin-bottom:9px;transition:border-color var(--transition),background var(--transition),transform 0.12s ease;animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
-.pb-board-card:hover,.pb-activity-item:hover,.pb-charter-decision:hover,.pb-attn-card:hover,.pb-watch-item:hover{border-color:var(--border-light);background:var(--pb-card-hover);transform:translateY(-1px)}
+   decision/checker row, watch item — so the eye learns the surface once.
+   Status and severity read from the leading rail, never from saturated
+   fills. */
+.pb-board-card,.pb-activity-item,.pb-charter-decision,.pb-watch-item{background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);padding:11px 13px;margin-bottom:9px;transition:border-color var(--transition),background var(--transition),transform 0.12s ease;animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+.pb-board-card:hover,.pb-activity-item:hover,.pb-charter-decision:hover,.pb-watch-item:hover{border-color:var(--border-light);background:var(--pb-card-hover);transform:translateY(-1px)}
 @keyframes pbRowIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 
 /* Section block + small-caps head shared by Board lanes, Charter sections and
@@ -130,9 +129,7 @@
 .pb-board-card-title{font-size:13.5px;font-weight:600;line-height:1.5;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
 .pb-board-card-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:6px;font-size:11.5px;color:var(--text-tertiary)}
 .pb-board-card-desc{margin-top:6px;font-size:12px;line-height:1.55;color:var(--text-secondary);overflow-wrap:anywhere;word-break:break-word}
-.pb-attn-title{font-size:13.5px;font-weight:600;line-height:1.5;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
-.pb-attn-body{margin-top:4px;font-size:12.5px;line-height:1.6;color:var(--text-secondary);overflow-wrap:anywhere;word-break:break-word}
-.pb-attn-card>time,.pb-activity-item time{display:block;margin-top:7px;font-size:10.5px;color:var(--text-tertiary)}
+.pb-activity-item time{display:block;margin-top:7px;font-size:10.5px;color:var(--text-tertiary)}
 
 /* ── Board: active work + recent outcomes (read-only projection) ──
    The leading rail carries the status: active = green, completed = quiet
@@ -189,10 +186,6 @@
 .pb-watch-actions button:hover{color:var(--text-primary);border-color:var(--text-tertiary)}
 .pb-watch-actions button:disabled{opacity:0.5;cursor:default}
 .pb-watch-actions button[data-pb-action="delete-watch"]:hover{color:var(--pb-red);border-color:color-mix(in srgb,var(--pb-red) 55%,transparent)}
-
-/* collab-bar escalation: the Needs-you count is always visible; only the
-   segment itself bolds — no conflict/blocking state is synthesized here. */
-.collab-seg-needsyou{font-weight:600}
 
 /* ── Responsive: narrow panel ──
    NOTE: .project-brain-columns is a display:block tab host (one panel visible

@@ -43,6 +43,7 @@ import com.tofu.client.session.SupervisorAction
 import com.tofu.client.session.SupervisorClient
 import com.tofu.client.session.executeSupervisorCall
 import com.tofu.client.session.isStillCurrent
+import com.tofu.client.ui.theme.TofuButtonShape
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -192,6 +193,7 @@ fun SupervisorControls(
                 FilledTonalButton(
                     onClick = { run(SupervisorAction.START, ProbeTrigger.USER) },
                     enabled = !busy,
+                    shape = TofuButtonShape,
                     contentPadding = CompactButtonPadding,
                     modifier = TouchTarget,
                 ) {
@@ -204,6 +206,7 @@ fun SupervisorControls(
                 OutlinedButton(
                     onClick = { run(SupervisorAction.STOP, ProbeTrigger.USER) },
                     enabled = !busy,
+                    shape = TofuButtonShape,
                     contentPadding = CompactButtonPadding,
                     modifier = TouchTarget,
                 ) {
@@ -216,6 +219,7 @@ fun SupervisorControls(
                 TextButton(
                     onClick = { run(SupervisorAction.STATUS, ProbeTrigger.USER) },
                     enabled = !busy,
+                    shape = TofuButtonShape,
                     contentPadding = CompactButtonPadding,
                     modifier = TouchTarget,
                 ) {

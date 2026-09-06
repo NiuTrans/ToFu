@@ -97,7 +97,6 @@ def read_projection(project_path: str, *, user_id: int) -> dict:
             'version': 1, 'projectKey': '', 'headSequence': 0,
             'checkpointSequence': 0, 'workItems': [], 'narratives': [],
             'charter': {'decisions': []}, 'checkers': [], 'watch': [],
-            'attention': [],
         }
     return get_storage_client().query(
         'project_brain.get', {
@@ -140,25 +139,16 @@ def feed_projection(
 def status_projection(project_path: str, *, user_id: int) -> dict:
     projection = read_projection(project_path, user_id=user_id)
     work = list(projection.get('workItems') or ())
-    attention = list(projection.get('attention') or ())
     return {
         'project': projection.get('projectKey') or '',
         'headSequence': int(projection.get('headSequence') or 0),
         'activeCount': sum(1 for item in work if item.get('status') == 'active'),
         'recentOutcomeCount': sum(
             1 for item in work if item.get('status') in WORK_TERMINAL_STATUSES),
-        'attentionCount': len(attention),
         'checkerCount': sum(
             1 for item in projection.get('checkers') or () if item.get('enabled')),
         'watchCount': len(projection.get('watch') or ()),
     }
-
-
-def attention_projection(project_path: str, *, user_id: int) -> dict:
-    projection = read_projection(project_path, user_id=user_id)
-    items = list(projection.get('attention') or ())
-    items.sort(key=lambda item: int(item.get('createdAt') or 0), reverse=True)
-    return {'project': projection.get('projectKey') or '', 'items': items}
 
 
 def charter_projection(project_path: str, *, user_id: int) -> dict:
@@ -847,23 +837,6 @@ def promote_decision(
     return decision
 
 
-def add_attention(
-    project_path: str,
-    *,
-    kind: str,
-    text: str,
-    user_id: int,
-    work_id: str = '',
-) -> dict:
-    attention_id = 'pa_' + uuid.uuid4().hex[:20]
-    return _command(
-        'project_brain.attention.add', project_path,
-        user_id=user_id,
-        command_id=f'project-attention:{attention_id}',
-        attention_id=attention_id, kind=kind, text=text, work_id=work_id,
-    )
-
-
 def add_narrative(
     project_path: str,
     *,
@@ -904,13 +877,6 @@ def record_integration_failure(
         user_id=user_id,
         command_id=f'project-integration-narrative:{work_id}:{digest}',
         kind='integration_failed', text=text, work_id=work_id,
-    )
-    _command(
-        'project_brain.attention.add', project_path,
-        user_id=user_id,
-        command_id=f'project-integration-attention:{work_id}:{digest}',
-        attention_id=f'integration:{work_id}:{digest}',
-        kind='integration', text=text, work_id=work_id,
     )
 
 
@@ -992,8 +958,8 @@ def delete_watch_item(project_path: str, item_id: str, *, user_id: int) -> None:
 
 
 __all__ = [
-    'WORK_TERMINAL_STATUSES', 'add_attention', 'add_narrative', 'add_watch_item',
-    'attention_projection', 'board_projection', 'charter_projection',
+    'WORK_TERMINAL_STATUSES', 'add_narrative', 'add_watch_item',
+    'board_projection', 'charter_projection',
     'checker_catalog', 'confirm_project_context_delivery',
     'delete_watch_item', 'deterministic_work_id', 'ensure_work_item',
     'feed_projection', 'note_file_signal', 'note_isolated_workspace_signal',

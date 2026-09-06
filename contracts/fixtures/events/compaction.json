@@ -1,0 +1,16 @@
+{
+  "archiveId": "s",
+  "convId": "s",
+  "model": "s",
+  "msgsAfter": 1,
+  "msgsBefore": 1,
+  "reason": "s",
+  "roundNum": 1,
+  "snapshotKind": "s",
+  "tokenCountKind": "s",
+  "tokensAfter": 1,
+  "tokensBefore": 1,
+  "trigger": "s",
+  "ts": 1,
+  "type": "compaction"
+}

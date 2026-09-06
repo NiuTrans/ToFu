@@ -53,7 +53,6 @@ from lib.pricing._peak import peak_multiplier  # noqa: E402,F401
 # ── Online refresh / exchange-rate fetchers + live pricing state ──
 from lib.pricing._refresh import (  # noqa: E402,F401
     _do_update_pricing,
-    _fetch_exchange_rate,
     _fetch_exchange_rates,
     _fetch_model_pricing_online,
     _pricing_data,

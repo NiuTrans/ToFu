@@ -557,13 +557,17 @@ def _status_from_persistence(task_id: str, *, user_id: int) -> dict | None:
         if not isinstance(a, dict):
             continue
         result = a.get('result') or {}
+        status = a.get('status') or 'pending'
+        error = ((result.get('error_message') or '')
+                 if isinstance(result, dict) else '')
+        if status == 'completed' and error:
+            status = 'failed'
         agents.append({
             'id':        a.get('agent_id'),
             'role':      a.get('role') or '',
             'objective': (a.get('objective') or '')[:120],
-            'status':    a.get('status') or 'pending',
-            'error':     (result.get('error_message') or '')
-                         if isinstance(result, dict) else '',
+            'status':    status,
+            'error':     error,
         })
     if row.get('status') in SWARM_SESSION_TERMINAL_STATUSES:
         return {

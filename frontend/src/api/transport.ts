@@ -7,6 +7,11 @@ import {
 
 import { readBrowserStorage, writeBrowserStorage } from '../core/browser-storage';
 import { BoundedMap } from '../core/bounded-map';
+import {
+  createNativeReauthGate,
+  isGatewayAuthRejection,
+  type NativeShellHandle,
+} from '../core/native-bridge';
 
 export type ParseMode = 'json' | 'text' | 'blob' | 'response' | 'none';
 export type RequestPriority = 'foreground' | 'normal' | 'background';
@@ -92,6 +97,28 @@ type ApiGlobals = Window & typeof globalThis & {
     options: { timeout?: number; signal?: AbortSignal },
   ) => Promise<T>;
 };
+
+const nativeReauthGate = createNativeReauthGate({
+  native: (window as Window & { TofuNative?: NativeShellHandle }).TofuNative,
+  now: () => Date.now(),
+  onError: (error) => console.warn('[Api] native reauth request failed:', error),
+});
+
+/**
+ * A gateway-shaped 401 means the outer edge session is dead; every queued
+ * request will bounce the same way until the shell re-logins. Forward once
+ * per window (the gate rate-limits) and let the normal error path continue.
+ */
+function maybeRequestNativeReauth(
+  status: number,
+  envelope: ErrorEnvelope | null,
+  problem: ApiProblemDetails | null,
+  method: string,
+  url: string,
+): void {
+  if (!isGatewayAuthRejection(status, envelope, problem)) return;
+  nativeReauthGate.requestReauth(`api ${status} ${method} ${url}`);
+}
 
 declare global {
   interface Window {
@@ -770,6 +797,7 @@ async function requestDirect<T = unknown>(
         requestId: bodyRequestId(bodyRecord, problem) || serverRequestId || requestId,
       },
     );
+    maybeRequestNativeReauth(response.status, envelope, problem, method, url);
     if (options.onError === 'null') {
       console.warn('[Api] %s [rid=%s]', failure.message, failure.requestId);
       return null as T;

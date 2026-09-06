@@ -18,7 +18,11 @@ from lib.tasks_pkg.manager.runtime import (
     _conv_latest_task_lock,
 )
 from lib.tasks_pkg.manager._events import append_event
-from lib.tasks_pkg.manager._persist import _upsert_task_row, build_result_meta
+from lib.tasks_pkg.manager._persist import (
+    _upsert_task_row,
+    build_result_meta,
+    persist_task_result,
+)
 
 logger = get_logger(__name__)
 
@@ -41,6 +45,43 @@ _next_orphan_result_report_monotonic = 0.0
 # this event, coalescing any number of task completions into one heap trim.
 _released_task_heap_trim_requested = threading.Event()
 _released_task_heap_trim_lock = threading.Lock()
+_TERMINAL_PERSISTENCE_RETRY_LIMIT = 32
+
+
+def retry_pending_terminal_persistence(
+    limit: int = _TERMINAL_PERSISTENCE_RETRY_LIMIT,
+) -> tuple[int, int]:
+    """Retry bounded terminal durability debts before registry eviction.
+
+    Returns ``(attempted, recovered)``. The private task marker is owned by
+    ``persist_task_result`` and is cleared only after the authoritative row
+    acknowledges the terminal write.
+    """
+    attempted = 0
+    recovered = 0
+    for task in chat_task_runtime.snapshot():
+        if attempted >= max(0, int(limit)):
+            break
+        if (not task.get('_terminalPersistencePending')
+                or not task.get('_terminalPersistenceRetryReady')
+                or task.get('_finalize_started_at')
+                or task.get('status') not in TASK_REPLAY_TERMINAL_STATUSES):
+            continue
+        attempted += 1
+        try:
+            if persist_task_result(task) is True:
+                recovered += 1
+        except Exception as exc:
+            logger.error(
+                '[Task %s] terminal persistence retry failed: %s',
+                str(task.get('id') or '?')[:8], exc, exc_info=True,
+            )
+    if attempted:
+        logger.info(
+            '[Manager] terminal persistence retry attempted=%d recovered=%d',
+            attempted, recovered,
+        )
+    return attempted, recovered
 
 
 def _claim_orphan_result_report(now_monotonic: float | None = None) -> bool:
@@ -82,10 +123,13 @@ def cleanup_old_tasks():
       - We snapshot the task ids ABOUT to be cleaned BEFORE calling
         cleanup_stale() so we can prune the conv-latest-task index too.
     """
+    retry_pending_terminal_persistence()
     now = time.time()
     finished_ids: set = set()
     for task in chat_task_runtime.snapshot():
-        if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
+        if (task['status'] in TASK_REPLAY_TERMINAL_STATUSES
+                and not task.get('_finalize_started_at')
+                and not task.get('_terminalPersistencePending')):
             finished_at = task.get('finished_at')
             # Fall back to created_at for records completed by an external
             # terminal policy that predates ``finished_at``.
@@ -216,6 +260,8 @@ def shed_memory_under_pressure() -> dict:
             str(task.get('id') or '')
             for task in chat_task_runtime.snapshot()
             if task.get('status') in TASK_REPLAY_TERMINAL_STATUSES
+            and not task.get('_finalize_started_at')
+            and not task.get('_terminalPersistencePending')
         }
         evicted = chat_task_runtime.cleanup_stale(max_age=0)
         if finished_ids:

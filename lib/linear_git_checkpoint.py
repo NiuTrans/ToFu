@@ -1,10 +1,11 @@
 """Best-effort Git checkpoints for one model-owned canonical checkout.
 
 Project tools never call this module and are never admitted, delayed, or
-rejected by Git state.  After a task reaches a terminal state, the existing
+rejected by Git state. After a task reaches a terminal state, the existing
 commit-round daemon may ask this module to record the checkout's current bytes
-as one linear workspace commit.  A short cross-process lock serializes only
-Git index/ref updates; it does not serialize project-file writers.
+as one immutable checkpoint ref. A short cross-process lock serializes only
+Git index/ref updates; it does not serialize project-file writers. The checked-
+out branch remains at its last published revision until verification passes.
 
 Concurrent edits are intentionally coalesced workspace state, not task-owned
 attribution.  Bytes written after a snapshot remain dirty for a later task.
@@ -61,6 +62,7 @@ def _git(
     env: dict[str, str] | None = None,
     timeout: float = 30.0,
     check: bool = False,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     merged_env = os.environ.copy()
     if env:
@@ -69,6 +71,7 @@ def _git(
         process = subprocess.run(
             ['git', '-c', 'core.fsmonitor=false', *args],
             cwd=str(cwd), env=merged_env, text=True,
+            input=input_text,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=timeout, check=False,
         )
@@ -471,10 +474,28 @@ def _checkout_matches_snapshot(root: Path, target_sha: str) -> bool:
     """Return whether HEAD, index, tracked bytes, and untracked bytes match."""
     if _revision(root, 'HEAD') != target_sha:
         return False
+    return _workspace_matches_snapshot(root, target_sha)
+
+
+def _workspace_matches_snapshot(root: Path, target_sha: str) -> bool:
+    """Return whether current index/worktree bytes equal an immutable tree.
+
+    Unlike ``_checkout_matches_snapshot``, HEAD intentionally remains at the
+    last published revision until verification succeeds.
+    """
+    index_path = ''
     try:
-        return not _working_tree_status(root)
-    except LinearCheckpointError:
+        index_path, workspace_tree, _ = _stage_working_tree(root, target_sha)
+        target_tree = _git(
+            root, ['rev-parse', f'{target_sha}^{{tree}}'], check=True,
+        ).stdout.strip()
+        return workspace_tree == target_tree
+    except (OSError, LinearCheckpointError):
         return False
+    finally:
+        if index_path:
+            with contextlib.suppress(OSError):
+                os.unlink(index_path)
 
 
 def _task_succeeded(task: dict[str, Any]) -> bool:
@@ -488,6 +509,16 @@ def _task_succeeded(task: dict[str, Any]) -> bool:
 
 def _syntax_check(root: Path, paths: list[str]) -> tuple[bool, str]:
     current_files = [path for path in paths if (root / path).is_file()]
+    marker_pattern = re.compile(r'^(?:<<<<<<<|=======|>>>>>>>)(?:\s|$)', re.M)
+    for relative in current_files:
+        try:
+            source = (root / relative).read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            continue
+        except OSError as error:
+            return False, f'{relative}: {error}'
+        if marker_pattern.search(source):
+            return False, f'{relative}: unresolved merge-conflict marker'
     for relative in [path for path in current_files if path.endswith('.py')]:
         try:
             source = (root / relative).read_text(encoding='utf-8')
@@ -524,6 +555,40 @@ def _syntax_check(root: Path, paths: list[str]) -> tuple[bool, str]:
     return True, ''
 
 
+def _ruff_check(root: Path, paths: list[str]) -> tuple[bool, str]:
+    """Run the repository's Python static gate on changed source files."""
+    ruff_enabled = (root / 'ruff.toml').is_file() or \
+        (root / '.ruff.toml').is_file()
+    pyproject = root / 'pyproject.toml'
+    if not ruff_enabled and pyproject.is_file():
+        try:
+            ruff_enabled = '[tool.ruff' in pyproject.read_text(
+                encoding='utf-8')
+        except (OSError, UnicodeError):
+            ruff_enabled = False
+    if not ruff_enabled:
+        return True, ''
+    python_paths = [
+        path for path in paths
+        if path.endswith('.py') and (root / path).is_file()
+    ]
+    if not python_paths:
+        return True, ''
+    process = subprocess.run(
+        [os.sys.executable, '-m', 'ruff', 'check', '--no-cache',
+         '--output-format=concise',
+         *python_paths],
+        cwd=str(root), text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=120.0, check=False,
+    )
+    if process.returncode == 0:
+        return True, ''
+    detail = '\n'.join(
+        part for part in (process.stdout, process.stderr) if part
+    ).strip()[-3000:]
+    return False, detail or 'ruff check failed'
+
+
 def _run_verification_gate(
     root: Path,
     verification_base: str,
@@ -541,6 +606,9 @@ def _run_verification_gate(
     syntax_ok, syntax_detail = _syntax_check(root, paths)
     if not syntax_ok:
         return 'failed', syntax_detail[:3000]
+    ruff_ok, ruff_detail = _ruff_check(root, paths)
+    if not ruff_ok:
+        return 'failed', ruff_detail[:3000]
     command = _configured_gate_command(root)
     semantic_paths = semantic_gate_paths(paths)
     if semantic_paths and not command:
@@ -588,9 +656,15 @@ def _run_verification_gate(
     return 'passed', ''
 
 
-def _advance_stable(root: Path, stable_sha: str, target_sha: str) -> str:
-    if stable_sha == target_sha:
-        return stable_sha
+def _publish_verified_refs(
+    root: Path,
+    *,
+    branch_ref: str,
+    base_sha: str,
+    stable_sha: str,
+    target_sha: str,
+) -> None:
+    """Atomically publish the development branch and verified stable ref."""
     ancestor = _git(root, [
         'merge-base', '--is-ancestor', stable_sha, target_sha,
     ])
@@ -598,15 +672,23 @@ def _advance_stable(root: Path, stable_sha: str, target_sha: str) -> str:
         raise LinearCheckpointError(
             'refs/tofu/stable diverged from the linear development history; '
             'automatic promotion refuses to merge it')
-    process = _git(root, [
-        'update-ref', '-m', 'tofu: verified linear checkpoint',
-        STABLE_REF, target_sha, stable_sha,
-    ])
+    transaction = '\n'.join((
+        'start',
+        f'update {branch_ref} {target_sha} {base_sha}',
+        f'update {STABLE_REF} {target_sha} {stable_sha}',
+        'prepare',
+        'commit',
+        '',
+    ))
+    process = _git(
+        root,
+        ['update-ref', '-m', 'tofu: verified linear checkpoint', '--stdin'],
+        input_text=transaction,
+    )
     if process.returncode != 0:
         raise LinearCheckpointError(
-            'Stable ref moved concurrently: '
+            'Development branch or stable ref moved concurrently: '
             + (process.stderr or process.stdout).strip()[:600])
-    return target_sha
 
 
 def _capture_repository(task: dict[str, Any], user_id: int,
@@ -675,49 +757,6 @@ def _capture_repository(task: dict[str, Any], user_id: int,
                 final_sha = _commit_tree(
                     root, tree_sha, base_sha, task=task,
                     verification='pending_settlement_gate')
-                branch_before_update = _git(
-                    root, ['symbolic-ref', '-q', 'HEAD'])
-                if (branch_before_update.returncode != 0
-                        or branch_before_update.stdout.strip() != branch_ref):
-                    if attempt < 3:
-                        continue
-                    raise LinearCheckpointError(
-                        'The checked-out branch kept changing during three Git '
-                        'checkpoint attempts; workspace bytes were left '
-                        'untouched')
-                update = _git(root, [
-                    'update-ref', '-m',
-                    f'tofu: workspace checkpoint {task_id[:24]}',
-                    branch_ref, final_sha, base_sha,
-                ])
-                if update.returncode != 0:
-                    if attempt < 3:
-                        continue
-                    raise LinearCheckpointError(
-                        'Development branch kept moving during three Git '
-                        'checkpoint attempts; workspace bytes were left '
-                        'untouched: '
-                        + (update.stderr or update.stdout).strip()[:800])
-
-                index_detail = ''
-                if _revision(root, 'HEAD') != final_sha:
-                    index_synchronized = False
-                    index_detail = (
-                        'Checkpoint committed, but HEAD moved again before '
-                        'real-index synchronization; the index and workspace '
-                        'were left untouched.')
-                else:
-                    index_sync = _git(
-                        root, ['read-tree', final_sha], timeout=60.0)
-                    index_synchronized = index_sync.returncode == 0
-                    if index_synchronized:
-                        _git(root, ['update-index', '--refresh'], timeout=60.0)
-                    else:
-                        index_detail = (
-                            'Checkpoint committed, but the real Git index '
-                            'could not be synchronized: '
-                            + (index_sync.stderr or index_sync.stdout).strip()[:600])
-
                 checkpoint_ref = (
                     f'{CHECKPOINT_REF_ROOT}/u{user_id}/'
                     f'{_safe_task_ref_component(task_id)}')
@@ -734,13 +773,15 @@ def _capture_repository(task: dict[str, Any], user_id: int,
 
                 return {
                     'projectRoot': str(root), 'status': 'committed',
+                    'userId': user_id,
                     'baseSha': base_sha, 'checkpointSha': final_sha,
+                    'branchRef': branch_ref,
                     'checkpointRef': checkpoint_ref,
                     'changedPaths': changed_paths[:128],
                     'stableSha': stable_sha, 'stableUpdated': False,
-                    'verification': 'pending', 'verificationDetail': index_detail,
+                    'verification': 'pending', 'verificationDetail': '',
                     'captureConsistent': capture_consistent,
-                    'indexSynchronized': index_synchronized,
+                    'indexSynchronized': False,
                 }
             finally:
                 if index_path:
@@ -762,7 +803,7 @@ def _verify_captured_checkpoint(task: dict[str, Any],
         row['verification'] = 'task_failed'
         row['verificationDetail'] = 'Task did not settle successfully'
         return row
-    if not row.get('captureConsistent') or not _checkout_matches_snapshot(
+    if not row.get('captureConsistent') or not _workspace_matches_snapshot(
             root, target_sha):
         row['verification'] = 'workspace_changed'
         row['verificationDetail'] = (
@@ -788,7 +829,7 @@ def _verify_captured_checkpoint(task: dict[str, Any],
     verification_paths = _changed_paths(root, stable_sha, target_sha)
     verification, detail = _run_verification_gate(
         root, stable_sha, target_sha, verification_paths, task)
-    if not _checkout_matches_snapshot(root, target_sha):
+    if not _workspace_matches_snapshot(root, target_sha):
         row['verification'] = 'workspace_changed'
         row['verificationDetail'] = (
             'The canonical workspace changed during checkpoint verification. '
@@ -800,13 +841,69 @@ def _verify_captured_checkpoint(task: dict[str, Any],
     row['verificationDetail'] = detail[:3000]
     if verification != 'passed':
         return row
+    handle = _acquire_checkpoint_lock(
+        root,
+        user_id=int(row.get('userId') or 1),
+        task_id=str(task.get('id') or ''),
+        conv_id=str(task.get('convId') or ''),
+    )
+    if handle is None:
+        row['verification'] = 'promotion_deferred'
+        row['verificationDetail'] = (
+            'Verification passed, but another checkpoint owns the Git lock; '
+            'the immutable checkpoint ref is preserved for a later promotion.')
+        return row
     try:
-        promoted_sha = _advance_stable(root, stable_sha, target_sha)
+        branch_ref = str(row.get('branchRef') or '')
+        base_sha = str(row.get('baseSha') or '')
+        current_branch = _git(root, ['symbolic-ref', '-q', 'HEAD'])
+        if (
+            current_branch.returncode != 0
+            or current_branch.stdout.strip() != branch_ref
+            or _revision(root, branch_ref) != base_sha
+            or _revision(root, STABLE_REF) != stable_sha
+            or not _workspace_matches_snapshot(root, target_sha)
+        ):
+            row['verification'] = 'workspace_changed'
+            row['verificationDetail'] = (
+                'Branch, stable ref, or workspace changed after verification; '
+                'the checkpoint remains recoverable and was not published.')
+            return row
+        # Prepare the real index before publishing refs. If this fails, both
+        # branch and stable still point at the last verified revision.
+        index_sync = _git(root, ['read-tree', target_sha], timeout=60.0)
+        row['indexSynchronized'] = index_sync.returncode == 0
+        if not row['indexSynchronized']:
+            raise LinearCheckpointError(
+                'Verified checkpoint index could not be prepared before '
+                'publication: '
+                + (index_sync.stderr or index_sync.stdout).strip()[:600])
+        try:
+            _publish_verified_refs(
+                root, branch_ref=branch_ref, base_sha=base_sha,
+                stable_sha=stable_sha, target_sha=target_sha)
+        except LinearCheckpointError:
+            # Ref publication failed its CAS transaction. Restore the real
+            # index to the still-current branch so no staged residue leaks.
+            _git(root, ['read-tree', base_sha], timeout=60.0)
+            row['indexSynchronized'] = False
+            raise
+        _git(root, ['update-index', '--refresh'], timeout=60.0)
+        promoted_sha = target_sha
+        if _revision(root, 'HEAD') != target_sha:
+            row['indexSynchronized'] = False
+            row['verification'] = 'workspace_changed'
+            row['verificationDetail'] = (
+                'HEAD moved immediately after atomic verified publication; '
+                'the checkpoint and stable ref remain recoverable.')
+            return row
     except LinearCheckpointError as error:
         row['verification'] = 'failed'
         row['verificationDetail'] = str(error)[:3000]
         row['stableSha'] = _revision(root, STABLE_REF)
         return row
+    finally:
+        _release_checkpoint_lock(handle)
     row['stableSha'] = promoted_sha
     row['stableUpdated'] = stable_sha != promoted_sha
     return row

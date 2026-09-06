@@ -68,6 +68,19 @@ retained reference; sync pruning releases it. Turn deletion/compaction expires
 the referenced replay prefix before removing the event source, making older
 cursors re-anchor by snapshot instead of receiving a partial event sequence.
 
+### Push-channel frames (declared contract)
+
+Owner-scoped push-hub frames outside the shared chat vocabulary are declared
+in the same authority file as stream events: the `PUSH_FRAME_SPECS` registry
+in `lib/agent_core/events.py` holds each frame's channel, task-id semantics,
+prose fields, and machine-readable `FieldSpec` schema. Emitters construct
+frames through `build_push_frame` (the same construction gate as
+`build_event`: strict under pytest, warn in production), and
+`scripts/gen_event_contract.py` mirrors the registry into
+`frontend/src/api/event-contract.generated.ts` (`ContractedPushFrame`), where
+`frontend/src/core/frame-identity.ts` narrows unknown payloads to the
+declared union. Never hand-assemble a declared frame as a raw dict.
+
 ### Private non-chat push receipt: Codex reset availability
 
 The owner-scoped `oauth` channel has one passive account-state receipt outside
@@ -84,8 +97,12 @@ redeem a credit from the event.
 
 The owner-scoped `notify` channel carries best-effort catalog/Conversation Sync
 wake hints outside the shared task vocabulary. Its task ID is the conversation
-ID. `conv_changed` carries `{convId, userId, rev?}`; `conv_deleted` carries
-`{convId, userId}`. Push Hub owner filtering and the browser's frame-owner check
+ID (`folders_changed` uses the `__folders__` sentinel: folders are not
+task-scoped, and clients subscribe channel-wide). `conv_changed` carries
+`{convId, userId, rev?}`; `conv_deleted` carries `{convId, userId}`;
+`folders_changed` carries `{userId, deletedFolderId?}` — with
+`deletedFolderId` every device unassigns local conversations off the removed
+folder. Push Hub owner filtering and the browser's frame-owner check
 are both mandatory. A positive integer `rev` is only an optimization hint for a
 content change: the browser may suppress a catalog read after authoritative
 TurnState reaches that revision. Metadata mutations omit `rev`; zero, malformed,
@@ -202,6 +219,12 @@ tool row, and old low-priority status rows are reclaimed before failures and
 model switches. It never enters the LLM transcript or grants tool authority.
 The legacy `error` event remains a terminal compatibility frame; current fatal
 paths normally settle with `done.error`.
+Before a task terminal frame enters durable append/push, its private operational
+execution session settles all live resources. A failed non-recoverable release
+rewrites the proposed terminal success to `done.error`; recoverable billing or
+TTL lease debt is recorded as deferred without changing the truthful task
+outcome. The execution receipt contains no prompt, output, owner, or request ID
+and is operations evidence, not a second event authority.
 
 ### Delivery vs construction
 
@@ -270,7 +293,9 @@ For model streaming, the three progress phases have non-overlapping meaning:
   valid tool progress has paused.
 - `retrying` is emitted only after an actual failed or rate-limited provider
   attempt is being retried. Its `attempt` field is a real retry count, never a
-  heartbeat sequence.
+  heartbeat sequence. Retry frames carry the physical attempt `model`, optional
+  `providerId`, and `dispatchMode=strict_model|pool_rescue`; pool rescue must
+  never claim that the outer logical model is being held fixed.
 
 Every phase snapshot carries the assigned event `seq`; repeated wait/stall
 heartbeats repaint through that sequence. Wait/stall phases remain transient
@@ -377,6 +402,45 @@ from an `execute_tools` gateway call.
 If you add an emitter in a NEW file, add its path to `_BACKEND_FILES` in
 `tests/test_event_registry.py` so the new call sites are scanned.
 
+### Field-level schemas (`EventSpec.schema`)
+
+The `fields` map is prose; prose cannot fail CI. The `rawToolTokens`
+incident proved the gap: a field rode the wire undeclared — emitted by the
+pipeline, consumed by the frontend badge, absent from the contract — and was
+discovered by a user. `EventSpec.schema` (a tuple of `FieldSpec(name, kind,
+required)`) makes the field contract machine-readable, and three gates
+enforce it:
+
+| Gate | Catches |
+|------|--------|
+| `build_event` construction validation | An **undeclared field**, a **missing required field**, or a **type mismatch** raises `EventContractError` at the emitting line under pytest (default) or `TOFU_EVENT_SCHEMA=strict`; production defaults to `warn` (logged once per signature, never fails a turn); `off` disables. |
+| `append_event` delivery-seam `check_event` | Fields stamped by **post-construction mutation** (the pipeline adds `status` / `rejection` / compaction fields after building `tool_complete`) — validated on the final frame that actually reaches the wire. |
+| `tests/test_event_schema.py` | Schema ↔ prose **exact key sync** (a field declared in one but not the other fails), closed kind vocabulary, plus a REAL scripted `execute_tool_pipeline` round whose every emitted frame must conform. |
+
+`kind` is a tiny closed DSL: `str` / `bool` / `int` / `number` / `dict` /
+`list` / `None`, `|`-separated for unions (`'int | None'`). `bool` is NOT an
+`int` (JSON semantics, not Python's). Keep `required` minimal — a field any
+real emitter legitimately omits (e.g. the success path omits `status`) is
+optional, or the strict gate raises on conforming traffic.
+
+The TypeScript mirror is generated: `scripts/gen_event_contract.py` writes
+`frontend/src/api/event-contract.generated.ts` (one interface per schema'd
+event), wired into `make contracts-check` / `npm run check:event-contract` —
+a frontend read of an undeclared field is a *typecheck* error, so the two
+sides cannot drift in either direction. Schema'd events also export their
+`schema` in the `/api/v1/capabilities` `events` block.
+
+Golden-wire fixtures: `scripts/gen_wire_fixtures.py` renders one JSON
+frame per schema'd event and push frame into `contracts/fixtures/`
+(deterministic minimal payloads built through the real construction
+gates). `make contracts-check` fails on corpus drift;
+`tests/test_wire_fixtures.py` re-validates and rebuilds every frame, and
+`tests/test_wire_fixtures_frontend.py` proves the generated TS mirror and
+the push narrowing guards accept exactly the corpus.
+
+Migration is event-by-event (`tool_complete` is the pilot): un-schema'd
+events keep the permissive forward-compatible wire.
+
 ---
 
 ## 4. ⚠️ Gotcha — grep tests for literal type strings BEFORE converting
@@ -430,7 +494,8 @@ idempotency receipt, and returns a push hint. A failure rolls back all four
 effects. Public lifecycle kinds are derived from runtime signals:
 
 - `work_started`, `work_title_refined`, `work_changed`, `work_finished`;
-- `narrative_added`, `attention_added`;
+- `narrative_added` (historical `attention_added` events stay in the log but
+  fold to nothing; the kind is no longer emitted);
 - `checker_registered`, `checker_result`, `decision_promoted`;
 - `watch_added`, `watch_updated`, `watch_deleted`;
 - `cursor_initialized`, `cursor_confirmed`;

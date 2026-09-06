@@ -430,63 +430,38 @@ PROJECT_TOOL_RUN_COMMAND = {
     "function": {
         "name": "run_command",
         "description": (
-            "Execute a shell command in the project directory and return stdout + "
-            "stderr. Use it for builds, tests, lint, installs, Git, and pipelines over "
-            "another command's output.\n\n"
-            "**Never use a shell no-op as a placeholder.** Do not call "
-            "`true`, `:`, or `exit 0` to obtain another model round. Continue "
-            "reasoning, call the real next tool, or finish with the blocker; repeated "
-            "placeholders are a tool loop.\n\n"
-            "The project root is the initial working directory. There is NO default "
-            "timeout: builds, tests, and installs run until completion or user Stop. "
-            "Set `timeout` only when the command itself should be abandoned after a "
-            "bound. Avoid commands that wait for stdin.\n\n"
-            "Every call uses a fresh subprocess with no persistent shell; exports, "
-            "sourced profiles, and activated environments do not carry over. Prefer "
-            "absolute paths and avoid `cd`; use `working_dir` to choose another "
-            "directory (use `cd` only when the user explicitly requests it).\n\n"
-            "Use dedicated tools for repository data: `read_files` for reading; "
-            "`grep_search` for file content (bounded, .gitignore-aware, batchable); "
-            "`find_files` for names; `edit_file` for edits; `write_file` for "
-            "creation/full rewrites. Use `browser_download_url_to_server` for remote "
-            "files on the server, including browser-authenticated downloads; never "
-            "export browser cookies to curl/wget. Do not hide recursive filesystem "
-            "grep behind a pipeline—call `grep_search` with `max_results`.\n\n"
-            "**Enforced:** filesystem `grep`/`egrep`/`fgrep` (file/directory operands "
-            "or `-r`) runs through a bounded, FUSE-safe GNU-compatible engine and "
-            "feeds its real output to the remaining pipeline. Shapes that cannot be "
-            "translated honestly (`-P`, command substitution in arguments, or a "
-            "target written earlier in the command) are refused with a `grep_search` "
-            "translation. Filtering another command's stream remains allowed "
-            "(`make 2>&1 | grep error`).\n\n"
-            "Text tools on PATH: `sd` for regex/literal substitution; `mlr` for "
-            "CSV/TSV/JSON fields; `goawk -i csv` for POSIX awk with CSV. Use GNU "
-            "sed/awk when the host lacks them or sed address/script semantics are "
-            "required."
+            "Run a shell command for builds, tests, lint, installs, Git, or a "
+            "pipeline, returning stdout/stderr. There is NO default timeout; use "
+            "`timeout` only when the work should be abandoned. User Stop remains "
+            "available. If the operator sends a message during a long wait, the "
+            "command may move to the background and its result will arrive "
+            "automatically. Avoid commands that wait for stdin.\n\n"
+            "Each call is a fresh subprocess with no persistent shell: environment "
+            "changes do not carry over. Prefer absolute paths and avoid `cd`; use "
+            "`working_dir`.\n\n"
+            "Use `read_files`, `grep_search`, `find_files`, `edit_file`, and "
+            "`write_file` for repository data. Filesystem grep is redirected through "
+            "a bounded FUSE-safe engine or refused with a `grep_search` translation; "
+            "filtering another command's output is allowed. Use "
+            "`browser_download_url_to_server` for browser-authenticated downloads. "
+            "Text helpers include `sd`, `mlr`, and `goawk`.\n\n"
+            "Never use a shell no-op as a placeholder (`true`, `:`, or `exit 0`); "
+            "repeated placeholders are a tool loop."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": (
-                        "Shell command to execute (for example `pytest`, "
-                        "`git status`, or `npm test`)."
-                    )
+                    "description": "Shell command, for example `pytest` or `git status`."
                 },
                 "description": {
                     "type": "string",
-                    "description": (
-                        "Required short one-line caption, in the user's "
-                        "language, explaining what the command does and why."
-                    )
+                    "description": "Short user-language caption: what runs and why."
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": (
-                        "Optional seconds before abandonment. Omit for the "
-                        "NO-timeout default; 0 also means unlimited."
-                    )
+                    "description": "Optional seconds before abandonment; omit or use 0 for unlimited."
                 },
                 "working_dir": {
                     "type": "string",
@@ -499,7 +474,7 @@ PROJECT_TOOL_RUN_COMMAND = {
                 },
                 "credentials": {
                     "type": "array",
-                    "description": "Vault entry names to inject into THIS child process only. Default empty. Use only names shown in <credential_vault>; values never enter the command or chat. Unknown, skill-scoped, or unreadable entries are rejected before execution.",
+                    "description": "Vault entry names for THIS child process only; use names from <credential_vault>. Values never enter the command/chat.",
                     "items": {"type": "string"},
                     "maxItems": 16
                 }
@@ -579,90 +554,14 @@ READ_FILES_TOOL = {
 # information is available via reading conversation history (which the
 # model already does).  Per-round undo/redo of file changes still works
 # end-to-end through the file-history store.
-_MULTIROOT_PATH_HINT = (
-    " Multi-root: use an absolute path or `rootname:subdir`; a bare relative "
-    "path uses the primary root."
-)
-
-
-def _augment_path_descriptions(schema):
-    """Recursively append the multi-root prefix hint to every ``path`` field.
-
-    Walks an OpenAI-style JSON-schema ``properties`` tree in place, appending
-    :data:`_MULTIROOT_PATH_HINT` to the ``description`` of any property literally
-    named ``path`` (top-level or nested inside ``items``) that doesn't already
-    mention the ``rootname:`` convention. Caller must pass a copy — this mutates.
-    """
-    if not isinstance(schema, dict):
-        return
-    props = schema.get('properties')
-    if isinstance(props, dict):
-        for key, sub in props.items():
-            if not isinstance(sub, dict):
-                continue
-            if key == 'path':
-                desc = sub.get('description', '') or ''
-                if 'rootname:' not in desc:
-                    sub['description'] = desc + _MULTIROOT_PATH_HINT
-            # Recurse into nested object/array property schemas.
-            _augment_path_descriptions(sub)
-    items = schema.get('items')
-    if isinstance(items, dict):
-        _augment_path_descriptions(items)
-
-
 def with_multiroot_hint(tools):
-    """Return a deep copy of *tools* with the multi-root prefix hint on path fields.
-
-    Called by the tool-assembly registry ONLY when more than one workspace root
-    is active, so single-root sessions keep the byte-identical (prompt-cache
-    friendly) schema. Each tool's ``path`` parameter gains a sentence telling the
-    model to use the ``rootname:`` prefix for non-primary roots — placed where the
-    model actually chooses the argument value, complementing the system-prompt
-    multi-root table.
-    """
-    out = []
-    for tool in tools:
-        t = copy.deepcopy(tool)
-        params = t.get('function', {}).get('parameters')
-        _augment_path_descriptions(params)
-        out.append(t)
-    return out
-
-
-_REMOTE_EXEC_HINT = (
-    " Executes on the user's LOCAL machine via the desktop agent — the "
-    "project is a REMOTE worktree bound to that machine, so paths are "
-    "relative to the bound remote root and file changes happen on the "
-    "user's own disk (with a local snapshot before every write)."
-)
-_REMOTE_RUN_COMMAND_CREDENTIAL_HINT = (
-    " Server vault credentials are unavailable on remote worktrees; do not "
-    "pass the `credentials` field. Configure credentials on the desktop "
-    "agent or run the command in a server workspace."
-)
+    """Compatibility copy; multi-root guidance now rides tail user context."""
+    return copy.deepcopy(list(tools or ()))
 
 
 def with_remote_hint(tools):
-    """Return a deep copy of *tools* carrying the remote-execution hint.
-
-    RWA 拍板 3A (same-name routing): names + parameter schemas stay
-    byte-identical; ONLY each tool's top-level description gains
-    :data:`_REMOTE_EXEC_HINT`. Called by the tool-assembly registry only
-    when the conversation is bound to a remote worktree (总闸
-    TOFU_REMOTE_WORKTREE + cfg['project_remote']).
-    """
-    out = []
-    for tool in tools:
-        t = copy.deepcopy(tool)
-        fn = t.get('function', {})
-        desc = fn.get('description', '') or ''
-        if _REMOTE_EXEC_HINT.strip() not in desc:
-            fn['description'] = desc + _REMOTE_EXEC_HINT
-        if fn.get('name') == 'run_command':
-            fn['description'] += _REMOTE_RUN_COMMAND_CREDENTIAL_HINT
-        out.append(t)
-    return out
+    """Compatibility copy; remote guidance now rides tail user context."""
+    return copy.deepcopy(list(tools or ()))
 
 
 PROJECT_TOOLS_UNIFIED = [

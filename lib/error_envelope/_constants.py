@@ -24,7 +24,7 @@ KINDS = frozenset({
     'premature_close', 'abnormal_stop', 'aborted', 'server_offline',
     'server_busy', 'task_start_failed',
     'internal', 'generic',
-    'bad_request', 'upstream_error', 'worker_lost', 'budget_exceeded',
+    'bad_request', 'not_found', 'upstream_error', 'worker_lost', 'budget_exceeded',
     'content_refused',
     'tool_not_available', 'tool_call_rejected',
 })
@@ -238,6 +238,18 @@ _TITLES: dict[str, tuple[str, str, str, str]] = {
                             '• This is NOT a key / quota / 429 problem — the API rejected the request '
                             'payload itself. Expand the error detail below for the exact reason.\n'
                             '• If it recurs with no clear cause, check the server logs (logs/error.log).'),
+    # HTTP 404 — the model or route does not exist on the upstream endpoint.
+    # Split from bad_request (2026-09-02): the hardcoded "HTTP 400" title
+    # mislabeled every 404, and subscription-OAuth channels flap transient
+    # 404s (chatgpt.com codex backend, minutes-long per-request flapping
+    # verified live) which the transport now absorbs with bounded same-route
+    # retries before this envelope ever surfaces.
+    'not_found':          ('⚠️ 上游找不到该模型或路由（HTTP 404）',
+                            'Model or route not found upstream (HTTP 404)',
+                            '• 这不是 Key / 配额 / 429 问题——上游端点上不存在该模型或路由。订阅通道的瞬时 404 系统已自动重试；仍然出现说明上游持续故障或该模型已下线。\n'
+                            '• 可稍后重试；若反复出现，在 「设置 → 模型默认」 临时切换到其他可用模型。',
+                            '• This is NOT a key / quota / 429 problem — the model or route does not exist on the upstream endpoint. Transient 404s on subscription channels are already retried automatically; a persistent one means the upstream is failing or the model was retired.\n'
+                            '• Retry shortly; if it recurs, temporarily switch to another available model in "Settings → Model defaults".'),
     # Vendor / gateway outage. RetryableAPIError (5xx-after-retries) and
     # RateLimitError(is_gateway=True) (vendor 401/403/429) both land here.
     'upstream_error':     ('⚠️ 上游模型服务暂时不可用',

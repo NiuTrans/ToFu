@@ -30,8 +30,7 @@ from lib.agent_core.admission import (
     unregister_waiter, wait_for_event,
 )
 from lib.agent_core.execution_session import (
-    ExecutionPhase,
-    bind_admission_lease,
+    acquire_and_bind_admission,
     bind_billing_reservation,
     bind_model_route,
     execution_session_for_task,
@@ -521,7 +520,7 @@ async def chat_completions():
                                    'sending original text', _fail)
                 break
 
-    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.manager import create_task, reject_unstarted_chat_task
     from lib.tasks_pkg.spawn import spawn_task
     task = create_task(
         conversation_id, messages, cfg, user_id=owner_user_id
@@ -545,10 +544,16 @@ async def chat_completions():
         else _model_selection.provider_offering.public_dict()
     )
     execution_session = execution_session_for_task(task)
-    bind_model_route(
-        execution_session,
-        lambda: dispose_routed_slot_group(_route_group),
-    )
+    try:
+        bind_model_route(
+            execution_session,
+            lambda: dispose_routed_slot_group(_route_group),
+        )
+    except Exception as exc:
+        reject_unstarted_chat_task(
+            task, exc, cause='model_route_bind_failed',
+            conv_id=conversation_id)
+        raise
 
     # ── Billing: pre-flight reserve (multi-user mode only) ──
     # Estimate the cost of the request based on prompt size + the
@@ -570,8 +575,9 @@ async def chat_completions():
                 prompt_tokens=estimate_prompt_tokens(messages),
                 max_completion_tokens=est_completion)
         except InsufficientFunds as e:
-            execution_session.settle(
-                ExecutionPhase.FAILED, cause='billing_reservation_refused')
+            reject_unstarted_chat_task(
+                task, e, cause='billing_reservation_refused',
+                conv_id=conversation_id)
             return api_error(
                 f'Insufficient credits. '
                 f'Estimated cost {e.needed_micro / 1_000_000:.4f} credits, '
@@ -580,39 +586,67 @@ async def chat_completions():
                 error_kind='insufficient_funds',
                 balance_micro=e.balance_micro,
                 needed_micro=e.needed_micro)
+        except Exception as exc:
+            reject_unstarted_chat_task(
+                task, exc, cause='billing_reservation_failed',
+                conv_id=conversation_id)
+            raise
 
     if billing_user_id:
-        bind_billing_reservation(
-            execution_session,
-            reservation_micro=reservation_micro,
-            settle=lambda: settle_task(
-                task, user_id=billing_user_id,
-                model=cfg.get('model', '') or '', raise_on_error=True,
-            ),
-            release=lambda: release_reservation(
-                task, user_id=billing_user_id,
-                reservation_micro=reservation_micro, raise_on_error=True,
-            ),
-        )
+        try:
+            bind_billing_reservation(
+                execution_session,
+                reservation_micro=reservation_micro,
+                settle=lambda: settle_task(
+                    task, user_id=billing_user_id,
+                    model=cfg.get('model', '') or '', raise_on_error=True,
+                ),
+                release=lambda: release_reservation(
+                    task, user_id=billing_user_id,
+                    reservation_micro=reservation_micro, raise_on_error=True,
+                ),
+            )
+        except Exception as exc:
+            reject_unstarted_chat_task(
+                task, exc, cause='billing_bind_failed',
+                conv_id=conversation_id)
+            raise
 
     # Reserve a long-lived stream slot only after every preflight that can
     # fail. From here onward every non-streaming-return path releases it, and
     # the generator owns the normal disconnect/terminal release.
     sse_slot_token = None
     if stream:
-        sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
+        try:
+            sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
+        except Exception as exc:
+            reject_unstarted_chat_task(
+                task, exc, cause='sse_admission_failed',
+                conv_id=conversation_id)
+            raise
         if sse_rejection is not None:
-            execution_session.settle(
-                ExecutionPhase.FAILED, cause='sse_admission_refused')
+            reject_unstarted_chat_task(
+                task, RuntimeError('SSE admission refused'),
+                cause='sse_admission_refused', conv_id=conversation_id)
             return sse_rejection
 
     # ── Admission control: refuse with 503 when at capacity ───────
-    admission_lease = controller.acquire()
+    try:
+        admission_lease = acquire_and_bind_admission(
+            execution_session, controller)
+    except Exception as exc:
+        if sse_slot_token:
+            sse_limiter.release(sse_slot_token)
+        reject_unstarted_chat_task(
+            task, exc, cause='admission_acquire_failed',
+            conv_id=conversation_id)
+        raise
     if admission_lease is None:
         if sse_slot_token:
             sse_limiter.release(sse_slot_token)
-        execution_session.settle(
-            ExecutionPhase.FAILED, cause='task_admission_refused')
+        reject_unstarted_chat_task(
+            task, RuntimeError('Task admission refused'),
+            cause='task_admission_refused', conv_id=conversation_id)
         logger.warning('[api_v1.chat] admission refused (in_flight=%d/%d) '
                        'key=%s model=%s', controller.in_flight,
                        controller.capacity,
@@ -620,10 +654,6 @@ async def chat_completions():
                        cfg.get('model', '?'))
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
-    bind_admission_lease(
-        execution_session,
-        lambda: controller.release(admission_lease),
-    )
     register_waiter(task['id'])
 
     try:
@@ -633,9 +663,9 @@ async def chat_completions():
             sse_limiter.release(sse_slot_token)
         # Spawn failure has not dispatched; the shared settlement releases the
         # billing hold, route group, and this exact admission lease in order.
-        execution_session.settle(
-            ExecutionPhase.FAILED, cause='task_spawn_failed')
         unregister_waiter(task['id'])
+        reject_unstarted_chat_task(
+            task, e, cause='task_spawn_failed', conv_id=conversation_id)
         logger.exception('[api_v1.chat] spawn_task failed task=%s',
                          task['id'][:8])
         return api_internal_error(e, context='api_v1.chat',

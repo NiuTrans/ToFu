@@ -44,7 +44,8 @@ TITLE_MAX_CHARS = 60
 # guards this at CI time — any new such model added to bootstrap without
 # updating this constant will flip that test red.
 _THINKING_MODELS_TO_EXCLUDE = frozenset({
-    # OpenAI o-series (cheap + thinking)
+    # OpenAI (cheap + thinking)
+    'o3',
     'o4-mini',
     # GPT-5.6 balanced/high-volume tiers are cheap + thinking.
     'gpt-5.6-terra',
@@ -54,14 +55,17 @@ _THINKING_MODELS_TO_EXCLUDE = frozenset({
     'deepseek-v4-flash',
     # GLM (only glm-4.7 has cheap+thinking; glm-5.x are thinking-only, non-cheap)
     'glm-4.7',
-    # Kimi (all 3 are cheap+thinking)
+    # Kimi (all four are cheap+thinking; kimi-k2-thinking dropped 2026-09-03 —
+    # official kimi-k2 series discontinued 2026-05-25)
     'kimi-k3',
+    'kimi-k2.7-code',
+    'kimi-k2.7-code-highspeed',
     'kimi-k2.6',
-    'kimi-k2-thinking',
     # Qwen (max/plus are cheap+thinking; flash is cheap-only)
     'qwen3-max',
     'qwen-plus',
-    # Gemini (2.5-pro is cheap+thinking; 2.5-flash & 3.1-flash-lite are cheap-only)
+    # Gemini (3.1-pro & 2.5-pro are cheap+thinking; 2.5-flash & 3.1-flash-lite are cheap-only)
+    'gemini-3.1-pro-preview',
     'gemini-2.5-pro',
     # Gemini 3.7 Flash (2026-08-13 release; cheap+thinking in both the
     # builtin Gemini template and the OpenRouter relay)

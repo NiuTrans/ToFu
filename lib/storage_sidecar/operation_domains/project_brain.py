@@ -18,8 +18,6 @@ OPERATIONS = {
         'command', True, ops._project_brain_work_finish),
     'project_brain.narrative.add': ops.OperationSpec(
         'command', True, ops._project_brain_narrative_add),
-    'project_brain.attention.add': ops.OperationSpec(
-        'command', True, ops._project_brain_attention_add),
     'project_brain.checker.register': ops.OperationSpec(
         'command', True, ops._project_brain_checker_register),
     'project_brain.checker.result': ops.OperationSpec(

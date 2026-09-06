@@ -242,6 +242,9 @@ class RequestPlan:
     # Boolean evidence only; credential values never cross the transport
     # boundary into error classification or diagnostics.
     credential_present: bool = False
+    # Internal route identity is retained beside the wire body because every
+    # protocol strips Tofu control fields before serialization.
+    route_output_limit_key: str = ''
     # Optional bounded durable Request Inspector capture. The transport shells
     # feed raw response bytes and commit it best-effort on every exit path.
     raw_archive_capture: Any = None
@@ -326,6 +329,42 @@ def activate_native_orchestration_fallback(
     return True
 
 
+#: Bounded same-route absorption of transient 404s from subscription-OAuth
+#: upstreams. chatgpt.com's codex backend flapped per-request 404s for
+#: minutes on 2026-09-02 while the endpoint, token, and payload were all
+#: healthy (live probe: identical requests returned 200 minutes later);
+#: the plain RequestScopedError classification killed the turn on the
+#: first spike. Keyed gateways keep the deterministic 404 classification
+#: — there a 404 really means the wire model ID is unknown.
+SUBSCRIPTION_404_MAX_RETRIES = 2
+
+
+def activate_subscription_transient_retry(
+    status_code: int,
+    *,
+    oauth: str,
+    canonical_body: dict,
+) -> bool:
+    """Absorb a bounded number of transient 404s on subscription routes.
+
+    Returns ``True`` at most :data:`SUBSCRIPTION_404_MAX_RETRIES` times per
+    canonical body; afterwards the ordinary 404 classification applies, so
+    a genuinely retired model still surfaces as request-scoped. The retry
+    rides the transport's existing attempt loop (same route, same body) —
+    it is NOT a model switch and consumes no fallback budget.
+    """
+    if status_code != 404 or not oauth:
+        return False
+    absorbed = int(canonical_body.get('_subscription_404_absorbed') or 0)
+    if absorbed >= SUBSCRIPTION_404_MAX_RETRIES:
+        return False
+    canonical_body['_subscription_404_absorbed'] = absorbed + 1
+    logger.warning('Subscription upstream returned a transient 404 '
+                   '(absorb %d/%d); retrying the same route',
+                   absorbed + 1, SUBSCRIPTION_404_MAX_RETRIES)
+    return True
+
+
 def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                     base_url=None, extra_headers=None,
                     api_protocol='openai', oauth='',
@@ -342,6 +381,8 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
     # reusing an already-trimmed wire body would silently lose the immutable
     # executable catalog on the next attempt.
     body = dict(body)
+    _route_output_limit_key = str(
+        body.get('_route_output_limit_key') or '')
     _raw_archive_context = body.get('_raw_archive_context')
     _request_activity_sink = body.get('_request_activity_sink')
     if not callable(_request_activity_sink):
@@ -786,6 +827,7 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
             '_programmatic_stage', '_programmatic_tier',
             '_programmatic_eligible_tools', '_programmatic_serial_chain',
             '_programmatic_exposure',
+            '_route_output_limit_key',
             '_resolved_programmatic_backend', '_force_local_programmatic',
             '_tool_search_mode', '_frontend_selected_tool_names',
             '_tool_schema_budget_tokens',
@@ -1093,11 +1135,12 @@ def prepare_request(body, *, attempt=0, log_prefix='', api_key=None,
                        multi_agent_backend=_multi_agent_backend,
                        native_compaction_mode=_native_compaction_mode,
                        credential_present=_has_outbound_credential(hdrs),
+                       route_output_limit_key=_route_output_limit_key,
                        raw_archive_capture=_raw_archive_capture)
 
 
 def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper,
-                          credential_present=False):
+                          credential_present=False, route_limit_key=''):
     """Shared non-200 handling. Caller reads the body text per-transport.
 
     Always raises (via ``_classify_http_error``) — never returns normally
@@ -1115,7 +1158,8 @@ def classify_status_error(status_code, err_text, *, body, log_prefix, raw_dumper
         raw_dumper.line(f'[HTTP-{status_code}] {err_text[:_ERR_BODY_LIMIT]}')
     _classify_http_error(status_code, err_msg, body.get('model', ''),
                          log_prefix, max_tokens=body.get('max_tokens', 0),
-                         credential_present=credential_present)
+                         credential_present=credential_present,
+                         route_limit_key=str(route_limit_key or ''))
 
 
 def _wire_tool_names(tools) -> set[str]:
@@ -1165,7 +1209,8 @@ class SSEAccumulator:
     def __init__(self, body, trace_id, raw_dumper, wire_translator, t0, *,
                  url='', log_prefix='', on_thinking=None, on_content=None,
                  on_tool_call_ready=None, on_reasoning_progress=None,
-                 on_actionable_output=None, progress=None):
+                 on_actionable_output=None, progress=None,
+                 route_output_limit_key=''):
         self.body = body
         self.trace_id = trace_id
         self.raw_dumper = raw_dumper
@@ -1173,6 +1218,7 @@ class SSEAccumulator:
         self.t0 = t0
         self.url = url
         self.log_prefix = log_prefix
+        self.route_output_limit_key = str(route_output_limit_key or '')
         self.on_thinking = on_thinking
         self.on_content = on_content
         self.on_tool_call_ready = on_tool_call_ready
@@ -1510,7 +1556,9 @@ class SSEAccumulator:
         _model_id = self.body.get('model', '')
         _detected_limit = _parse_token_limit_from_error(err_text, _model_id)
         if _detected_limit:
-            _learn_model_limit(_model_id, _detected_limit)
+            _learn_model_limit(
+                _model_id, _detected_limit,
+                route_key=self.route_output_limit_key)
             raise ModelLimitError(
                 f'SSE error (token limit): {err_text}',
                 _model_id, _detected_limit,

@@ -57,8 +57,8 @@ Shared canonical checkout (the default):
 
 Opt-in linear mode:
 
-`concurrent writers → terminal task → short Git-only lock → linear workspace
-commit HEAD → refs/tofu/stable after the gate passes`
+`concurrent writers → terminal task → immutable checkpoint ref → verification
+gate → current branch + refs/tofu/stable only after the gate passes`
 
 - Enable per repository with `git config --local tofu.linearCheckpoint true`;
   the process-wide
@@ -72,14 +72,20 @@ commit HEAD → refs/tofu/stable after the gate passes`
 - The first settlement records `HEAD` in `refs/tofu/workspace-checkpoint-baseline`
   and anchors `refs/tofu/stable` before capturing dirty bytes. Enabling alone
   moves no ref and cannot make export select an older isolated-mode stable ref.
-- Capture stages through an alternate index, creates a commit with mechanical
-  task/conversation metadata, CAS-advances the current branch, and repoints the
-  real index without changing working-file bytes.
+- Capture stages through an alternate index and creates a commit with
+  mechanical task/conversation metadata under `refs/tofu/checkpoints/`. The
+  current branch and real index remain at the last published revision while
+  verification is pending, required, or failed. Conflict-marker, syntax, JSON,
+  JavaScript, and changed-Python Ruff checks are built in; semantic changes
+  additionally require the configured project gate. Only an unchanged,
+  passing snapshot prepares the index and atomically CAS-advances the branch
+  together with `refs/tofu/stable`.
 - The task in a commit message identifies which settlement triggered the
   snapshot, not exclusive authorship. Concurrent conversations may be
   coalesced into the same workspace commit. Bytes arriving after capture stay
   dirty and are eligible for the next task-end snapshot.
-- Failed/aborted tasks still receive a WIP checkpoint, but cannot move stable.
+- Failed/aborted tasks still receive a WIP checkpoint ref, but cannot move the
+  current branch or stable.
   A later passing gate evaluates the entire stable-to-checkpoint delta, so a
   docs-only task cannot accidentally publish earlier unverified code.
 - If checkpoint thread creation, Git capture, or lock acquisition fails, the
@@ -119,7 +125,7 @@ recovery; it does not erase user work.
 7. Stable promotion evaluates the exact candidate tree and explicit
    canonical/candidate divergence acknowledgement.
 8. The integration row is associated by automatic Project Work ID. Candidate
-   success or quarantine records narrative/Attention but never mutates the
+   success or quarantine records a narrative but never mutates the
    already terminal work item.
 9. Submit/retry and release run the applicable immutable Checker versions
    before Git publication. Any failure rejects or quarantines publication.

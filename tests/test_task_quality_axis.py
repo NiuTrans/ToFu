@@ -331,6 +331,52 @@ def test_task_routes_never_expose_or_mutate_another_owner(api):
     assert not foreign['abort_event'].is_set()
 
 
+def test_task_delete_cancels_live_dispatch_before_terminal_removal(api):
+    app, rt = api
+    task = rt.create(user_id=1)
+    released = []
+    task['_executionSession'].hold_resource(
+        'route', lambda _context: released.append('route'))
+    assert rt.mark_running(task['id']) is True
+
+    async def go():
+        client = app.test_client()
+        active = await client.delete(f'/api/v1/tasks/{task["id"]}')
+        assert active.status_code == 409
+        active_body = await active.get_json()
+        assert active_body['error_code'] == 'task_active'
+        assert rt.get(task['id']) is task
+        assert task['abort_event'].is_set() is True
+        assert released == []
+
+        assert rt.finish(task['id']) is True
+        terminal = await client.delete(f'/api/v1/tasks/{task["id"]}')
+        assert terminal.status_code == 200
+        return await terminal.get_json()
+
+    body = _run(go())
+    assert body['status'] == 'deleted'
+    assert released == ['route']
+    assert rt.get(task['id']) is None
+
+
+def test_task_delete_refuses_terminal_record_with_durability_debt(api):
+    app, rt = api
+    task = rt.create(user_id=1)
+    assert rt.finish(task['id']) is True
+    task['_terminalPersistencePending'] = True
+
+    async def go():
+        response = await app.test_client().delete(
+            f'/api/v1/tasks/{task["id"]}')
+        return response.status_code, await response.get_json()
+
+    status, body = _run(go())
+    assert status == 409
+    assert body['error_code'] == 'task_settling'
+    assert rt.get(task['id']) is task
+
+
 # ── The three consumers wire the same shape ──
 
 def test_research_engine_reports_its_degraded_verdict(monkeypatch, tmp_path):

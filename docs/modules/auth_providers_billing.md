@@ -1,5 +1,17 @@
 # Authentication, providers, and billing
 
+## Tofu-DB wallet and ledger pre-authority
+
+The seven wallet/ledger operations compile through Tofu-DB Transaction IR.
+Billing subjects remain explicit opaque IDs inside a narrowly enumerated
+tenant-global scope. Every applied amount atomically publishes the immutable
+ledger entry, exact global ID and nonempty reference claims, wallet balance,
+constant-time user sum/count, descending list index, active-reserve projection,
+receipt, and encrypted outbox record. Checked signed arithmetic rejects
+overflow, insufficient debit writes nothing, and filtered lists fail closed
+after 10,000 candidates or 8 MiB. Payment, redemption-code, and stale-reserve
+operations remain default-denied until their complete state machines land.
+
 This security/money boundary owns principals, credentials, OAuth, owner-scoped
 ProviderAccess resources, safe egress, charging, and rate limits. Identity lives in
 [`../IDENTITY.md`](../IDENTITY.md); HTTP rules in [`../API_CONTRACT.md`](../API_CONTRACT.md).
@@ -80,8 +92,10 @@ a security defect.
    RouteSnapshot is persisted with the turn.
 
 The native direct-stream relay follows the same steps without persisting a
-Turn: its server-minted request record owns billing idempotency, terminal usage,
-route disposal, and admission release. Provider binding uses an execution
+Turn: its server-minted request record owns billing idempotency and terminal
+usage, while the shared `ExecutionSession` owns route disposal and an exact
+admission lease. Task-backed API/compat routes bind the same resources to the
+private session carried by `TaskRuntime`. Provider binding uses an execution
 `ContextVar`, so concurrent asyncio Tasks on one event-loop thread cannot see
 one another's request-scoped route group.
 
@@ -135,7 +149,9 @@ legacy TTL alias remain. Distributed scheduling invents no owner;
 The append-only ledger is authoritative; wallet balance is a recomputable
 cache. Refunds are positive ledger entries, not history rewrites. Billing may
 be disabled for private/BYO-only deployments, but reserve and settle must use
-the same enablement decision for a request.
+the same enablement decision for a request. If billing is disabled after a
+reservation was created, settlement releases that durable hold rather than
+stranding it behind the disabled path.
 
 ## Failure semantics
 - Missing/invalid credentials: `401`.

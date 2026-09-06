@@ -17,10 +17,15 @@ export interface ParetoPoint {
   label: string;
   vendorLabel: string;
   brand: string;
-  cost: number;
   rawCost: number;
   quality: number;
   onFrontier: boolean;
+}
+
+export interface ParetoExclusion {
+  modelId: string;
+  label: string;
+  quality: number;
 }
 
 export interface ParetoOptions {
@@ -28,8 +33,11 @@ export interface ParetoOptions {
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const COST_FLOOR = 0.01;
 const MARGIN = { top: 28, right: 44, bottom: 62, left: 68 };
+export const MARKER_CLEARANCE_PX = 20;
+const SPREAD_STEP_PX = 7;
+const SPREAD_MAX_STEPS = 140;
+const GOLDEN_ANGLE = 2.399963229728653;
 let activeOverlay: HTMLElement | null = null;
 let activeEscapeHandler: ((event: KeyboardEvent) => void) | null = null;
 
@@ -55,6 +63,18 @@ function axisCost(value: number): string {
   return value >= 1 ? `$${Number(value.toFixed(1))}` : `$${Number(value.toPrecision(1))}`;
 }
 
+/** USD blended cost for one Model, or null when it cannot be plotted. */
+function modelRawCost(
+  model: ModelCatalogRow,
+  toUsd: (value: number, currency: string) => number,
+): number | null {
+  const blended = blendedModelCost(model.pricing);
+  if (blended === null) return null;
+  const currency = String(model.pricing?.currency || 'USD').toUpperCase();
+  const rawCost = toUsd(blended, currency);
+  return Number.isFinite(rawCost) && rawCost >= 0 ? rawCost : null;
+}
+
 /** Project scored/priced Models and flag the increasing-cost frontier. */
 export function buildParetoPoints(
   groups: VendorGroup[],
@@ -66,18 +86,13 @@ export function buildParetoPoints(
     for (const model of group.models) {
       const intelligence = model.aa?.intelligence;
       if (intelligence === null || intelligence === undefined) continue;
-      const pricing = model.pricing;
-      const blended = blendedModelCost(pricing);
-      if (blended === null) continue;
-      const currency = String(pricing?.currency || 'USD').toUpperCase();
-      const rawCost = toUsd(blended, currency);
-      if (!Number.isFinite(rawCost) || rawCost < 0) continue;
+      const rawCost = modelRawCost(model, toUsd);
+      if (rawCost === null) continue;
       points.push({
         modelId: `${model.creatorId}/${model.modelId}`,
         label: model.displayName,
         vendorLabel: group.label,
         brand: model.brand,
-        cost: Math.max(rawCost, COST_FLOOR),
         rawCost,
         quality: intelligence,
         onFrontier: false,
@@ -85,7 +100,7 @@ export function buildParetoPoints(
     }
   }
   const ordered = [...points].sort((left, right) => (
-    left.cost - right.cost || right.quality - left.quality
+    left.rawCost - right.rawCost || right.quality - left.quality
   ));
   let bestQuality = -Infinity;
   for (const point of ordered) {
@@ -95,6 +110,117 @@ export function buildParetoPoints(
     }
   }
   return points;
+}
+
+export interface CostAxisDomain {
+  logMin: number;
+  logMax: number;
+  hasPositive: boolean;
+}
+
+/**
+ * Log10 x-axis domain from the positive raw costs. Free ($0) Models do not
+ * stretch the log axis: they render in a dedicated lane at the left edge.
+ */
+export function costAxisDomain(points: readonly ParetoPoint[]): CostAxisDomain {
+  const positive = points
+    .map((point) => point.rawCost)
+    .filter((cost) => cost > 0);
+  if (!positive.length) return { logMin: -2, logMax: 1, hasPositive: false };
+  return {
+    logMin: Math.log10(Math.min(...positive)) - 0.04,
+    logMax: Math.log10(Math.max(...positive)) + 0.04,
+    hasPositive: true,
+  };
+}
+
+/** Scored Models the chart cannot place because no official price is registered. */
+export function buildParetoExclusions(
+  groups: VendorGroup[],
+  options: ParetoOptions = {},
+): ParetoExclusion[] {
+  const toUsd = options.toUsd ?? ((value: number) => value);
+  const excluded: ParetoExclusion[] = [];
+  for (const group of groups) {
+    for (const model of group.models) {
+      const intelligence = model.aa?.intelligence;
+      if (intelligence === null || intelligence === undefined) continue;
+      if (modelRawCost(model, toUsd) !== null) continue;
+      excluded.push({
+        modelId: `${model.creatorId}/${model.modelId}`,
+        label: model.displayName,
+        quality: intelligence,
+      });
+    }
+  }
+  return excluded.sort(
+    (left, right) => right.quality - left.quality || left.label.localeCompare(right.label),
+  );
+}
+
+export interface SpreadBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+function clampValue(value: number, low: number, high: number): number {
+  return Math.min(high, Math.max(low, value));
+}
+
+/**
+ * Deterministically fan out markers that would overlap. Non-colliding markers
+ * keep their exact data position; displaced markers spiral around the anchor
+ * and stay inside the plot bounds.
+ */
+export function spreadMarkers<T extends { x: number; y: number }>(
+  items: readonly T[],
+  bounds: SpreadBounds,
+): T[] {
+  const ordered = items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => (
+      left.item.x - right.item.x || left.item.y - right.item.y || left.index - right.index
+    ));
+  const placed: { x: number; y: number }[] = [];
+  const spread = new Array<T>(items.length);
+  for (const { item, index } of ordered) {
+    let x = clampValue(item.x, bounds.minX, bounds.maxX);
+    let y = clampValue(item.y, bounds.minY, bounds.maxY);
+    const collides = () => placed.some(
+      (other) => Math.hypot(other.x - x, other.y - y) < MARKER_CLEARANCE_PX,
+    );
+    if (collides()) {
+      for (let step = 1; step <= SPREAD_MAX_STEPS; step += 1) {
+        const radius = SPREAD_STEP_PX * Math.sqrt(step);
+        const angle = step * GOLDEN_ANGLE;
+        x = clampValue(item.x + radius * Math.cos(angle), bounds.minX, bounds.maxX);
+        y = clampValue(item.y + radius * Math.sin(angle), bounds.minY, bounds.maxY);
+        if (!collides()) break;
+      }
+    }
+    placed.push({ x, y });
+    spread[index] = { ...item, x, y };
+  }
+  return spread;
+}
+
+interface LabelBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+function labelWidth(label: string): number {
+  let units = 0;
+  for (const char of label) units += char.charCodeAt(0) > 0xff ? 2 : 1;
+  return units * 5.2;
+}
+
+function boxesOverlap(left: LabelBox, right: LabelBox): boolean {
+  return left.x0 < right.x1 && right.x0 < left.x1 && left.y0 < right.y1 && right.y0 < left.y1;
 }
 
 function appendBrandGlyph(marker: SVGGElement, brand: string, size: number): void {
@@ -110,29 +236,31 @@ function appendBrandGlyph(marker: SVGGElement, brand: string, size: number): voi
   const color = MODEL_BRAND_COLORS[brand] ?? MODEL_BRAND_COLORS.generic;
   glyph.setAttribute('color', color);
   if (!glyph.hasAttribute('fill')) glyph.setAttribute('fill', color);
-  glyph.classList.add('stg-mc-pareto-glyph');
-  marker.appendChild(glyph);
+  // CSS transforms apply reliably to a <g> wrapper; an inner <svg> ignores
+  // them in some engines, which silently killed the hover zoom.
+  const zoom = document.createElementNS(SVG_NS, 'g');
+  zoom.classList.add('stg-mc-pareto-glyph');
+  zoom.appendChild(glyph);
+  marker.appendChild(zoom);
 }
 
 function renderChart(points: ParetoPoint[]): SVGSVGElement {
-  const width = 1120;
-  const height = 600;
+  const width = 1240;
+  const height = 660;
   const plotWidth = width - MARGIN.left - MARGIN.right;
   const plotHeight = height - MARGIN.top - MARGIN.bottom;
-  const costs = points.map((point) => point.cost);
+  const hasFree = points.some((point) => point.rawCost <= 0);
+  const laneWidth = hasFree ? 64 : 0;
+  const laneRight = MARGIN.left + laneWidth;
+  const laneX = MARGIN.left + laneWidth / 2;
+  const logWidth = MARGIN.left + plotWidth - laneRight;
+  const domain = costAxisDomain(points);
   const qualities = points.map((point) => point.quality);
-  let xMin = 10 ** (Math.floor(Math.log10(Math.min(...costs)) * 2) / 2);
-  let xMax = 10 ** (Math.ceil(Math.log10(Math.max(...costs)) * 2) / 2);
-  if (xMin >= xMax) {
-    xMin /= Math.sqrt(10);
-    xMax *= Math.sqrt(10);
-  }
-  let yMin = Math.max(0, Math.floor((Math.min(...qualities) - 3) / 5) * 5);
-  let yMax = Math.ceil((Math.max(...qualities) + 3) / 5) * 5;
+  let yMin = Math.max(0, Math.floor((Math.min(...qualities) - 2) / 5) * 5);
+  let yMax = Math.ceil((Math.max(...qualities) + 2) / 5) * 5;
   if (yMin >= yMax) yMax = yMin + 10;
-  const x = (cost: number) => MARGIN.left
-    + ((Math.log10(cost) - Math.log10(xMin)) / (Math.log10(xMax) - Math.log10(xMin)))
-      * plotWidth;
+  const xLog = (cost: number) => laneRight
+    + ((Math.log10(cost) - domain.logMin) / (domain.logMax - domain.logMin)) * logWidth;
   const y = (quality: number) => MARGIN.top
     + (1 - (quality - yMin) / (yMax - yMin)) * plotHeight;
 
@@ -148,17 +276,35 @@ function renderChart(points: ParetoPoint[]): SVGSVGElement {
     rx: '4', class: 'stg-mc-pareto-plot',
   }));
 
-  for (let decade = Math.ceil(Math.log10(xMin)); decade <= Math.floor(Math.log10(xMax)); decade += 1) {
-    const tickX = x(10 ** decade);
+  if (hasFree) {
+    svg.appendChild(svgElement('rect', {
+      x: String(MARGIN.left), y: String(MARGIN.top),
+      width: String(laneWidth), height: String(plotHeight),
+      class: 'stg-mc-pareto-lane',
+    }));
     svg.appendChild(svgElement('line', {
-      x1: String(tickX), y1: String(MARGIN.top),
-      x2: String(tickX), y2: String(MARGIN.top + plotHeight),
-      class: 'stg-mc-pareto-grid',
+      x1: String(laneRight), y1: String(MARGIN.top),
+      x2: String(laneRight), y2: String(MARGIN.top + plotHeight),
+      class: 'stg-mc-pareto-lane-divider',
     }));
     svg.appendChild(svgElement('text', {
-      x: String(tickX), y: String(MARGIN.top + plotHeight + 22),
+      x: String(laneX), y: String(MARGIN.top + plotHeight + 22),
       class: 'stg-mc-pareto-tick', 'text-anchor': 'middle',
-    }, axisCost(10 ** decade)));
+    }, '$0'));
+  }
+  if (domain.hasPositive) {
+    for (let decade = Math.ceil(domain.logMin); decade <= Math.floor(domain.logMax); decade += 1) {
+      const tickX = xLog(10 ** decade);
+      svg.appendChild(svgElement('line', {
+        x1: String(tickX), y1: String(MARGIN.top),
+        x2: String(tickX), y2: String(MARGIN.top + plotHeight),
+        class: 'stg-mc-pareto-grid',
+      }));
+      svg.appendChild(svgElement('text', {
+        x: String(tickX), y: String(MARGIN.top + plotHeight + 22),
+        class: 'stg-mc-pareto-tick', 'text-anchor': 'middle',
+      }, axisCost(10 ** decade)));
+    }
   }
   const yStep = yMax - yMin <= 25 ? 5 : 10;
   for (let tick = yMin; tick <= yMax; tick += yStep) {
@@ -176,13 +322,34 @@ function renderChart(points: ParetoPoint[]): SVGSVGElement {
   svg.appendChild(svgElement('text', {
     x: String(MARGIN.left + plotWidth / 2), y: String(height - 14),
     class: 'stg-mc-pareto-axis-label', 'text-anchor': 'middle',
-  }, '3:1 输入/输出混合成本 · USD / 1M tokens（log）'));
+  }, hasFree
+    ? '3:1 输入/输出混合成本 · USD / 1M tokens（log；左列为官方价 $0）'
+    : '3:1 输入/输出混合成本 · USD / 1M tokens（log）'));
   svg.appendChild(svgElement('text', {
     class: 'stg-mc-pareto-axis-label', 'text-anchor': 'middle',
     transform: `translate(20 ${MARGIN.top + plotHeight / 2}) rotate(-90)`,
   }, 'AA Index / 模型质量分'));
 
-  const positioned = points.map((point) => ({ point, x: x(point.cost), y: y(point.quality) }));
+  const anchors = points.map((point) => ({
+    point,
+    x: point.rawCost > 0 ? xLog(point.rawCost) : laneX,
+    y: y(point.quality),
+  }));
+  const positioned = [
+    ...spreadMarkers(anchors.filter(({ point }) => point.rawCost <= 0), {
+      minX: MARGIN.left + 11,
+      minY: MARGIN.top + 11,
+      maxX: laneRight - 11,
+      maxY: MARGIN.top + plotHeight - 11,
+    }),
+    ...spreadMarkers(anchors.filter(({ point }) => point.rawCost > 0), {
+      minX: laneRight + 11,
+      minY: MARGIN.top + 11,
+      maxX: MARGIN.left + plotWidth - 9,
+      maxY: MARGIN.top + plotHeight - 9,
+    }),
+  ];
+  const labelBoxes: LabelBox[] = [];
   const frontier = positioned.filter(({ point }) => point.onFrontier).sort((a, b) => a.x - b.x);
   if (frontier.length > 1) {
     svg.appendChild(svgElement('path', {
@@ -195,7 +362,8 @@ function renderChart(points: ParetoPoint[]): SVGSVGElement {
     (left, right) => Number(left.point.onFrontier) - Number(right.point.onFrontier),
   );
   for (const { point, x: pointX, y: pointY } of ordered) {
-    const size = point.onFrontier ? 19 : 15;
+    const size = point.onFrontier ? 17 : 13;
+    const hitRadius = size / 2 + 9;
     const marker = svgElement('g', {
       transform: `translate(${pointX.toFixed(1)} ${pointY.toFixed(1)})`,
       class: `stg-mc-pareto-point${point.onFrontier ? ' is-frontier' : ''}`,
@@ -205,12 +373,32 @@ function renderChart(points: ParetoPoint[]): SVGSVGElement {
       `${point.label} · ${point.vendorLabel}\nAA/质量 ${Number(point.quality.toFixed(1))} · ${displayCost(point.rawCost)}/1M\n${point.modelId}`));
     appendBrandGlyph(marker, point.brand, size);
     marker.appendChild(svgElement('circle', {
-      r: String(size / 2 + 6), class: 'stg-mc-pareto-hit',
+      r: String(hitRadius), class: 'stg-mc-pareto-hit',
     }));
+    if (!point.onFrontier) {
+      marker.appendChild(svgElement('text', {
+        y: String(-(size / 2 + 8)), 'text-anchor': 'middle',
+        class: 'stg-mc-pareto-hover-label',
+      }, point.label));
+    }
     svg.appendChild(marker);
     if (point.onFrontier) {
+      const labelX = pointX + 15;
+      let labelY = pointY - 11;
+      const width = labelWidth(point.label);
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const box: LabelBox = {
+          x0: labelX - 1, y0: labelY - 9, x1: labelX + width + 1, y1: labelY + 2,
+        };
+        if (!labelBoxes.some((other) => boxesOverlap(other, box))) {
+          labelBoxes.push(box);
+          break;
+        }
+        labelY += 13;
+        if (attempt === 7) labelBoxes.push(box);
+      }
       svg.appendChild(svgElement('text', {
-        x: String(pointX + 13), y: String(pointY - 10),
+        x: String(labelX), y: String(labelY),
         class: 'stg-mc-pareto-point-label',
       }, point.label));
     }
@@ -258,6 +446,14 @@ export function openParetoDialog(
   const note = document.createElement('p');
   note.className = 'stg-mc-pareto-note';
   note.textContent = '红线是 Pareto 前沿：在同等或更低成本下，没有更高质量分的模型。价格使用模型目录登记的官方 Model.list_pricing。';
+  const exclusions = buildParetoExclusions(groups, options);
+  if (exclusions.length) {
+    const names = exclusions.slice(0, 5)
+      .map((entry) => `${entry.label}（AA ${entry.quality.toFixed(1)}）`)
+      .join('、');
+    note.textContent += ` 另有 ${exclusions.length} 个模型有质量分但缺官方价格，未入图：${names}`
+      + `${exclusions.length > 5 ? ' 等' : ''}，补登记 list_pricing 后自动出现。`;
+  }
   body.appendChild(note);
   dialog.append(head, body);
   overlay.appendChild(dialog);

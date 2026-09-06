@@ -910,7 +910,7 @@ def compact_conversation_now(
 
     # Cross-device sync: the body was rewritten (and rev bumped), so push the
     # post-write rev → a sibling tab with this conv open refetches without a
-    # manual refresh (mirrors the L1-persist path). Best-effort.
+    # manual refresh. Automatic L1 has no persistence/notification authority.
     try:
         store.notify_conversation_changed(conv_id, user_id=user_id)
     except Exception as e:

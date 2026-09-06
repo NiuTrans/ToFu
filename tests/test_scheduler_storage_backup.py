@@ -166,7 +166,7 @@ def test_schema_36_retires_database_specific_tasks_and_adds_system_identity(
     ).fetchone()[0]
     connection.close()
 
-    assert int(version) == schema.SCHEMA_VERSION
+    assert int(version) == schema.SCHEMA_VERSION == 51
     assert 'system_key' in columns
     assert [tuple(row) for row in tasks] == [('user-task', '')]
 

@@ -192,12 +192,29 @@ def test_locale_source_change_preserves_requests_but_fails_deploy_validation(
 
 def test_release_wrapper_publishes_manifest_last_and_retains_previous_graph():
     source = _read('scripts/build_frontend.mjs')
+    tdz_at = source.index('checkFrontendTdz(defaultRuntimePaths())')
+    canary_at = source.index('await runBundleCanary(temporaryDir)')
     copy_at = source.index('for (const asset of nextAssets)')
     previous_at = source.index("'previous-manifest.json'")
     manifest_at = source.index("'manifest.json'), nextManifest")
-    assert copy_at < previous_at < manifest_at
+    assert tdz_at < canary_at < copy_at < previous_at < manifest_at
     assert 'for (const key of Object.keys(manifest)) await visit(key)' in source
     assert 'new Set([...nextAssets, ...previousAssets]' in source
+    assert "'conversation catalog request was not issued'" in _read(
+        'scripts/frontend_bundle_canary.py')
+    assert "'folder catalog request was not issued'" in _read(
+        'scripts/frontend_bundle_canary.py')
+
+
+def test_vite_authoring_inputs_have_one_machine_readable_authority():
+    contract = json.loads(_read('frontend/authoring-inputs.json'))
+    assert 'scripts/check_frontend_tdz.mjs' in contract['configPaths']
+    assert 'scripts/frontend_bundle_canary.py' in contract['configPaths']
+    assert 'frontend/authoring-inputs.json' in contract['configPaths']
+    build = _read('scripts/build_frontend.mjs')
+    backend = _read('lib/vite_assets.py')
+    assert "join(root, 'frontend', 'authoring-inputs.json')" in build
+    assert "BASE_DIR, 'frontend', 'authoring-inputs.json'" in backend
 
 
 def test_server_uses_prebuilt_manifest_and_never_runtime_bundles():

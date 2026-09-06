@@ -26,12 +26,16 @@ Provider ── ProviderAccess ── Offering
 | `Connection` | One protocol endpoint inside a ProviderAccess. Region and gateway namespace are connection metadata, not model identity. |
 | `CredentialMetadata` | Redacted credential kind, hint, quota policy, and authorization over Connections and official Models. Plaintext is stored only by the repository's encrypted secret operation. |
 | `Offering` | What one ProviderAccess actually supplies: confirmed or pending identity, actual capability subset, actual context, transaction price, priority, stale state, and enablement. |
-| `Deployment` | Exactly one Offering on one Connection under one real upstream `wire_model_id`, with independent probe and identity-confidence state. |
+| `Deployment` | Exactly one Offering on one Connection under one real upstream `wire_model_id`, with independent probe and identity-confidence state; optional `max_output_tokens` records the concrete route's verified output ceiling. |
 
 One provider-scoped wire ID may identify only one Deployment. Every distinct
 wire ID is a distinct Deployment; `aliases` and `request_ids` are rejected in
 v2 documents. A pending identity is reachable only by an explicit
 `{provider_id, offering_id}` selection and is never a cross-provider route.
+Output ceilings are applied after slot selection. Provider-error learning is
+scoped by Provider, Offering, Deployment, and protocol rather than globally by
+model name; exclusive upper bounds normalize to the largest accepted integer
+before one same-route retry.
 
 ## Prices, capabilities, and limits
 
@@ -161,6 +165,15 @@ dispatcher:
   branch. Providers owns the supply projection: each Provider card names its
   canonical Models and may show that Provider's differing wire identifiers as
   aliases. The same exact Model may therefore appear under several Providers.
+- The catalog's **Cost × AA Index** Pareto chart plots a Model only when it
+  has both an external quality score and an official `list_pricing`
+  (3:1 blended input/output USD cost); scored-but-unpriced Models are not
+  points and are named in the chart note instead. A $0 official price renders
+  in a dedicated $0 lane left of the log axis while its tooltip keeps the raw
+  value. Markers that
+  would overlap (identical or colliding positions) fan out deterministically
+  inside the plot bounds; data positions, frontier computation, and tooltips
+  are unaffected by the visual spread.
 - A Provider can own multiple Credentials. Credential rotation is attempted
   inside the Provider before the dispatcher crosses to another Provider that
   supplies the same Model.

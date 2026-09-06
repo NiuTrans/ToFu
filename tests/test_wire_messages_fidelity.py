@@ -4,7 +4,7 @@
 Proves the debug panel is FAITHFUL: the COLD path (the ``/debug-messages``
 endpoint, ``build_wire_messages(mode='snapshot')``) and the HOT path (the live
 orchestrator snapshot: ``_transform_messages`` → ``compose_task_context`` →
-``apply_wire_sanitize`` AFTER ``sort_tool_results``) produce a BYTE-IDENTICAL
+``apply_wire_sanitize``) produce a BYTE-IDENTICAL
 OpenAI-form message array given the same provider context.
 
 The equality assertion alone is worthless unless it has teeth, so this file is
@@ -14,14 +14,8 @@ driven by ``TOFU_WIRE_REVERT`` to run in three states:
   * 'inject' → REVERT (i): the cold path skips ``compose_task_context``
       (what the old endpoint did) → cold system text drops to 0 chars →
       cold != hot → the equality test FAILS.
-  * 'sort'   → REVERT (ii): the hot path emits its snapshot BEFORE
-      ``sort_tool_results`` (the old orchestrator emission point) → tool
-      results stay in author order [call_zzz, call_aaa] while cold has them
-      sorted [call_aaa, call_zzz] → cold != hot → the equality test FAILS.
-
-Run all three (see this module's ``__main__`` or the CHANGE.md commands):
+Run the injection negative control and normal path:
     TOFU_WIRE_REVERT=inject python -m pytest tests/test_wire_messages_fidelity.py
-    TOFU_WIRE_REVERT=sort   python -m pytest tests/test_wire_messages_fidelity.py
     python -m pytest tests/test_wire_messages_fidelity.py
 """
 
@@ -46,8 +40,8 @@ _REVERT = os.environ.get('TOFU_WIRE_REVERT', '')
 
 # ── Adversarial fixture (inline; mirrors debug/_scratch/adversarial.json) ──
 # Designed to exercise the wire transforms: a full toolRounds batch whose
-# toolCallIds are in REVERSE lexical order (so sort_tool_results visibly
-# reorders), and a whitespace-only user turn (so _fix_empty_user_messages
+# toolCallIds are in reverse lexical order (which must remain unchanged),
+# and a whitespace-only user turn (so _fix_empty_user_messages
 # visibly rewrites). The trailing consecutive assistants exercise the
 # builder's own merge (a finding: redundant at the wire layer).
 # NOTE: the whitespace turn MUST NOT be the tail — compose_task_context
@@ -121,34 +115,13 @@ def _build_cold(raw, config):
 
 
 def _build_hot(raw, config):
-    """Mirror the live orchestrator: transform → inject → (sort) → sanitize."""
+    """Mirror the live orchestrator: transform → inject → sanitize."""
     from lib.tasks_pkg.conv_message_builder._transform import _transform_messages
     from lib.tasks_pkg.context_composer import compose_task_context
     from lib.tasks_pkg.wire_messages import apply_wire_sanitize
 
     msgs = _transform_messages([dict(m) for m in raw], config)
     compose_task_context(msgs, **_inject_params(config))
-
-    if _REVERT == 'sort':
-        # REVERT (ii): emit BEFORE sort_tool_results — run the sanitize tail
-        # WITHOUT the cache-aware reorder (the old emission point at
-        # orchestrator.py:1513, which was before sort at :1531).
-        from lib.llm_sanitize import (
-            _fix_empty_user_messages,
-            _fix_orphaned_tool_calls,
-            _merge_consecutive_same_role,
-            _sanitize_messages,
-            _strip_non_api_fields,
-        )
-        from lib.tasks_pkg.wire_messages import _gateway_sanitize_enabled
-        work = [dict(m) for m in msgs]
-        clean = _strip_non_api_fields(work)
-        if _gateway_sanitize_enabled(''):
-            _sanitize_messages(clean)
-        clean = _fix_orphaned_tool_calls(clean)
-        clean = _merge_consecutive_same_role(clean)
-        _fix_empty_user_messages(clean)
-        return clean
 
     return apply_wire_sanitize(msgs, conv_id='')
 
@@ -200,20 +173,21 @@ def test_carrier_transforms_fire():
     """Byte-identity must rest on REAL transforms, not an empty no-op run."""
     raw, config = _fixture(), _config()
     wire = _build_hot(raw, config)
-    # (1) The assistant's tool_calls array remains in the model's slot order,
-    # while the following tool-result run is canonicalized by tool_call_id.
-    # Pairing is by ID, not by the two arrays sharing a positional order.
+    # (1) Assistant calls and tool results preserve their produced order.
+    # Pairing is by ID, not by positional coincidence.
     assert _assistant_tool_order(wire) == ['call_zzz', 'call_aaa']
-    assert _tool_order(wire) == ['call_aaa', 'call_zzz'], (
-        f'sort_tool_results did not reorder: {_tool_order(wire)}')
+    assert _tool_order(wire) == ['call_zzz', 'call_aaa']
     # (2) empty user rewritten
     user_texts = [m.get('content') for m in wire if m.get('role') == 'user']
     assert '[empty message]' in user_texts, f'empty-user fix did not fire: {user_texts}'
-    # (3) system context injected (swarm block present, non-empty)
+    # (3) dynamic context rides a trailing user carrier, never system history.
     sys_txt = _system_text(wire)
-    assert len(sys_txt) > 0 and '<parallel_execution>' in sys_txt, (
-        'system context not injected into hot path')
-    _ok('carrier transforms fire: tool reorder + empty-user fix + system inject')
+    assert '<parallel_execution>' not in sys_txt
+    assert any(
+        '<parallel_execution>' in str(message.get('content') or '')
+        for message in wire if message.get('role') == 'user'
+    ), 'dynamic context did not land in a user carrier'
+    _ok('carrier transforms fire: order retained + empty-user fix + tail inject')
 
 
 def test_provider_symmetry_no_gateway_divergence():
@@ -225,7 +199,7 @@ def test_provider_symmetry_no_gateway_divergence():
     base = _transform_messages([dict(m) for m in raw], config)
     a = apply_wire_sanitize(base, conv_id='', provider_id='')
     b = apply_wire_sanitize(base, conv_id='', provider_id='openai')
-    assert _tool_order(a) == _tool_order(b) == ['call_aaa', 'call_zzz']
+    assert _tool_order(a) == _tool_order(b) == ['call_zzz', 'call_aaa']
     assert [m.get('role') for m in a] == [m.get('role') for m in b]
     _ok('provider symmetry: carrier transforms provider-independent')
 

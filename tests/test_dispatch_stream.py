@@ -75,6 +75,28 @@ def _no_real_sleep(monkeypatch):
 
 @pytest.mark.unit
 class TestDispatchStreamSuccess:
+    def test_local_body_adaptation_failure_is_neutral(self, monkeypatch):
+        from lib.llm_dispatch import api
+        from lib.llm_errors import LocalRequestPreparationError
+
+        slot = _make_slot(model='kimi-k3')
+        dispatcher = _FakeDispatcher([slot])
+        monkeypatch.setattr(api, 'get_dispatcher', lambda: dispatcher)
+        monkeypatch.setattr(
+            'lib.llm_dispatch._api_stream._adapt_stream_body_for_slot',
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                TypeError('unexpected exposure argument')),
+        )
+
+        with pytest.raises(LocalRequestPreparationError):
+            api.dispatch_stream(
+                [{'role': 'user', 'content': 'hi'}], log_prefix='[t]')
+
+        assert dispatcher.picks == 1
+        assert slot.inflight == 0
+        assert slot.consecutive_errors == 0
+        assert slot.last_error_time == 0
+
     def test_success_returns_tuple_and_records_slot(self, monkeypatch):
         from lib.llm_dispatch import api
 

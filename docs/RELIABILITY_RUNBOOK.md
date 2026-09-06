@@ -120,6 +120,7 @@ backup API 分页复制，完成 `integrity_check`、fsync 后原子发布。夜
 | Project presence TTL | 空注册表 0 个线程；首个 peer 1 个共享 sweeper；最后 peer 回收后回到 0；有项目任务运行期间另有 1 个 presence-keepalive | 启动不创建空闲 worker；25 秒 active/180 秒 idle TTL 与 owner 隔离不变，精确线程身份阻止旧批次释放新 owner；keepalive 由任务注册表驱动每 10 秒刷新，无项目任务即退休 |
 | Swarm 会话清理 | 活跃 session 共享 1 个 300 秒 timer；0 session 时为 0 | import 不启动线程；精确 timer 代次在最后 session 移除时取消，后续 session 按需重建 |
 | Billing reserve 回收 | 非 multi-user/计费关闭时 0；启用时每 5 分钟 1 个 durable claim | 单一 Sidecar sweep，跳过仍运行任务，幂等 release；无第二个 request-worker janitor |
+| 执行资源对账 | 每个执行最多 16 个显式资源；deadline tick 只请求 owner cancellation | `tofu_execution_sessions_active`、terminal invariant 与 resource release/deferred/failed 指标检测路由、计费、admission 泄漏；不在活跃 provider 下方强拆资源 |
 | 日报缺失补偿 | 0 个专用常驻线程；主 scheduler 每 6 小时 1 个 owner-scoped durable claim | 启动仅在昨日缺失时排入有界 hint；maintenance 子线程不阻塞主 tick，Sidecar claim 防重复 |
 | 直连/代理路径探测 | 最多 64 个主机；新路径/真实失败立即探测；默认失败退避 3→6→12→24→48→60 分钟，稳定上限 60 分钟，闲置 24 小时停止 | 真实请求成功会延后同路径的合成 GET；持久化保留真实 last-seen，重启不会把废弃主机重新激活 |
 | 日志后台维护 | 安静态 2 个周期 worker、默认至多 5 次唤醒/小时；重复尾部 worker 为 0 | 核心/外部保留共享 15 分钟线程；聚合空闲仅按小时 TTL 唤醒、有积压仍 15 秒批刷；首个被压制 delta 才创建短生命周期尾部 worker |

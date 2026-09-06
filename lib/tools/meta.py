@@ -276,6 +276,7 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     m = re.search(r'\[exit code: (-?\d+)\]\s*$', tool_content)
     exit_code = m.group(1) if m else '?'
     timed_out = '[Command timed out]' in tool_content
+    backgrounded = '[Command moved to background:' in tool_content
     # Per-command interrupt (user button / stall watchdog, ):
     #   `[Command interrupted by user]` / `[Command interrupted by stall-
     #   watchdog: …]`. Distinct from a whole-task abort — the turn CONTINUED
@@ -301,7 +302,10 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
     #   old `exit ?` badge is useless to users — the actual reason was the whole
     #   message. So when the contract marker is missing, treat the FULL
     #   tool_content as the reason and flag the round as not-run.
-    not_run = (m is None) and (not timed_out) and (not interrupted)
+    not_run = (
+        (m is None) and (not timed_out) and (not interrupted)
+        and (not backgrounded)
+    )
     if not_run:
         reason = (tool_content or '').strip()
         meta['exitCode'] = 'not-run'
@@ -312,6 +316,12 @@ def _build_run_command(meta, fn_name, fn_args, tool_content, path):
         meta['badge'] = _classify_not_run_badge(reason)
         return
     meta['output'] = output_text
+    if backgrounded:
+        meta['exitCode'] = 'background'
+        meta['backgrounded'] = True
+        meta['snippet'] = f'$ {cmd[:120]}'
+        meta['badge'] = 'background'
+        return
     meta['exitCode'] = 'timeout' if timed_out else exit_code
     if interrupted:
         meta['snippet'] = f'$ {cmd[:120]}'

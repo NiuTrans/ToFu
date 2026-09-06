@@ -163,7 +163,9 @@ def _preserve_user_configuration(
             str(connection.get("base_url") or "").rstrip("/"))
         if old_connection is None:
             continue
-        for field in ("enabled", "priority", "extra_headers"):
+        for field in (
+            "enabled", "priority", "extra_headers", "thinking_format",
+        ):
             if field in old_connection:
                 connection[field] = copy.deepcopy(old_connection[field])
 

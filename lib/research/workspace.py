@@ -18,7 +18,7 @@ from typing import Any
 from lib.identity import require_user_id
 from lib.storage.errors import StorageError
 
-from .persistence import research_direction_hash
+from .persistence import _direction_read_candidates, research_direction_hash
 from .program import (
     MAX_CLAIMS,
     MAX_PROGRAM_BYTES,
@@ -81,18 +81,22 @@ def normalize_workspace(
 
 
 def load_workspace(direction: str, lang: str = 'en', *, user_id: int) -> dict[str, Any]:
-    paper_hash = research_direction_hash(direction)
-    if not paper_hash:
+    candidates = _direction_read_candidates(direction)
+    if not candidates:
         return empty_workspace(direction, lang)
-    row = _storage().query('research.workspace.get', {
-        'user_id': require_user_id(user_id, context='research workspace owner'),
-        'paper_hash': paper_hash,
-        'lang': 'zh' if lang == 'zh' else 'en',
-    })
-    if not isinstance(row, Mapping):
-        return empty_workspace(direction, lang)
-    return normalize_workspace(
-        direction, lang, row.get('workspace'), revision=int(row.get('revision') or 0))
+    uid = require_user_id(user_id, context='research workspace owner')
+    norm_lang = 'zh' if lang == 'zh' else 'en'
+    for paper_hash, candidate_direction in candidates:
+        row = _storage().query('research.workspace.get', {
+            'user_id': uid,
+            'paper_hash': paper_hash,
+            'lang': norm_lang,
+        })
+        if isinstance(row, Mapping):
+            return normalize_workspace(
+                candidate_direction, lang, row.get('workspace'),
+                revision=int(row.get('revision') or 0))
+    return empty_workspace(direction, lang)
 
 
 def save_workspace(

@@ -45,6 +45,10 @@ const messages = {
   'stall.reasonGeneric': 'stall-generic-local',
   'stall.bound': 'stall-bound-local',
   'stall.promptLabel': 'stall-prompt-local',
+  'bgCommand.injectRowLabel': 'bgcmd-label-local',
+  'bgCommand.injectRowOne': 'bgcmd-one-local',
+  'bgCommand.injectRowMany': 'bgcmd-many-local',
+  'bgCommand.noPayload': 'no-bgcmd-local',
 };
 function translate(key, params) {
   let value = messages[key] || key;
@@ -259,16 +263,40 @@ check('stall_prompt_is_bounded_with_a_visible_notice',
   stallHtml.includes('content-limit:32768')
   && !stallHtml.includes('STALL_TAIL'));
 
+const bgcmdHtml = presentation.renderInjectionHtml({
+  _bgCommandInject: true,
+  roundNum: 5,
+  bgCommandCount: 1,
+  bgCommandPreviews: [{ commandId: 'bg_<abc>', text: '<raw result>' }],
+});
+check('bg_command_lane_renders_escaped_result_without_markdown_port',
+  bgcmdHtml.includes('sw-bgcmd-row')
+  && bgcmdHtml.includes('bgcmd-label-local')
+  && bgcmdHtml.includes('bgcmd-one-local')
+  && bgcmdHtml.includes('badge-local')
+  && bgcmdHtml.includes('bg_&lt;abc&gt;')
+  && bgcmdHtml.includes('&lt;raw result&gt;')
+  && !bgcmdHtml.includes('<raw result>')
+  && !bgcmdHtml.includes('sw-steer-row'));
+const emptyBgcmdHtml = presentation.renderInjectionHtml({
+  _bgCommandInject: true,
+  bgCommandPreviews: 'malformed',
+});
+check('malformed_bg_command_previews_degrade_to_empty_state',
+  emptyBgcmdHtml.includes('no-bgcmd-local'));
+
 const priorityHtml = presentation.renderInjectionHtml({
   _inboxInject: true,
   _peerInject: true,
   _userSteerInject: true,
+  _bgCommandInject: true,
   _stallNudge: true,
 });
 check('lane_priority_is_closed_and_deterministic',
   priorityHtml.includes('class="sw-inbox-row"')
   && !priorityHtml.includes('sw-peer-row')
   && !priorityHtml.includes('sw-steer-row')
+  && !priorityHtml.includes('sw-bgcmd-row')
   && !priorityHtml.includes('sw-stall-row'));
 
 const fallbackPresentation = createToolInjectionPresentation({
@@ -303,6 +331,6 @@ def test_tool_injection_owner_contract():
     run_harness(
         target_js=str(OWNER_JS),
         body_js=_OWNER_HARNESS,
-        expect_pass=19,
+        expect_pass=21,
         label='tool injection presentation owner',
     )

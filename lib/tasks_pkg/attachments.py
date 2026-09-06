@@ -5,9 +5,9 @@ Inspired by Claude Code's ``attachments.ts`` (3997 lines), which computes
 per-turn injections including file attachments, delta announcements, memory
 surfacing, TODO reminders, and memory discoveries.
 
-Tofu adaptation: because we inject all context into the system message (not
-via separate `user` messages like Claude Code), our attachments are appended
-to the last user message as <system-reminder> blocks.
+Tofu adaptation: runtime attachments are emitted through the shared context
+composer as new tail ``user`` messages containing <system-reminder> blocks.
+Existing system/history message content is not edited.
 
 Why we CAN'T replicate Claude Code's full attachment system:
   - Claude Code uses 40+ attachment types including hook outputs, teammate

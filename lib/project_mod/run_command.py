@@ -9,10 +9,10 @@ dispatch facade.  This module owns the entire shell-execution subsystem:
   - ``tool_run_command`` and its simple + interactive runners
   - process-tree kill, grep hardening, stdin-reader detection
 
-``tools.py`` re-exports every public symbol from here for backward compat,
-so external callers (``from lib.project_mod.tools import tool_run_command``)
-are unaffected.  There is no dependency back on ``tools.py`` — the dispatch
-layer depends on this module, not the reverse.
+``tools.py`` re-exports the dispatch-facing symbols from here for backward
+compat, so external callers (``from lib.project_mod.tools import
+tool_run_command``) are unaffected.  There is no dependency back on
+``tools.py`` — the dispatch layer depends on this module, not the reverse.
 """
 
 import os
@@ -23,7 +23,6 @@ import time
 
 from lib.log import get_logger
 from lib.project_mod.config import (
-    DANGEROUS_PATTERNS,  # noqa: F401  — re-exported for back-compat callers
     IGNORE_DIRS,
     MAX_COMMAND_OUTPUT,
     MAX_COMMAND_TIMEOUT,
@@ -31,25 +30,12 @@ from lib.project_mod.config import (
 )
 from lib.project_mod.modifications import _record_modification
 
-# ── Pure command analysis relocated to command_analysis.py (2026-07-11) ──
-# Re-imported here so both `lib.project_mod.run_command` and (via tools.py)
-# `lib.project_mod.tools` keep exposing these symbols unchanged.
+# ── Pure command analysis lives in command_analysis.py (2026-07-11) ──
+# Only the symbols this module uses internally or that `tools.py` / tests
+# still import from here are re-imported; everything else is imported from
+# `lib.project_mod.command_analysis` directly by its consumers.
 from lib.project_mod.command_analysis import (  # noqa: F401
-    _ANSI_ESC_RE,
-    _AWK_INPLACE,
-    _DANGEROUS_RE,
-    _DELETE_COMMANDS,
-    _DEVICE_RE,
-    _FS_HEAVY_RE,
-    _GIT_DESTRUCTIVE_SUBCOMMANDS,
-    _GIT_READONLY_SUBCOMMANDS,
-    _MIN_DELETE_DEPTH,
-    _PROGRESS_RE,
-    _READONLY_COMMANDS,
-    _REDIRECT_PATTERN,
-    _REDIRECT_TO_DEV_NULL,
-    _SED_INPLACE,
-    _WRITE_TARGET_COMMANDS,
+    _bound_scan_segments,
     _clean_command_output,
     _extract_device_ids,
     _extract_progress_label,
@@ -66,7 +52,6 @@ from lib.project_mod.command_analysis import (  # noqa: F401
     _mask_quoted_literals,
     _split_pipeline,
     _unbounded_recursive_scan_target,
-    _bound_scan_segments,
 )
 from lib.project_mod.grep_redirect import plan_grep_redirect
 
@@ -1500,13 +1485,9 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
                 f'Error starting command: {e}\n'
                 f'[exit code: -1]')
 
-    # Spawn clock — the subprocess now EXISTS and `timeout` already holds the
-    #   effective budget, so this is the earliest and only point at which a
-    #   truthful deadline can be published. Fired before the read loop so the
-    #   countdown appears immediately rather than at the first heartbeat tick.
-    _safe_on_spawn(on_spawn, timeout)
-
-    # Store PID on task so abort handler can kill it directly
+    # Register the process before invoking callbacks. A callback may publish or
+    # persist live state; during that work Stop must already have a PID/PGID it
+    # can signal.
     if task is not None:
         task['_subprocess_pid'] = proc.pid
         task['_subprocess_pgid'] = None
@@ -1515,6 +1496,11 @@ def _run_command_simple(command, full_command, timeout, base, task=None, on_chun
         except OSError as _e_audit:
             logger.debug('[tools] _run_command_simple caught %s: %s', type(_e_audit).__name__, _e_audit)
             pass
+
+    # Spawn clock — the subprocess now EXISTS and `timeout` already holds the
+    # effective budget, so this is the earliest and only point at which a
+    # truthful deadline can be published.
+    _safe_on_spawn(on_spawn, timeout)
 
     # Set stdout/stderr to non-blocking.  On platforms where this fails
 
@@ -2019,6 +2005,16 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                 f'Error starting command: {e}\n'
                 f'[exit code: -1]')
 
+    # Register before callbacks/setup so Stop can signal the process throughout
+    # every post-Popen operation, including live-state persistence.
+    if task is not None:
+        task['_subprocess_pid'] = proc.pid
+        task['_subprocess_pgid'] = None
+        try:
+            task['_subprocess_pgid'] = os.getpgid(proc.pid)
+        except OSError as _e_audit:
+            logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
+
     # Set stdout/stderr to non-blocking (no-op on Windows, uses threading there).
     # If this fails on an unusual platform, interactive I/O will still work via
     # polling with small timeouts — it just won't be as responsive.
@@ -2028,23 +2024,8 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
     if not nonblocking_ok:
         logger.warning('run_command: non-blocking pipe setup failed — falling back to polling I/O')
 
-    # Spawn clock — same contract as _run_command_simple: the subprocess
-    #   exists and `timeout` already carries the effective budget, so this is
-    #   the earliest truthful deadline. Both runners must publish it, else an
-    #   interactive command (the ones that block LONGEST) would be the only
-    #   kind with no countdown.
+    # Same contract as _run_command_simple; PID/PGID is already visible.
     _safe_on_spawn(on_spawn, timeout)
-
-    # Store PID/PGID on task so the abort handler can kill it directly
-    # (mirrors _run_command_simple) — the interactive path was previously
-    # missing this, leaving Stop unable to kill a long interactive command.
-    if task is not None:
-        task['_subprocess_pid'] = proc.pid
-        task['_subprocess_pgid'] = None
-        try:
-            task['_subprocess_pgid'] = os.getpgid(proc.pid)
-        except OSError as _e_audit:
-            logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
 
     # Get the inode of our stdin pipe so we can match it in /proc
 
@@ -2150,6 +2131,20 @@ def _run_command_interactive(command, full_command, timeout, base, stdin_callbac
                     logger.debug('[tools] _run_command_interactive caught %s: %s', type(_e_audit).__name__, _e_audit)
                     pass
                 break
+
+            # A user steer may hand this process to a background owner. The
+            # original tool round can no longer surface or resolve an
+            # interactive prompt, so close stdin exactly once while retaining
+            # stdout/stderr draining, timeout, and completion handling.
+            if (task and task.get('_background_detached')
+                    and not stdin_closed):
+                try:
+                    proc.stdin.close()
+                except OSError as _e_audit:
+                    logger.debug(
+                        '[run_command] detached stdin close failed: %s',
+                        _e_audit)
+                stdin_closed = True
 
             # Stdin detection: check /proc/pid/syscall for read(0, ...) on our pipe
             if (retcode is None and not stdin_closed

@@ -48,7 +48,10 @@ carry out that task:
 For a deep-read task, the extension may open a temporary background tab,
 perform bounded scrolling and recognized same-origin pagination, and then
 close that tab. Captured page/network/state content is transient and is not
-written to extension storage.
+written to extension storage. The user's Tofu server may retain a bounded,
+owner-scoped structural observation (strategy, query-free endpoint templates
+and response shapes) to improve later passive capture; it does not retain the
+captured response body, credentials, cookie values, or login URL in that store.
 
 File bytes sent to server staging are streamed in bounded chunks and are not
 written to extension storage or to the browser device's Downloads folder.

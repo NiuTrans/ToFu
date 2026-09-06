@@ -806,3 +806,63 @@ def test_registry_uses_launch_budget_and_fails_open_at_capacity():
         maximum=256,
     )
     assert defaults["gatherMilliseconds"] == 8
+
+
+def test_snapshot_backfills_attempt_id_on_legacy_client_observations():
+    """Legacy receipt rows persisted before attempt tracking must not wedge
+    the fail-closed snapshot decode; the read adapter backfills the empty
+    identity without mutating the stored authority."""
+    legacy_row = {
+        "observationId": "p1re44itg81i75:mtig2qv9:2f",
+        "kind": "phase_painted",
+        "taskId": "clone-task-legacy",
+        "clientId": "242853",
+        "recordedAt": 1788253691046,
+        "phase": "llm_thinking",
+    }
+    stored_box: list[dict] = []
+
+    class LegacyTraceRepository(_RecordingRepository):
+        def snapshot(self, conversation_id: str, user_id: int):
+            stored = super().snapshot(conversation_id, user_id)
+            stored["turns"] = [{
+                "turnId": "turn-a",
+                "conversationId": conversation_id,
+                "laneId": "main",
+                "ordinal": 1,
+                "actor": "assistant",
+                "kind": "reply",
+                "runId": "run-a",
+                "status": "completed",
+                "projection": {
+                    "content": "done",
+                    "segments": [],
+                    "timingTrace": {
+                        "version": 1,
+                        "taskId": "clone-task-legacy",
+                        "clientObservations": [
+                            dict(legacy_row),
+                            {**legacy_row,
+                             "observationId": "p1:mtig:2g",
+                             "attemptId": "attempt-1"},
+                        ],
+                    },
+                },
+                "projectionRevision": 1,
+                "settlement": {},
+                "createdAt": 1,
+                "updatedAt": 1,
+            }]
+            stored_box.append(stored)
+            return stored
+
+    service = ConversationSyncService(LegacyTraceRepository())
+    snapshot = service.snapshot("conv-a", 7)
+
+    observations = snapshot["turns"][0]["projection"]["timingTrace"][
+        "clientObservations"]
+    assert observations[0]["attemptId"] == ""
+    assert observations[1]["attemptId"] == "attempt-1"
+    stored_observations = stored_box[0]["turns"][0]["projection"][
+        "timingTrace"]["clientObservations"]
+    assert "attemptId" not in stored_observations[0]

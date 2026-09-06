@@ -27,27 +27,23 @@ VITE_ENTRIES = {
 VITE_ENTRY = VITE_ENTRIES['main']
 I18N_CATALOG_DIGEST_FIELD = 'tofuI18nCatalogSha256'
 VITE_AUTHORING_DIGEST_FIELD = 'tofuAuthoringSha256'
+VITE_AUTHORING_INPUTS_PATH = os.path.join(
+    BASE_DIR, 'frontend', 'authoring-inputs.json')
+with open(VITE_AUTHORING_INPUTS_PATH, encoding='utf-8') as _authoring_file:
+    _VITE_AUTHORING_INPUTS = json.load(_authoring_file)
+if (not isinstance(_VITE_AUTHORING_INPUTS.get('configPaths'), list)
+        or not isinstance(_VITE_AUTHORING_INPUTS.get('sourceSuffixes'), list)):
+    raise RuntimeError('frontend/authoring-inputs.json has an invalid shape')
 I18N_LOCALE_PATHS = tuple(
     os.path.join(BASE_DIR, 'frontend', 'src', 'i18n', 'locales', f'{language}.json')
     for language in ('zh', 'en')
 )
 VITE_AUTHORING_CONFIG_PATHS = tuple(
     os.path.join(BASE_DIR, *relative_path.split('/'))
-    for relative_path in (
-        'package.json',
-        'package-lock.json',
-        'tsconfig.json',
-        'tsconfig.vite.json',
-        'vite.config.mjs',
-        'scripts/build_frontend.mjs',
-        'scripts/compose_frontend_runtime.mjs',
-        'scripts/compose_frontend_styles.mjs',
-        'scripts/gen_i18n_contract.mjs',
-    )
+    for relative_path in _VITE_AUTHORING_INPUTS['configPaths']
 )
-VITE_AUTHORING_SUFFIXES = frozenset({
-    '.css', '.html', '.js', '.json', '.ts', '.ttf', '.woff', '.woff2',
-})
+VITE_AUTHORING_SUFFIXES = frozenset(
+    _VITE_AUTHORING_INPUTS['sourceSuffixes'])
 _CACHE_TTL_SECONDS = 5.0
 _cache_lock = threading.Lock()
 _cache: dict[tuple[object, ...], tuple[float, str]] = {}

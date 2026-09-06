@@ -1,0 +1,14 @@
+{
+  "autopilotRunId": "s",
+  "content": "s",
+  "discard": true,
+  "emits": "s",
+  "flowProjection": "s",
+  "iteration": 1,
+  "next_phase": "s",
+  "synthetic": true,
+  "thinking": "s",
+  "turnRole": "s",
+  "type": "flow_critic_msg",
+  "vuMsgId": "s"
+}

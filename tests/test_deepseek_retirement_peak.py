@@ -14,9 +14,8 @@ A. Retired-name cleanup
 B. Peak-hour pricing mechanism
    DeepSeek announced (api-docs.deepseek.com/quick_start/pricing, verified
    2026-07-31): ALL billing items 2x during 09:00-12:00 + 14:00-18:00
-   Beijing time (UTC+8, no DST), effective date "subject to official
-   announcement" (TBA). The mechanism ships INERT (``effective_from=None``)
-   and must:
+   Beijing time (UTC+8, no DST), IN FORCE since 2026-08-16 Beijing time
+   (``effective_from=1786809600``). The mechanism must:
      * scale ``input`` + ``output`` unit prices when active and inside a
        window — the cache multipliers are RELATIVE to input, so all four
        billing items (uncached in / cache write / cache read / out) scale
@@ -24,7 +23,7 @@ B. Peak-hour pricing mechanism
      * evaluate the timestamp PER LOOKUP (``at``) so historical cost
        recomputation (daily_report backfill) bills each message at ITS OWN
        time, not at the rescan's wall clock;
-     * leave the shipped deepseek rows at base prices today.
+     * scale the shipped deepseek rows per the schedule since 2026-08-16.
 
 Run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest \
      tests/test_deepseek_retirement_peak.py -p no:cacheprovider
@@ -121,7 +120,7 @@ def test_peak_multiplier_inert_cases():
     from lib.pricing._peak import peak_multiplier
     assert peak_multiplier({}) == 1.0
     assert peak_multiplier({'input': 1}) == 1.0
-    # Announced but NOT yet in force (the shipped deepseek rows' state).
+    # Announced but NOT yet in force (effective_from=None).
     assert peak_multiplier(
         {'peak': dict(_PEAK_BLOCK, effective_from=None)},
         at=_cst(2026, 8, 3, 10)) == 1.0
@@ -180,20 +179,22 @@ def test_lookup_pricing_scales_at_peak(peak_override):
     assert 'peakMul' not in off
 
 
-def test_shipped_deepseek_rows_carry_inert_peak_block():
-    """The two official-API rows carry the announced schedule INERT
-    (effective_from=None — one-line flip when DeepSeek names the date);
-    today's lookups return base prices. The Meituan-gateway mirror
+def test_shipped_deepseek_rows_carry_live_peak_block():
+    """The two official-API rows carry the schedule IN FORCE since
+    2026-08-16 (effective_from = 2026-08-15 16:00 UTC): off-peak lookups
+    return the 2026-08-16 bases (Flash $0.22, Pro $0.66), peak-window
+    lookups double them and stamp peakMul. The Meituan-gateway mirror
     (-huawei) must NOT carry it — the 2x policy is DeepSeek-direct only."""
     from lib.pricing import MODEL_PRICING, lookup_pricing
-    for mid, base_in in (('deepseek-v4-flash', 0.14), ('deepseek-v4-pro', 0.435)):
+    for mid, base_in in (('deepseek-v4-flash', 0.22), ('deepseek-v4-pro', 0.66)):
         peak = MODEL_PRICING[mid].get('peak')
         assert peak, f'{mid}: peak block missing'
-        assert peak['effective_from'] is None
+        assert peak['effective_from'] == 1786809600
         assert peak['mul'] == 2.0 and peak['windows'] == [(9, 12), (14, 18)]
-        resolved = lookup_pricing(mid)
-        assert resolved['input'] == base_in
-        assert 'peakMul' not in resolved
+        off = lookup_pricing(mid, at=_cst(2026, 9, 4, 13, 0))
+        assert off['input'] == base_in and 'peakMul' not in off
+        hit = lookup_pricing(mid, at=_cst(2026, 9, 4, 10, 0))
+        assert hit['input'] == base_in * 2 and hit['peakMul'] == 2.0
     assert 'peak' not in MODEL_PRICING['deepseek-v4-flash-huawei']
 
 

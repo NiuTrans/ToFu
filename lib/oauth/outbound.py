@@ -299,14 +299,15 @@ def _cloak_message_tools(messages: list, reverse: dict) -> None:
 
 
 def _prepend_system_reminder(messages: list, user_system: str) -> None:
-    """Move the user's own system text into the first user message.
+    """Move user system text into a stable carrier after the first user.
 
     Ported from CLIProxyAPI ``prependToFirstUserMessage``: keeping third-party
     system prompts in ``system[]`` is how Anthropic fingerprints (and
     extra-bills) OAuth-proxied traffic. The text rides a
-    ``<system-reminder>`` block instead. A message leading with
-    ``tool_result`` keeps its results FIRST (Anthropic contract), with the
-    reminder appended after.
+    ``<system-reminder>`` block instead. Inserting one independent carrier
+    immediately after the first user keeps it at a fixed prefix position as
+    later assistant/tool turns are appended. Existing content remains
+    byte-for-byte untouched; the compatibility name is retained for callers.
     """
     reminder = (
         '<system-reminder>\n'
@@ -319,27 +320,21 @@ def _prepend_system_reminder(messages: list, user_system: str) -> None:
         '</system-reminder>\n'
     )
     for msg in messages:
-        if msg.get('role') != 'user':
-            continue
-        content = msg.get('content')
-        block = {'type': 'text', 'text': reminder}
-        if isinstance(content, list):
-            if any('<system-reminder>' in (b.get('text') or '')
-                   for b in content if isinstance(b, dict)):
-                return  # idempotency: reminder already present
-            leads_tool_result = (bool(content) and isinstance(content[0], dict)
-                                 and content[0].get('type') == 'tool_result')
-            if leads_tool_result:
-                content.append(block)
-            else:
-                content.insert(0, block)
-        elif isinstance(content, str):
-            msg['content'] = reminder + content
-        return
-    # No user message at all — CLIProxyAPI DROPS the text in this case; we
-    # deliberately keep it as a trailing system block instead (strictly
-    # safer; in practice Tofu conversations always have a user message).
-    return
+        content = msg.get('content') if isinstance(msg, dict) else None
+        if (isinstance(msg, dict) and msg.get('role') == 'user'
+                and isinstance(content, list)
+                and any(b.get('text') == reminder
+                        for b in content if isinstance(b, dict))):
+            return
+    carrier = {
+        'role': 'user',
+        'content': [{'type': 'text', 'text': reminder}],
+    }
+    for index, msg in enumerate(messages):
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            messages.insert(index + 1, carrier)
+            return
+    messages.append(carrier)
 
 
 def apply_claude_cloak(body: dict) -> tuple[dict, dict]:
@@ -353,7 +348,8 @@ def apply_claude_cloak(body: dict) -> tuple[dict, dict]:
     Steps (each ported from CLIProxyAPI ``claude_executor_cloaking.go`` /
     ``claude_executor_request.go``):
       1. system[] rebuilt to [billing header, identity, static prompt];
-      2. the user's own system text moved into the first user message;
+      2. the user's own system text moved into a stable user carrier after
+         the first user message;
       3. tool names remapped to Claude Code TitleCase equivalents;
       4. ``metadata.user_id`` injected when missing/invalid;
       5. sampling normalised (temperature/top_p dropped; thinking drops
@@ -382,7 +378,7 @@ def apply_claude_cloak(body: dict) -> tuple[dict, dict]:
         {'type': 'text', 'text': CLAUDE_CODE_STATIC_PROMPT},
     ]
 
-    # ── 2. User system text → first user message (<system-reminder>).
+    # ── 2. User system text → stable post-first-user carrier.
     if user_system:
         _prepend_system_reminder(body.get('messages') or [], user_system)
 
@@ -587,6 +583,7 @@ _CODEX_MODEL_TIERS = {
         'gpt-5.6-sol',
         'gpt-5.6-terra',
         'gpt-5.6-luna',
+        'gpt-6-astra',
         'codex-auto-review',
     ],
     'plus': [
@@ -597,6 +594,7 @@ _CODEX_MODEL_TIERS = {
         'gpt-5.6-sol',
         'gpt-5.6-terra',
         'gpt-5.6-luna',
+        'gpt-6-astra',
         'codex-auto-review',
     ],
     'pro': [
@@ -607,6 +605,7 @@ _CODEX_MODEL_TIERS = {
         'gpt-5.6-sol',
         'gpt-5.6-terra',
         'gpt-5.6-luna',
+        'gpt-6-astra',
         'codex-auto-review',
     ],
 }
@@ -648,6 +647,7 @@ _MANAGED_SPECS = {
         'models': [
             {'model_id': 'claude-opus-5', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-sonnet-5', 'capabilities': ['text', 'vision', 'thinking']},
+            {'model_id': 'claude-fable-5-1', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-fable-5', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-opus-4-8', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-opus-4-7', 'capabilities': ['text', 'vision', 'thinking']},
@@ -656,7 +656,6 @@ _MANAGED_SPECS = {
             {'model_id': 'claude-opus-4-5-20251101', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-sonnet-4-5-20250929', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-haiku-4-5-20251001', 'capabilities': ['text', 'vision', 'thinking']},
-            {'model_id': 'claude-opus-4-1-20250805', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-opus-4-20250514', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-sonnet-4-20250514', 'capabilities': ['text', 'vision', 'thinking']},
             {'model_id': 'claude-3-7-sonnet-20250219', 'capabilities': ['text', 'vision', 'thinking']},

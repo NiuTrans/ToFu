@@ -14,6 +14,7 @@ def test_request_normalizes_identity_and_rejects_unbounded_seed_lists():
 
     request = normalize_research_request(
         '  KV cache compression  ', lang='EN', n_ideas=99,
+        model='  kimi-k3  ',
         seed_arxiv_ids=[
             'arXiv:2312.00752v2',
             'https://arxiv.org/abs/2312.00752',
@@ -23,15 +24,18 @@ def test_request_normalizes_identity_and_rejects_unbounded_seed_lists():
     assert request.lang == 'en'
     assert request.n_ideas == 12
     assert request.seed_arxiv_ids == ('2312.00752', '2401.12345')
+    assert request.model == 'kimi-k3'
     assert request.dedup_key(7) == (
         7, 'KV cache compression', 'en', 12,
-        ('2312.00752', '2401.12345'))
+        ('2312.00752', '2401.12345'), 'kimi-k3')
 
     with pytest.raises(ValueError, match='at most 20'):
         normalize_research_request(
             'bounded', seed_arxiv_ids=[f'2501.{i:05d}' for i in range(21)])
     with pytest.raises(ValueError, match=r'\[0\].*valid arXiv'):
         normalize_research_request('bounded', seed_arxiv_ids=['not-a-paper'])
+    with pytest.raises(ValueError, match='model exceeds 256'):
+        normalize_research_request('bounded', model='m' * 257)
 
 
 def test_engine_claim_uses_complete_normalized_identity_and_atomic_fields(
@@ -59,18 +63,20 @@ def test_engine_claim_uses_complete_normalized_identity_and_atomic_fields(
 
     first = engine.produce_research(
         '  bounded direction ', lang='EN', n_ideas=99,
-        seed_arxiv_ids=['arXiv:2312.00752v3'], user_id=4)
+        seed_arxiv_ids=['arXiv:2312.00752v3'], model=' kimi-k3 ', user_id=4)
     second = engine.produce_research(
         'bounded direction', lang='en', n_ideas=3,
         seed_arxiv_ids=['2401.12345'], user_id=4)
 
     assert first['deduped'] is False and second['deduped'] is False
     assert claimed[0][0] == (
-        4, 'bounded direction', 'en', 12, ('2312.00752',))
+        4, 'bounded direction', 'en', 12, ('2312.00752',), 'kimi-k3')
     assert claimed[1][0] == (
-        4, 'bounded direction', 'en', 3, ('2401.12345',))
+        4, 'bounded direction', 'en', 3, ('2401.12345',), '')
     assert claimed[0][1]['seed_arxiv_ids'] == ('2312.00752',)
+    assert claimed[0][1]['model'] == 'kimi-k3'
     assert spawned[0][1]['seed_arxiv_ids'] == ('2312.00752',)
+    assert spawned[0][1]['model'] == 'kimi-k3'
 
 
 def test_engine_start_failure_settles_claimed_task(monkeypatch, tmp_path):
@@ -110,11 +116,13 @@ def test_manifest_roundtrip_and_resume_preserve_seed_corpus(
         'task_id': 'research_resume_seed', 'user_id': 9,
         'direction': 'seeded', 'lang': 'en', 'n_ideas': 4,
         'seed_arxiv_ids': ['2312.00752'], 'conv_id': 'conv-seed',
+        'model': 'kimi-k3',
         'workdir': str(tmp_path),
     }
     engine._write_manifest(task, 'running')
     manifest = jobs.read_manifest(str(tmp_path))
     assert manifest['seed_arxiv_ids'] == ['2312.00752']
+    assert manifest['model'] == 'kimi-k3'
 
     recreated = []
     spawned = []
@@ -137,7 +145,9 @@ def test_manifest_roundtrip_and_resume_preserve_seed_corpus(
 
     assert engine.resume_interrupted_research() == 1
     assert recreated[0][1]['seed_arxiv_ids'] == ('2312.00752',)
+    assert recreated[0][1]['model'] == 'kimi-k3'
     assert spawned[0]['seed_arxiv_ids'] == ('2312.00752',)
+    assert spawned[0]['model'] == 'kimi-k3'
 
 
 def test_recipe_caps_misbehaving_search_iterator_and_idea_fanout(monkeypatch):
@@ -250,3 +260,50 @@ def test_chinese_direction_uses_one_english_discovery_alias(monkeypatch):
     assert first['usage']['calls'] == 1
     assert first['usage']['prompt_tokens'] == 12
     assert second['usage'] == first['usage']
+
+
+def test_translation_failure_falls_back_to_raw_direction_and_retries(
+        monkeypatch):
+    """A failed discovery translation must not zero the harvest: search with
+    the raw direction, and re-attempt translation on the next stage run."""
+    import lib.research.recipe as recipe
+
+    translated = []
+    searched = []
+
+    def translate(direction, *, abort_check=None):
+        translated.append(direction)
+        if len(translated) == 1:
+            raise RuntimeError('upstream 429 storm')
+        return 'english discovery query', {'prompt_tokens': 5,
+                                           'completion_tokens': 3}
+
+    def search(query, max_results=20):
+        searched.append(query)
+        return [{'arxiv_id': '2501.00001', 'title': 'Paper 1'}]
+
+    def harvest(ids, **kwargs):
+        return {
+            'parsed': len(ids), 'cache_hits': 0, 'errors': 0,
+            'results': [{'arxivId': arxiv_id, 'status': 'parsed'}
+                        for arxiv_id in ids],
+        }
+
+    monkeypatch.setattr(recipe, '_translate_direction_for_search', translate)
+    monkeypatch.setattr(recipe, '_search_arxiv', search)
+    monkeypatch.setattr(recipe, '_harvest_batch', harvest)
+    ctx = {
+        'direction': 'KV-cache 压缩对长上下文罕见证据的影响',
+        'folder_id': 'folder', 'user_id': 1, 'harvest_n': 3,
+    }
+
+    first = recipe._run_harvest(ctx)
+    second = recipe._run_harvest(ctx)
+
+    assert searched == [
+        'KV-cache 压缩对长上下文罕见证据的影响',
+        'english discovery query',
+    ]
+    assert first['arxiv_ids'] == ['2501.00001']
+    assert first['usage'] == {}
+    assert second['usage']['prompt_tokens'] == 5

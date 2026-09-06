@@ -11,6 +11,7 @@ Sub-modules:
   _max_output    — Per-model max output token limits (_MODEL_MAX_OUTPUT)
   _limits        — Auto-learned model limits + clamp/learn/parse
                    (OWNS the single _LEARNED_MODEL_LIMITS dict + _limits_lock)
+  _release       — Static vendor release-date knowledge (release_date)
 
 All public names are also re-exported from ``lib.llm`` for convenience.
 
@@ -47,6 +48,7 @@ from lib.model_info._family import (  # noqa: E402,F401
     is_gpt_56,
     is_kimi,
     is_kimi_k3,
+    is_kimi_k27_code,
     is_longcat,
     is_minimax,
     is_qwen,
@@ -85,11 +87,16 @@ from lib.model_info._max_output import (  # noqa: E402,F401
 # dict is loaded/rebound only inside ._limits, never here.
 from lib.model_info._limits import (  # noqa: E402,F401
     _LEARNED_MODEL_LIMITS,
+    _LEARNED_ROUTE_LIMITS,
     _clamp_max_tokens,
+    _clamp_route_max_tokens,
     _learn_model_limit,
     _limits_lock,
     _load_learned_limits,
     _parse_token_limit_from_error,
+    _parse_token_limit_evidence,
+    _route_output_limit_key,
+    TokenLimitEvidence,
 )
 
 # ── Video-frame budget (send-time clamp) ──
@@ -112,12 +119,18 @@ from lib.model_info._folds import (  # noqa: E402,F401
     version_tuple,
 )
 
+# ── Static vendor release-date knowledge ──
+from lib.model_info._release import (  # noqa: E402,F401
+    release_date,
+)
+
 __all__ = [
     # family detection
     'claude_line_version', 'glm_line_version',
     'is_claude', 'is_claude_opus_47', 'is_deepseek', 'is_doubao', 'is_ernie',
     'is_gemini', 'is_glm', 'is_glm53', 'is_gpt', 'is_gpt5', 'is_gpt_56',
-    'is_kimi', 'is_kimi_k3', 'is_longcat', 'is_minimax', 'is_qwen',
+    'is_kimi', 'is_kimi_k3', 'is_kimi_k27_code', 'is_longcat', 'is_minimax',
+    'is_qwen',
     # capabilities
     'gemini_reasoning_effort', '_GEMINI_EFFORT_MAP',
     'glm_reasoning_effort', '_GLM52_EFFORT_MAP', '_GLM53_EFFORT_MAP',
@@ -132,12 +145,18 @@ __all__ = [
     '_qwen_max_output', '_minimax_max_output', '_ernie_max_output',
     '_kimi_max_output',
     # learned limits / clamp
-    '_clamp_max_tokens', '_learn_model_limit', '_load_learned_limits',
-    '_parse_token_limit_from_error', '_LEARNED_MODEL_LIMITS', '_limits_lock',
+    '_clamp_max_tokens', '_clamp_route_max_tokens', '_learn_model_limit',
+    '_load_learned_limits',
+    '_parse_token_limit_from_error', '_parse_token_limit_evidence',
+    '_route_output_limit_key',
+    'TokenLimitEvidence', '_LEARNED_MODEL_LIMITS',
+    '_LEARNED_ROUTE_LIMITS', '_limits_lock',
     # video frame budget
     'video_frame_budget', 'aggregate_image_cap',
     # display folds
     'build_fold_index', 'family_key', 'version_tuple',
     # context windows
     'ContextProfile', 'context_profile', 'resolved_context_profile',
+    # release dates
+    'release_date',
 ]

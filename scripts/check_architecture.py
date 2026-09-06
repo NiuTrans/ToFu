@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,79 @@ FORBIDDEN_TEXT = (
         "messages-array mirror and committed-message transport are retired",
     ),
 )
+
+_ROUTE_LLM_DISPATCH_IMPORT_NAMES = frozenset({
+    "astream",
+    "async_dispatch_stream",
+    "chat",
+    "dispatch_chat",
+    "dispatch_stream",
+    "pick_key_for_model",
+    "smart_chat",
+    "stream_chat",
+})
+_ROUTE_LLM_READ_ONLY_IMPORT_NAMES = frozenset({
+    "get_dispatcher",
+    "reset_dispatcher",
+})
+
+
+def route_llm_bypass_violations(
+    paths: list[Path],
+    *,
+    routes_root: Path | None = None,
+) -> list[str]:
+    """Forbid provider execution in HTTP adapters.
+
+    Routes may reset/read dispatcher state and call the provider-discovery
+    service. Model execution, provider pins, and slot reservation belong to a
+    task/application execution owner with the shared lifecycle contract.
+    """
+    violations: list[str] = []
+    routes_root = (routes_root or (ROOT / "routes")).resolve()
+    for path in paths:
+        try:
+            path.resolve().relative_to(routes_root)
+        except ValueError:
+            continue
+        if path.suffix != ".py":
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+        except (FileNotFoundError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = str(node.module or "")
+                imported = {alias.name for alias in node.names}
+                if module == "lib.llm_dispatch":
+                    forbidden = imported - _ROUTE_LLM_READ_ONLY_IMPORT_NAMES
+                    if forbidden:
+                        violations.append(
+                            f"{path.name}:{node.lineno}: HTTP routes "
+                            "must call a task/application execution owner, not "
+                            f"LLM dispatch directly: {sorted(forbidden)}"
+                        )
+                elif module.startswith("lib.llm_dispatch.") \
+                        and not module.startswith("lib.llm_dispatch.discovery"):
+                    violations.append(
+                        f"{path.name}:{node.lineno}: HTTP routes "
+                        f"cannot import dispatcher internals: {module}"
+                    )
+                elif module == "lib.llm" and imported & _ROUTE_LLM_DISPATCH_IMPORT_NAMES:
+                    violations.append(
+                        f"{path.name}:{node.lineno}: HTTP routes "
+                        "cannot invoke provider transport directly"
+                    )
+            elif isinstance(node, ast.Attribute) and node.attr in {
+                "pick_and_reserve", "pick_key_for_model",
+            }:
+                violations.append(
+                    f"{path.name}:{node.lineno}: HTTP routes "
+                    f"cannot reserve provider slots directly: {node.attr}"
+                )
+    return violations
 
 
 def _relative_contract_path(value: Any, *, field: str) -> Path:
@@ -275,6 +349,7 @@ def main() -> int:
             violations.append(f"{path.relative_to(ROOT)}: retired path exists")
 
     sources = authored_sources()
+    violations.extend(route_llm_bypass_violations(sources))
     checked_sources = 0
     for path in sources:
         try:

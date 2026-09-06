@@ -12,6 +12,7 @@ code ownership only and must not redefine backend authority.
 | `lib/storage_sidecar/` | Dedicated child process | Personal database paths, project lease, FUSE preflight, drivers, pools, transactions, receipts, semantic operation catalog, SQLite backup/restore/handoff |
 | `lib/storage_sidecar/adapters/sqlite.py` | Sidecar only | One writer connection, fair priority lanes, query-only pool, WAL/full-sync, progress watchdog, result-code retry classification |
 | `lib/storage_sidecar/adapters/postgres.py` | Sidecar only | External TLS PostgreSQL connections, durability/schema validation, Psycopg 3 isolated read/write pools, connection budget, SQLSTATE retry classification |
+| `packages/tofu-db/` | Supervised pre-authority Rust binary | Experimental CONTROL/WAL engine plus one-shot resource-budgeted `storage.v2` loopback serving; no application selection path until certification |
 | `lib/storage_metric_policy.py` | Shared dependency-light policy | Launch-probed recent latency sample window for application and Sidecar metrics |
 | `lib/storage_event_policy.py` | Application process | Launch-derived durable-event waiting-object, serialized-byte, and Sidecar frame ceilings |
 | `lib/conversations/repository.py` | Application process | Owner-scoped conversation projections; metadata-first lazy transcript scans with recursive frame splitting; validated interval-count projection |

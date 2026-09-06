@@ -1,0 +1,10 @@
+{
+  "attemptId": "s",
+  "contract": "tofu.conversation-sync.event/v1",
+  "conversationId": "s",
+  "occurredAt": 1,
+  "payload": {},
+  "syncSeq": 1,
+  "turnId": "s",
+  "type": "turn.upsert"
+}

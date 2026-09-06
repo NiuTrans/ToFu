@@ -63,6 +63,7 @@ logger = get_logger(__name__)
 __all__ = [
     'build_survey', 'survey_lang_key', 'OPEN_GAPS_SCHEMA_VERSION',
     '_verify_against_library', '_load_paper_inputs', '_extract_survey_ids',
+    '_ensure_open_gap_ids',
 ]
 
 # The frozen open_gaps.json schema version. R3 reads this; bump (never silently
@@ -112,6 +113,52 @@ def _norm_id(arxiv_id) -> str:
     """
     from lib.paper.arxiv import normalize_arxiv_id
     return normalize_arxiv_id(arxiv_id)
+
+
+def _ensure_open_gap_ids(gap_map: dict) -> dict:
+    """Return a copy whose retained gaps have unique deterministic handles.
+
+    ``id`` is a cross-stage reference, not model-authored research content.
+    Real providers occasionally return every substantive gap field but omit
+    this mechanical handle. Repair missing or duplicate handles locally so a
+    grounded survey cannot pass R2 and then fail immediately at R3.
+    """
+    if not isinstance(gap_map, dict):
+        return gap_map
+    out = dict(gap_map)
+    raw_rows = gap_map.get('open_gaps')
+    rows = raw_rows if isinstance(raw_rows, list) else []
+    claimed = {
+        row.get('id').strip()
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get('id'), str)
+        and row.get('id').strip()
+    }
+    used = set()
+    repaired = []
+    generated = []
+    next_id = 1
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        gap_id = item.get('id')
+        gap_id = gap_id.strip() if isinstance(gap_id, str) else ''
+        if not gap_id or gap_id in used:
+            while f'gap_{next_id}' in claimed or f'gap_{next_id}' in used:
+                next_id += 1
+            gap_id = f'gap_{next_id}'
+            next_id += 1
+            generated.append(gap_id)
+        item['id'] = gap_id
+        used.add(gap_id)
+        repaired.append(item)
+    out['open_gaps'] = repaired
+    if generated:
+        out['generated_gap_ids'] = generated
+        logger.info('[Paper:Survey] synthesized %d missing/duplicate gap handle(s): %s',
+                    len(generated), ','.join(generated))
+    return out
 
 
 # ── Input loading (pin #2: reports/library only, never a re-parse) ─────────
@@ -464,6 +511,7 @@ def _verify_against_library(gap_map: dict, *, user_id: int,
                         g.get('gap', ''))
         gaps.append(g2)
     out['open_gaps'] = gaps
+    out = _ensure_open_gap_ids(out)
 
     # missing_ids = grounded (real but not yet in the shelf) → next harvest;
     # stripped_ids = hallucinations removed.
@@ -562,7 +610,10 @@ def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
     open_gaps map; we split on the last JSON object.
     """
     from lib.agent_loop import AbortSignal
-    from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop
+    from lib.paper.agent_loop_policy import (
+        PAPER_AGENT_ROUTE_MAX_RETRIES,
+        run_guarded_paper_agent_loop,
+    )
     from lib.paper.agent_usage import PaperAgentUsageMeter
     from lib.paper.prompts import date_anchor_clause
     from lib.paper.tools import (
@@ -616,7 +667,9 @@ def _synthesize_survey(paper_inputs, direction, lang, *, user_id, model=None,
             prefer_model=model or None, strict_model=bool(model), capability='text',
             tools=effective_tools, max_tokens=_SURVEY_MAX_TOKENS,
             temperature=_SURVEY_TEMPERATURE,
-            thinking_enabled=False, log_prefix='[Paper:Survey]'))
+            thinking_enabled=False,
+            max_retries=PAPER_AGENT_ROUTE_MAX_RETRIES,
+            log_prefix='[Paper:Survey]'))
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
@@ -684,7 +737,8 @@ def _survey_system_prompt(lang: str) -> str:
             '`paper/method/compression_unit/selection_signal/update_timing/system_tradeoff/'
             'robustness_assumption/evaluation_tasks/limitation`；不能用空数组。用这张表逐论文'
             '说明为何每个 gap 仍然存在，而不是只做串行摘要。\n'
-            'open_gaps 是核心:标出真正没人做的空白,每条附 evidence(证明这确实是空白的库内论文 id)。'
+            'open_gaps 是核心:标出真正没人做的空白,每条必须有唯一的字符串 id(如 gap_1)并附 '
+            'evidence(证明这确实是空白的库内论文 id)。'
             '可用 web 工具交叉核对,但空白地图的 id 只能来自库内。')
     return (
         'You are a senior researcher writing a **related-work survey + open-gap map** '
@@ -701,7 +755,8 @@ def _survey_system_prompt(lang: str) -> str:
         'update_timing/system_tradeoff/robustness_assumption/evaluation_tasks/limitation`. '
         'It may not be empty. Use it to explain, paper by paper, why each gap remains open '
         'rather than writing serial summaries.\n'
-        'open_gaps is the core: mark genuinely unexplored gaps, each with evidence (library '
+        'open_gaps is the core: mark genuinely unexplored gaps, each with a unique string id '
+        '(for example gap_1) and evidence (library '
         'paper ids that prove it is a gap). You may cross-check with web tools, but the gap '
         "map's ids may only come from the library.")
 

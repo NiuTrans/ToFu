@@ -792,10 +792,11 @@ def prepare_retryable_wait(attempt, err, abort_check, log_prefix=''):
 
 
 def headers():
-    """Build default request headers with current API key."""
+    """Build default request headers with the first configured API key."""
+    key = _lib.LLM_API_KEYS[0] if _lib.LLM_API_KEYS else ''
     return {
         'Content-Type': 'application/json',
-        'Authorization': f'Bearer {_lib.LLM_API_KEY}',
+        'Authorization': f'Bearer {key}',
     }
 
 

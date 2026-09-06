@@ -214,15 +214,14 @@ class TestPhaseSemantics(unittest.TestCase):
         self.assertNotIn('run_command', _names(tl))
         self.assertNotIn('run_command', _names(ctx.executable_tool_catalog))
 
-    def test_memory_write_scope_matches_project_context(self):
+    def test_memory_write_schema_is_stable_across_project_context(self):
         no_project_tools, _ = assemble_tool_list(_ctx(
             cfg={'memoryEnabled': True}))
         no_project = {
             tool['function']['name']: tool for tool in no_project_tools}
         for name in ('create_memory', 'merge_memories'):
             scope = no_project[name]['function']['parameters']['properties']['scope']
-            self.assertEqual(scope['enum'], ['global'])
-            self.assertIn('Default: global', scope['description'])
+            self.assertEqual(scope['enum'], ['global', 'project'])
 
         project_tools, _ = assemble_tool_list(_ctx(
             cfg={'memoryEnabled': True}, project_path='/tmp/project',
@@ -231,6 +230,8 @@ class TestPhaseSemantics(unittest.TestCase):
         for name in ('create_memory', 'merge_memories'):
             scope = project[name]['function']['parameters']['properties']['scope']
             self.assertEqual(scope['enum'], ['global', 'project'])
+            self.assertEqual(scope, no_project[name]['function']['parameters']
+                             ['properties']['scope'])
 
         # Context specialization must never mutate the module-level schemas.
         from lib.memory.tools import CREATE_MEMORY_TOOL

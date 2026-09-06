@@ -1,0 +1,55 @@
+name: Build iOS client
+
+# Two gates for the iOS WebView client (ios/), on every push/PR that touches it:
+#   1. `swift test` — the whole session/supervisor/reauth logic lives in the
+#      Foundation-only TofuClientCore package, so it is unit-testable on a
+#      macOS runner with NO simulator and NO WebKit (mirrors android/'s
+#      JVM-unit-test posture);
+#   2. an unsigned simulator build of the SwiftUI shell — proves the app
+#      target compiles and links against the package without needing Apple
+#      signing secrets on this repo. Distribution (TestFlight / ipa) is a
+#      later, secrets-bearing workflow; see ios/README.md.
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/build-ios.yml'
+  pull_request:
+    paths:
+      - 'ios/**'
+      - '.github/workflows/build-ios.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run core unit tests (SwiftPM, host macOS — no simulator)
+        run: swift test
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project from project.yml
+        run: xcodegen generate
+
+      # CODE_SIGNING_ALLOWED=NO: compile + link only. A signed device build
+      # requires a development team / provisioning, which this repo does not
+      # carry (same reason the Android workflow guards its committed keystore).
+      - name: Build the app (unsigned, iOS Simulator)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project TofuClient.xcodeproj \
+            -scheme TofuClient \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO

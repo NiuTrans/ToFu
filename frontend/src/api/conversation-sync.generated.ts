@@ -2402,6 +2402,9 @@ export const CONVERSATION_SYNC_SCHEMAS = {
       },
       {
         "$ref": "#/components/schemas/TurnToolUseSegment"
+      },
+      {
+        "$ref": "#/components/schemas/TurnSystemNoteSegment"
       }
     ]
   },
@@ -3086,6 +3089,12 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     "properties": {
       "_autopilotRunId": {
         "type": "string"
+      },
+      "_bgCommandInjects": {
+        "items": {
+          "$ref": "#/components/schemas/TurnMessageInjection"
+        },
+        "type": "array"
       },
       "_boardTaskId": {
         "type": "string"
@@ -3818,6 +3827,51 @@ export const CONVERSATION_SYNC_SCHEMAS = {
     ],
     "type": "string"
   },
+  "TurnSystemNoteSegment": {
+    "additionalProperties": true,
+    "properties": {
+      "attemptId": {
+        "type": "string"
+      },
+      "blockId": {
+        "type": "string"
+      },
+      "llmRound": {
+        "oneOf": [
+          {
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "noteKind": {
+        "enum": [
+          "intent-stall",
+          "todo-continuation"
+        ],
+        "type": "string"
+      },
+      "taskId": {
+        "type": "string"
+      },
+      "text": {
+        "type": "string"
+      },
+      "type": {
+        "const": "system_note"
+      }
+    },
+    "required": [
+      "type",
+      "blockId",
+      "text",
+      "noteKind"
+    ],
+    "type": "object"
+  },
   "TurnTerminationEvidence": {
     "enum": [
       "provider_finish",
@@ -4497,6 +4551,10 @@ export const CONVERSATION_SYNC_SCHEMAS = {
         "$ref": "#/components/schemas/SnapshotDocumentReferences",
         "description": "Snapshot-only references for repeated, immutable browser fields. The generated browser client resolves every entry from ConversationSyncSnapshot.sharedToolDocuments before TurnStore."
       },
+      "agentId": {
+        "description": "Owning swarm sub-agent id. This call's Request Inspector stream is `{taskId}#agent:{agentId}`, where llmRound is the sub-agent's 1-based loop round (equal to its request-snapshot roundNum).",
+        "type": "string"
+      },
       "assistantContent": {
         "type": "string"
       },
@@ -4842,6 +4900,7 @@ export type TurnToolRound = {
   "taskId"?: string;
   "roundNum"?: number;
   "llmRound"?: (number) | (null);
+  "agentId"?: string;
   "toolCallId"?: string;
   "toolName"?: string;
   "toolArgs"?: unknown;
@@ -4946,7 +5005,18 @@ export type TurnToolUseSegment = {
   [key: string]: unknown;
 };
 
-export type TurnContentSegment = (TurnTextSegment) | (TurnThinkingSegment) | (TurnToolUseSegment);
+export type TurnSystemNoteSegment = {
+  "type": "system_note";
+  "blockId": string;
+  "attemptId"?: string;
+  "taskId"?: string;
+  "text": string;
+  "noteKind": "intent-stall" | "todo-continuation";
+  "llmRound"?: (number) | (null);
+  [key: string]: unknown;
+};
+
+export type TurnContentSegment = (TurnTextSegment) | (TurnThinkingSegment) | (TurnToolUseSegment) | (TurnSystemNoteSegment);
 
 export type BranchLaneDescriptor = {
   "laneId": string;
@@ -5534,6 +5604,7 @@ export type TurnProjection = {
   "_inboxInjects"?: ReadonlyArray<TurnMessageInjection>;
   "_peerInjects"?: ReadonlyArray<TurnMessageInjection>;
   "_userSteerInjects"?: ReadonlyArray<TurnMessageInjection>;
+  "_bgCommandInjects"?: ReadonlyArray<TurnMessageInjection>;
   "_stallNudges"?: ReadonlyArray<TurnStallInjection>;
 };
 

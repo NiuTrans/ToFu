@@ -242,6 +242,11 @@ def _response_allowed(owner_user_id: str, url: str) -> bool:
     owner = str(owner_user_id or '').strip()
     if not owner.isdigit() or int(owner) < 1 or not url:
         return False
+    # Page captures also see extension/content-script requests (e.g. a
+    # translation add-on fetching chrome-extension://<id>/config.json);
+    # those bodies are not page evidence and must never reach model context.
+    if urlsplit(str(url)).scheme.lower() not in ('http', 'https', 'ws', 'wss'):
+        return False
     try:
         from lib.browser.access import is_read_allowed
         return bool(is_read_allowed(owner, url))
@@ -450,6 +455,9 @@ def analyze_network_evidence(
             'dropped_entries': int(network.get('droppedEntries') or 0),
             'dropped_bodies': int(network.get('droppedBodies') or 0),
             'websocket_frames': int(network.get('webSocketFrameCount') or 0),
+            'priority_hint_count': int(network.get('priorityHintCount') or 0),
+            'priority_body_matches': int(network.get('priorityBodyMatches') or 0),
+            'priority_reserve_chars': int(network.get('priorityReserveChars') or 0),
         },
     }
 

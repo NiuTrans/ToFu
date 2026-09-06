@@ -676,6 +676,10 @@ export function createConversationTurnRuntime(
   ): Promise<RuntimeStore> => {
     if (!conversation?.id) throw new Error('Conversation is required.');
     const store = ensureRuntimeStore(conversation.id);
+    // A local-only draft has no server row yet: hydrating it 404s and the
+    // reconcile loop retries it forever. The in-memory store is authoritative
+    // until the first submit persists the conversation.
+    if (conversation._localOnly) return store;
     if (!store._snapshotLoaded) return hydrateConversation(conversation);
     const coordinator = coordinators.get(conversation.id);
     if (!coordinator) throw new Error('Conversation coordinator is not initialized.');

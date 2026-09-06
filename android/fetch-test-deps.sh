@@ -18,6 +18,9 @@ mkdir -p "$DEST"
 # corporate Nexus) to override. CENTRAL is the fallback when MIRROR is set.
 MIRROR="${MIRROR:-https://repo1.maven.org/maven2}"
 CENTRAL="https://repo1.maven.org/maven2"
+# androidx artifacts are NOT on Maven Central — they resolve only from Google's
+# Maven repo, so every fetch tries it as the last fallback.
+GOOGLE="https://maven.google.com"
 
 # groupPath/artifact/version/file  — one per line (Maven coordinates as a path).
 ARTIFACTS=(
@@ -94,7 +97,7 @@ is_zip() { head -c2 "$1" 2>/dev/null | grep -q 'PK'; }
 fetch() {
   local coord="$1"; local out="$DEST/$(basename "$coord")"
   if [[ -s "$out" ]] && is_zip "$out"; then echo "  cached  $(basename "$coord")"; return 0; fi
-  for base in "$MIRROR" "$CENTRAL"; do
+  for base in "$MIRROR" "$CENTRAL" "$GOOGLE"; do
     if curl -fsSL -o "$out" "$base/$coord" 2>/dev/null && is_zip "$out"; then
       echo "  ok      $(basename "$coord")  ($(stat -c%s "$out" 2>/dev/null || echo '?')B)"
       return 0
@@ -111,7 +114,7 @@ fetch_aar() {
   local out="$DEST/androidxtest_${name}.jar"
   if [[ -s "$out" ]] && is_zip "$out"; then echo "  cached  androidxtest_${name}.jar"; return 0; fi
   local tmp; tmp="$(mktemp --suffix=.aar)"
-  for base in "$MIRROR" "$CENTRAL"; do
+  for base in "$MIRROR" "$CENTRAL" "$GOOGLE"; do
     if curl -fsSL -o "$tmp" "$base/$coord" 2>/dev/null && is_zip "$tmp"; then
       if unzip -p "$tmp" classes.jar > "$out" 2>/dev/null && is_zip "$out"; then
         rm -f "$tmp"; echo "  ok      androidxtest_${name}.jar  ($(stat -c%s "$out" 2>/dev/null || echo '?')B)"

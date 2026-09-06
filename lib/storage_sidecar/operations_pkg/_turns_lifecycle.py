@@ -479,7 +479,10 @@ def _turn_recover(session: Session, payload: Mapping[str, Any]) -> Any:
     # per call (always ≥1 row so an oversized projection still progresses) and
     # report the remainder; the caller loops until ``remaining`` is 0.
     max_rows = _integer(payload, "max_rows", default=8, minimum=1, maximum=500)
-    max_bytes = _integer(payload, "max_bytes", default=2_000_000, minimum=1)
+    max_bytes = _integer(
+        payload, "max_bytes", default=2_000_000, minimum=1,
+        maximum=8 * 1024 * 1024,
+    )
     # Optional liveness guards for the POST-SERVING backstop (unused on the
     # boot path, where the registry is empty by construction): only settle
     # attempts created before ``created_before_ms`` and never touch an attempt

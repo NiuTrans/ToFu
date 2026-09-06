@@ -772,7 +772,7 @@ def _quarantine(root: Path, row: Mapping[str, Any], reason: str) -> None:
             str(root), work_id=str(row['task_id']), reason=reason,
             user_id=owner_user_id)
     except Exception as exc:
-        logger.debug('[Integration] Project Attention emit failed: %s', exc)
+        logger.debug('[Integration] Project narrative emit failed: %s', exc)
     # Keep bounded conflict paths for human review of the quarantined package.
     conflict_files = _conflict_files_from(reason)
     if conflict_files:
@@ -866,6 +866,8 @@ def _peek_ready() -> dict | None:
 # IO stalls even when no integration work existed.
 
 
+
+
 def process_ready_once() -> bool:
     row = _claim_next()
     if row is None:
@@ -882,10 +884,10 @@ def process_ready_once() -> bool:
             record_integration_failure(
                 str(row['project_root']), work_id=str(row['task_id']),
                 reason=str(exc), user_id=int(row['user_id']))
-        except Exception as attention_exc:
+        except Exception as narrative_exc:
             logger.debug(
-                '[Integration] Project Attention emit failed: %s',
-                attention_exc)
+                '[Integration] Project narrative emit failed: %s',
+                narrative_exc)
         _push(row['project_root'], user_id=int(row['user_id']))
     return True
 

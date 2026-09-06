@@ -214,6 +214,7 @@ Object.assign(runtimeScope, {
   _getCurrentTheme,
   _findRenderedNativeTurnNode,
   _loadServerConfigAndPopulate,
+  _modelBrand,
   _modelRoutingDropdownModels,
   _modelShortName,
   _orchestrationFlowCatalog,

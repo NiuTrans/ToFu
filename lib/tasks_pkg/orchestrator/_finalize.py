@@ -1252,6 +1252,10 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
         # on the index yet, so a premature LATE done would close the stream
         # with no successor on the wire (see lib/chat_dispatch.py branch 3).
         task['_finalize_started_at'] = time.time()
+        # Fence TTL/capacity/memory-pressure eviction before the terminal
+        # task-result write begins. persist_task_result clears this receipt
+        # only after the authoritative row acknowledges the terminal state.
+        task['_terminalPersistencePending'] = True
         stamp_chat_task_terminal(
             task,
             status='done',
@@ -1528,7 +1532,7 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     #   fires") already expected this order — the code disagreed. The
     #   heavy-state release is deferred past the hook (the VU inherits
     #   task['messages']); it runs below, right after append_event(done_evt).
-    persist_task_result(task, _defer_heavy_release=True)
+    _terminal_persisted = persist_task_result(task, _defer_heavy_release=True)
     # ── Autopilot step 1 ( HB-1): REGISTER the VU carrier and
     #   claim the conv→latest successor index BEFORE the parent done ships.
     #   This is cheap (no VU LLM); step 2 is append_event(done_evt) below and
@@ -1753,7 +1757,13 @@ def _finalize_and_emit_done(task: dict[str, Any], *, model: str, preset: str, th
     # The deferred release follows autopilot/done and commit admission; the
     # authority predicate excludes synchronous inline/headless carriers.
     from lib.tasks_pkg.manager._persist import _release_heavy_task_state
-    _release_heavy_task_state(task)
+    if _terminal_persisted:
+        _release_heavy_task_state(task)
+    else:
+        logger.error(
+            '[Task:%s] retained terminal retry state after persistence debt',
+            tid,
+        )
 
     # Layer-3 preference consolidation — OFF the hot path.
     #   Mirrors _spawn_async_commit_round: runs AFTER the done event +

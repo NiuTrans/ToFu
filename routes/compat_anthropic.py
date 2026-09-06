@@ -19,8 +19,7 @@ from lib.agent_core.admission import (
     unregister_waiter,
 )
 from lib.agent_core.execution_session import (
-    ExecutionPhase,
-    bind_admission_lease,
+    acquire_and_bind_admission,
     bind_model_route,
     execution_session_for_task,
 )
@@ -112,7 +111,7 @@ async def messages():
               model=cfg.get('model', '?'),
               n_messages=len(msgs), stream=options['stream'])
 
-    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.manager import create_task, reject_unstarted_chat_task
     from lib.tasks_pkg.spawn import spawn_task
     conv_id = short_id('compat-anthropic-', 12)
     task = create_task(
@@ -130,34 +129,42 @@ async def messages():
         else _selection.provider_offering.public_dict()
     )
     execution_session = execution_session_for_task(task)
-    bind_model_route(
-        execution_session,
-        lambda: dispose_routed_slot_group(_route_group),
-    )
+    try:
+        bind_model_route(
+            execution_session,
+            lambda: dispose_routed_slot_group(_route_group),
+        )
+    except Exception as exc:
+        reject_unstarted_chat_task(
+            task, exc, cause='model_route_bind_failed', conv_id=conv_id)
+        raise
 
     # ── Admission control: refuse with 503 when at capacity ───────
-    admission_lease = controller.acquire()
+    try:
+        admission_lease = acquire_and_bind_admission(
+            execution_session, controller)
+    except Exception as exc:
+        reject_unstarted_chat_task(
+            task, exc, cause='admission_acquire_failed', conv_id=conv_id)
+        raise
     if admission_lease is None:
-        execution_session.settle(
-            ExecutionPhase.FAILED, cause='task_admission_refused')
+        reject_unstarted_chat_task(
+            task, RuntimeError('Task admission refused'),
+            cause='task_admission_refused', conv_id=conv_id)
         logger.warning('[compat:anthropic] admission refused '
                        '(in_flight=%d/%d) key=%s model=%s',
                        controller.in_flight, controller.capacity,
                        auth.key_id, cfg.get('model', '?'))
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
-    bind_admission_lease(
-        execution_session,
-        lambda: controller.release(admission_lease),
-    )
     register_waiter(task['id'])
 
     try:
         spawn_task(task)
     except Exception as e:
-        execution_session.settle(
-            ExecutionPhase.FAILED, cause='task_spawn_failed')
         unregister_waiter(task['id'])
+        reject_unstarted_chat_task(
+            task, e, cause='task_spawn_failed', conv_id=conv_id)
         logger.exception('[compat:anthropic] spawn_task failed task=%s',
                          task['id'][:8])
         return api_internal_error(e, context='compat:anthropic',

@@ -103,6 +103,61 @@ def test_decide_activates_on_measured_win(tmp_path):
     assert decision.benchmark['data_dir_median_fsync_ms'] == 100.0
 
 
+def test_decide_does_not_create_an_absent_implicit_temporary_front(
+        tmp_path, monkeypatch):
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    temporary_root = tmp_path / 'temporary'
+    home_in_data = data_dir / 'home'
+    monkeypatch.setattr(fastpath.tempfile, 'gettempdir',
+                        lambda: str(temporary_root))
+    monkeypatch.setattr(fastpath.Path, 'home', lambda: home_in_data)
+
+    decision = fastpath.decide(
+        data_dir, environ=_env(), benchmark=lambda _directory: 1.0)
+
+    assert not decision.active
+    assert not temporary_root.exists()
+
+
+def test_decide_may_reuse_a_surviving_implicit_temporary_front(
+        tmp_path, monkeypatch):
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    temporary_root = tmp_path / 'temporary'
+    monkeypatch.setattr(fastpath.tempfile, 'gettempdir',
+                        lambda: str(temporary_root))
+    monkeypatch.setattr(fastpath.Path, 'home', lambda: data_dir / 'home')
+    monkeypatch.setattr(fastpath, '_same_device',
+                        lambda _candidate, _data_dir: False)
+    candidate = temporary_root / (
+        f'tofu-fastpath-{os.getuid()}-{fastpath._data_dir_key(data_dir)}')
+    candidate.mkdir(parents=True)
+    (candidate / 'tofu.db').touch()
+
+    decision = fastpath.decide(
+        data_dir,
+        environ=_env(TOFU_STORAGE_FASTPATH_MIN_SPEEDUP='0'),
+        benchmark=lambda directory: 1.0 if Path(directory) == candidate else 2.0,
+    )
+
+    assert decision.active
+    assert decision.local_dir == candidate
+
+
+def test_classic_authority_is_refused_while_fastpath_shadow_exists(tmp_path):
+    shadow_dir = tmp_path / fastpath.SHADOW_DIRNAME
+    shadow_dir.mkdir()
+    fastpath.write_shadow_manifest(shadow_dir, {
+        'format': 'tofu.fastpath-shadow.v1',
+        'generation': 7,
+        'authority_uuid': 'durable-shadow',
+    })
+
+    with pytest.raises(RuntimeError, match='retire-fastpath'):
+        fastpath.require_classic_authority_is_current(tmp_path)
+
+
 def test_decide_skips_on_insufficient_measured_win(tmp_path):
     candidate = tmp_path / 'fast'
     data_dir = tmp_path / 'data'
@@ -1325,6 +1380,59 @@ def test_checkpointed_copy_releases_only_completed_clean_cache_ranges(
 
     assert destination.read_bytes() == source.read_bytes()
     assert advised == [(0, 4), (0, 4), (4, 4), (4, 4)]
+
+
+def test_checkpointed_copy_falls_back_after_tiny_sendfile_completions(
+        tmp_path, monkeypatch):
+    source = tmp_path / 'source'
+    destination = tmp_path / 'destination'
+    payload = b'abcdefgh' * 32
+    source.write_bytes(payload)
+    sendfile_calls = []
+
+    def tiny_sendfile(output_fd, input_fd, offset, _count):
+        sendfile_calls.append(offset)
+        chunk = os.pread(input_fd, 1, offset)
+        return os.write(output_fd, chunk)
+
+    monkeypatch.setattr(fastpath.os, 'sendfile', tiny_sendfile)
+
+    fastpath._copy_file_checkpointed(
+        source,
+        destination,
+        expected_bytes=len(payload),
+        durable_bytes=0,
+        checkpoint=lambda _copied: None,
+    )
+
+    assert destination.read_bytes() == payload
+    assert len(sendfile_calls) == 4
+
+
+def test_checkpointed_copy_skips_sendfile_for_network_destination(
+        tmp_path, monkeypatch):
+    source = tmp_path / 'source'
+    destination = tmp_path / 'destination'
+    source.write_bytes(b'network-copy')
+    monkeypatch.setattr(
+        'lib.storage_sidecar.storage_capabilities.describe_mount',
+        lambda _path: SimpleNamespace(storage_class='network-filesystem'),
+    )
+    monkeypatch.setattr(
+        fastpath.os,
+        'sendfile',
+        lambda *_args: pytest.fail('network copy must not use sendfile'),
+    )
+
+    fastpath._copy_file_checkpointed(
+        source,
+        destination,
+        expected_bytes=source.stat().st_size,
+        durable_bytes=0,
+        checkpoint=lambda _copied: None,
+    )
+
+    assert destination.read_bytes() == b'network-copy'
 
 def _make_classic_with_wal_tail(tmp_path):
     """A classic authority holding a committed-but-uncheckpointed WAL tail.

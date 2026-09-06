@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import sys
+import urllib.parse
 
 import pytest
 
@@ -223,6 +224,58 @@ class TestArtifactsOutliveTheProcess:
             user_id=TEST_OWNER_USER_ID)
         assert load_research_artifacts(
             _DIRECTION, 'en', user_id=TEST_OWNER_USER_ID)['found'] is True
+
+
+# ── 2b. A proxy-re-escaped (still percent-encoded) direction must read back ─
+
+class TestPercentEncodedReadback:
+    """A constrained reverse proxy (docs/PROXY_RUNTIME.md) re-escapes an
+    already-encoded query string; Flask undoes one layer, so a non-ASCII
+    ``direction`` GET parameter arrives STILL percent-encoded while writers
+    hash the raw text from POST/PUT bodies (never re-escaped). Without a
+    decode-on-miss fallback every direction-keyed read reported "no stored
+    research" for exactly the directions users care about."""
+
+    _ZH_DIRECTION = '大模型高效知识注入方法'
+
+    def test_percent_encoded_direction_reads_back(self, fresh_db):
+        from lib.research.persistence import (load_research_artifacts,
+                                              persist_ideate, persist_survey)
+        persist_survey(self._ZH_DIRECTION, 'zh', '# 综述', _OPEN_GAPS,
+                       model='', user_id=TEST_OWNER_USER_ID)
+        persist_ideate(self._ZH_DIRECTION, 'zh', _IDEATE_ARTIFACT,
+                       model='', user_id=TEST_OWNER_USER_ID)
+        encoded = urllib.parse.quote(self._ZH_DIRECTION)
+        assert encoded != self._ZH_DIRECTION
+        got = load_research_artifacts(encoded, 'zh',
+                                      user_id=TEST_OWNER_USER_ID)
+        assert got['found'] is True, (
+            'a proxy-re-escaped direction must still find its persisted rows')
+        assert got['survey_md'] == '# 综述'
+        assert len(got['accepted']) == 1
+        assert got['rejected'][0]['scores']['novelty'] == 2
+
+    def test_exact_identity_wins_over_the_decoded_fallback(self, fresh_db):
+        """A direction that LITERALLY contains %XX keeps its own row — the
+        fallback fires on a miss only, never shadowing an exact identity."""
+        from lib.research.persistence import (load_research_artifacts,
+                                              persist_survey)
+        literal = '100%25 effort'
+        persist_survey(literal, 'en', '# literal', _OPEN_GAPS, model='',
+                       user_id=TEST_OWNER_USER_ID)
+        persist_survey(urllib.parse.unquote(literal), 'en', '# decoded',
+                       _OPEN_GAPS, model='', user_id=TEST_OWNER_USER_ID)
+        got = load_research_artifacts(literal, 'en',
+                                      user_id=TEST_OWNER_USER_ID)
+        assert got['survey_md'] == '# literal'
+
+    def test_encoded_absent_direction_still_reads_empty(self, fresh_db):
+        from lib.research.persistence import load_research_artifacts
+        got = load_research_artifacts(
+            urllib.parse.quote('从未研究过的方向'), 'zh',
+            user_id=TEST_OWNER_USER_ID)
+        assert got['found'] is False
+        assert got['accepted'] == []
 
 
 # ── 3. Key discipline: never collide with a paper's own rows ──────────────

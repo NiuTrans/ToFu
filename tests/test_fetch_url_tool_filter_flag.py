@@ -1,17 +1,4 @@
-"""Regression: the fetch_url tool schema must follow the RUNTIME
-``lib.LLM_CONTENT_FILTER_ENABLED`` flag (Settings toggle, hot-applied by
-routes/config.py), not the ``FETCH_LLM_FILTER`` env var that only seeds the
-flag's default at import time.
-
-Pre-fix, ``lib/tools/search.py`` read the env var directly, so after a
-Settings toggle the schema kept advertising (or hiding) the ``reason``
-relevance-gate parameter stale — and the per-request consumers used the
-import-time ``FETCH_URL_TOOL`` snapshot, so even a correct source would not
-have reached the model until restart.
-
-Pure-pytest: monkeypatch the flag on the already-imported ``lib`` package and
-rebuild the schema per call — no server needed.
-"""
+"""Regression: fetch_url keeps one canonical schema across runtime toggles."""
 from __future__ import annotations
 
 import inspect
@@ -46,15 +33,15 @@ class TestFetchUrlToolFilterFlag:
         assert present is True
         assert 'relevance GATE' in description
 
-    def test_flag_off_hides_reason(self, monkeypatch):
+    def test_flag_off_keeps_canonical_reason(self, monkeypatch):
         present, description = _reason_param_present(monkeypatch, flag=False, env=None)
-        assert present is False
-        assert 'relevance GATE' not in description
+        assert present is True
+        assert 'relevance GATE' in description
 
     def test_runtime_flag_wins_over_env_on(self, monkeypatch):
-        # env says ON but the Settings toggle turned the filter OFF → hide.
+        # Runtime behavior may change, but the model-facing contract may not.
         present, _ = _reason_param_present(monkeypatch, flag=False, env='1')
-        assert present is False
+        assert present is True
 
     def test_runtime_flag_wins_over_env_off(self, monkeypatch):
         # env says OFF but the Settings toggle turned the filter ON → expose.
@@ -89,7 +76,7 @@ class TestFetchUrlToolFilterFlag:
         assert 'build_fetch_url_tool()' in poll_src
         assert 'FETCH_URL_TOOL' not in poll_src
 
-    @pytest.mark.parametrize(('flag', 'budget'), ((True, 400), (False, 300)))
+    @pytest.mark.parametrize(('flag', 'budget'), ((True, 400), (False, 400)))
     def test_runtime_schema_is_semantic_and_bounded(
             self, monkeypatch, flag, budget):
         from lib.tools.gateway import tool_schema_tokens
@@ -104,12 +91,23 @@ class TestFetchUrlToolFilterFlag:
             'verify its own receipt', 'Page Links', 'Concurrent batch',
         ):
             assert guidance in wire
-        if flag:
-            for guidance in (
-                'relevance GATE', 'Failed to fetch',
-                'does not select passages or summarize', 'batches bypass',
-            ):
-                assert guidance in wire
-        else:
-            assert 'relevance GATE' not in wire
+        for guidance in (
+            'relevance GATE', 'Failed to fetch',
+            'does not select passages or summarize', 'batches bypass',
+            'accepted but ignored',
+        ):
+            assert guidance in wire
         assert tool_schema_tokens([schema], model='kimi-k3') <= budget
+
+    def test_runtime_toggle_does_not_change_schema_bytes(self, monkeypatch):
+        monkeypatch.setattr(
+            _lib, 'LLM_CONTENT_FILTER_ENABLED', True, raising=False)
+        enabled = json.dumps(
+            search_tools.build_fetch_url_tool(), sort_keys=True,
+            separators=(',', ':'))
+        monkeypatch.setattr(
+            _lib, 'LLM_CONTENT_FILTER_ENABLED', False, raising=False)
+        disabled = json.dumps(
+            search_tools.build_fetch_url_tool(), sort_keys=True,
+            separators=(',', ':'))
+        assert enabled == disabled

@@ -47,8 +47,9 @@ Flags: `--full` (untruncated, all messages), `--raw` (messages as JSON),
 
 Key storage facts that save exploration turns:
 
-- The storage authority is the **sidecar** (`server.py` defaults
-  `TOFU_STORAGE_MODE=sidecar`). The inspector auto-resolves the active SQLite
+- The storage authority is the **sidecar** — it is the only mode;
+  `TOFU_STORAGE_MODE` is a retired key that startup rejects outright
+  (`runtime_guards.py`). The inspector auto-resolves the active SQLite
   authority from the live lease/open file or fastpath lineage. Never assume
   `data/tofu.db` while a fastpath shadow exists; use `--db` only for an
   explicitly verified override.

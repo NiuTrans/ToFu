@@ -1,4 +1,4 @@
-"""URL prefetch injection — splice auto-fetched URL content into the last user message.
+"""URL prefetch injection — append fetched content as a tail user carrier.
 
 Extracted from ``orchestrator.py`` (see the package ``__init__`` for the
 facade). Isolates :func:`inject_prefetched_urls`, which mutates the
@@ -11,12 +11,11 @@ logger = get_logger(__name__)
 
 
 def inject_prefetched_urls(messages, prefetched, task):
-    """Inject auto-fetched URL content into the last user message.
+    """Append auto-fetched URL content as an independent user carrier.
 
     For each ``(url, content)`` pair in *prefetched*, builds a labelled
     text block (distinguishing PDF vs Web Page) and appends the combined
-    block to the last ``role='user'`` message.  Handles both plain-string
-    and structured-list content formats.
+    block at the message tail without editing the human-authored request.
 
     Parameters
     ----------
@@ -45,23 +44,13 @@ def inject_prefetched_urls(messages, prefetched, task):
         )
     urls_text = '\n\n' + ('═' * 40 + '\n\n').join(url_blocks)
 
-    # Walk backwards to find the last user message and append there
     _spliced = '\n\n[Auto-fetched URL content:]\n' + urls_text
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get('role') != 'user':
-            continue
-        mc = messages[i].get('content', '')
-        if isinstance(mc, str):
-            messages[i] = {
-                **messages[i],
-                'content': mc + _spliced,
-            }
-        elif isinstance(mc, list):
-            messages[i] = {
-                **messages[i],
-                'content': mc + [{'type': 'text', 'text': _spliced}],
-            }
-        break
+    messages.append({
+        'role': 'user',
+        'content': _spliced,
+        '_isMeta': True,
+        '_isUrlPrefetch': True,
+    })
 
     try:
         _cid = (task.get('convId') or '') if isinstance(task, dict) else ''

@@ -1,5 +1,5 @@
 /**
- * Tofu Browser Bridge — Background Service Worker (v5.4.2)
+ * Tofu Browser Bridge — Background Service Worker (v5.4.4)
  *
  * Single-endpoint architecture:
  *   Every poll is a POST to /api/browser/poll with:
@@ -40,7 +40,7 @@ const PROTOCOL_VERSION = 2;
 const BROWSER_CAPABILITIES = [
   'tabs', 'navigate', 'read', 'snapshot', 'click', 'fill', 'press',
   'select', 'scroll', 'wait', 'execute', 'iframes', 'network_capture',
-  'network_body', 'deep_collect', 'devtools_console', 'js_debugger',
+  'network_body', 'deep_collect', 'research_hints', 'devtools_console', 'js_debugger',
   'upload', 'file_export', 'downloads', 'screenshot',
 ];
 // Auto re-pair (owner decree 2026-08-04): the extension must NEVER send the
@@ -150,6 +150,7 @@ const NETWORK_CAPTURE_MAX_ENTRIES = 80;
 const NETWORK_CAPTURE_MAX_TRACKED_REQUESTS = 160;
 const NETWORK_CAPTURE_MAX_BODY_CHARS = 384 * 1024;
 const NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS = 1024 * 1024;
+const NETWORK_CAPTURE_HINT_RESERVE_CHARS = 256 * 1024;
 const NETWORK_CAPTURE_RECENT_TABS = 12;
 const NETWORK_CAPTURE_MAX_WEBSOCKET_FRAMES = 40;
 const NETWORK_CAPTURE_MAX_ACTIVE = 4;
@@ -350,9 +351,31 @@ function setServer(url) {
   SERVER_URL = url;
   console.log('[Bridge] Server:', SERVER_URL);
   chrome.storage.local.set({ serverUrl: url });
+  registerOriginMarker(url);
   _resetAuthBackoff();
   stopPolling();
   startPolling();
+}
+
+/* The web app pins browser automation to THIS machine by reading the DOM
+ * stamp left by origin_marker.js — without it the server sees an anonymous
+ * fleet of polling devices (two computers, one account) and any can win a
+ * given call. Registration must be dynamic: the paired origin is only known
+ * at runtime. Same-id re-registration is a cheap replace. */
+function registerOriginMarker(serverUrl) {
+  if (!chrome.scripting || !chrome.scripting.registerContentScripts) return;
+  let origin;
+  try {
+    origin = new URL(serverUrl).origin;
+  } catch (e) {
+    return;
+  }
+  chrome.scripting.registerContentScripts([{
+    id: 'tofu-origin-marker',
+    js: ['origin_marker.js'],
+    matches: [origin + '/*'],
+    runAt: 'document_start',
+  }]).catch((e) => console.warn('[Bridge] origin marker registration failed:', e));
 }
 
 // ══════════════════════════════════════════
@@ -1343,11 +1366,24 @@ async function cmdGetInteractiveElements(params) {
     await waitForTabLoad(tabId, 10000);
   }
 
-  const results = await chrome.scripting.executeScript({
+  const enumerate = () => chrome.scripting.executeScript({
     target: { tabId },
     func: _getInteractiveElements,
     args: [params.maxElements || 200, params.viewport || false],
   });
+
+  let results = await enumerate();
+
+  /* SPA shell race: tab.status==='complete' only means the INITIAL document
+   * loaded; XHR-driven rendering lands later and an enumeration fired in the
+   * gap returns zero elements, which the model experiences as "no element
+   * matches" on a page that visibly has buttons. One bounded settle +
+   * re-enumeration closes the gap; an empty second result is the truth. */
+  let first = results && results[0] && results[0].result;
+  if (!first || !Array.isArray(first.elements) || first.elements.length === 0) {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    results = await enumerate();
+  }
 
   if (results && results[0] && results[0].result) {
     const r = results[0].result;
@@ -3439,7 +3475,7 @@ async function cmdResearchUrl(params) {
   const seenFingerprints = new Set();
   try {
     captureId = (await _startNetworkCapture({
-      tabId: tab.id, captureBodies: true,
+      tabId: tab.id, captureBodies: true, captureHints: params.captureHints,
     }, { allowInertBlank: true })).captureId;
     await chrome.tabs.update(tab.id, {url: requestedUrl});
     await waitForTabLoad(tab.id, Math.min(20000, timeoutMs));
@@ -4554,6 +4590,41 @@ function _networkPatternMatches(url, patterns) {
   });
 }
 
+function _normalizedResearchCaptureHints(rawHints) {
+  const hints = [];
+  for (const raw of Array.isArray(rawHints) ? rawHints.slice(0, 5) : []) {
+    if (!raw || !['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(String(raw.method))) continue;
+    let origin;
+    try {
+      const parsed = new URL(String(raw.origin || ''));
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== String(raw.origin)) continue;
+      origin = parsed.origin;
+    } catch (_) { continue; }
+    const pathTemplate = String(raw.pathTemplate || '');
+    const segments = pathTemplate === '/' ? [] : pathTemplate.split('/').slice(1);
+    if (!pathTemplate.startsWith('/') || pathTemplate.length > 512 ||
+        segments.length > 24 || segments.some((segment) =>
+          !/^(?:[a-z][a-z_-]{0,39}|\{segment\}|\{truncated\})$/.test(segment))) continue;
+    hints.push({method: String(raw.method), origin, segments});
+  }
+  return hints;
+}
+
+function _networkCaptureMatchesHint(capture, row) {
+  if (!capture.priorityHints.length) return false;
+  let parsed;
+  try { parsed = new URL(String(row.url || '')); } catch (_) { return false; }
+  const actual = parsed.pathname.split('/').filter(Boolean);
+  return capture.priorityHints.some((hint) => {
+    if (hint.method !== String(row.method || 'GET').toUpperCase() || hint.origin !== parsed.origin) return false;
+    const truncatedAt = hint.segments.indexOf('{truncated}');
+    const expectedLength = truncatedAt >= 0 ? truncatedAt : hint.segments.length;
+    if (actual.length < expectedLength || (truncatedAt < 0 && actual.length !== expectedLength)) return false;
+    return hint.segments.slice(0, expectedLength).every(
+      (segment, index) => segment === '{segment}' || segment === actual[index].toLowerCase());
+  });
+}
+
 function _networkCaptureForTab(tabId) {
   const captureId = _networkCaptureByTab.get(Number(tabId));
   return captureId ? _networkCaptures.get(captureId) : null;
@@ -4584,7 +4655,10 @@ async function _captureResponseBody(capture, row, encodedDataLength) {
     capture.droppedBodies++;
     return;
   }
-  const remaining = NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS - capture.totalBodyChars;
+  const priority = _networkCaptureMatchesHint(capture, row);
+  const ceiling = priority ? NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS :
+    NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS - capture.priorityReserveChars;
+  const remaining = ceiling - capture.totalBodyChars;
   if (remaining <= 0) {
     row.responseBodyTruncated = true;
     row.responseBodyFullSize = fullSizeHint || null;
@@ -4609,6 +4683,7 @@ async function _captureResponseBody(capture, row, encodedDataLength) {
     }
     row.responsePreview = text;
     capture.totalBodyChars += text.length;
+    if (priority) capture.priorityBodyMatches++;
     capture.lastActivityAt = Date.now();
   } catch (error) {
     // Bodies can be unavailable for redirects, cached entries, preflight or a
@@ -4654,7 +4729,10 @@ function _onNetworkDebuggerEvent(source, method, params) {
     }
     let text = String(frame.payloadData || '');
     if (!text || text.includes('\u0000')) return;
-    const remaining = NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS - capture.totalBodyChars;
+    // WebSocket frames are unhinted evidence, so they cannot consume the
+    // response-body reserve held for previously observed HTTP endpoints.
+    const remaining = NETWORK_CAPTURE_MAX_TOTAL_BODY_CHARS -
+      capture.priorityReserveChars - capture.totalBodyChars;
     if (remaining <= 0) {
       capture.droppedBodies++;
       return;
@@ -4774,6 +4852,9 @@ function _publicNetworkSnapshot(capture) {
     droppedBodies: capture.droppedBodies,
     webSocketFrameCount: capture.webSocketFrameCount,
     totalBodyChars: capture.totalBodyChars,
+    priorityHintCount: capture.priorityHints.length,
+    priorityBodyMatches: capture.priorityBodyMatches,
+    priorityReserveChars: capture.priorityReserveChars,
     consoleEntries: Array.isArray(capture.consoleEntries)
       ? capture.consoleEntries.slice(0, DEVTOOLS_MAX_LOG_ENTRIES) : [],
     droppedConsoleEntries: Number(capture.droppedConsoleEntries) || 0,
@@ -4805,6 +4886,7 @@ async function _startNetworkCapture(params, { allowInertBlank = false } = {}) {
   }
   await _assertExpectedDomain(params, tab);
   const captureBodies = params.captureBodies === true;
+  const priorityHints = _normalizedResearchCaptureHints(params.captureHints);
   const priorBodyCapture = _networkCaptureByTab.get(Number(params.tabId));
   if (captureBodies && priorBodyCapture) {
     await _stopNetworkCaptureInternal(priorBodyCapture, { remember: true });
@@ -4824,6 +4906,8 @@ async function _startNetworkCapture(params, { allowInertBlank = false } = {}) {
     droppedBodies: 0, webSocketFrameCount: 0,
     startedAt: Date.now(), lastActivityAt: Date.now(),
     bodyCaptureTail: Promise.resolve(), pageUrl: '', captureBodies,
+    priorityHints, priorityBodyMatches: 0,
+    priorityReserveChars: priorityHints.length ? NETWORK_CAPTURE_HINT_RESERVE_CHARS : 0,
     cdpAttached: false, everCdpAttached: false, stopping: false,
     cdpLease: null,
     consoleEntries: [], consoleChars: 0, droppedConsoleEntries: 0,

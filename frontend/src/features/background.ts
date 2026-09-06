@@ -63,6 +63,13 @@ function runtimeFunction<T extends (...args: never[]) => unknown>(name: string):
   return typeof value === 'function' ? value as unknown as T : null;
 }
 
+/** The Android WebView reports visible while backgrounded; the shell bridge
+ *  published on the registry is the only reliable pocket signal there. */
+function shellHidden(): boolean {
+  return (featureRegistry as { nativeVisibility?: { isHidden(): boolean } })
+    .nativeVisibility?.isHidden() === true;
+}
+
 function startSubscriptionResetNotice(): void {
   if (resetNoticeController) return;
   const translate = t as unknown as (
@@ -95,7 +102,7 @@ function startSubscriptionResetNotice(): void {
       return runtimeFunction<(value: string) => unknown>('switchSettingsTab')?.(tabId);
     },
     storage: resolveBrowserLocalStorage(),
-    isVisible: () => document.visibilityState !== 'hidden',
+    isVisible: () => document.visibilityState !== 'hidden' && !shellHidden(),
     subscribeOfferUpdates(listener): (() => void) | null {
       const subscribe = runtimeFunction<RuntimePushSubscribe>('pushSubscribe');
       const unsubscribe = runtimeFunction<RuntimePushUnsubscribe>('pushUnsubscribe');
@@ -118,7 +125,7 @@ function startSubscriptionResetNotice(): void {
   if (!visibilityListenerInstalled) {
     visibilityListenerInstalled = true;
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState !== 'hidden') {
+      if (document.visibilityState !== 'hidden' && !shellHidden()) {
         void resetNoticeController?.checkIfDue();
       }
     });

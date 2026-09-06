@@ -206,7 +206,8 @@ def _turn_list(session: Session, payload: Mapping[str, Any]) -> Any:
         where += " AND lane_id=?"
         params.append(str(lane_id))
     rows = session.fetch_all(
-        "SELECT * FROM storage_conversation_turns WHERE " + where + " ORDER BY ordinal",
+        "SELECT * FROM storage_conversation_turns WHERE " + where
+        + " ORDER BY ordinal, turn_id",
         tuple(params),
     )
     return [_turn_public(session, row) for row in rows]
@@ -575,12 +576,52 @@ def _partition_visible_messages(messages: Any) -> tuple[list[Any], list[Any]]:
     return kept, dropped
 
 
+def _inherit_live_round_fields(
+    projection: dict[str, Any], live_projection: Mapping[str, Any]
+) -> None:
+    """Restore full-fidelity round fields from the live root projection.
+
+    Visible-sync messages carry the flow projection's bounded preview rounds
+    (query brief + result snippet, no toolArgs).  The root turn's
+    live-checkpointed projection still holds the same rounds at full fidelity
+    under the same stable toolCallId, so the durable boundary can rebuild
+    display-complete turns without growing the sync payload.  Fill-only: the
+    flow projection's own values always win and unmatched rounds stay
+    untouched.
+    """
+    rounds = projection.get("toolRounds")
+    live_rounds = live_projection.get("toolRounds")
+    if not isinstance(rounds, list) or not isinstance(live_rounds, list):
+        return
+    live_by_id = {
+        str(item.get("toolCallId")): item
+        for item in live_rounds
+        if isinstance(item, Mapping) and item.get("toolCallId")
+    }
+    if not live_by_id:
+        return
+    for round_dict in rounds:
+        if not isinstance(round_dict, dict):
+            continue
+        live = live_by_id.get(str(round_dict.get("toolCallId") or ""))
+        if not isinstance(live, Mapping):
+            continue
+        for field in ("toolArgs", "toolContent", "tStart", "tEnd",
+                      "attemptId", "taskId"):
+            if (round_dict.get(field) in (None, "")
+                    and live.get(field) not in (None, "")):
+                round_dict[field] = live[field]
+
+
 def _visible_shape(
-    message: Mapping[str, Any], default_kind: str
+    message: Mapping[str, Any],
+    default_kind: str,
+    live_projection: Mapping[str, Any] | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     from lib.orchestration_message_compat import normalize_flow_message
     from lib.turn_projection_patch import normalize_projection_document
 
+    from lib.turn_projection_segments import projection_with_stable_segments
     message = normalize_flow_message(message)
     role = message.get("role")
     if message.get("_isVirtualUser"):
@@ -603,8 +644,16 @@ def _visible_shape(
     projection = normalize_projection_document(message)
     projection.setdefault("content", "")
     projection.setdefault("thinking", "")
-    projection.setdefault("segments", [])
     projection.setdefault("toolRounds", [])
+    if isinstance(live_projection, Mapping):
+        _inherit_live_round_fields(projection, live_projection)
+    # Persist the same assembled segment timeline a normal turn checkpoints.
+    # Visible-sync messages arrive with toolRounds but no segments; leaving
+    # the durable list empty made the settled surface fall back to content
+    # plus a trailing rounds panel (tools never interleave, command cards
+    # lose their data) until a serve-time repair rewrote the read.
+    projection = projection_with_stable_segments(
+        projection, actor=actor, status="completed")
     orchestration = projection.get("orchestration")
     phase = dict(orchestration) if isinstance(orchestration, Mapping) else {}
     phase.update({
@@ -654,7 +703,9 @@ def _turn_visible_sync(session: Session, payload: Mapping[str, Any]) -> Any:
     sync_event: dict[str, Any] | None = None
     for index, message in enumerate(messages):
         actor, kind, projection = _visible_shape(
-            message, str(payload.get("default_kind") or "flow_node")
+            message,
+            str(payload.get("default_kind") or "flow_node"),
+            live_projection=root_projection_before,
         )
         if index == 0:
             turn_id = root_id
@@ -1001,6 +1052,8 @@ def _turn_sync_snapshot(session: Session, payload: Mapping[str, Any]) -> Any:
                 "fromConv": str(queue_payload.get("_fromConv") or ""),
                 "isPeerHuman": bool(queue_payload.get("_peerHuman")),
             })
+        if queue_payload.get("_steerFallback"):
+            item["steerFallback"] = True
         queue_items.append(item)
     settings = _load(conversation["settings_json"]) or {}
     if not isinstance(settings, Mapping):

@@ -1,0 +1,7 @@
+{
+  "attempt": 1,
+  "contentEpoch": 1,
+  "kind": "s",
+  "max": 1,
+  "type": "retry_reset"
+}

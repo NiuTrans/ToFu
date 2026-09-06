@@ -27,9 +27,8 @@ to pass post-split — by file path of the symbols they exercise:
   5. test_phase0_image_strip_runs_when_image_count_exceeds_keep_tail
        Phase 0 image-strip (Layer 1 OOM protection) is non-negotiable.
 
-  6. test_micro_compact_persists_via_cas_update
-       L1 fix: micro_compact mutates ``toolContent`` durably and
-       persists via CAS-style UPDATE on the conversations table.
+  6. test_micro_compact_source_has_no_transcript_authority_access
+       L1 may change only the request-local projection, never durable Turns.
 
   7. test_compaction_facade_export_list
        Every name imported by the existing test suite stays reachable.
@@ -658,49 +657,34 @@ class TestPhase0ImageStrip:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  6. micro_compact loads from DB, mutates toolContent, persists via UPDATE
+#  6. micro_compact is isolated from durable transcript authority
 # ═══════════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-class TestMicroCompactDurablePersistence:
-    """The L1 fix (``l1-compaction-fix-durable-placeholders`` memory):
-    when ``micro_compact`` archives a tool result, it must also mutate
-    the conv-side ``toolContent`` field and persist it back to the
-    ``conversations`` table via a CAS-style UPDATE so the next
-    ``build_api_messages_from_db`` rebuild produces the same placeholder.
+class TestMicroCompactRequestIsolation:
+    """Automatic L1 may mutate only its API-form request projection."""
 
-    Static-source check (full integration is in
-    ``tests/test_compaction_improvements.py``).  This test guards the
-    invariant that the DB-load + UPDATE flow lives **inside** the
-    micro_compact function — i.e. nobody can split Phase A/B/C from the
-    DB-persistence path without breaking this behaviour."""
-
-    def test_micro_compact_source_contains_db_load_and_update(self):
+    def test_micro_compact_source_has_no_transcript_authority_access(self):
         import inspect
 
         from lib.tasks_pkg.compaction.api import micro_compact
 
         src = inspect.getsource(micro_compact)
-        # The L1 fix introduced these markers in the function body:
-        assert '_round_index' in src, (
-            "micro_compact lost its _round_index DB-load — L1 placeholder "
-            "fix regressed (memory: l1-compaction-fix-durable-placeholders)"
+        forbidden = (
+            '_round_index', 'toolContent', 'load_transcript',
+            'cas_update_conversation_messages', 'update_turn_projection',
+            'notify_conversation_changed',
         )
-        assert 'toolContent' in src, (
-            "micro_compact no longer mutates toolContent for durability"
-        )
-        # CAS-style persist of the conversation row. The literal
-        # ``UPDATE conversations`` SQL moved behind the ConversationStore
-        # seam (2026-06 persistence-decoupling); accept either the inline
-        # SQL (legacy) or the seam call so the invariant tracks behaviour,
-        # not the layer the SQL happens to live in.
-        assert ('UPDATE conversations' in src
-                or 'cas_update_conversation_messages' in src
-                or 'update_turn_projection' in src), (
-            "micro_compact lost its CAS projection persist (legacy whole-row "
-            "CAS or turn-native update_turn_projection) — placeholders will "
-            "not survive next build_api_messages_from_db"
-        )
+        assert not [marker for marker in forbidden if marker in src]
+        assert 'run_steps(step_names, ctx)' in src
+
+    def test_orchestrator_uses_a_nested_working_copy(self):
+        import inspect
+
+        from lib.tasks_pkg.orchestrator import _run
+
+        src = inspect.getsource(_run.run_task)
+        assert "messages = copy.deepcopy(task['messages'])" in src
 
 
 # ═══════════════════════════════════════════════════════════════════════

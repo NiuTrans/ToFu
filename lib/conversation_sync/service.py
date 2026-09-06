@@ -29,6 +29,58 @@ from lib.turn_projection_segments import (
 )
 
 
+def _backfill_legacy_observation_attempt_ids(turn: Any) -> Any:
+    """Legacy/read-adapter boundary: client-perception receipts persisted
+    before attempt tracking lack the now-required attemptId. Backfill the
+    empty identity so historical turns stay readable; rows missing other
+    required fields still fail closed at decode. Copy-on-write: repository
+    state is never mutated.
+    """
+    if not isinstance(turn, dict):
+        return turn
+    projection = turn.get("projection")
+    if not isinstance(projection, dict):
+        return turn
+    trace = projection.get("timingTrace")
+    if not isinstance(trace, dict):
+        return turn
+    observations = trace.get("clientObservations")
+    if not isinstance(observations, list) or not any(
+        isinstance(item, dict) and "attemptId" not in item
+        for item in observations
+    ):
+        return turn
+    patched = [
+        {**item, "attemptId": ""}
+        if isinstance(item, dict) and "attemptId" not in item
+        else item
+        for item in observations
+    ]
+    return {
+        **turn,
+        "projection": {
+            **projection,
+            "timingTrace": {**trace, "clientObservations": patched},
+        },
+    }
+
+
+# Persisted-read adapter registry: every legacy-shape lift applied at the
+# snapshot/turn-page read boundary, in registration order. Each adapter is
+# copy-on-write and must be pinned by a legacy fixture under
+# contracts/fixtures/sync_v3/ (tests/test_wire_fixtures.py).
+TURN_READ_ADAPTERS: tuple[Callable[[Any], Any], ...] = (
+    _backfill_legacy_observation_attempt_ids,
+)
+
+
+def adapt_turn_read(turn: Any) -> Any:
+    """Run the registered persisted-read adapters over one stored turn."""
+    for adapter in TURN_READ_ADAPTERS:
+        turn = adapter(turn)
+    return turn
+
+
 class ConversationSyncNotFound(LookupError):
     pass
 
@@ -132,7 +184,7 @@ class ConversationSyncService:
                     **raw_turn,
                     "presentationId": str(raw_turn.get("turnId") or ""),
                 }
-            stored_turns.append(raw_turn)
+            stored_turns.append(adapt_turn_read(raw_turn))
         response = {
             "ok": True,
             "contract": "tofu.conversation-sync.snapshot/v1",
@@ -208,7 +260,10 @@ class ConversationSyncService:
             "hasMore": bool(stored.get("hasMore")),
             "totalTurns": int(stored.get("totalTurns") or 0),
             "turns": public_value_with_stable_segments(
-                list(stored.get("turns") or [])
+                [
+                    adapt_turn_read(turn)
+                    for turn in list(stored.get("turns") or [])
+                ]
             ),
             "attempts": list(stored.get("attempts") or []),
         }

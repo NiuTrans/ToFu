@@ -2,7 +2,7 @@
 
 docs/modules/remote_execution.md:
   * **同名策略**:远程会话沿用 write_file 等工具名 —— schema 逐字节不变,
-    仅 description 追加本地执行提示(``with_remote_hint``);
+    本地执行提示放在尾部 user context;
     OFF→ON 一次性 latch-clear(project_ready/multiroot 同范式);
   * **路由**:``_handle_project_tool`` 读 ``cfg['project_remote']``
     (总闸 ``TOFU_REMOTE_WORKTREE``)翻译为 ``project_<fn>`` 命令按
@@ -79,7 +79,7 @@ class TestBindingContract:
 
 
 # ═══════════════════════════════════════════════════════════
-#  投影:同名 schema + 本地执行提示
+#  投影:远程状态不改变工具声明
 # ═══════════════════════════════════════════════════════════
 
 @pytest.mark.unit
@@ -91,12 +91,19 @@ class TestProjection:
         # create_project 已退出模型面向 schema；拍板 3A 契约对剩余项目工具不变。
         base = {t['function']['name']: t for t in PROJECT_TOOLS}
         hinted = {t['function']['name']: t for t in tools}
-        # 拍板 3A:同名同 schema,仅 description 变化
+        # 路由说明进入尾部 user context；工具声明保持完全一致。
         assert set(hinted) == set(base)
         for name, t in hinted.items():
-            assert t['function']['parameters'] == \
-                base[name]['function']['parameters']
-        desc = hinted['write_file']['function']['description']
+            assert t == base[name]
+
+    def test_remote_hint_applies_to_scaffold_spec(self, monkeypatch):
+        # create_project 的新家:project_scaffold spec 在远程绑定下同样
+        # 携带本地执行提示(同一 with_remote_hint 路径)。
+        monkeypatch.setenv('TOFU_REMOTE_WORKTREE', '1')
+        from lib.tools.registry._build import _build_project_scaffold
+        tools = _build_project_scaffold(_ctx())
+        assert [t['function']['name'] for t in tools] == ['create_project']
+        desc = tools[0]['function']['description']
         assert 'local machine' in desc.lower() or '本地' in desc
 
     def test_master_switch_off_no_hint(self, monkeypatch):

@@ -419,6 +419,8 @@ function _buildSwarmPanelHTML(round, allRounds) {
     statusPill = `<span class="sw-status-pill sw-pill-error" title="${escapeHtml(round._swarmError)}">${_SW_STATUS_SVG.failed} Failed</span>`;
   } else if (failed > 0 && done === 0) {
     statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Failed</span>`;
+  } else if (failed > 0) {
+    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Completed with errors</span>`;
   } else if (finished === 0 && total > 0
              && !(round._swarmSnapshot && round._swarmSnapshot.settled)) {
     /* No terminal agent or settled snapshot is never Complete. Deliberately
@@ -443,7 +445,7 @@ function _buildSwarmPanelHTML(round, allRounds) {
         `<div class="sw-progress-fill${fillClass}" style="width:${pctDone + pctFailed + pctRunning}%"${fillStyle}></div>` +
       `</div>` +
       `<div class="sw-progress-label">` +
-        `<span>${finished}/${total} agents complete</span>` +
+        `<span>${finished}/${total} agents finished</span>` +
         (elapsed ? `<span>${elapsed}</span>` : "") +
       `</div>` +
     `</div>`;
@@ -1077,7 +1079,8 @@ async function _reconcileStuckSwarmPanelsOnce() {
 
 function _swReconcileDocumentHidden() {
   return typeof document !== 'undefined'
-    && (document.hidden === true || document.visibilityState === 'hidden');
+    && (document.hidden === true || document.visibilityState === 'hidden'
+      || runtimeScope.nativeVisibility?.isHidden() === true);
 }
 
 function _swResumeTimerTicker() {

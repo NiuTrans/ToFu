@@ -28,10 +28,28 @@ from lib.orchestration_transcript import OrchestrationTranscript
 logger = get_logger(__name__)
 
 ZERO_DELIVERABLE_DIRECTIVE = (
-    'STOP ANALYZING — START EXECUTING. Your last attempts produced ZERO '
-    'state-changing actions (no file writes, edits, or commands). Your very '
-    'next step MUST be a concrete state-changing tool call that advances the '
-    'plan. Do not just read, search, or describe.'
+    'Your last attempts produced no durable deliverable. Reassess the next '
+    'step: if the exploration already answered the important questions, move '
+    'to a concrete deliverable now. If more read-only investigation is '
+    'genuinely required, state the specific unanswered question and inspect '
+    'new evidence that can answer it. Do not mutate state merely to satisfy '
+    'this guard.'
+)
+
+REPEATED_FEEDBACK_DIRECTIVE = (
+    'The reviewer feedback is worded similarly to an earlier turn. This is '
+    'only a strategy-change hint, not proof that the work is stuck. Compare '
+    'the feedback with the latest attempt: verify whether the issue still '
+    'exists, then either address the concrete remaining gap with a different '
+    'approach or show the reviewer the evidence that it is resolved.'
+)
+
+DIMINISHING_RETURNS_DIRECTIVE = (
+    'Recent turns edited overlapping targets without increasing the '
+    'reviewer-reported count of resolved criteria. This can still be valid '
+    'incremental work, so it is not a stop condition. Reassess the approach: '
+    'verify whether the edits are converging, choose a different strategy if '
+    'they are not, and keep the structured progress line accurate.'
 )
 
 GOAL_COMPLETION_EVIDENCE_DIRECTIVE = (
@@ -142,6 +160,7 @@ class OrchestrationLoopRuntime:
         replan_exhausted = False
         producer_sc_total = 0
         stop_challenged = False
+        strategy_nudged = False
         for index in range(cap):
             if self._abort_check():
                 raise OrchestrationLoopAborted()
@@ -315,41 +334,55 @@ class OrchestrationLoopRuntime:
 
             if (
                 self._feedback.detects_stuck(verifier_role=verifier_role)
+                and not strategy_nudged
                 and iteration < cap
             ):
+                # Similar reviewer prose is useful as a weak strategy signal,
+                # but it is not evidence that the worker or world state failed
+                # to advance.  The old branch terminated here, which could
+                # kill a valid retry simply because a verifier restated the
+                # same acceptance criterion.  Nudge once and keep the finite
+                # iteration cap as the safety boundary.
+                strategy_nudged = True
+                self._feedback.set_directive(REPEATED_FEEDBACK_DIRECTIVE)
                 self._emit({
                     'type': 'stuck_detected',
                     'node_id': loop_id,
                     'iteration': iteration,
+                    'action': 'strategy_nudge',
                 })
                 logger.info(
-                    '[FlowEngine] loop %s STUCK (repeating feedback) — '
-                    'breaking after iteration %d',
+                    '[FlowEngine] loop %s repeating verifier feedback — '
+                    'injecting one strategy nudge after iteration %d',
                     loop_id,
                     iteration,
                 )
-                exit_reason = 'stuck'
-                break
 
-            if verifier_role == 'virtual_user' and iteration < cap:
+            if (
+                verifier_role == 'virtual_user'
+                and not strategy_nudged
+                and iteration < cap
+            ):
                 progress_window = self._feedback.no_progress_window()
                 if progress_window:
+                    strategy_nudged = True
+                    self._feedback.set_directive(
+                        DIMINISHING_RETURNS_DIRECTIVE)
                     self._emit({
                         'type': 'no_progress',
                         'node_id': loop_id,
                         'iteration': iteration,
                         'window': progress_window,
+                        'action': 'strategy_nudge',
                     })
                     logger.info(
-                        '[FlowEngine] loop %s NO-PROGRESS (churn without net '
-                        'resolved items over %d turns) — breaking after '
+                        '[FlowEngine] loop %s possible diminishing returns '
+                        'over %d turns — injecting one strategy nudge after '
                         'iteration %d',
                         loop_id,
                         progress_window,
                         iteration,
                     )
-                    exit_reason = 'no_progress'
-                    break
 
             if (
                 phase == 'planner'
@@ -403,8 +436,10 @@ class OrchestrationLoopRuntime:
 
 
 __all__ = [
+    'DIMINISHING_RETURNS_DIRECTIVE',
     'MAX_REPLANS',
     'MAX_ZERO_DELIVERABLE_TURNS',
+    'REPEATED_FEEDBACK_DIRECTIVE',
     'OrchestrationLoopAborted',
     'OrchestrationLoopRuntime',
     'ZERO_DELIVERABLE_DIRECTIVE',

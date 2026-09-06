@@ -59,9 +59,9 @@ logger = get_logger(__name__)
 def flush_deferred_peer_and_steer(task: dict[str, Any], *,
                                   round_num: int, tid: str) -> None:
     """Emit ``PEER_INBOX_INJECT`` + ``USER_STEER_INJECT`` chips and
-    accumulate display-only sidecars for the peer / steer messages
-    that were injected into ``messages`` earlier this round and are
-    now confirmed as delivered (the LLM call above returned).
+    accumulate display-only sidecars for the peer / steer / background-
+    command messages that were injected into ``messages`` earlier this round
+    and are now confirmed as delivered (the LLM call above returned).
 
     Parameters
     ----------
@@ -111,9 +111,9 @@ def flush_deferred_peer_and_steer(task: dict[str, Any], *,
                    if _pit.get('queueId')]
         if _conv_dd and _dd_ids:
             try:
-                from lib.message_queue import dedup_peer_durable_rows
+                from lib.message_queue import dedup_inbox_durable_rows
                 from lib.tasks_pkg.manager import task_user_id
-                dedup_peer_durable_rows(
+                dedup_inbox_durable_rows(
                     _conv_dd, _dd_ids, user_id=int(task_user_id(task)))
             except Exception as _dde:
                 logger.warning(
@@ -162,3 +162,47 @@ def flush_deferred_peer_and_steer(task: dict[str, Any], *,
         except Exception as _sce:
             logger.warning('[Task %s] steer inject chip emit failed: %s',
                            tid, _sce)
+
+    # ── Flush DEFERRED background-command delivery (never-zero fix) ──
+    # Same discipline as peer: the LLM call succeeded, so the detached
+    # run_command completion injected this round WAS consumed. Emit the
+    # BACKGROUND_COMMAND_INJECT chip, accumulate the display-only
+    # ``task['_bgCommandInjects']`` sidecar, and delete the durable
+    # message_queue row(s) by queueId so dispatch_next_queued can't later
+    # re-dispatch them as a redundant fresh turn. On an abort before this
+    # point the row SURVIVES → fresh-turn dispatch delivers it exactly once.
+    _bgcmd_inject = task.pop('_bgcmd_inject_pending', None)
+    if _bgcmd_inject:
+        _bgcmd_previews = [{
+            'commandId': str(_bit.get('commandId') or ''),
+            'text': (_bit.get('value') or '')[:1200],
+        } for _bit in _bgcmd_inject]
+        try:
+            append_event(task, build_event(
+                EventType.BACKGROUND_COMMAND_INJECT,
+                roundNum=round_num + 1,
+                count=len(_bgcmd_inject),
+                previews=_bgcmd_previews,
+            ))
+        except Exception as _bce:
+            logger.warning('[Task %s] background-command inject chip emit '
+                           'failed: %s', tid, _bce)
+        task.setdefault('_bgCommandInjects', []).append({
+            'round': round_num + 1,
+            'count': len(_bgcmd_inject),
+            'previews': _bgcmd_previews,
+        })
+        _bg_conv_dd = task.get('convId', '') or ''
+        _bg_dd_ids = [_bit.get('queueId') for _bit in _bgcmd_inject
+                      if _bit.get('queueId')]
+        if _bg_conv_dd and _bg_dd_ids:
+            try:
+                from lib.message_queue import dedup_inbox_durable_rows
+                from lib.tasks_pkg.manager import task_user_id
+                dedup_inbox_durable_rows(
+                    _bg_conv_dd, _bg_dd_ids,
+                    user_id=int(task_user_id(task)))
+            except Exception as _bgde:
+                logger.warning(
+                    '[Task %s] deferred background-command de-dup failed '
+                    '(durable row may re-deliver once): %s', tid, _bgde)

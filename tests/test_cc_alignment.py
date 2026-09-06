@@ -96,7 +96,7 @@ class TestSystemPromptSections:
         assert 'brief' in section.lower()
 
     def test_sections_injected_when_tools_present(self):
-        """Verify sections are appended to system message when has_real_tools=True."""
+        """Tool guidance rides a new tail user when tools are present."""
         from lib.tasks_pkg.context_composer import compose_task_context
         messages = [{'role': 'system', 'content': 'You are a helpful assistant.'}]
         compose_task_context(
@@ -108,12 +108,9 @@ class TestSystemPromptSections:
             search_enabled=False,
             has_real_tools=True,
         )
-        system_content = messages[0]['content']
-        # Content may now be a list of text blocks (static/dynamic split)
-        if isinstance(system_content, list):
-            full_text = '\n\n'.join(b['text'] for b in system_content if isinstance(b, dict))
-        else:
-            full_text = system_content
+        assert messages[0]['content'] == 'You are a helpful assistant.'
+        assert messages[-1]['role'] == 'user'
+        full_text = str(messages[-1]['content'])
         assert 'Function Result Clearing' in full_text
         assert 'important information' in full_text
         assert 'parallel' in full_text.lower()
@@ -478,11 +475,8 @@ class TestFullPipelineIntegration:
             search_enabled=False,
             has_real_tools=True,
         )
-        content = messages[0]['content']
-        if isinstance(content, list):
-            full = '\n\n'.join(b['text'] for b in content if isinstance(b, dict))
-        else:
-            full = content
+        assert messages[0]['content'] == 'Pre-existing.'
+        full = str(messages[-1]['content'])
         tool_pos = full.find('Using your tools')
         output_pos = full.find('Output efficiency')
         frc_pos = full.find('Function Result Clearing')
@@ -520,7 +514,7 @@ class TestSystemReminderAndBlocks:
                 memory_enabled=False, search_enabled=False,
                 has_real_tools=True,
             )
-        # Find the prepended user _isMeta message
+        # Find the appended user _isMeta message
         meta_msg = next(
             (m for m in messages
              if m.get('role') == 'user' and m.get('_isMeta')), None)
@@ -542,8 +536,8 @@ class TestSystemReminderAndBlocks:
             sys_text = sys_content
         assert 'Project files: a.py, b.py' not in sys_text
 
-    def test_skills_context_in_system_message(self):
-        """Memory count hint is injected into the system message.
+    def test_skills_context_in_tail_user_message(self):
+        """Memory count hint is injected into a tail user message.
 
         Both compact memory instructions and the dynamic count hint go
         into the system message. No listing is injected into the user
@@ -582,21 +576,13 @@ class TestSystemReminderAndBlocks:
                 search_enabled=False,
                 has_real_tools=True,
             )
-        content2 = messages2[0]['content']
-        if isinstance(content2, list):
-            full2 = '\n\n'.join(b['text'] for b in content2 if isinstance(b, dict))
-        else:
-            full2 = content2
+        assert messages2[0]['content'] == 'Base'
+        full2 = str(messages2[-1]['content'])
         assert '10 accumulated memories' in full2
         assert 'memory_accumulation' in full2
 
     def test_static_guidance_as_separate_block(self):
-        """Static guidance sections are part of the cache-segmented system
-        message. After the Layout A consolidation, the CC static block
-        contains FRC + tool usage + output efficiency, and the memory
-        block (when has_real_tools=True AND memory_enabled=True) gets its
-        OWN separate cache block so a memory CRUD doesn't invalidate the
-        FRC/tools/static prefix."""
+        """Static and memory guidance share the managed tail carrier."""
         from lib.tasks_pkg.context_composer import compose_task_context
         messages = [{'role': 'system', 'content': 'Pre-existing prompt'}]
         # memory_enabled=True so the memory_accumulation block is injected
@@ -606,24 +592,13 @@ class TestSystemReminderAndBlocks:
             search_enabled=False,
             has_real_tools=True,
         )
-        content = messages[0]['content']
-        assert isinstance(content, list), f"Expected list, got {type(content)}"
-        assert len(content) >= 2, f"Expected at least 2 blocks, got {len(content)}"
-        full = '\n\n'.join(b.get('text', '') for b in content
-                            if isinstance(b, dict))
-        # Static CC content lives somewhere in the system message blocks
+        assert messages[0]['content'] == 'Pre-existing prompt'
+        assert messages[-1]['role'] == 'user'
+        full = str(messages[-1]['content'])
         assert 'Function Result Clearing' in full
         assert 'concise' in full.lower()
-        # Memory accumulation reminder gets its own segmented block. It is not
-        # required to be last: later independent cache blocks (for example the
-        # credential-vault index) may legitimately follow it.
-        memory_blocks = [
-            block.get('text', '') for block in content
-            if isinstance(block, dict)
-            and ('<memory_accumulation>' in block.get('text', '')
-                 or 'accumulated memories' in block.get('text', ''))
-        ]
-        assert memory_blocks, 'memory reminder must remain a separate cache block'
+        assert ('<memory_accumulation>' in full
+                or 'accumulated memories' in full)
 
     def test_cache_breakpoints_per_block(self):
         """add_cache_breakpoints should cache each text block independently."""

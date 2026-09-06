@@ -12,7 +12,7 @@ never converged — the exact dishonesty the standalone autopilot loop avoids
 This suite pins the labeling-parity fix:
   * a loop that hits its iteration cap with no STOP → ``run()`` returns
     ``ok=False`` + ``stop_reason='max_iterations'`` and a ``loop_exits`` record;
-  * a loop broken by stuck-detection → ``stop_reason='stuck'``;
+  * repeated critic prose cannot terminate a loop and reaches the finite cap;
   * a loop that exits on a clean verifier STOP → ``ok=True`` +
     ``stop_reason='completed'`` (the fix must not regress convergent runs);
   * ``is_incomplete_stop`` classifies the new reasons;
@@ -58,9 +58,7 @@ def test_caphit_reports_max_iterations_not_completed():
     def never_stop(self, node, context, iteration):
         role = node.get('role')
         if role == 'critic':
-            # Always CONTINUE_WORKER, but with DISTINCT feedback each turn so
-            # detect_stuck (Jaccard on consecutive feedbacks) does NOT fire —
-            # we want the genuine iteration-cap exit, not a stuck break.
+            # Always CONTINUE_WORKER with distinct feedback each turn.
             crit['n'] += 1
             uniq = ' '.join(f'issue{crit["n"]}_{w}' for w in range(crit['n'] + 3))
             return {'output': f'Remaining work: {uniq}. [VERDICT: CONTINUE_WORKER]',
@@ -83,9 +81,8 @@ def test_caphit_reports_max_iterations_not_completed():
     assert any(e['reason'] == 'max_iterations' for e in exits), exits
 
 
-def test_stuck_reports_stuck():
-    """A critic repeating near-identical feedback trips detect_stuck → the loop
-    breaks with stop_reason='stuck' (not completed, not max_iterations)."""
+def test_repeated_feedback_is_advisory_and_reports_iteration_cap():
+    """Near-identical critic prose cannot prove no progress or end the loop."""
     same = 'The parser still fails on empty input ❌ please fix it now'
     def repeating(self, node, context, iteration):
         if node.get('role') == 'critic':
@@ -96,9 +93,9 @@ def test_stuck_reports_stuck():
 
     res = _run_with_runner(_verifier_loop(6), repeating, max_iter=6)
     assert res['ok'] is False
-    assert res['stop_reason'] == 'stuck', res.get('stop_reason')
+    assert res['stop_reason'] == 'max_iterations', res.get('stop_reason')
     exits = res.get('loop_exits') or []
-    assert any(e['reason'] == 'stuck' for e in exits), exits
+    assert any(e['reason'] == 'max_iterations' for e in exits), exits
 
 
 def test_clean_stop_stays_completed():

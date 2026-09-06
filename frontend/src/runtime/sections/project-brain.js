@@ -1,8 +1,8 @@
 /* ===== migrated source: project-brain.js ===== */
 /* Signal-driven Project Brain read model.
  *
- * Board, Feed, Status, Attention and Charter are read-only projections of the
- * storage event authority. The only commands owned by this surface are Watch
+ * Board, Feed, Status and Charter are read-only projections of the storage
+ * event authority. The only commands owned by this surface are Watch
  * maintenance and versioned Checker registration/execution. There is no
  * claim, block, reopen, handoff, peer inbox or autonomous dispatch UI here.
  */
@@ -145,19 +145,6 @@
       _esc(_text('projectBrain.registerChecker', 'Register version')) + '</button></form></section>';
   }
 
-  function renderAttention(data) {
-    var host = document.getElementById('projectBrainAttentionBody');
-    if (!host) return;
-    var items = data && Array.isArray(data.items) ? data.items : [];
-    _badge('pbTabCountAttention', items.length);
-    host.innerHTML = items.length ? items.map(function (item) {
-      return '<article class="pb-attn-card"><div class="pb-attn-title">' +
-        _esc(item.kind || 'attention') + '</div><div class="pb-attn-body">' +
-        _esc(item.text || '') + '</div><time>' + _esc(_time(item.createdAt)) +
-        '</time></article>';
-    }).join('') : _empty(_text('projectBrain.attnEmpty', 'Nothing needs you'));
-  }
-
   function _watchRow(item) {
     return '<article class="pb-watch-item"><div class="pb-watch-main"><strong>' +
       _esc(item.kind || 'concern') + '</strong><p>' + _esc(item.text || '') + '</p>' +
@@ -178,7 +165,6 @@
     host.innerHTML = '<div class="pb-status-evidence">' +
       '<span class="pb-status-ev-chip">' + _esc((status.activeCount || 0) + ' active') + '</span>' +
       '<span class="pb-status-ev-chip">' + _esc((status.recentOutcomeCount || 0) + ' recent') + '</span>' +
-      '<span class="pb-status-ev-chip">' + _esc((status.attentionCount || 0) + ' attention') + '</span>' +
       '<span class="pb-status-ev-chip">' + _esc((status.checkerCount || 0) + ' checkers') + '</span></div>' +
       '<section id="pbWatchSection"><h3>' + _esc(_text('projectBrain.watchHead', 'Watch')) + '</h3>' +
       '<form class="pb-watch-composer" id="pbWatchForm"><select name="kind">' +
@@ -203,14 +189,13 @@
     _state.path = path;
     return Promise.all([
       api.board(path), api.feed(path, 0), api.charter(path), api.brainCheckers(path),
-      api.brainAttention(path), api.brainStatus(path), api.brainWatchList(path),
+      api.brainStatus(path), api.brainWatchList(path),
     ]).then(function (values) {
       if (path !== _state.path) return;
       renderBoard(values[0] || {});
       renderFeed(values[1] || {});
       renderCharter(values[2] || {}, values[3] || {});
-      renderAttention(values[4] || {});
-      renderStatus(values[5] || {}, values[6] || {});
+      renderStatus(values[4] || {}, values[5] || {});
     }).catch(_reportFailure);
   }
 
@@ -325,7 +310,7 @@
     overlay.hidden = false;
     _wire();
     if (!path) {
-      ['projectBrainAttentionBody', 'projectBrainCharterBody', 'projectBrainBoardBody',
+      ['projectBrainCharterBody', 'projectBrainBoardBody',
         'projectBrainActivityList', 'projectBrainStatusBody'].forEach(function (id) {
           var node = document.getElementById(id);
           if (node) node.innerHTML = _empty(_text('projectBrain.noProject', 'Attach a project first'));
@@ -386,7 +371,6 @@
     renderBoard: renderBoard,
     renderFeed: renderFeed,
     renderCharter: renderCharter,
-    renderAttention: renderAttention,
     renderStatus: renderStatus,
     refreshAll: refreshAll,
     _reportFailure: _reportFailure,

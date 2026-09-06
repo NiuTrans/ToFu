@@ -58,8 +58,12 @@ from urllib.parse import urlparse
 from lib.log import audit_log, get_logger
 
 from .config import DEFAULT_SLOT_CONFIGS
-from .factory import get_dispatcher
 from .slot import Slot
+
+# get_dispatcher is imported lazily inside the functions below: a top-level
+# import would pull factory → dispatcher (and the HTTP transport stack) into
+# every server boot, breaking the startup-dormancy contract pinned by
+# tests/test_llm_dispatch_startup_boundary.py.
 
 logger = get_logger(__name__)
 
@@ -349,6 +353,8 @@ def mint_ephemeral_slot(*, base_url: str, api_key: str, model_id: str,
         stream_only=False,
     )
 
+    from .factory import get_dispatcher
+
     dispatcher = get_dispatcher()
     dispatcher.initialize()
     with dispatcher._lock:
@@ -394,6 +400,8 @@ def dispose_ephemeral_slot(handle: EphemeralSlotHandle) -> bool:
             return False
         handle.disposed = True
         _handles.pop(handle.handle_id, None)
+
+    from .factory import get_dispatcher
 
     dispatcher = get_dispatcher()
     removed = False

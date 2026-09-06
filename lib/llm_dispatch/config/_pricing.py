@@ -106,23 +106,34 @@ def get_pricing_tiers(model_id: str,
     return tags
 
 
-def is_model_cheap(model_id: str, fallback_cost_per_1k: float = None,
-                   input_price: float = None, output_price: float = None) -> bool:
-    """Backward-compat shim: True iff 'cheap' ∈ :func:`get_pricing_tiers`.
+def _row_price_usd(m: dict, top_key: str, nested_key: str):
+    """Shared resolver behind _model_input_price / _model_output_price.
 
-    Prefer :func:`get_pricing_tiers` for new code — it naturally extends
-    when more tiers are added to ``PRICING_TIERS``.
+    Top-level ``input_price`` / ``output_price`` (auto-discovery, OpenRouter
+    enrichment) are always USD. Values taken from the nested ``pricing``
+    override honor its declared ``currency`` — registration accepts CNY rows
+    (lib.model_registration converts for cost accounting), so tier evaluation
+    must convert too or a ¥-priced row is compared raw against USD brackets.
     """
-    return 'cheap' in get_pricing_tiers(
-        model_id,
-        fallback_cost_per_1k=fallback_cost_per_1k,
-        input_price=input_price,
-        output_price=output_price,
-    )
+    v = m.get(top_key)
+    if v is not None:
+        return v
+    pinfo = m.get('pricing')
+    if not isinstance(pinfo, dict):
+        return None
+    v = pinfo.get(nested_key)
+    if (v is not None and isinstance(v, (int, float))
+            and str(pinfo.get('currency') or 'USD').upper() == 'CNY'):
+        try:
+            from lib.pricing import DEFAULT_USD_CNY_RATE
+        except Exception:
+            DEFAULT_USD_CNY_RATE = 7.24
+        v = v / DEFAULT_USD_CNY_RATE
+    return v
 
 
 def _model_input_price(m: dict):
-    """Resolve a model entry's per-1M input price from its two on-disk shapes.
+    """Resolve a model entry's per-1M input price (USD) from its on-disk shapes.
 
     Top-level ``input_price`` is what auto-discovery/OpenRouter enrichment
     writes; the nested ``pricing: {input, output, …}`` dict is the
@@ -131,25 +142,16 @@ def _model_input_price(m: dict):
     accounting honors it. Tier evaluation must see BOTH or a user-set price
     silently fails to update the 'cheap' tag.
     """
-    v = m.get('input_price')
-    if v is None:
-        pinfo = m.get('pricing')
-        if isinstance(pinfo, dict):
-            v = pinfo.get('input')
-    return v
+    return _row_price_usd(m, 'input_price', 'input')
 
 
 def _model_output_price(m: dict):
     """Output-price twin of :func:`_model_input_price`."""
-    v = m.get('output_price')
-    if v is None:
-        pinfo = m.get('pricing')
-        if isinstance(pinfo, dict):
-            v = pinfo.get('output')
-    return v
+    return _row_price_usd(m, 'output_price', 'output')
 
 
-def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '') -> dict:
+def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '',
+                            strip_unpriced: bool = True) -> dict:
     """Re-evaluate all managed pricing-tier tags on *models* in place.
 
     For each model dict, computes the desired tier-tag set from live
@@ -168,6 +170,10 @@ def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '') -> dict
             ``output_price``, ``cost``.  Mutated in place.
         log_prefix: Optional prefix for log messages (e.g. a provider
             id) — shown as ``[PricingTags] <prefix> …`` in logs.
+        strip_unpriced: When True (default), a model with no pricing evidence
+            anywhere loses managed tags it carries. Pass False at authoring
+            seams (provider-template onboarding) so a hand-declared tag
+            survives until pricing data exists to confirm or refute it.
 
     Returns:
         ``{'added': {tag: n, …}, 'removed': {tag: n, …}, 'changed': n,
@@ -198,11 +204,19 @@ def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '') -> dict
                 changed += 1
             continue
 
+        row_inp = _model_input_price(m)
+        row_out = _model_output_price(m)
+        if not strip_unpriced:
+            eff_inp, eff_out = _resolve_prices(mid, row_inp, row_out)
+            has_evidence = (eff_inp is not None and eff_out is not None) \
+                or bool(m.get('cost'))
+            if not has_evidence:
+                continue
         desired = get_pricing_tiers(
             mid,
             fallback_cost_per_1k=m.get('cost'),
-            input_price=_model_input_price(m),
-            output_price=_model_output_price(m),
+            input_price=row_inp,
+            output_price=row_out,
         )
 
         current_tier_tags = caps & MANAGED_TIER_TAGS

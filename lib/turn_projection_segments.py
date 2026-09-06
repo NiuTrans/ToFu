@@ -36,7 +36,7 @@ from lib.turn_image_transport import (
 from lib.turn_projection_patch import normalize_projection_document
 
 
-_SEGMENT_TYPES = frozenset({"text", "thinking", "tool_use"})
+_SEGMENT_TYPES = frozenset({"text", "thinking", "tool_use", "system_note"})
 _RESUMABLE_TURN_STATUSES = frozenset({"interrupted", "truncated"})
 _REFERENCEABLE_TURN_STATUS = "completed"
 _BROWSER_TERMINAL_TURN_STATUSES = frozenset({
@@ -92,7 +92,7 @@ def _valid_segments(value: Any) -> list[dict[str, Any]] | None:
             return None
         segment = dict(item)
         segment_type = segment["type"]
-        if segment_type in {"text", "thinking"}:
+        if segment_type in {"text", "thinking", "system_note"}:
             if not isinstance(segment.get("text"), str):
                 return None
         elif not isinstance(segment.get("result"), Mapping):
@@ -293,6 +293,7 @@ def _normalize_sidecar_blocks(projection: dict[str, Any]) -> set[str]:
         ("_inboxInjects", "inbox"),
         ("_peerInjects", "peer"),
         ("_userSteerInjects", "user-steer"),
+        ("_bgCommandInjects", "background-command"),
         ("_stallNudges", "stall-nudge"),
     ):
         if projection.get(field) is None:

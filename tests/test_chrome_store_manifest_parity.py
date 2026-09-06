@@ -78,7 +78,8 @@ def _ext_sources() -> str:
     """
     return '\n'.join(
         (EXT_DIR / n).read_text(encoding='utf-8')
-        for n in ('background.js', 'popup.js') if (EXT_DIR / n).exists())
+        for n in ('background.js', 'origin_marker.js', 'popup.js')
+        if (EXT_DIR / n).exists())
 
 
 def _called_namespaces() -> set[str]:
@@ -504,7 +505,7 @@ def test_package_script_ships_exactly_the_files_we_scanned():
     # matched inside `manifest.json`, inventing a `manifest.js` that does not
     # exist. Anchor on a word boundary so `.json` cannot be truncated to `.js`.
     copied_js = set(re.findall(r'\$SRC_DIR/([A-Za-z0-9_-]+\.js)\b', sh))
-    scanned = {'background.js', 'popup.js'}
+    scanned = {'background.js', 'origin_marker.js', 'popup.js'}
     assert copied_js == scanned, (
         f"package_extension.sh ships JS {sorted(copied_js)} but the "
         f"permission scan in this file only reads {sorted(scanned)}. Update "

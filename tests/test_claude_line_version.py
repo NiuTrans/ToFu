@@ -168,10 +168,12 @@ def test_sonnet5_in_slot_configs():
     assert {'text', 'vision', 'thinking'} <= row['caps']
 
 
-def test_sonnet5_in_pricing_at_promo_price():
+def test_sonnet5_in_pricing_at_standard_price():
+    """Promo $2/$10 ended 2026-08-31 as announced; the row now books the
+    standard $3/$15 (applied 2026-09-03)."""
     from lib.pricing import MODEL_PRICING
     row = MODEL_PRICING['claude-sonnet-5']
-    assert row['input'] == 2.0 and row['output'] == 10.0
+    assert row['input'] == 3.0 and row['output'] == 15.0
     assert row['cacheWriteMul'] == 1.25 and row['cacheReadMul'] == 0.10
     assert row['name'] == 'Claude Sonnet 5'
 

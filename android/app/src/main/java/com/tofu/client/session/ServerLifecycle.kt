@@ -249,6 +249,7 @@ object ServerLifecycle {
         is LoginResult.NoCredential -> true
         is LoginResult.NeedsInteractiveSso -> true
         is LoginResult.Error -> true
+        is LoginResult.Incompatible -> true
     }
 
     /**
@@ -269,6 +270,8 @@ object ServerLifecycle {
                 "once, then Start and Stop will work from here."
         is LoginResult.Error ->
             "Can't reach this server: ${result.message}"
+        is LoginResult.Incompatible ->
+            result.message
         is LoginResult.Success ->
             "Signed in."   // not a block; never surfaced
     }

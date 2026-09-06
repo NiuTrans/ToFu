@@ -30,7 +30,6 @@ WORK_HISTORY_LIMIT = 100
 ACTIVE_WORK_LIMIT = 100
 NARRATIVE_LIMIT = 500
 NARRATIVE_TEXT_LIMIT_BYTES = 720
-ATTENTION_LIMIT = 200
 WATCH_LIMIT = 100
 CHECKER_VERSION_LIMIT = 128
 CHARTER_DECISION_LIMIT = 256
@@ -72,7 +71,6 @@ def _empty_projection(owner_user_id: int, project_key: str) -> dict[str, Any]:
         'charter': {'decisions': []},
         'checkers': [],
         'watch': [],
-        'attention': [],
         'cursors': {},
     }
 
@@ -101,6 +99,9 @@ def _load_projection(
             or str(projection.get('projectKey') or '') != project_key):
         raise StorageError(
             'database_integrity', 'Project Brain projection ownership mismatch')
+    # Retired attention collection: dropped on load so the next save rewrites
+    # the row without it; historical attention_added events stay inert.
+    projection.pop('attention', None)
     return projection
 
 
@@ -161,8 +162,6 @@ def _public_projection(projection: Mapping[str, Any]) -> dict[str, Any]:
                      if isinstance(item, Mapping)],
         'watch': [dict(item) for item in projection.get('watch') or ()
                   if isinstance(item, Mapping)],
-        'attention': [dict(item) for item in projection.get('attention') or ()
-                      if isinstance(item, Mapping)],
     }
 
 
@@ -359,30 +358,6 @@ def _append_narrative(
     projection['narratives'] = narratives[-NARRATIVE_LIMIT:]
 
 
-def _append_attention(
-    projection: dict[str, Any],
-    *,
-    attention_id: str,
-    kind: str,
-    text: str,
-    timestamp: int,
-    work_id: str = '',
-) -> None:
-    items = [dict(item) for item in projection.get('attention') or ()
-             if isinstance(item, Mapping)]
-    item = {
-        'id': attention_id[:128],
-        'kind': kind[:64] or 'project',
-        'text': text.strip()[:4000],
-        'createdAt': timestamp,
-    }
-    if work_id:
-        item['workId'] = work_id
-    items = [existing for existing in items if existing.get('id') != item['id']]
-    items.append(item)
-    projection['attention'] = items[-ATTENTION_LIMIT:]
-
-
 def _fold_event(projection: dict[str, Any], event: Mapping[str, Any]) -> None:
     kind = str(event.get('kind') or '')
     payload = event.get('payload')
@@ -475,15 +450,6 @@ def _fold_event(projection: dict[str, Any], event: Mapping[str, Any]) -> None:
             work_id=str(payload.get('workId') or ''),
             conversation_id=str(payload.get('conversationId') or ''),
         )
-    elif kind == 'attention_added':
-        _append_attention(
-            projection,
-            attention_id=str(payload.get('attentionId') or ''),
-            kind=str(payload.get('attentionKind') or 'project'),
-            text=str(payload.get('text') or ''),
-            timestamp=timestamp,
-            work_id=str(payload.get('workId') or ''),
-        )
     elif kind == 'checker_registered':
         definition = dict(payload.get('definition') or {})
         checkers = [dict(item) for item in projection.get('checkers') or ()
@@ -548,15 +514,6 @@ def _fold_event(projection: dict[str, Any], event: Mapping[str, Any]) -> None:
                 timestamp=timestamp,
                 work_id=work_id,
             )
-            _append_attention(
-                projection,
-                attention_id='checker:' + hashlib.sha256(
-                    f'{checker_ref}:{sequence}'.encode()).hexdigest()[:20],
-                kind='checker',
-                text=text,
-                timestamp=timestamp,
-                work_id=work_id,
-            )
     elif kind.startswith('watch_'):
         watch = [dict(item) for item in projection.get('watch') or ()
                  if isinstance(item, Mapping)]
@@ -606,16 +563,6 @@ def _fold_event(projection: dict[str, Any], event: Mapping[str, Any]) -> None:
     elif kind == 'legacy_migrated':
         projection['watch'] = [dict(item) for item in payload.get('watch') or ()
                                if isinstance(item, Mapping)][-WATCH_LIMIT:]
-        for item in payload.get('attention') or ():
-            if not isinstance(item, Mapping):
-                continue
-            _append_attention(
-                projection,
-                attention_id=str(item.get('id') or ''),
-                kind='legacy_decision',
-                text=str(item.get('text') or ''),
-                timestamp=timestamp,
-            )
     elif kind == 'projection_checkpoint':
         projection['checkpointSequence'] = sequence
 
@@ -826,14 +773,6 @@ def _project_brain_command(
             'conversationId': str(payload.get('conversation_id') or '')[:256],
         }
         kind = 'narrative_added'
-    elif action == 'attention.add':
-        event_payload = {
-            'attentionId': _required_text(payload, 'attention_id', 128),
-            'attentionKind': _required_text(payload, 'kind', 64),
-            'text': _required_text(payload, 'text', 4000),
-            'workId': str(payload.get('work_id') or '')[:128],
-        }
-        kind = 'attention_added'
     elif action == 'checker.register':
         definition = payload.get('definition')
         if not isinstance(definition, Mapping):
@@ -1031,10 +970,6 @@ def _project_brain_work_finish(session: Session, payload: Mapping[str, Any]) -> 
 
 def _project_brain_narrative_add(session: Session, payload: Mapping[str, Any]) -> Any:
     return _project_brain_command(session, payload, 'narrative.add')
-
-
-def _project_brain_attention_add(session: Session, payload: Mapping[str, Any]) -> Any:
-    return _project_brain_command(session, payload, 'attention.add')
 
 
 def _project_brain_checker_register(session: Session, payload: Mapping[str, Any]) -> Any:
@@ -1300,21 +1235,6 @@ def _table_exists(session: Session, table_name: str) -> bool:
     return row is not None
 
 
-def _legacy_decision_texts(value: Mapping[str, Any]) -> list[str]:
-    values: list[str] = []
-    content = str(value.get('content') or '').strip()
-    if content:
-        values.append(content)
-    for decision in value.get('decisions') or ():
-        if isinstance(decision, Mapping):
-            text = str(decision.get('text') or decision.get('summary') or '').strip()
-        else:
-            text = str(decision or '').strip()
-        if text:
-            values.append(text)
-    return values
-
-
 def _project_brain_cutover_status(
     session: Session, _payload: Mapping[str, Any],
 ) -> Any:
@@ -1346,23 +1266,6 @@ def _project_brain_cutover(
         )
 
     projects: dict[tuple[int, str], dict[str, Any]] = {}
-    charter_rows = session.fetch_all(
-        "SELECT record_key,value_json FROM storage_records "
-        "WHERE namespace='project_charter' ORDER BY record_key")
-    for row in charter_rows:
-        key = str(row['record_key'] or '')
-        owner_text, separator, project_key = key.partition(':')
-        if not separator or not owner_text.isdigit() or not project_key:
-            continue
-        owner_user_id = int(owner_text)
-        normalized_project = _TRAILING_SEPARATORS.sub('', project_key)
-        value = _load(row['value_json'])
-        if not isinstance(value, Mapping):
-            continue
-        bucket = projects.setdefault(
-            (owner_user_id, normalized_project), {'watch': [], 'texts': []})
-        bucket['texts'].extend(_legacy_decision_texts(value))
-
     if _table_exists(session, 'storage_watch_items'):
         watch_rows = session.fetch_all(
             'SELECT * FROM storage_watch_items '
@@ -1387,7 +1290,7 @@ def _project_brain_cutover(
                         'timestamp': int(response['ts'] or 0),
                     }
             bucket = projects.setdefault(
-                (owner_user_id, normalized_project), {'watch': [], 'texts': []})
+                (owner_user_id, normalized_project), {'watch': []})
             bucket['watch'].append({
                 'id': str(row['item_id'] or '')[:128],
                 'kind': str(row['kind'] or 'concern')[:64],
@@ -1402,33 +1305,16 @@ def _project_brain_cutover(
 
     migrated = 0
     for (owner_user_id, project_key), legacy in sorted(projects.items()):
-        seen: set[str] = set()
-        attention = []
-        for text in legacy['texts']:
-            normalized = ' '.join(str(text).split()).casefold()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            digest = hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:20]
-            attention.append({
-                'id': f'legacy:{digest}',
-                'text': str(text).strip()[:4000],
-            })
         projection = _empty_projection(owner_user_id, project_key)
         _append_event_and_fold(
             session, owner_user_id, project_key, projection,
             kind='legacy_migrated',
-            payload={
-                'watch': list(legacy['watch'])[-WATCH_LIMIT:],
-                'attention': attention[-ATTENTION_LIMIT:],
-            },
+            payload={'watch': list(legacy['watch'])[-WATCH_LIMIT:]},
             timestamp=now_ms,
         )
         verified = _load_projection(session, owner_user_id, project_key)
         if (len(verified.get('watch') or ())
-                != min(len(legacy['watch']), WATCH_LIMIT)
-                or len(verified.get('attention') or ())
-                != min(len(attention), ATTENTION_LIMIT)):
+                != min(len(legacy['watch']), WATCH_LIMIT)):
             raise StorageError(
                 'database_integrity', 'Project Brain cutover verification failed')
         migrated += 1
@@ -1591,7 +1477,7 @@ def _merge_relinked_projections(
     rename are still running. Both projections belong to the same owner, so a
     relink folds their durable state into one checkpoint instead of choosing a
     winner. Delivery cursors are reconstructible and reset at this identity
-    boundary; durable work, narratives, Charter, Watch, and attention remain.
+    boundary; durable work, narratives, Charter, and Watch remain.
     """
     merged = {**source, **destination}
     merged.update({
@@ -1720,21 +1606,6 @@ def _merge_relinked_projections(
         watch_by_id.values(), key=lambda item: int(item.get('updatedAt') or 0)
     )
 
-    attention_by_id: dict[str, dict[str, Any]] = {}
-    for projection in (destination, source):
-        for raw in projection.get('attention') or ():
-            if not isinstance(raw, Mapping):
-                continue
-            item = dict(raw)
-            item_id = str(item.get('id') or '')
-            current = attention_by_id.get(item_id)
-            if current is None or int(item.get('createdAt') or 0) >= int(
-                current.get('createdAt') or 0
-            ):
-                attention_by_id[item_id] = item
-    merged['attention'] = sorted(
-        attention_by_id.values(), key=lambda item: int(item.get('createdAt') or 0)
-    )[-ATTENTION_LIMIT:]
     merged['cursors'] = {}
     return merged
 

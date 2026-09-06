@@ -174,6 +174,31 @@ def _candidate_dirs(data_dir: Path, environ: Any) -> list[Path]:
     return [c for c in candidates if not _same_filesystem_root(c, data_dir)]
 
 
+def _is_implicit_temporary_candidate(
+    candidate: Path,
+    data_dir: Path,
+    environ: Any,
+) -> bool:
+    """Whether ``candidate`` is the auto-added, lifecycle-ephemeral front.
+
+    An explicit directory remains an operator-owned deployment decision.  The
+    implicit ``/tmp`` fallback is different: container recreation routinely
+    erases it, so recovering a large durable shadow there turns every cold
+    launch into a database-sized copy.  A surviving front may still be used;
+    automatic activation or recovery onto an absent temporary front is
+    forbidden.
+    """
+    if str(environ.get('TOFU_STORAGE_FASTPATH_DIR') or '').strip():
+        return False
+    key = _data_dir_key(data_dir)
+    expected = Path(tempfile.gettempdir()) / (
+        f'tofu-fastpath-{os.getuid()}-{key}')
+    try:
+        return candidate.resolve() == expected.resolve()
+    except OSError:
+        return candidate == expected
+
+
 def _same_filesystem_root(candidate: Path, data_dir: Path) -> bool:
     try:
         resolved = candidate.resolve()
@@ -311,6 +336,14 @@ def decide(data_dir: Path, *, environ: Any = os.environ,
     data_median_ms: float | None = None
     best_bench: dict[str, Any] = {}
     for candidate in _candidate_dirs(data_dir, environ):
+        local_db = candidate / 'tofu.db'
+        if (_is_implicit_temporary_candidate(
+                candidate, data_dir, environ) and not local_db.is_file()):
+            logger.info(
+                '[fastpath] implicit temporary front %s is absent — skipped; '
+                'automatic database-sized recovery onto ephemeral storage is '
+                'disabled', candidate)
+            continue
         try:
             candidate.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -327,7 +360,6 @@ def decide(data_dir: Path, *, environ: Any = os.environ,
                         candidate, exc)
             continue
         free = shutil.disk_usage(candidate).free
-        local_db = candidate / 'tofu.db'
         classic_db = data_dir / 'tofu.db'
         reusable_seed_bytes = (
             _owned_seed_temporary_bytes(local_db)
@@ -389,6 +421,27 @@ def decide(data_dir: Path, *, environ: Any = os.environ,
         benchmark=best_bench or ({'data_dir_median_fsync_ms':
                                   round(data_median_ms, 3)}
                                  if data_median_ms is not None else {}))
+
+
+def require_classic_authority_is_current(data_dir: Path) -> None:
+    """Refuse a classic fallback while a durable fastpath shadow exists.
+
+    ``data/tofu.db`` predates the fastpath lineage and may be arbitrarily
+    stale.  An inactive decision must therefore never make it authoritative
+    merely because the local front disappeared or fastpath was toggled off.
+    The explicit offline retirement command is the only supported transition
+    back to the classic layout.
+    """
+    shadow_dir = data_dir / SHADOW_DIRNAME
+    manifest = read_shadow_manifest(shadow_dir)
+    if manifest is None:
+        return
+    generation = manifest.get('generation')
+    raise RuntimeError(
+        'fastpath durable shadow exists '
+        f'(generation={generation}); data/tofu.db may be stale and cannot be '
+        'opened as authority. Stop Tofu and run `python3 scripts/storagectl.py '
+        'retire-fastpath --confirm`, then set TOFU_STORAGE_FASTPATH=off.')
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -663,6 +716,8 @@ def _copy_file_checkpointed(
     progress: Any = None,
 ) -> None:
     """Copy from one durable offset, fsyncing bounded progress checkpoints."""
+    from lib.storage_sidecar.storage_capabilities import describe_mount
+
     mode = 'r+b' if destination.exists() else 'w+b'
     with source.open('rb') as source_stream, destination.open(mode) as target:
         if target.seek(0, os.SEEK_END) < durable_bytes:
@@ -670,7 +725,13 @@ def _copy_file_checkpointed(
         target.truncate(durable_bytes)
         offset = durable_bytes
         target.seek(offset)
-        use_sendfile = hasattr(os, 'sendfile')
+        destination_storage_class = describe_mount(
+            destination.parent).storage_class
+        use_sendfile = (
+            hasattr(os, 'sendfile')
+            and destination_storage_class not in {
+                'network-filesystem', 'userspace-filesystem'})
+        short_sendfile_calls = 0
         unsupported_sendfile_errors = {
             errno.EINVAL,
             errno.ENOSYS,
@@ -700,6 +761,19 @@ def _copy_file_checkpointed(
                             raise
                         use_sendfile = False
                         continue
+                    if copied < remaining:
+                        short_sendfile_calls += 1
+                        # Some FUSE/network combinations accept an 8 MiB
+                        # sendfile request but complete only one 4 KiB page.
+                        # Repeating that for a multi-GiB authority creates
+                        # millions of syscalls and hour-long retirement. A
+                        # bounded number of short completions proves this
+                        # zero-copy path is not useful; the existing 8 MiB
+                        # buffered path preserves identical bytes/durability.
+                        if short_sendfile_calls >= 4:
+                            use_sendfile = False
+                    else:
+                        short_sendfile_calls = 0
                 else:
                     source_stream.seek(offset)
                     target.seek(offset)

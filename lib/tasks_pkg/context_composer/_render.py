@@ -18,12 +18,6 @@ from lib.tasks_pkg.context_composer._models import (
 
 logger = get_logger(__name__)
 
-_MANAGED_MARKER = '<!-- tofu-context:'
-_MANAGED_SECTION_RE = re.compile(
-    r'<!-- tofu-context:[^>]+:start -->.*?'
-    r'<!-- tofu-context:[^>]+:end -->',
-    re.DOTALL,
-)
 _AUTHORITY_ORDER = {
     # Lower-authority evidence is rendered first; higher-authority contracts
     # are physically closer to the generation boundary within each placement.
@@ -43,6 +37,23 @@ _LAYER_ORDER = {
     'hot_tail': 3,
     'cold_history': 4,
 }
+_AUTHORITATIVE_RETRACTION_REASONS = frozenset({
+    'disabled',
+    'memory_disabled',
+    'multi_agent_disabled',
+    'no_delta',
+    'no_enabled_skills',
+    'no_high_confidence_matches',
+    'ordinary_agent_role',
+    'plan_mode_off',
+    'preferences_disabled',
+    'profile_empty',
+    'programmatic_disabled',
+    'project_disabled',
+    'skills_disabled',
+    'vault_empty',
+    'vault_disabled',
+})
 
 
 def _count_tokens(text: str, model: str) -> int:
@@ -141,8 +152,11 @@ def _apply_global_budget(manifest: list[dict[str, Any]],
     base = max(0, int(request.base_context_tokens or 0))
     available = max(0, budget - base)
     candidates = [row for row in manifest if row.get('_rendered')]
-    required = [row for row in candidates if row['_block'].required]
-    optional = [row for row in candidates if not row['_block'].required]
+    required = [row for row in candidates
+                if row['_block'].required or row.get('_required_override')]
+    optional = [row for row in candidates
+                if not row['_block'].required
+                and not row.get('_required_override')]
     optional.sort(key=lambda row: (
         _LAYER_ORDER[row['_block'].layer],
         row['_block'].priority,
@@ -197,20 +211,22 @@ def _apply_global_budget(manifest: list[dict[str, Any]],
         'conversation': [], 'dynamicTail': [],
     }
     for row in manifest:
-        if not row.get('_rendered'):
+        if not (row.get('_rendered') or row.get('reused')):
             continue
         block = row['_block']
         segment = ('staticPrefix' if block.stability == 'static' else
                    'conversation' if block.stability == 'conversation' else
                    'dynamicTail')
-        segment_values[segment].append(row['_rendered'])
+        # Hash the content-addressed identity rather than only newly appended
+        # bytes. Reusing an existing carrier must keep segment telemetry stable.
+        segment_values[segment].append(str(row.get('hash') or ''))
     segment_hashes = {
         name: _hash_join(values) for name, values in segment_values.items()
     }
     entries = tuple(ContextPlanEntryV2(
         id=row['id'],
         layer=row['_block'].layer,
-        selected=bool(row.get('injected')),
+        selected=bool(row.get('injected') or row.get('reused')),
         truncated=bool(row.get('reason') in {
             'truncated', 'global_budget_truncated'}),
         reason=str(row.get('reason') or ''),
@@ -233,27 +249,36 @@ def _apply_global_budget(manifest: list[dict[str, Any]],
     )
 
 
-def _strip_managed(messages: list[dict[str, Any]]) -> None:
-    """Remove a previous render during Planner/Worker/Critic re-entry."""
-    kept: list[dict[str, Any]] = []
+def _managed_block_hashes(
+    messages: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Return the latest content hash for each already-rendered block.
+
+    Hash actual marker envelopes rather than trusting side metadata, which a
+    compactor could retain after altering content. Only composer-owned
+    messages are inspected.
+    """
+    latest: dict[str, str] = {}
+    marker_pattern = re.compile(
+        r'<!-- tofu-context:([^:\n]+):start -->.*?'
+        r'<!-- tofu-context:\1:end -->',
+        re.DOTALL,
+    )
     for message in messages:
-        if message.get('_contextComposer'):
+        if not isinstance(message, dict) or not message.get('_contextComposer'):
             continue
         content = message.get('content')
-        if isinstance(content, list):
-            blocks = [
-                block for block in content
-                if not (isinstance(block, dict)
-                        and _MANAGED_MARKER in str(block.get('text') or ''))
-            ]
-            message['content'] = blocks
-        elif isinstance(content, str) and _MANAGED_MARKER in content:
-            # Managed system blocks are normally separate structured blocks.
-            # This fallback handles snapshots produced by providers that
-            # flattened them.
-            message['content'] = _MANAGED_SECTION_RE.sub('', content).strip()
-        kept.append(message)
-    messages[:] = kept
+        parts = content if isinstance(content, list) else [content]
+        for part in parts:
+            text = (part.get('text') if isinstance(part, dict) else part)
+            if not isinstance(text, str):
+                continue
+            for match in marker_pattern.finditer(text):
+                block_id = match.group(1).strip()
+                rendered = match.group(0)
+                latest[block_id] = hashlib.sha256(
+                    rendered.encode('utf-8')).hexdigest()[:16]
+    return latest
 
 
 def _envelope(block: ContextBlock, text: str) -> str:
@@ -285,21 +310,6 @@ def _unwrap_reminder(text: str) -> str:
     return stripped
 
 
-def _ensure_system(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    if messages and messages[0].get('role') == 'system':
-        system = messages[0]
-    else:
-        system = {'role': 'system', 'content': []}
-        messages.insert(0, system)
-    content = system.get('content')
-    if isinstance(content, str):
-        system['content'] = ([{'type': 'text', 'text': content}]
-                             if content.strip() else [])
-    elif not isinstance(content, list):
-        system['content'] = []
-    return system
-
-
 def _emit_context_summary(request: ComposeRequest, names: str,
                           total: int) -> None:
     """Best-effort instrumentation; logging must never block a model turn."""
@@ -313,37 +323,39 @@ def _emit_context_summary(request: ComposeRequest, names: str,
         return
 
 
-def _insert_head(messages: list[dict[str, Any]], texts: list[str]) -> None:
-    if not texts:
-        return
-    idx = 0
-    while idx < len(messages) and messages[idx].get('role') == 'system':
-        idx += 1
-    messages.insert(idx, {
-        'role': 'user',
-        'content': [{'type': 'text', 'text': text} for text in texts],
-        '_isMeta': True,
-        '_contextComposer': True,
-    })
-
-
-def _append_tail(messages: list[dict[str, Any]], texts: list[str]) -> None:
-    if not texts:
+def _append_tail(messages: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:
+    if not rows:
         return
     messages.append({
         'role': 'user',
-        'content': [{'type': 'text', 'text': text} for text in texts],
+        'content': [
+            {'type': 'text', 'text': row['_rendered']} for row in rows
+        ],
         '_isMeta': True,
         '_contextComposer': True,
+        '_contextBlocks': [
+            {
+                'id': row['id'],
+                'hash': row['hash'],
+                'stability': row['stability'],
+                'lifecycle': row['lifecycle'],
+            }
+            for row in rows
+        ],
     })
 
 
 def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
                    request: ComposeRequest, *,
                    replace_managed: bool = True) -> ComposeResult:
-    """Render blocks once, returning the messages and their exact manifest."""
-    if replace_managed:
-        _strip_managed(messages)
+    """Append only missing or changed blocks and preserve every prior carrier.
+
+    ``replace_managed`` remains in the public signature for compatibility but
+    no longer authorizes deletion. Replacement is represented by a newer tail
+    version of the same block id, which keeps the prior prompt prefix stable.
+    """
+    del replace_managed
+    existing_hashes = _managed_block_hashes(messages)
     manifest: list[dict[str, Any]] = []
     winners: dict[str, ContextBlock] = {}
     ordered = sorted(
@@ -408,30 +420,80 @@ def render_context(messages: list[dict[str, Any]], blocks: list[ContextBlock],
         })
         manifest[-1]['_rendered'] = rendered
 
+    # An empty provider result does not authorize deletion. Explicit state
+    # transitions append a tombstone; transient/ambiguous absence retains the
+    # last known block until a later authoritative version arrives.
+    for row in manifest:
+        if row.get('_rendered') or row['id'] not in existing_hashes:
+            continue
+        reason = str(row.get('reason') or '')
+        retract = (
+            reason in _AUTHORITATIVE_RETRACTION_REASONS
+            or reason.startswith('permission_denied:')
+        )
+        if retract:
+            text = (
+                f'[Context update: {row["id"]} is no longer active; '
+                'do not rely on its earlier version.]'
+            )
+            rendered = _envelope(row['_block'], text)
+            row['_raw_text'] = text
+            row['_rendered'] = rendered
+            row['injected'] = True
+            row['chars'] = len(rendered)
+            row['tokens'] = _count_tokens(rendered, request.model)
+            row['hash'] = hashlib.sha256(
+                rendered.encode('utf-8')).hexdigest()[:16]
+            row['reason'] = f'retracted:{reason}'
+            row['_required_override'] = True
+            continue
+        row['injected'] = True
+        row['reused'] = True
+        row['appended'] = False
+        row['hash'] = existing_hashes[row['id']]
+        row['reason'] = f'retained_after:{reason}'
+
+    # Content-addressed reuse happens before global budget selection. Existing
+    # bytes are already included in ``base_context_tokens`` and must not spend
+    # the incremental budget or be appended again.
+    for row in manifest:
+        rendered = row.get('_rendered') or ''
+        if rendered and existing_hashes.get(row['id']) == row.get('hash'):
+            row['_rendered'] = ''
+            row['reused'] = True
+            row['appended'] = False
+            row['reason'] = 'already_present'
+
     plan = (_apply_global_budget(manifest, request)
             if request.global_budget_tokens is not None else None)
 
-    system_texts = [row.pop('_rendered') for row in manifest
-                    if row.get('_rendered') and row['placement'] == 'system']
-    head_texts = [row.pop('_rendered') for row in manifest
-                  if row.get('_rendered') and row['placement'] == 'head']
-    tail_texts = [row.pop('_rendered') for row in manifest
-                  if row.get('_rendered') and row['placement'] == 'tail']
+    # Runtime context has one cache-safe placement contract. Preserve a
+    # caller's requested placement as evidence, but append only missing or
+    # changed blocks in a user carrier. Reused blocks remain at their original
+    # prefix position.
+    tail_rows: list[dict[str, Any]] = []
+    for row in manifest:
+        rendered = row.get('_rendered', '')
+        if rendered:
+            row['appended'] = True
+            requested_placement = row.get('placement') or 'tail'
+            if requested_placement != 'tail':
+                row['requestedPlacement'] = requested_placement
+                row['placement'] = 'tail'
+            previous_hash = existing_hashes.get(row['id'])
+            if previous_hash and previous_hash != row.get('hash'):
+                transition_reason = str(row.get('reason') or '')
+                row['reason'] = f'supersedes:{previous_hash}' + (
+                    f';{transition_reason}' if transition_reason else '')
+            tail_rows.append(row)
+    _append_tail(messages, tail_rows)
     for order, row in enumerate(manifest):
         row['order'] = order
+        row.pop('_rendered', None)
         row.pop('_block', None)
         row.pop('_raw_text', None)
         row.pop('_global_truncated', None)
-    if system_texts:
-        system = _ensure_system(messages)
-        # Preserve the established authority order: an operator-provided
-        # system prompt is followed by the platform's safety/capability
-        # contract. ``replace`` mode suppresses the platform block upstream.
-        system['content'].extend(
-            {'type': 'text', 'text': text} for text in system_texts)
-    _insert_head(messages, head_texts)
-    _append_tail(messages, tail_texts)
-
+        row.pop('_required_override', None)
     total = sum(row['chars'] for row in manifest if row['injected'])
     names = ','.join(f"{row['id']}:{row['chars']}" for row in manifest
                      if row['injected'])

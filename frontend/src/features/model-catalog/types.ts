@@ -27,6 +27,8 @@ export interface OfficialModel {
   capabilities: string[];
   context_window: number;
   quality_rank: number;
+  /** Vendor release date (``YYYY-MM[-DD]``), stamped by public_projection when known. */
+  release_date?: string | null;
   list_pricing?: ModelPricing;
   lifecycle?: 'stable' | 'preview' | 'dated_snapshot' | 'retired';
 }
@@ -66,6 +68,7 @@ export interface ModelCatalogRow {
   capabilities: string[];
   contextWindow: number;
   registeredQualityRank: number | null;
+  releaseDate: string | null;
   aa: AaScore | null;
   pricing: ModelPricing | null;
   lifecycle: OfficialModel['lifecycle'];

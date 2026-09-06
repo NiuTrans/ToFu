@@ -16,6 +16,7 @@ from difflib import SequenceMatcher
 
 from lib.log import get_logger
 from lib.project_mod.modifications import _record_modification
+from lib.project_mod.path_resolution import _resolve_base
 from lib.project_mod.scanner import _fmt_size
 
 from ._paths import (
@@ -861,8 +862,6 @@ def tool_apply_diffs(base_path, edits, conv_id=None, task_id=None,
     if len(edits) > MAX_EDITS:
         edits = edits[:MAX_EDITS]
 
-    # Import _resolve_base here (from tools.py) to avoid circular import
-    from lib.project_mod.tools import _resolve_base
     from collections import OrderedDict
 
     ok_count = 0
@@ -1528,8 +1527,6 @@ def tool_insert_contents(base_path, edits, conv_id=None, task_id=None,
     if len(edits) > MAX_EDITS:
         edits = edits[:MAX_EDITS]
 
-    from lib.project_mod.tools import _resolve_base
-
     results = []
     ok_count = 0
     fail_count = 0
@@ -1622,7 +1619,6 @@ def tool_edit_file(base_path, edits, conv_id=None, task_id=None,
     dropped = max(0, len(edits) - MAX_EDITS)
     edits = edits[:MAX_EDITS]
 
-    from lib.project_mod.tools import _resolve_base
     from collections import OrderedDict
 
     ok_count = 0

@@ -59,6 +59,7 @@ import com.tofu.client.session.HealthProbe
 import com.tofu.client.session.ProfileForm
 import com.tofu.client.session.ServerUrl
 import com.tofu.client.session.TofuProbe
+import com.tofu.client.ui.theme.TofuButtonShape
 import kotlinx.coroutines.launch
 
 /**
@@ -259,7 +260,7 @@ fun AddEditScreen(
                         )
                     },
                     enabled = validation.ok,
-                    shape = RoundedCornerShape(13.dp),
+                    shape = TofuButtonShape,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                     ),

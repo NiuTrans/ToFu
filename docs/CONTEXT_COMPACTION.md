@@ -8,11 +8,11 @@ turns. Manual compaction explicitly mutates the conversation by writing a
 persistent summary boundary through its authority, guarded against intervening
 turns.
 
-The per-round L1 pass is incremental at the authority boundary. A no-op does not
-load the transcript to rediscover placeholders; settled-turn ownership resolves
-lazily only for a real durable tool/image mutation. Image-tail and text-tool
-placeholders update the same settled Turn projection, so base64 payloads do not
-return on the next rebuild.
+The per-round L1 pass is isolated from transcript authority. It receives an
+API-form request projection, replaces cold tool/image bulk only in that working
+copy, and performs no conversation read, projection update, or change
+notification. The next user turn rebuilds from unchanged settled Turns and may
+derive the same bounded request projection again.
 
 Both paths may share summarization/token-budget primitives, not persistence
 semantics: a request-local summary is not the stored transcript, and persistent
@@ -23,7 +23,7 @@ transcript authority. Verified public GPT-5.6 Responses and supported direct
 Anthropic Messages routes use the resolved economic working set as their
 rendered-input server trigger. The fallback is 128K; a declared price increase
 selects 90% of the preceding cheaper tier. Local L1 still removes
-reconstructible bulk; local lossy L2 is
+reconstructible bulk from the current request; local lossy L2 is
 reserved for the hard-window/reactive fallback. Codex and Claude Code
 subscription OAuth, generic compatible gateways, mixed provider pools and
 Responses native Multi-agent rounds keep local L2 authoritative because their
@@ -61,9 +61,10 @@ unpaired, so a later success can never authorize or relabel an earlier call.
 L1's default tool-result hot tail is the intersection of a 40-result ceiling
 and a 48K estimated-token ceiling. It never edits the warm cache prefix and
 always protects the newest complete tool-call batch, even when that batch alone
-exceeds 48K. Older reconstructible results use the existing durable
-placeholder path; the opt-in `adaptive_hot_tail` method remains a separate
-experiment rather than a second default authority.
+exceeds 48K. Older reconstructible results become request-local placeholders;
+their durable tool results and artifact references remain untouched. The
+opt-in `adaptive_hot_tail` method remains a separate experiment rather than a
+second default authority.
 
 Automatic L2 and manual `/compact` select the newest contiguous complete
 tool-round suffix under the same preservation token budget used for turns. The

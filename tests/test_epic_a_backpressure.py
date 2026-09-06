@@ -477,6 +477,13 @@ async def test_chat_completion_admission_refusal_releases_stream_slot(
                 execution_id='refused-task', kind='chat', owner_user_id=1),
         },
     )
+    rejected = []
+    monkeypatch.setattr(
+        task_manager,
+        'reject_unstarted_chat_task',
+        lambda task, _error, *, cause, conv_id='': rejected.append(
+            (task['id'], cause, conv_id)),
+    )
     monkeypatch.setattr(chat.controller, 'acquire', lambda: None)
     monkeypatch.setattr(chat.sse_limiter, 'try_acquire', lambda _key: 'slot')
     released = []
@@ -512,6 +519,9 @@ async def test_chat_completion_admission_refusal_releases_stream_slot(
     assert response.status_code == 503
     assert released == ['slot']
     assert disposed == [route_group]
+    assert rejected[0][0] == 'refused-task'
+    assert rejected[0][1] == 'task_admission_refused'
+    assert rejected[0][2].startswith('api-')
 
 
 @pytest.mark.anyio

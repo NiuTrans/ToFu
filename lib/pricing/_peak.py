@@ -2,8 +2,8 @@
 
 DeepSeek announced peak-hour pricing (api-docs.deepseek.com/quick_start/pricing,
 verified 2026-07-31): 09:00-12:00 and 14:00-18:00 Beijing time (UTC+8, no
-DST), ALL billing items 2x, effective date "subject to official announcement"
-(TBA).
+DST), ALL billing items 2x, in force since 2026-08-16 Beijing time
+(1786809600 = 2026-08-15 16:00 UTC).
 
 A pricing row (a ``MODEL_PRICING`` value or a provider-template override)
 opts in with a ``'peak'`` block::

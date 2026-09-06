@@ -829,22 +829,23 @@ def remove_from_queue(
     return bool(result.get("removed"))
 
 
-def dedup_peer_durable_rows(
+def dedup_inbox_durable_rows(
     conv_id: str,
     queue_ids,
     *,
     user_id: int,
 ) -> int:
-    """Delete peer-message durable rows by ``queueId`` (the FORWARD-race de-dup).
+    """Delete injection-lane durable rows by ``queueId`` (FORWARD-race de-dup).
 
-    The Pillar #6 peer-message FORWARD-race twin of
-    :func:`lib.agent_inbox.consume_peer`. A live-target peer message is written
-    to BOTH a durable ``message_queue`` row AND a fast-path agent_inbox item
-    tagged with that row's ``queueId``. When the orchestrator's round-boundary
-    drain hook injects the inbox item (delivery), it calls THIS to delete the
-    matching durable row(s) so ``dispatch_next_queued`` can never later pop them
-    as a redundant fresh turn = zero double-delivery. The REVERSE race (durable
-    row dispatched first) is closed symmetrically by ``consume_peer``.
+    Shared by every dual-written injection lane (peer message, background-
+    command completion): the live-target payload is written to BOTH a durable
+    ``message_queue`` row AND a fast-path agent_inbox twin tagged with that
+    row's ``queueId``. When the orchestrator's round-boundary drain injects
+    the twin and the post-LLM flush confirms consumption, it calls THIS to
+    delete the matching durable row(s) so ``dispatch_next_queued`` can never
+    later pop them as a redundant fresh turn = zero double-delivery. The
+    REVERSE race (durable row dispatched first) is closed symmetrically by
+    :func:`lib.agent_inbox.consume_peer` at dispatch time.
 
     Best-effort — a delete failure logs and is skipped (the reverse-race guard
     still protects against a double delivery). Returns the number removed.
@@ -1327,16 +1328,17 @@ def dispatch_next_queued(
             )
             return None
 
-        # ── Pillar #6 REVERSE-race de-dup ──
-        # A live-target peer message is written to BOTH this durable row AND a
+        # ── Injection-lane REVERSE-race de-dup (peer / background-command) ──
+        # A dual-written injection payload lives as BOTH this durable row AND a
         # fast-path agent_inbox twin tagged with this row's queueId. If the
         # target's live turn ended BEFORE its next round-boundary drain, we pop
         # the durable row HERE and dispatch it as a fresh turn — so the still-
         # pending inbox twin must be dropped, or it would be re-injected on that
         # fresh turn = double delivery. (The forward race — inbox drains first —
-        # is closed symmetrically in the orchestrator drain hook, which deletes
+        # is closed symmetrically by the post-LLM deferred flush, which deletes
         # this row by queueId.) The inbox is conv-keyed (swarm_key_for=convId).
-        if payload.get("_peerMessage") and item.get("queueId"):
+        if (payload.get("_peerMessage") or payload.get("_backgroundCommand")) \
+                and item.get("queueId"):
             try:
                 from lib.agent_inbox import consume_peer
 

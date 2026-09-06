@@ -41,7 +41,7 @@ def test_resolve_base_ignores_json_blob_in_path(tmp_path):
     'rootname:path' spec (it contains a JSON ':' before char 40).  The
     prefix '[{"path"' is not a valid root name, so it falls through to the
     primary base_path instead of raising UnknownWorkspaceRootError."""
-    from lib.project_mod.tools import _resolve_base
+    from lib.project_mod.path_resolution import _resolve_base
 
     blob = '[{"path": "lib/self_update.py", "start_line": 392, "end_line": 432]'
     base, rel = _resolve_base(str(tmp_path), blob)
@@ -53,7 +53,7 @@ def test_resolve_base_ignores_json_blob_in_path(tmp_path):
 def test_resolve_base_still_honors_real_root_prefix(tmp_path):
     """Genuine 'rootname:path' must still resolve via the registry."""
     from lib.project_mod import config
-    from lib.project_mod.tools import _resolve_base
+    from lib.project_mod.path_resolution import _resolve_base
 
     conv_id = 'test-conv-rootprefix'
     config.set_conv_roots(conv_id, str(tmp_path))

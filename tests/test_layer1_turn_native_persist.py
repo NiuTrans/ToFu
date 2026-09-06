@@ -1,4 +1,4 @@
-"""L1 placeholders persist through normalized turn authority, never v1 PUT."""
+"""L1 compaction is a request projection and never rewrites settled turns."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class _TurnNativeStore:
         self.notifications += 1
 
 
-def test_l1_patches_dirty_settled_turn_projection(monkeypatch):
+def test_l1_compacts_request_without_touching_settled_turn(monkeypatch):
     from lib.tasks_pkg.compaction.api import micro_compact
 
     cold_round = {
@@ -95,29 +95,14 @@ def test_l1_patches_dirty_settled_turn_projection(monkeypatch):
         })
 
     assert saved > 0
-    assert store.load_calls == 1
-    assert store.notifications == 1
-    assert len(updates) == 1
-    assert updates[0]['operation'] == 'turn.projection.update'
-    assert updates[0]['payload']['turn_id'] == 'turn-cold'
-    assert updates[0]['payload']['expected_projection_revision'] == 7
-    persisted = updates[0]['payload']['projection']
-    persisted_tool = next(
-        segment for segment in persisted['segments']
-        if segment['type'] == 'tool_use'
-    )
-    assert persisted_tool['blockId'] == 'tool:custom-cold-call'
-    assert persisted_tool['input'] == {}
-    assert persisted_tool['translatedText'] == '已读取'
-    assert persisted_tool['result'] == {
-        'content': cold_round['toolContent'],
-        'status': 'done',
-        'artifactId': 'artifact-cold',
-    }
+    assert api_messages[1]['content'].startswith('[read_files result compacted')
+    assert store.load_calls == 0
+    assert store.notifications == 0
+    assert updates == []
     assert owner['segments'][0]['result']['content'] == 'x' * 4000
-    assert cold_round['compactionLayer'] == 'L1'
-    assert cold_round['toolContent'].startswith('[read_files result compacted')
-    assert owner['_projectionRevision'] == 8
+    assert cold_round['toolContent'] == 'x' * 4000
+    assert 'compactionLayer' not in cold_round
+    assert owner['_projectionRevision'] == 7
 
 
 def test_l1_noop_does_not_load_conversation_transcript(monkeypatch):
@@ -159,8 +144,8 @@ def test_l1_noop_does_not_load_conversation_transcript(monkeypatch):
     assert token_counts == []
 
 
-def test_l1_task_owned_placeholder_does_not_load_transcript(monkeypatch):
-    """An in-flight round already carries the persistence/UX stamp owner."""
+def test_l1_task_owned_placeholder_does_not_mutate_round(monkeypatch):
+    """Even an in-flight round remains durable-projection input, not scratch."""
     from lib.tasks_pkg.compaction.api import micro_compact
 
     store = _TurnNativeStore([])
@@ -199,8 +184,8 @@ def test_l1_task_owned_placeholder_does_not_load_transcript(monkeypatch):
             'MICRO_COMPACT_THRESHOLD': 100,
         }) > 0
     assert store.load_calls == 0
-    assert cold_round['compactionLayer'] == 'L1'
-    assert cold_round['toolContent'].startswith('[read_files result compacted')
+    assert 'compactionLayer' not in cold_round
+    assert cold_round['toolContent'] == 'x' * 4000
 
 
 def test_l1_duplicate_legacy_id_never_rewrites_an_arbitrary_round(monkeypatch):
@@ -257,10 +242,11 @@ def test_l1_duplicate_legacy_id_never_rewrites_an_arbitrary_round(monkeypatch):
     assert second_round['toolContent'] == 'second durable bytes'
     assert updates == []
     assert store.notifications == 0
+    assert store.load_calls == 0
 
 
-def test_l1_cold_image_placeholder_is_durable(monkeypatch):
-    """The image-tail step must not resurrect base64 on the next turn."""
+def test_l1_cold_image_placeholder_is_request_local(monkeypatch):
+    """Image projection drops request bulk without deleting durable media."""
     from lib.tasks_pkg.compaction.api import micro_compact
 
     cold_round = {
@@ -303,8 +289,10 @@ def test_l1_cold_image_placeholder_is_durable(monkeypatch):
         api_messages, conv_id='conv-image',
         task={'_userId': 1, 'model': 'test-model', 'toolRounds': []},
         constant_overrides={'MICRO_HOT_TAIL': 99}) > 0
-    assert store.load_calls == 1
-    assert store.notifications == 1
-    assert cold_round['compactionLayer'] == 'L1'
-    assert cold_round['toolContent'].startswith(
+    assert store.load_calls == 0
+    assert store.notifications == 0
+    assert 'compactionLayer' not in cold_round
+    assert cold_round['toolContent'] == []
+    assert isinstance(api_messages[0]['content'], str)
+    assert api_messages[0]['content'].startswith(
         '[browser_read_page image compacted')

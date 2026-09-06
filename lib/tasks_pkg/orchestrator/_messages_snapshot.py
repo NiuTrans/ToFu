@@ -6,9 +6,9 @@ Extracted 2026-07-31 ( slice 15) from
 ``lib/tasks_pkg/orchestrator/_run.py``'s stream loop.
 
 **What it does**
-    RIGHT AFTER ``sort_tool_results`` — the messages are now in their
-    real outbound ordering, so the debug panel sees the same sequence
-    the model will. The helper:
+    After canonical request-body construction, so the debug panel sees the
+    same sequence the model will without reordering historical tool results.
+    The helper:
 
     * Successful rounds reuse the canonical message list already produced by
       ``build_body`` instead of repeating every conversation-sized sanitizer.
@@ -90,9 +90,11 @@ def emit_messages_snapshot_event(
     try:
         _wire = prepared_messages
         if not isinstance(_wire, list):
+            from lib.tasks_pkg.manager import task_user_id
             _wire = apply_wire_sanitize(
                 messages, conv_id=task.get('convId', ''),
-                provider_id=task.get('provider_id') or '')
+                provider_id=task.get('provider_id') or '',
+                user_id=task_user_id(task))
         snapshot = _strip_base64_for_snapshot(_wire)
         snap_evt = build_event(
             EventType.MESSAGES_SNAPSHOT,

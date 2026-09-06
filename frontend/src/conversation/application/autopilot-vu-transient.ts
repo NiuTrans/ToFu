@@ -12,6 +12,11 @@ import type {
   TurnToolRound,
 } from '../../api/conversation-sync.generated';
 import type {
+  ToolCompleteEvent,
+  ToolResultEvent,
+  ToolStartEvent,
+} from '../../api/event-contract.generated';
+import type {
   TransientTurnPresentation,
   TransientTurnRecord,
 } from '../domain/transient-turn';
@@ -365,17 +370,22 @@ export function reduceAutopilotVuTransientTurn(
       },
     );
   } else if (type === 'tool_start') {
+    /* Contracted fold (see tool_complete below) — every field read here is
+     * declared on the generated interface; anything else is a typecheck
+     * error. */
+    const evt = inner as unknown as ToolStartEvent;
     const candidate: UnknownRecord = {
-      roundNum: number(inner.roundNum),
-      query: text(inner.query),
+      roundNum: evt.roundNum,
+      query: text(evt.query),
       results: null,
       status: 'searching',
-      toolName: text(inner.toolName),
-      toolCallId: text(inner.toolCallId),
-      toolArgs: inner.toolArgs ?? null,
-      attentionKind: text(inner.attentionKind),
-      parentToolCallId: text(inner.parentToolCallId),
-      llmRound: number(inner.llmRound) ?? null,
+      toolName: text(evt.toolName),
+      toolCallId: text(evt.toolCallId),
+      toolArgs: evt.toolArgs ?? null,
+      attentionKind: text(evt.attentionKind),
+      parentToolCallId: text(evt.parentToolCallId),
+      llmRound: evt.llmRound ?? null,
+      agentId: text(evt.agentId),
     };
     const match = matchingToolRoundIndex(rounds, inner);
     rounds = match >= 0
@@ -394,25 +404,39 @@ export function reduceAutopilotVuTransientTurn(
         if (index !== match) return round;
         const next = { ...round };
         if (type === 'tool_result') {
-          next.results = inner.results;
-          next.status = text(inner.status) || 'done';
-          for (const key of ['searchDiag', 'cacheSource', 'engineBreakdown',
-            'toolSearchTotal', 'toolSearchNextCursor', 'toolSearchFailOpen',
-            'rejection', '_rejected']) {
-            if (Object.prototype.hasOwnProperty.call(inner, key)) next[key] = inner[key];
-          }
+          /* Contracted fold (see tool_complete below). */
+          const evt = inner as unknown as ToolResultEvent;
+          next.results = evt.results;
+          next.status = text(evt.status) || 'done';
+          if (evt.searchDiag !== undefined) next.searchDiag = evt.searchDiag;
+          if (evt.cacheSource !== undefined) next.cacheSource = evt.cacheSource;
+          if (evt.engineBreakdown !== undefined) next.engineBreakdown = evt.engineBreakdown;
+          if (evt.toolSearchTotal !== undefined) next.toolSearchTotal = evt.toolSearchTotal;
+          if (evt.toolSearchNextCursor !== undefined) next.toolSearchNextCursor = evt.toolSearchNextCursor;
+          if (evt.toolSearchFailOpen !== undefined) next.toolSearchFailOpen = evt.toolSearchFailOpen;
+          if (evt.rejection !== undefined) next.rejection = evt.rejection;
+          if (evt._rejected !== undefined) next._rejected = evt._rejected;
         } else if (type === 'tool_progress') {
           return applyToolProgress(next, inner);
         } else if (type === 'tool_complete') {
-          next.toolContent = inner.toolContent ?? null;
-          if (inner.toolResultEvidence != null) {
-            next.toolResultEvidence = inner.toolResultEvidence;
+          /* Contracted fold — the migration paradigm: the backend emission
+           * gates (build_event + manager.append_event) validate every
+           * declared field of a schema'd event, so narrowing the dispatched
+           * frame to its generated contract interface is a safe assertion at
+           * this seam, and reading a field the backend never declared (the
+           * rawToolTokens drift class) is a TYPECHECK error here — the
+           * consumer half of the contract. Migrate each remaining event by
+           * adding its EventSpec.schema, regenerating, then folding through
+           * the generated interface the same way. */
+          const evt = inner as unknown as ToolCompleteEvent;
+          next.toolContent = evt.toolContent ?? null;
+          if (evt.toolResultEvidence != null) {
+            next.toolResultEvidence = evt.toolResultEvidence;
           }
-          next.status = text(inner.status) || 'done';
-          if (inner.toolTokens != null) next.toolTokens = inner.toolTokens;
-          for (const key of ['rejection', '_rejected']) {
-            if (Object.prototype.hasOwnProperty.call(inner, key)) next[key] = inner[key];
-          }
+          next.status = evt.status || 'done';
+          if (evt.toolTokens != null) next.toolTokens = evt.toolTokens;
+          if (evt.rejection !== undefined) next.rejection = evt.rejection;
+          if (evt._rejected !== undefined) next._rejected = evt._rejected;
         } else {
           if (inner.compactedContent != null) {
             next.toolContent = inner.compactedContent;

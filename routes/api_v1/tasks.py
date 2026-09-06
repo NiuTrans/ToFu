@@ -26,7 +26,8 @@ from contextlib import nullcontext
 from quart import Blueprint, request
 
 from lib.api_response import (
-    api_bad_request, api_internal_error, api_not_found, api_ok, sse_response,
+    api_bad_request, api_conflict, api_internal_error, api_not_found, api_ok,
+    sse_response,
 )
 from lib.log import audit_log, get_logger
 from lib.openapi import api_meta
@@ -147,7 +148,7 @@ def _starters() -> dict:
         return _STARTERS
     for mod_path, attr, kind, field, params in (
         ('lib.research.api', 'produce_research', 'research', 'direction',
-         ('lang', 'n_ideas', 'seed_arxiv_ids')),
+         ('lang', 'n_ideas', 'seed_arxiv_ids', 'model')),
         ('lib.research.action', 'start_research_action', 'research-action',
          'direction', ('action', 'lang', 'expected_revision',
                        'confirm_external_writes', 'model')),
@@ -823,6 +824,21 @@ def task_delete(task_id):
         task_id, user_id=owner_user_id)
     if task is None:
         return api_not_found('Task not found')
+    if task.get('status') in ('pending', 'running'):
+        rt.abort_owned(task_id, user_id=owner_user_id)
+        return api_conflict(
+            'Task is still active; cancellation was requested. Delete it '
+            'after it reaches a terminal state.',
+            error_code='task_active',
+        )
+    if (task.get('_executionTerminalizing')
+            or task.get('_finalize_started_at')
+            or task.get('_terminalPersistencePending')):
+        return api_conflict(
+            'Task terminal settlement is still being published or persisted. '
+            'Retry deletion after settlement completes.',
+            error_code='task_settling',
+        )
     if not rt.remove_owned(task_id, user_id=owner_user_id):
         return api_not_found('Task not found')
     audit_log('api_task_delete', task_id=task_id,

@@ -173,10 +173,21 @@ def main() -> int:
     for path in sorted(present - cataloged):
         failures.append(f"uncataloged document: {path}")
     present_contracts = _repository_contracts()
-    for path in sorted(contract_catalog - present_contracts):
+    catalog_exact = {
+        path for path in contract_catalog if not path.endswith("/")}
+    # A trailing-slash entry registers a whole generated directory (e.g. the
+    # fixture corpus); enumerating every generated file would put the
+    # catalog itself in the generator's drift loop.
+    catalog_prefixes = tuple(
+        path for path in contract_catalog if path.endswith("/"))
+    for path in sorted(catalog_exact - present_contracts):
         failures.append(f"cataloged contract is missing: {path}")
-    for path in sorted(present_contracts - contract_catalog):
-        failures.append(f"uncataloged contract: {path}")
+    for prefix in sorted(catalog_prefixes):
+        if not any(path.startswith(prefix) for path in present_contracts):
+            failures.append(f"cataloged contract directory is empty: {prefix}")
+    for path in sorted(present_contracts - catalog_exact):
+        if not any(path.startswith(prefix) for prefix in catalog_prefixes):
+            failures.append(f"uncataloged contract: {path}")
 
     root_resolved = ROOT.resolve()
     for relative_path in sorted(cataloged & present):

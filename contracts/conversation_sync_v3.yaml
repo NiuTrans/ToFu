@@ -642,6 +642,12 @@ components:
         roundNum: {type: integer, minimum: 0}
         llmRound:
           oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
+        agentId:
+          type: string
+          description: >-
+            Owning swarm sub-agent id. This call's Request Inspector stream
+            is `{taskId}#agent:{agentId}`, where llmRound is the sub-agent's
+            1-based loop round (equal to its request-snapshot roundNum).
         toolCallId: {type: string}
         toolName: {type: string}
         toolArgs: {}
@@ -791,11 +797,27 @@ components:
             In a refs snapshot, resolves input and result from the unique
             sibling TurnToolRound whose toolCallId equals this value.
         _round: {$ref: '#/components/schemas/TurnToolRound'}
+    TurnSystemNoteSegment:
+      type: object
+      additionalProperties: true
+      required: [type, blockId, text, noteKind]
+      properties:
+        type: {const: system_note}
+        blockId: {type: string}
+        attemptId: {type: string}
+        taskId: {type: string}
+        text: {type: string}
+        noteKind:
+          type: string
+          enum: [intent-stall, todo-continuation]
+        llmRound:
+          oneOf: [{type: integer, minimum: 0}, {type: 'null'}]
     TurnContentSegment:
       oneOf:
         - $ref: '#/components/schemas/TurnTextSegment'
         - $ref: '#/components/schemas/TurnThinkingSegment'
         - $ref: '#/components/schemas/TurnToolUseSegment'
+        - $ref: '#/components/schemas/TurnSystemNoteSegment'
     BranchLaneDescriptor:
       type: object
       additionalProperties: true
@@ -1638,6 +1660,9 @@ components:
           type: array
           items: {$ref: '#/components/schemas/TurnMessageInjection'}
         _userSteerInjects:
+          type: array
+          items: {$ref: '#/components/schemas/TurnMessageInjection'}
+        _bgCommandInjects:
           type: array
           items: {$ref: '#/components/schemas/TurnMessageInjection'}
         _stallNudges:

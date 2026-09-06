@@ -77,6 +77,108 @@ def test_transport_capture_uses_final_body_and_scrubs_secrets(monkeypatch):
         RAW_ARCHIVE_FREE_SPACE_WIRE_MAX_BYTES
 
 
+def _capture_plan(monkeypatch, client):
+    from lib.llm._sse_core import prepare_request
+    from lib.raw_archive_contract import RAW_ARCHIVE_FREE_SPACE_WIRE_MAX_BYTES
+    import lib.storage
+    import lib.raw_archive
+
+    monkeypatch.setattr(
+        lib.storage, "get_storage_client", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        lib.raw_archive.shutil,
+        "disk_usage",
+        lambda _path: type("Usage", (), {
+            "free": RAW_ARCHIVE_FREE_SPACE_WIRE_MAX_BYTES * 8,
+        })(),
+    )
+    monkeypatch.setattr(lib.raw_archive.time, "sleep", lambda _s: None)
+    plan = prepare_request({
+        "model": "gpt-test",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": True,
+        "_raw_archive_context": {
+            "userId": 1,
+            "conversationId": "conv-retry",
+            "turnId": "turn-retry",
+            "attemptId": "attempt-retry",
+            "taskId": "task-retry",
+            "roundNum": 1,
+            "model": "gpt-test",
+        },
+    }, api_key="sk-header-secret-value", base_url="https://example.invalid")
+    return plan
+
+
+def test_commit_retries_classified_transient_errors(monkeypatch):
+    from lib.storage.errors import StorageError
+
+    calls: list[dict] = []
+
+    class _FlakyClient:
+        def command(self, operation, payload, command_id, **kwargs):
+            calls.append({
+                "operation": operation,
+                "command_id": command_id,
+                **kwargs,
+            })
+            if len(calls) < 3:
+                raise StorageError(
+                    "database_timeout",
+                    "Storage writer acquisition timed out", True, 25)
+            return {"archiveId": payload["archive_id"]}
+
+    plan = _capture_plan(monkeypatch, _FlakyClient())
+    plan.raw_archive_capture.append_response(b"data: {}\n\n")
+    result = plan.raw_archive_capture.commit(
+        response_complete=True, status_code=200)
+
+    assert result is not None
+    assert len(calls) == 3
+    assert all(call["operation"] == "raw_archive.put" for call in calls)
+    assert all(call["priority"] == "event" for call in calls)
+    assert len({call["command_id"] for call in calls}) == 1
+
+
+def test_commit_gives_up_after_bounded_attempts(monkeypatch):
+    from lib.storage.errors import StorageError
+
+    calls = 0
+
+    class _DownClient:
+        def command(self, operation, payload, command_id, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise StorageError(
+                "database_unavailable", "SQLite storage is unavailable",
+                True, 100)
+
+    plan = _capture_plan(monkeypatch, _DownClient())
+    plan.raw_archive_capture.append_response(b"data: {}\n\n")
+    assert plan.raw_archive_capture.commit(
+        response_complete=True, status_code=200) is None
+    assert calls == 3
+
+
+def test_commit_never_retries_non_retryable_errors(monkeypatch):
+    from lib.storage.errors import StorageError
+
+    calls = 0
+
+    class _IntegrityClient:
+        def command(self, operation, payload, command_id, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise StorageError(
+                "database_integrity", "SQLite integrity constraint failed")
+
+    plan = _capture_plan(monkeypatch, _IntegrityClient())
+    plan.raw_archive_capture.append_response(b"data: {}\n\n")
+    assert plan.raw_archive_capture.commit(
+        response_complete=True, status_code=200) is None
+    assert calls == 1
+
+
 def _archive_payload(created, archive_id: str, *, budget_bytes: int) -> dict:
     request = b'{"messages":[{"role":"user","content":"hello"}]}'
     response = b'data: {"choices":[{"delta":{"content":"world"}}]}\n\n'

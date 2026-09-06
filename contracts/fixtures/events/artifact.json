@@ -1,0 +1,17 @@
+{
+  "conv_id": "s",
+  "created_at": 1,
+  "format": "s",
+  "id": "s",
+  "msg_id": "s",
+  "parent_id": "s",
+  "pinned": true,
+  "size_bytes": 1,
+  "source": "s",
+  "source_ref": {},
+  "task_id": "s",
+  "title": "s",
+  "type": "artifact",
+  "url": "s",
+  "version": 1
+}

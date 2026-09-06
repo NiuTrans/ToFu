@@ -12,6 +12,8 @@ Outbound dependencies shared by multiple phases live in ``_ports``.
 
 from __future__ import annotations
 
+import copy
+
 # NOTE: ``import threading`` was removed 2026-07-23 ( slice 2).
 # The only usage inside run_task was the daemon-thread spawn of the
 # external-edit probe, which now lives in
@@ -192,8 +194,13 @@ def run_task(task: dict[str, Any]) -> None:
         project_enabled = mcfg['project_enabled']
         code_exec_enabled = mcfg['code_exec_enabled']
         memory_enabled  = mcfg['memory_enabled']
-        messages = list(task['messages'])
-        original_messages = list(messages)
+        # Every preparation/compaction pass may mutate the working projection.
+        # Isolate nested content/tool-call containers from the task's durable
+        # input view; deepcopy shares immutable strings/bytes, so large payload
+        # bodies are not duplicated. The shallow fallback list remains safe
+        # because no working transform can now reach its dictionaries.
+        original_messages = list(task['messages'])
+        messages = copy.deepcopy(task['messages'])
         # ── Round-loop cross-iteration state (slice 1): the 14 locals
         #    crossing the stream-loop boundary live on ONE flat carrier
         #    (docs/modules/task_engine.md).

@@ -213,13 +213,27 @@ def render_research_payload(
     owner_user_id: str,
     mode: str = 'both',
     max_chars: int = 60_000,
+    analysis: dict | None = None,
+    prior_observation: dict | None = None,
+    current_observation: dict | None = None,
 ) -> str:
     """Render one already-authorized deep-capture result for model context."""
     budget = _bounded_int(
         max_chars, default=60_000, minimum=1_000, maximum=_MAX_CONTEXT_CHARS)
-    analysis = analyze_research_payload(
+    analysis = analysis or analyze_research_payload(
         payload, owner_user_id=owner_user_id)
     analysis_text = _render_analysis(analysis, payload)
+    if mode != 'content' and prior_observation:
+        from .site_observations import (
+            render_adapter_promotion, render_site_observation,
+        )
+
+        prior_text = render_site_observation(prior_observation)
+        if prior_text:
+            analysis_text = prior_text + '\n\n' + analysis_text
+        promotion_text = render_adapter_promotion(current_observation)
+        if promotion_text:
+            analysis_text += '\n\n' + promotion_text
     if mode == 'analysis':
         return analysis_text[:budget]
     page_text = str(
@@ -253,6 +267,15 @@ def research_page(fn_args: dict, runtime) -> str:
     pagination = str(fn_args.get('pagination') or 'auto').strip().lower()
     if pagination not in ('auto', 'links', 'none'):
         return 'Error: pagination must be auto, links, or none.'
+    try:
+        from .access import is_read_allowed
+        if not is_read_allowed(runtime.owner_user_id, url):
+            return 'Error: browser research URL was denied by domain policy.'
+    except Exception as exc:
+        logger.debug('[BrowserResearch] requested URL policy failed: %s', exc)
+        return 'Error: browser research URL was denied by domain policy.'
+    from .site_observations import load_site_observation
+    prior_observation = load_site_observation(runtime.owner_user_id, url)
     max_chars = _bounded_int(
         fn_args.get('maxChars'), default=60_000,
         minimum=1_000, maximum=_MAX_CONTEXT_CHARS)
@@ -266,7 +289,7 @@ def research_page(fn_args: dict, runtime) -> str:
             BrowserUpgradeRequired,
             require_capabilities,
         )
-        require_capabilities(runtime.client_id, (
+        protocol_info = require_capabilities(runtime.client_id, (
             BrowserCapability.DEEP_COLLECT,
             BrowserCapability.NETWORK_BODY,
         ))
@@ -274,14 +297,35 @@ def research_page(fn_args: dict, runtime) -> str:
         return (
             'Error: browser extension upgrade required for deep website '
             f'research; missing capabilities: {", ".join(exc.missing)}')
-    result, error = runtime.send('research_url', {
+    command_params = {
         'url': url,
         'maxChars': max_chars,
         'maxScrolls': max_scrolls,
         'maxPages': max_pages,
         'pagination': pagination,
         'timeoutMs': 65_000,
-    }, timeout=80)
+    }
+    available_capabilities = set(
+        protocol_info.get('capabilities') or []) \
+        if isinstance(protocol_info, dict) else set()
+    if (isinstance(prior_observation, dict)
+            and prior_observation.get('status') == 'active'
+            # Three consistent successful observations are required before a
+            # stale hint may reserve any of the bounded transient body budget.
+            and int(prior_observation.get('confidence_milli') or 0) >= 700
+            and BrowserCapability.RESEARCH_HINTS.value in available_capabilities):
+        wire_hints = []
+        for hint in (prior_observation.get('api_hints') or [])[:5]:
+            if not isinstance(hint, dict) or hint.get('passive_only') is not True:
+                continue
+            wire_hints.append({
+                'method': hint.get('method'),
+                'origin': hint.get('origin'),
+                'pathTemplate': hint.get('path_template'),
+            })
+        if wire_hints:
+            command_params['captureHints'] = wire_hints
+    result, error = runtime.send('research_url', command_params, timeout=80)
     if error:
         return f'Error researching URL: {error}'
     if not isinstance(result, dict):
@@ -299,14 +343,40 @@ def research_page(fn_args: dict, runtime) -> str:
         from .cookie_capture import looks_like_login_wall
         if looks_like_login_wall(
                 url, final_url, str(result.get('title') or '')):
+            from .site_observations import record_site_observation
+
+            record_site_observation(
+                runtime.owner_user_id, url, outcome='auth_challenge')
             return (
                 'Error: the page redirected to a sign-in screen. Finish '
                 f'signing in at {final_url}, then retry this research call.')
     except Exception as exc:
         logger.debug('[BrowserResearch] login-wall classification degraded: %s', exc)
+    analysis = analyze_research_payload(
+        result, owner_user_id=runtime.owner_user_id)
+    from .site_observations import (
+        distill_site_observation,
+        record_site_observation,
+    )
+    research_stats = result.get('research')
+    elapsed_ms = _bounded_int(
+        research_stats.get('elapsedMs') if isinstance(research_stats, dict) else 0,
+        default=0, minimum=0, maximum=120_000)
+    try:
+        observation = distill_site_observation(analysis, elapsed_ms=elapsed_ms)
+        current_observation = record_site_observation(
+            runtime.owner_user_id, url, observation=observation,
+            outcome='success')
+    except Exception as exc:
+        # Site observations are reconstructible advisory state. A malformed
+        # extension payload or unavailable cache must not hide live page data.
+        logger.debug('[BrowserResearch] site observation distillation skipped: %s', exc)
+        current_observation = None
     return render_research_payload(
         result, owner_user_id=runtime.owner_user_id,
-        mode=mode, max_chars=max_chars)
+        mode=mode, max_chars=max_chars, analysis=analysis,
+        prior_observation=prior_observation,
+        current_observation=current_observation)
 
 
 __all__ = [

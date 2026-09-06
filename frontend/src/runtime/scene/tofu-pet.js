@@ -1251,6 +1251,11 @@ var t = (typeof globalThis !== 'undefined' && typeof globalThis.t === 'function'
 
     // Pause the loop when the tab is hidden (CPU + attention). oneko pattern.
     document.addEventListener('visibilitychange', function () { W.paused = document.hidden; });
+    // The Android WebView never flips document.hidden when the app is
+    // backgrounded; the shell dispatches tofu:native-visibility instead.
+    document.addEventListener('tofu:native-visibility', function (e) {
+      W.paused = !!(e && e.detail && e.detail.hidden) || document.hidden;
+    });
     // Keep the safe track correct as the bar/controls resize.
     if (window.ResizeObserver && _bar) {
       try { new ResizeObserver(function () { _measure(); }).observe(_bar); } catch (e) { /* harmless */ }

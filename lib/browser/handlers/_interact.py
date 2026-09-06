@@ -5,10 +5,33 @@ authority.
 """
 
 import json
+import re
 
 from lib.log import get_logger
 
 logger = get_logger(__name__)
+
+
+_TAB_GONE_RE = re.compile(r'element discovery failed: Tab \d+ not found')
+
+
+def _retarget_if_tab_gone(note, tab_id, fn_args, runtime):
+    """Re-seed the working tab when the remembered one died between calls.
+
+    Returns the replacement tab id, or None to keep the original error path.
+    An explicit tabId arg is a deliberate target — never silently reroute it.
+    """
+    if fn_args.get('tabId') is not None:
+        return None
+    if not note or not _TAB_GONE_RE.search(note):
+        return None
+    from lib.browser._resolve import forget_work_tab, resolve_work_tab
+    forget_work_tab(runtime.route_key, tab_id)
+    retry_tab = resolve_work_tab(
+        {}, route_key=runtime.route_key, send=runtime.send)
+    if retry_tab is None or retry_tab == tab_id:
+        return None
+    return retry_tab
 
 
 def _trusted_suffix(result):
@@ -91,6 +114,13 @@ def _handle_click(fn_args, runtime):
     if not selector:
         el, note, candidates = resolve_element(
             tab_id, text_query, 'clickable', send=runtime.send)
+
+        if el is None:
+            retry_tab = _retarget_if_tab_gone(note, tab_id, fn_args, runtime)
+            if retry_tab is not None:
+                tab_id = retry_tab
+                el, note, candidates = resolve_element(
+                    tab_id, text_query, 'clickable', send=runtime.send)
         if el is None:
             lines = [f'No clear match for text="{text_query}" ({note}).']
             if candidates:
@@ -156,6 +186,13 @@ def _handle_type(fn_args, runtime):
     if not selector:
         el, note, candidates = resolve_element(
             tab_id, text_query, 'input', send=runtime.send)
+
+        if el is None:
+            retry_tab = _retarget_if_tab_gone(note, tab_id, fn_args, runtime)
+            if retry_tab is not None:
+                tab_id = retry_tab
+                el, note, candidates = resolve_element(
+                    tab_id, text_query, 'input', send=runtime.send)
         if el is None:
             lines = [f'No input field matches text="{text_query}" ({note}).']
             if candidates:

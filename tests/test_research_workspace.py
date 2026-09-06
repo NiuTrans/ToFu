@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import urllib.parse
 
 import pytest
 
@@ -144,3 +145,48 @@ def test_http_scaffold_and_zip_export_keep_one_versioned_source_tree(storage):
     assert archive.status_code == 200
     assert archive.content_type == 'application/zip'
     assert bytes(_run(archive.get_data())).startswith(b'PK')
+
+
+def test_workspace_load_falls_back_to_percent_decoded_direction(storage):
+    """The proxy re-escape corrupts every direction-keyed GET the same way;
+    the workspace reader must share the decode-on-miss fallback."""
+    from lib.research.workspace import load_workspace, save_workspace
+    direction = '大模型高效知识注入方法'
+    draft = load_workspace(direction, 'zh', user_id=1)
+    draft['hypothesis'] = 'Layer entropy predicts a safe compression rate.'
+    saved = save_workspace(direction, 'zh', draft, expected_revision=0,
+                           user_id=1)
+    assert saved['revision'] == 1
+    got = load_workspace(urllib.parse.quote(direction), 'zh', user_id=1)
+    assert got['revision'] == 1
+    assert got['hypothesis'].startswith('Layer entropy')
+
+
+def test_http_workspace_get_survives_proxy_reescaped_direction(storage):
+    """End-to-end proxy shape: the writer speaks a JSON body (never
+    re-escaped), the reader's query string is re-escaped by the proxy, and
+    Flask's single decode leaves the direction still percent-encoded. Before
+    the read-side fallback this rendered as an empty workspace / 'no stored
+    research' for every non-ASCII direction."""
+    import server
+
+    direction = '大模型高效知识注入方法'
+    server.app.config['TESTING'] = True
+    client = server.app.test_client()
+    loaded = _run(client.get('/api/v1/research/workspace', query_string={
+        'direction': direction, 'lang': 'zh'}))
+    workspace = _run(loaded.get_json())['workspace']
+    workspace['hypothesis'] = 'kept through the proxy'
+    committed = _run(client.put('/api/v1/research/workspace', json={
+        'direction': direction, 'lang': 'zh', 'expected_revision': 0,
+        'workspace': workspace,
+    }))
+    assert committed.status_code == 200
+
+    wire = urllib.parse.quote(urllib.parse.quote(direction, safe=''), safe='')
+    response = _run(client.get(
+        f'/api/v1/research/workspace?direction={wire}&lang=zh'))
+    assert response.status_code == 200
+    body = _run(response.get_json())
+    assert body['workspace']['revision'] == 1
+    assert body['workspace']['hypothesis'] == 'kept through the proxy'

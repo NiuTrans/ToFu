@@ -183,6 +183,27 @@ class TestAgentFailureCarriesError(unittest.TestCase):
         self.assertEqual(done[0]['status'], SubAgentStatus.FAILED.value)
         self.assertEqual(done[0]['error'], 'gateway 500: upstream wedged')
 
+    def test_legacy_completed_with_error_is_projected_as_failed(self):
+        events: list[dict] = []
+        with _factory_for({'legacy': {
+                'status': SubAgentStatus.COMPLETED.value,
+                'error_message': 'LLM call failed at round 3: HTTP 400'}}):
+            execute_swarm_tool(
+                'spawn_agents',
+                {'agents': [{'id': 'legacy', 'objective': 'legacy partial'}]},
+                task={'id': self.task_id, '_userId': _TEST_OWNER_USER_ID},
+                on_event=events.append,
+            )
+            self.assertTrue(
+                _wait_until(lambda: any(
+                    e.get('type') == 'swarm_agent_complete'
+                    for e in events)),
+                'agent complete event never arrived')
+
+        done = [e for e in events if e.get('type') == 'swarm_agent_complete']
+        self.assertEqual(done[0]['status'], SubAgentStatus.FAILED.value)
+        self.assertIn('HTTP 400', done[0]['error'])
+
     def test_driver_crash_emits_error_phase_before_complete(self):
         events: list[dict] = []
         m = MasterOrchestrator(
@@ -345,14 +366,14 @@ class TestSwarmStatusPersistenceFallback(unittest.TestCase):
         self.p.delete_session(self.key)
         _reset_global_state(self.key)
 
-    def test_terminated_persisted_row_is_definitive_and_carries_error(self):
+    def test_legacy_completed_persisted_error_is_definitively_failed(self):
         self.p.save_session(self.key, conv_id=self.key, task_id='t-old',
                             specs=[{'id': 'p1', 'role': 'coder', 'objective': 'X'}],
                             config={'user_id': _TEST_OWNER_USER_ID},
                             status='running')
         self.p.save_agent(self.key, 'p1', role='coder', objective='X',
-                          status='failed', messages=[],
-                          result={'status': 'failed',
+                          status='completed', messages=[],
+                          result={'status': 'completed',
                                   'error_message': 'OOM in tool loop'},
                           rounds_used=3)
         self.p.mark_session_terminated(self.key)

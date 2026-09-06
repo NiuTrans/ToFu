@@ -185,6 +185,7 @@ def test_index_cache_key_includes_panels_signature():
         'index_page no longer calls _settings_panels_signature() — fragment '
         'edits would not invalidate the HTML cache.'
     )
+    src = src.replace('"', "'")  # quote-style agnostic: behavior, not style
     assert "_bundled_index_cache['panels']" in src, (
         'index_page cache-hit check no longer compares the panels signature — '
         'a fragment edit would serve stale cached HTML.'
@@ -202,6 +203,7 @@ def test_index_cache_key_includes_settings_stylesheet_tag():
     import inspect
     from routes import common
     src = inspect.getsource(common.index_page)
+    src = src.replace('"', "'")  # quote-style agnostic: behavior, not style
     assert 'settings_tag = _get_settings_link_tag()' in src
     assert "_bundled_index_cache['settings_tag'] == settings_tag" in src
     assert '_SETTINGS_STYLES_RE.sub(settings_tag, html)' in src

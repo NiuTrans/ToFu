@@ -8,18 +8,17 @@ Historically two paths fed the panel and disagreed:
     ``build_api_messages_from_db`` (no system-context injection, no
     cache-reorder, no sanitization).
   * HOT — the live ``messages_snapshot`` SSE was captured in the orchestrator
-    AFTER ``compose_task_context`` but BEFORE ``sort_tool_results`` and
-    BEFORE ``build_body``'s sanitization.
+    AFTER ``compose_task_context`` but before ``build_body`` sanitization.
 
 Neither equalled the real outbound (wire) array. This module collapses both
 onto one function so the panel is faithful.
 
 Two public entry points
 =======================
-``apply_wire_sanitize(messages, *, conv_id='', provider_id='')``
+``apply_wire_sanitize(messages, *, conv_id='', provider_id='', user_id=None)``
     The model-agnostic, IO-free tail of ``build_body`` — the transforms that
     change the *OpenAI-form messages array* the model receives:
-        sort_tool_results → _strip_non_api_fields → (gated) _sanitize_messages
+        _strip_non_api_fields → (gated) _sanitize_messages
         → _strip_empty_text_blocks → _fix_tool_call_wire_shape
         → _fix_orphaned_tool_calls → _drop_empty_assistant_messages
         → _merge_consecutive_same_role → _fix_empty_user_messages
@@ -68,7 +67,6 @@ from lib.llm_sanitize import (
     _strip_non_api_fields,
 )
 from lib.log import get_logger
-from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 
 logger = get_logger(__name__)
 
@@ -86,36 +84,34 @@ def _gateway_sanitize_enabled(provider_id: str) -> bool:
 
 
 def apply_wire_sanitize(messages: list, *, conv_id: str = '',
-                        provider_id: str = '') -> list:
+                        provider_id: str = '',
+                        user_id: int | None = None) -> list:
     """Return the OpenAI-form message array the model actually receives.
 
-    Operates on a deep-ish copy (``_strip_non_api_fields`` already returns
-    shallow per-message copies; ``sort_tool_results`` mutates the passed list
-    so we copy first) — never mutates the caller's list. This is the ONE
+    Operates on a deep-ish copy (``_strip_non_api_fields`` returns shallow
+    per-message copies) and never mutates the caller's list. This is the ONE
     implementation shared by the live snapshot and the ``/debug-messages``
     endpoint, so the cold and hot panels are byte-identical given the same
     ``provider_id``.
 
     Mirrors the model-agnostic tail of ``build_body`` in order:
-      1. ``sort_tool_results`` — cache-aware reorder of consecutive tool
-         results by ``tool_call_id`` (orchestrator.py:1531).
-      2. ``_strip_non_api_fields`` — drop frontend display metadata.
-      3. ``_sanitize_messages`` — gateway-blocked-term replacement, GATED on
+      1. ``_strip_non_api_fields`` — drop frontend display metadata.
+      2. ``_sanitize_messages`` — gateway-blocked-term replacement, GATED on
          ``_gateway_sanitize_enabled`` (verbatim build-body gate).
-      4. ``_strip_empty_text_blocks`` — remove provider-invalid blank blocks.
-      5. ``_fix_tool_call_wire_shape`` — normalize and occurrence-pair calls.
-      6. ``_fix_orphaned_tool_calls`` — Anthropic orphan tool_use/result repair.
-      7. ``_drop_empty_assistant_messages`` — pure-ghost assistant drop (strict
+      3. ``_strip_empty_text_blocks`` — remove provider-invalid blank blocks.
+      4. ``_fix_tool_call_wire_shape`` — normalize and occurrence-pair calls.
+      5. ``_fix_orphaned_tool_calls`` — Anthropic orphan tool_use/result repair.
+      6. ``_drop_empty_assistant_messages`` — pure-ghost assistant drop (strict
          providers HTTP 400 on empty assistant content).
-      8. ``_merge_consecutive_same_role`` — consecutive user/assistant merge.
-      9. ``_fix_empty_user_messages`` — empty-content placeholder.
+      7. ``_merge_consecutive_same_role`` — consecutive user/assistant merge.
+      8. ``_fix_empty_user_messages`` — empty-content placeholder.
 
     Args:
         messages: API-form messages (post system-context injection).
-        conv_id: Conversation id — forwarded to ``sort_tool_results`` so the
-            cache-prefix gate matches the live path. Empty → sort everywhere.
+        conv_id: Compatibility routing identity; order is preserved.
         provider_id: Provider context for the gateway-sanitize gate. Empty →
             auto-detect from ``LLM_BASE_URL`` (matches the chat main loop).
+        user_id: Compatibility owner identity; order is preserved.
 
     Returns:
         A new list of OpenAI-form messages.
@@ -127,7 +123,6 @@ def apply_wire_sanitize(messages: list, *, conv_id: str = '',
         logger.warning(
             '[wire_messages] Dropped %d malformed non-object message '
             'carrier(s) before snapshot sanitization', dropped_messages)
-    sort_tool_results(work, conv_id=conv_id or '')
     clean = _strip_non_api_fields(
         work, carry_same_role_seam_hints=True)
     if _gateway_sanitize_enabled(provider_id):
@@ -214,7 +209,8 @@ def build_wire_messages(raw_messages: list, config: dict, *,
         logger.warning('[wire_messages] inject failed (mode=%s conv=%s): %s — '
                        'returning un-injected wire form', mode, (conv_id or '')[:8], e)
 
-    wire = apply_wire_sanitize(msgs, conv_id=conv_id, provider_id=provider_id)
+    wire = apply_wire_sanitize(
+        msgs, conv_id=conv_id, provider_id=provider_id, user_id=user_id)
     if return_manifest:
         return wire, list(_task.get('_contextManifest') or [])
     return wire

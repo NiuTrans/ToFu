@@ -29,6 +29,30 @@ class SupervisorUrlTest {
     }
 
     @Test
+    fun derives_sibling_of_non_default_tofu_port() {
+        // A deployment not on 15000 must NOT be hardcoded to 15001: the
+        // supervisor rides one port up from whatever the URL itself names.
+        // NEUTER CHECK: restore the hardcoded `$SUPERVISOR_PORT` in
+        // fromServerUrl and this fails (base would end /15001, not /15006).
+        val su = SupervisorUrl.fromServerUrl(
+            "https://abc12345-vscode-dc1.codelab.example.com/proxy/15005/",
+        )!!
+        assertEquals(
+            "https://abc12345-vscode-dc1.codelab.example.com/proxy/15006", su.base,
+        )
+        // A trailing path after the port segment doesn't confuse the parse.
+        val nested = SupervisorUrl.fromServerUrl("https://h.example/proxy/18080/tofu/")!!
+        assertEquals("https://h.example/proxy/18081", nested.base)
+    }
+
+    @Test
+    fun falls_back_to_default_when_no_proxy_segment() {
+        // No `/proxy/<port>` in the path → the conventional default sibling.
+        val su = SupervisorUrl.fromServerUrl("https://h.example/tofu/")!!
+        assertEquals("https://h.example/proxy/${SupervisorUrl.SUPERVISOR_PORT}", su.base)
+    }
+
+    @Test
     fun invalid_url_returns_null() {
         assertNull(SupervisorUrl.fromServerUrl("not a url"))
         assertNull(SupervisorUrl.fromServerUrl(""))
@@ -37,7 +61,7 @@ class SupervisorUrlTest {
     @Test
     fun status_endpoint_encodes_project_path_query() {
         val su = SupervisorUrl("https://h.example/proxy/15001", "https://h.example")
-        val url = SupervisorUrl.endpoint(su, SupervisorUrl.STATUS, "/home/dev/tofu")
+        val url = SupervisorUrl.endpoint(su, SupervisorUrl.STATUS, "/home/dev/chatui")
         assertEquals(
             "https://h.example/proxy/15001/status?projectPath=%2Fhome%2Fdev%2Fchatui", url,
         )

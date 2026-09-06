@@ -37,30 +37,31 @@ def _research_index_register(key: tuple, task_id: str) -> None:
 
 def _new_research_task(task_id: str, *, direction: str, workdir: str, lang: str,
                        user_id: int, n_ideas: int = 6, conv_id: str = '',
-                       seed_arxiv_ids=()):
+                       seed_arxiv_ids=(), model: str = ''):
     """Create + register a pending research task with the engine's field shape."""
     seeds = list(seed_arxiv_ids or ())
     return _production.create_task(
         task_id,
         user_id=user_id, meta={'direction': direction, 'lang': lang,
-                              'n_ideas': n_ideas, 'seed_count': len(seeds)},
+                              'n_ideas': n_ideas, 'seed_count': len(seeds),
+                              'model': model},
         fields={'direction': direction, 'workdir': workdir, 'lang': lang,
                 'n_ideas': n_ideas, 'conv_id': conv_id,
-                'seed_arxiv_ids': seeds})
+                'seed_arxiv_ids': seeds, 'model': model})
 
 
 def _claim_research_task(key: tuple, task_id: str, *, direction: str,
                          workdir: str, lang: str, user_id: int, n_ideas: int = 6,
-                         conv_id: str = '', seed_arxiv_ids=()):
+                         conv_id: str = '', seed_arxiv_ids=(), model: str = ''):
     """Atomic start path; resume continues to use _new_research_task."""
     seeds = list(seed_arxiv_ids or ())
     return _production.claim_task(
         key, task_id, user_id=user_id,
         meta={'direction': direction, 'lang': lang, 'n_ideas': n_ideas,
-              'seed_count': len(seeds)},
+              'seed_count': len(seeds), 'model': model},
         fields={'direction': direction, 'workdir': workdir, 'lang': lang,
                 'n_ideas': n_ideas, 'conv_id': conv_id,
-                'seed_arxiv_ids': seeds})
+                'seed_arxiv_ids': seeds, 'model': model})
 
 
 def _append_research_event(task, event):

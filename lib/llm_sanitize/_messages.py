@@ -248,6 +248,7 @@ def _drop_empty_assistant_messages(messages: list) -> list:
 _SYNTHETIC_PAIR_PREFIXES = (
     '<system-reminder>',
     '<swarm-update>',
+    '<background-command',
     # Layer-2 compaction preserves earlier user text verbatim in this _isMeta
     # wrapper. Private fields are stripped before this seam, so its stable
     # envelope is the only producer-owned identity left on the wire.

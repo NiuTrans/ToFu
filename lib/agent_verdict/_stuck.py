@@ -1,10 +1,10 @@
 """lib/agent_verdict/_stuck.py — Non-convergence detectors for the agent loops.
 
-Two independent guards:
+Two independent convergence signals:
 
-  * Jaccard "stuck" detection on consecutive verifier feedbacks
+  * advisory Jaccard repetition detection on consecutive verifier feedbacks
     (``STUCK_JACCARD`` / ``_jaccard`` / ``detect_stuck``);
-  * the diminishing-returns / no-value-progress guard on the per-turn ledger
+  * the advisory diminishing-returns signal on the per-turn ledger
     (``DIMINISHING_*`` constants / ``autopilot_progress_window`` /
     ``detect_diminishing_returns``).
 
@@ -40,19 +40,19 @@ def _jaccard(a: str, b: str) -> float:
 
 def detect_stuck(feedback_history, *, threshold: float = STUCK_JACCARD,
                  window: int = 2) -> bool:
-    """Return True when the loop is repeating itself and not converging.
+    """Return True when recent verifier feedback is worded similarly.
 
     Compares the last ``window`` entries of ``feedback_history`` pairwise
     (consecutive) on Jaccard word-set similarity; returns True iff EVERY
     adjacent pair in that window exceeds ``threshold`` — i.e. the verifier
     emitted ``window`` near-identical messages in a row.
 
-    ``window`` defaults to 2: compare the last two feedbacks and return True
-    when their overlap exceeds ``threshold``. Flow loops use that default;
-    Autopilot passes ``window=3`` (see
-    :data:`AUTOPILOT_STUCK_WINDOW`): two near-identical VU nudges can be a
-    legitimate "you didn't do it, try again", but three in a row is a genuine
-    non-converging loop.
+    This is deliberately advisory. Text overlap says nothing about worker
+    state, tool outcomes, or objective progress, so production callers may use
+    it for a one-shot strategy nudge but never as a terminal condition.
+
+    ``window`` defaults to 2. Virtual-user feedback uses a larger diagnostic
+    window via :data:`AUTOPILOT_STUCK_WINDOW`.
     """
     if window < 2:
         window = 2
@@ -69,9 +69,9 @@ def detect_stuck(feedback_history, *, threshold: float = STUCK_JACCARD,
 #  Diminishing-returns / no-value-progress guard
 # ══════════════════════════════════════════════════════════
 #
-#  WHY this exists — repetition (Jaccard) detection is NECESSARY BUT NOT
-#  SUFFICIENT.  A verifier that keeps flagging a genuine-but-tiny item emits
-#  NON-similar feedback each turn (so ``detect_stuck`` never fires) while the
+#  WHY this exists — prose repetition is not terminal evidence. A verifier
+#  that keeps flagging a genuine-but-tiny item can emit NON-similar feedback
+#  each turn while the
 #  worker ships a REAL edit each turn (so the zero-deliverable guard never
 #  fires) — yet the loop makes no net progress toward the objective, burning
 #  its whole budget polishing a triviality or tuning the same parameter.  This
@@ -113,7 +113,11 @@ def autopilot_progress_window() -> int:
 def detect_diminishing_returns(ledger, *, window: int = DIMINISHING_WINDOW,
                                min_resolved: int = DIMINISHING_MIN_RESOLVED,
                                overlap: float = DIMINISHING_TARGET_OVERLAP) -> bool:
-    """True when the last ``window`` turns churn without net objective progress.
+    """True when the last ``window`` turns suggest diminishing returns.
+
+    The result is advisory only. Several incremental edits may be required
+    before an acceptance criterion becomes fully resolved, so callers must not
+    use this heuristic as a terminal condition.
 
     ``ledger`` is a list of per-turn dicts (oldest→newest), each:
         ``{'resolved_delta': int | None, 'targets': list[str]}``

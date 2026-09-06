@@ -51,6 +51,7 @@ import os
 import threading
 
 from lib.log import get_logger
+from lib.project_mod.path_resolution import _resolve_base
 from lib.tool_history_pairing import adjacent_tool_call_result_pairs
 
 logger = get_logger(__name__)
@@ -121,7 +122,6 @@ def _resolve_abs(project_path: str | None, conv_id: str | None, raw_path: str) -
     of blocking the gate on a bad lookup.
     """
     try:
-        from lib.project_mod.tools import _resolve_base
         bp, rp = _resolve_base(project_path or '', raw_path, conv_id=conv_id)
         if rp and (rp.startswith('/') or rp.startswith('~')):
             return os.path.abspath(os.path.expanduser(rp))

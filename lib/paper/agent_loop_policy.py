@@ -17,6 +17,14 @@ from lib.paper.contracts import (
 )
 from lib.paper.agent_usage import PaperAgentUsageMeter
 
+# Provider/model catalogs can contain newly discovered offerings whose text
+# capability has not yet been proven on the configured gateway.  Paper agents
+# carry large, expensive grounded contexts, so one dispatch may rotate across
+# a bounded set of deterministic 400/no-route candidates before reaching a
+# healthy text model.  Keep this separate from the paid agent-round budget:
+# failed admission/route attempts produce no model result and no new round.
+PAPER_AGENT_ROUTE_MAX_RETRIES = 12
+
 
 class PaperAgentLoopHalted(RuntimeError):
     """Raised when a Paper loop stops without completion or user abort."""
@@ -109,6 +117,7 @@ def run_guarded_paper_agent_loop(
 
 
 __all__ = [
+    'PAPER_AGENT_ROUTE_MAX_RETRIES',
     'PaperAgentLoopHalted',
     'run_guarded_paper_agent_loop',
 ]

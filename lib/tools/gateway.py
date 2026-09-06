@@ -97,18 +97,16 @@ def search_tools_schema() -> dict[str, Any]:
     }
 
 
-def execute_tools_schema(*, include_program: bool = True,
-                         ptc_note: str = '') -> dict[str, Any]:
+def execute_tools_schema(*, include_program: bool = True) -> dict[str, Any]:
     """Return the ``execute_tools`` gateway schema.
 
     Output is byte-identical to the historical shape and exposes the full
     ToolScript surface to every model.  ``include_program=False`` is the
     explicit ``TOFU_PTC_TIER=batch`` operator/benchmark override shape (the
-    model batches parallel ``calls`` instead of authoring ToolScript), and
-    ``ptc_note`` (the bounded local routing contract) is spliced into the
-    description so the policy travels with the schema the model sees.  The
-    schema is never compacted at runtime: rewriting description bytes between
-    rounds breaks the provider prompt-cache prefix.
+    model batches parallel ``calls`` instead of authoring ToolScript). Runtime
+    routing guidance belongs in tail user context, never in this canonical
+    schema: rewriting description bytes between rounds breaks provider prompt
+    caching and makes the executable contract depend on conversation state.
     """
     description = (
             'Run task-available tools with calls or program; search_tools is '
@@ -135,8 +133,6 @@ def execute_tools_schema(*, include_program: bool = True,
             'batched call with execution=parallel over issuing tools one per '
             'turn. Do not wrap a call you also invoke directly in the '
             'same response; choose one lane per action.')
-    if ptc_note:
-        description = f'{description} {ptc_note}'
     calls_property: dict[str, Any] = {
         'type': 'array',
         'maxItems': 16,
@@ -196,14 +192,9 @@ def _stable_local_execute_tools_schema(*, tier: str = 'program') -> dict[str, An
     guidance is conditional on PTC and remains true while the generic gateway
     is active without a PTC latch.
     """
-    from lib.tools.programmatic import local_ptc_guidance
-
     normalized_tier = (
         'batch' if str(tier or '').strip().lower() == 'batch' else 'program')
-    return execute_tools_schema(
-        include_program=normalized_tier != 'batch',
-        ptc_note=local_ptc_guidance(normalized_tier, ()),
-    )
+    return execute_tools_schema(include_program=normalized_tier != 'batch')
 
 
 def gateway_tool_schemas(*, include_search: bool = True,
@@ -944,37 +935,6 @@ def _without_json_schema_annotations(schema: Mapping[str, Any]) -> dict[str, Any
     return out
 
 
-def _without_schema_annotations(value: Any) -> Any:
-    """Copy a schema without model-facing annotations.
-
-    Validation keywords, property names, required fields, defaults, and all
-    other execution semantics stay intact.  This is an emergency wire-size
-    projection only; the task-owned executable contract remains unchanged.
-    """
-    if not isinstance(value, Mapping):
-        return copy.deepcopy(value)
-
-    out = copy.deepcopy(dict(value))
-    function = out.get('function')
-    if isinstance(function, dict):
-        for key in _SCHEMA_ANNOTATION_KEYS:
-            function.pop(key, None)
-        parameters = function.get('parameters')
-        if isinstance(parameters, Mapping):
-            function['parameters'] = _without_json_schema_annotations(
-                parameters)
-        return out
-
-    # Anthropic/direct legacy shapes keep the schema at the top level.
-    for key in _SCHEMA_ANNOTATION_KEYS:
-        out.pop(key, None)
-    for key in ('input_schema', 'parameters'):
-        schema = out.get(key)
-        if isinstance(schema, Mapping):
-            out[key] = _without_json_schema_annotations(schema)
-    return out
-
-
 def _required_property_error(
     schema: Mapping[str, Any], *, path: str = '$',
 ) -> str:
@@ -1288,24 +1248,10 @@ def fit_tool_schema_budget(
     for index, tool in ranked:
         candidate = tool
         if tool_schema_tokens([*selected, candidate], model=model) > budget:
-            candidate = _without_schema_annotations(tool)
-            schema_error = _wire_tool_schema_error(candidate)
-            if schema_error:
-                logger.error(
-                    '[ToolGateway] annotation compaction violated the schema '
-                    'contract; omitting tool=%s error=%s',
-                    _schema_name(tool) or '?', schema_error)
-                _report_tool_isolation(
-                    on_tool_isolated,
-                    tool_name=_schema_name(tool),
-                    stage='annotation_compaction',
-                    reason_code='invalid_schema_after_compaction',
-                    detail=schema_error,
-                )
-                continue
-            if tool_schema_tokens([*selected, candidate], model=model) > budget:
-                continue
-            compacted_names.append(_schema_name(tool))
+            # Never make an included declaration change shape as budgets move.
+            # Optional tools are either present with their canonical schema or
+            # absent; dynamic guidance belongs in the trailing user context.
+            continue
         selected.append(candidate)
         selected_tools[index] = candidate
     result = [selected_tools[index] for index, _tool in direct
@@ -1669,10 +1615,10 @@ def ptc_local_wire_tools(
     expensive. The next request restores the full direct surface regardless of
     model behavior, so write, approval, and recovery availability are delayed
     by at most one model round and their execution authority never changes.
-    Exactly one tier-shaped ``execute_tools`` schema carries the
-    bounded read-only routing contract (``ptc_note``), so per-round tool names
-    are never interpolated into cached schema text. An existing gateway schema
-    (local Tool Search) is replaced rather than duplicated. Every model sees
+    Exactly one tier-shaped canonical ``execute_tools`` schema is used; the
+    bounded read-only routing contract rides tail user context, so per-round
+    state is never interpolated into cached schema text. An existing gateway
+    schema (local Tool Search) is replaced rather than duplicated. Every model sees
     the free-form ``program`` parameter by default; only the explicit ``batch``
     override shape strips it.
     """
@@ -2203,9 +2149,12 @@ def search_executable_catalog(
             score += 100.0
         elif qlower in lname:
             score += 12.0
-        if ns_filter and ns == ns_filter:
-            score += 2.0
         if score > 0:
+            # Same-namespace bonus is a tie-break among lexical hits only.
+            # Added before admission it let every tool in the namespace pass
+            # score>0 and fill the page with zero-match entries.
+            if ns_filter and ns == ns_filter:
+                score += 2.0
             scored.append((-score, position, name, tool, ns))
     scored.sort()
     # Exact (including one-to-one maintained alias) lookup is a detail read,

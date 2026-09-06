@@ -13,7 +13,10 @@ Row shapes
     ``{taskId, requests, coverage, eventsAvailable, requestCount}``
     Request row (metadata ONLY — never the payload):
     ``{roundNum, ts, model, params, messageCount, toolsCount, toolNames,
-       label, legacy, attempts}``
+       label, legacy, attempts[, sourceTaskId]}``
+    ``sourceTaskId`` is present ONLY on rows merged from a swarm child's
+    event log (``parent#agent:<id>``) — it is the id the per-round
+    payload/state endpoints must be addressed with.
     ``toolNames`` = the tools that round's response INVOKED, read from the
     new-message tail of the next snapshot (the post-tool mirror of loop
     round N carries roundNum=N+1, §3.1) — this is what lets the drawer's
@@ -340,21 +343,61 @@ def _called_in_round(payload: dict, kind: str) -> int | None:
     return rn - 1
 
 
-def fold_request_log(task_id: str) -> dict:
-    """Fold a task's persisted events into the Request Inspector rows.
+# Bound on merged swarm children: a delegating (Goal-mode / Flow) parent
+# folds each child's request rows into its own round list — swarm fan-out is
+# small, but the fold must never scale with an unbounded agent count.
+_FOLD_CHILD_MERGE_MAX = 32
 
-    Request rows are METADATA-ONLY (no ``messages``/``tools`` bulk) —
-    payloads are served on demand via :func:`get_request_payload`.
 
-    The fold runs on the UNREBUILT read: counts ride the §10 delta
-    markers and the tool names come from each snapshot's stored
-    new-message tail, so listing the rounds of a 100+ round task never
-    pays the full-payload reconstruction (that stays on the per-round
-    payload endpoint, where the user actually asked for one round).
+def _child_snapshot_sources(task_id: str) -> tuple[list, bool]:
+    """Swarm-child task ids (``parent#agent:<id>``) holding snapshots.
+
+    A delegating parent (Goal mode runs its worker as a swarm agent)
+    persists NO request snapshots of its own — every ``messages_snapshot``
+    lands under the child's event id. Folding the parent alone therefore
+    renders "0 rounds" for the exact run the user watched do dozens of
+    model calls. Discovery rides the indexed inspector summary (counts
+    only, never payload bulk). ``ok=False`` marks a storage read FAILURE —
+    callers surface readError rather than silently folding parent-only.
     """
-    events, read_ok = _read_events(task_id, rebuild=False)
+    if not task_id or '#agent:' in task_id:
+        return [], True
+    try:
+        from lib.storage import get_storage_client
+
+        summary = get_storage_client().query(
+            'event.inspector_summary', {'task_ids': [task_id]},
+            deadline=30) or {}
+    except Exception as e:
+        logger.warning('[RequestInspector] child discovery failed task=%s: %s',
+                       task_id[:8], e)
+        return [], False
+    prefix = f'{task_id}#agent:'
+    children = []
+    for record in summary.get('records') or []:
+        child_id = str(record.get('task_id') or '')
+        if not child_id.startswith(prefix):
+            continue
+        snapshots = (int(record.get('request_count') or 0)
+                     + int(record.get('state_count') or 0)
+                     + int(record.get('legacy_count') or 0))
+        if snapshots > 0:
+            children.append(child_id)
+    children.sort()
+    return children[:_FOLD_CHILD_MERGE_MAX], True
+
+
+def _fold_event_rows(events: list) -> tuple[list, bool]:
+    """Fold ONE task's event log into request rows (+ the flow-seen bit).
+
+    Kept per-log so every join axis (attempts, wire projections, tool
+    names, tail diffs) stays scoped to its own (turn, roundNum) space —
+    two swarm agents share the 'swarm-agent' turn tag, and merging at the
+    row level (with ``sourceTaskId``) is what keeps their same-numbered
+    rounds distinct.
+    """
     requests = []
-    attempts: dict[str, list] = {}
+    attempts: dict[tuple, list] = {}
     wire_projections: dict[tuple[str, str], dict] = {}
     tool_names: dict[tuple[str, int], list] = {}
     full_prev: dict[str, list] = {}
@@ -451,20 +494,64 @@ def fold_request_log(task_id: str) -> dict:
                 wire.get('schemaBudgetTokens') or 0)
             row['budgetDroppedCount'] = len(
                 wire.get('budgetDroppedNames') or [])
+    return requests, flow_seen
+
+
+def fold_request_log(task_id: str) -> dict:
+    """Fold a task's persisted events into the Request Inspector rows.
+
+    Request rows are METADATA-ONLY (no ``messages``/``tools`` bulk) —
+    payloads are served on demand via :func:`get_request_payload`.
+
+    The fold runs on the UNREBUILT read: counts ride the §10 delta
+    markers and the tool names come from each snapshot's stored
+    new-message tail, so listing the rounds of a 100+ round task never
+    pays the full-payload reconstruction (that stays on the per-round
+    payload endpoint, where the user actually asked for one round).
+
+    Delegation merge: swarm-child (``#agent:``) request rows fold into
+    the PARENT list carrying ``sourceTaskId`` — the round list of a
+    delegating run then answers "what did this run actually do" in one
+    place, and the per-round payload fetch addresses the child's own
+    event log. Child rows keep their own ``turn``/``agentId`` badges.
+    """
+    events, read_ok = _read_events(task_id, rebuild=False)
+    requests, flow_seen = _fold_event_rows(events)
+    events_available = bool(events)
+    child_ids, discovery_ok = _child_snapshot_sources(task_id)
+    read_ok = read_ok and discovery_ok
+    for child_id in child_ids:
+        child_events, child_ok = _read_events(child_id, rebuild=False)
+        read_ok = read_ok and child_ok
+        if child_events:
+            events_available = True
+        child_requests, child_flow = _fold_event_rows(child_events)
+        flow_seen = flow_seen or child_flow
+        for row in child_requests:
+            row['sourceTaskId'] = child_id
+        requests.extend(child_requests)
+    if child_ids:
+        # Per-log folds are chronological; the merged list re-interleaves
+        # parent and agents by emission time (same total order the chat
+        # timeline showed).
+        requests.sort(key=lambda row: (row.get('ts') or 0,
+                                       row.get('sourceTaskId') or ''))
     has_turn_tags = any(r['turn'] for r in requests)
     out = {
         'taskId': task_id,
         'requests': requests,
-        'eventsAvailable': bool(events),
+        'eventsAvailable': events_available,
         'requestCount': len(requests),
     }
     if not read_ok:
         # Read FAILURE, not an expired/empty log — the UI must offer retry
         # instead of the "records cleaned up" empty state.
         out['readError'] = True
-    if flow_seen and not has_turn_tags:
+    if flow_seen and requests and not has_turn_tags:
         # Untagged Flow log: planner/worker/critic rounds share numbers
-        # with no phase tag — rows exist but cannot be told apart.
+        # with no phase tag — rows exist but cannot be told apart. An
+        # EMPTY round list has nothing ambiguous to warn about (a pure
+        # delegator's flow marker is not uncovered evidence).
         out['coverage'] = 'partial'
         out['coverageReason'] = 'flow-untagged'
     else:

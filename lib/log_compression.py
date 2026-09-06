@@ -14,7 +14,7 @@ from lib.agent_core.admission import controller
 from lib.agent_core.execution_session import (
     ExecutionPhase,
     ExecutionSession,
-    bind_admission_lease,
+    acquire_and_bind_admission,
 )
 from lib.ids import short_id
 from lib.production.llm_policy import production_llm_dispatch_kwargs
@@ -42,14 +42,9 @@ def compress_logs(text: str, *, owner_user_id: int) -> tuple[str, dict]:
         owner_user_id=owner_user_id,
         deadline_seconds=LOG_COMPRESSION_TIMEOUT_SECONDS,
     )
-    admission_lease = controller.acquire()
+    admission_lease = acquire_and_bind_admission(session, controller)
     if admission_lease is None:
-        session.settle(ExecutionPhase.FAILED, cause="task_admission_refused")
         raise LogCompressionBusyError("log compression is at capacity")
-    bind_admission_lease(
-        session,
-        lambda: controller.release(admission_lease),
-    )
     session.mark_dispatch_started()
     deadline = time.monotonic() + LOG_COMPRESSION_TIMEOUT_SECONDS
 

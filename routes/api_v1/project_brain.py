@@ -89,44 +89,13 @@ def project_brain_status():
         return _error(exc)
 
 
-@api_v1_project_brain_bp.route('/api/v1/project/brain/attention', methods=['GET'])
-@require_auth
-@api_meta(summary='Read Project Brain attention items', tags=['project'])
-def project_brain_attention():
-    try:
-        from lib.conversations.project_brain import attention_projection
-        return api_ok(attention_projection(_path(), user_id=_owner()))
-    except Exception as exc:
-        return _error(exc)
-
-
-@api_v1_project_brain_bp.route(
-    '/api/v1/project/brain/attention/add', methods=['POST'])
-@require_auth
-@rate_limit(limit=30, per=60)
-@api_meta(summary='Save a human-selected pending decision for triage', tags=['project'])
-def project_brain_attention_add():
-    data = parse_body()
-    try:
-        from lib.conversations.project_brain import add_attention
-        text = str(data.get('text') or '').strip()
-        if not text:
-            raise ValueError('text is required')
-        result = add_attention(
-            _path(str(data.get('path') or '')),
-            kind='pending_decision', text=text, user_id=_owner())
-        return api_ok({'attention': result})
-    except Exception as exc:
-        return _error(exc)
-
-
 @api_v1_project_brain_bp.route('/api/v1/project/brain/summary', methods=['GET'])
 @require_auth
 @api_meta(summary='Read compact Project Brain projection summary', tags=['project'])
 def project_brain_summary():
     try:
         from lib.conversations.project_brain import (
-            attention_projection, board_projection, charter_projection,
+            board_projection, charter_projection,
             status_projection, watch_projection,
         )
         path = _path()
@@ -134,7 +103,6 @@ def project_brain_summary():
         return api_ok({
             'board': board_projection(path, user_id=user_id),
             'status': status_projection(path, user_id=user_id),
-            'attention': attention_projection(path, user_id=user_id),
             'charter': charter_projection(path, user_id=user_id),
             'watch': watch_projection(path, user_id=user_id),
         })

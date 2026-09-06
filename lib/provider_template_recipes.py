@@ -133,7 +133,18 @@ def load_provider_templates() -> list[dict]:
     """Load normalized onboarding recipes from their package-owned sources."""
     from lib.model_info._openai_gpt56 import OPENAI_TEMPLATE
 
-    sources: list[dict] = [copy.deepcopy(OPENAI_TEMPLATE)]
+    # Share the bootstrap picker's curated builtin list so first-run and
+    # Settings offer the same providers.  ``custom`` is a bootstrap-form
+    # placeholder with an empty model id; ``anthropic`` has no v2
+    # OpenAI-compatible protocol mapping and would compile a broken
+    # connection.  Both stay available to bootstrap itself.
+    from bootstrap_pkg.providers import _BUILTIN_PROVIDER_TEMPLATES
+
+    sources: list[dict] = [
+        copy.deepcopy(template) for template in _BUILTIN_PROVIDER_TEMPLATES
+        if template.get('key') not in ('custom', 'anthropic')
+    ]
+    sources.append(copy.deepcopy(OPENAI_TEMPLATE))
     template_directory = Path(__file__).parents[1] / 'static' / 'provider_templates'
     if template_directory.is_dir():
         for path in sorted(template_directory.glob('*.json')):
@@ -187,6 +198,12 @@ def compile_provider_template_bundle(
     if not recipes and template.get('category') != 'local':
         raise ProviderTemplateRecipeError(
             'at least one template model must be selected')
+    # Managed pricing-tier tags (cheap) are owned by the pricing tables, not
+    # hand-authored recipe rows: correct the projection from live pricing,
+    # but keep authored tags on models the tables do not price yet.
+    from lib.llm_dispatch.config._pricing import reevaluate_pricing_tags
+    reevaluate_pricing_tags(
+        recipes, log_prefix='template:%s' % key, strip_unpriced=False)
 
     legacy = copy.deepcopy(template)
     legacy['id'] = template['key']

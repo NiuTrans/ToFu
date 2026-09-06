@@ -41,12 +41,19 @@ import {
 import { createCompactionHistoryState } from '../core/compaction-history-state';
 import { HTTP_RESULT } from '../core/http-result';
 import { createCurrentUserIdentityController } from '../core/current-user';
-import { frameBelongsToOwner } from '../core/frame-identity';
+import {
+  frameBelongsToOwner,
+  narrowConvCatalogFrame,
+  narrowFoldersChangedFrame,
+} from '../core/frame-identity';
 import {
   CHAT_EXCLUDED_CAPS_FALLBACK,
   createModelCapabilityTaxonomy,
 } from '../core/model-capability-taxonomy';
-import { detectModelBrand } from '../core/model-brand-detection';
+import {
+  createModelBrandResolver,
+  detectModelBrand,
+} from '../core/model-brand-detection';
 import { brandIconHtml } from '../core/model-brand-icons';
 import { createModelDisplayNames } from '../core/model-display-names';
 import { createModelGroupPolicy } from '../core/model-group';
@@ -55,6 +62,10 @@ import { createRecentModelsController } from '../core/recent-models';
 import { createRoleAvatarIcons } from '../core/role-avatar-icons';
 import { createCookieCaptureConsentController } from '../core/cookie-capture-consent';
 import { createBuildWatchController } from '../core/build-watch-controller';
+import {
+  NATIVE_BRIDGE_POLICY,
+  createNativeVisibility,
+} from '../core/native-bridge';
 import { clientLogFlushBaseDelayMs, createClientLogFlushScheduler } from '../core/client-log-flush-scheduler';
 import { createDebugRuntimeOwner } from '../core/debug-runtime-owner';
 import { TRANSLATION_CLAIMS } from '../core/translation-claim-registry';
@@ -210,6 +221,11 @@ import { createSendStartupLease } from '../core/send-startup';
 import {
   DOMPurify, ensureHljsLanguage, hljs, loadHtml2Canvas, loadKatex, marked,
 } from '../vendor-runtime';
+// The retained service registry is infrastructure, not a feature initialized
+// in manifest order. Declare it before any eager composition so adding a new
+// publisher can never create an import-time temporal-dead-zone failure.
+const runtimeScope = Object.create(null);
+runtimeScope.t = t;
 installMarkdownPolicy(marked);
 // Temporary lexical names consumed by retained sections. The typed icon owner
 // remains module-private; only `Icon` is injected into declared lazy features.
@@ -450,13 +466,40 @@ const availabilityHealthProbe = createAvailabilityHealthProbeCoordinator({
     signal: AbortSignal.timeout(timeoutMs),
   }),
 });
+
+// Android native shell bridge: a WebView keeps document.visibilityState
+// 'visible' while the app is backgrounded, so the shell's
+// tofu:native-visibility flips are the only background signal. Fold them
+// into one effective-hidden predicate every budget layer below shares.
+const nativeVisibility = createNativeVisibility({
+  subscribeNativeVisibility: (listener) => {
+    document.addEventListener(NATIVE_BRIDGE_POLICY.visibilityEvent, (event) => {
+      listener(
+        /** @type {CustomEvent|undefined} */ (event)?.detail?.hidden === true,
+      );
+    });
+  },
+  documentHidden: () => document.hidden === true,
+  native: /** @type {any} */ (window).TofuNative,
+  onError: (error) => console.warn('[native-bridge]', error),
+});
+// Re-run every visibilitychange consumer on a shell flip: layers that read
+// the effective predicate suspend/resume correctly; layers still reading
+// document.visibilityState directly observe exactly what they see today.
+nativeVisibility.subscribe(() => {
+  try {
+    document.dispatchEvent(new Event('visibilitychange'));
+  } catch (error) {
+    console.warn('[native-bridge] visibilitychange relay failed:', error);
+  }
+});
 const backendAvailabilityMonitor = createBackendAvailabilityMonitor({
   document,
   browserEvents: window,
   schedule: backendAvailabilitySchedule,
   log: console,
   offlineIconHtml: () => iconHtml('bot', 18),
-  isVisible: () => document.visibilityState === 'visible',
+  isVisible: () => !nativeVisibility.isEffectivelyHidden(),
   isNetworkOnline: () => navigator.onLine !== false,
   probeHealth: availabilityHealthProbe.probe,
   subscribePushReading: (listener) => (
@@ -520,7 +563,7 @@ const storageAvailabilityMonitor = createStorageAvailabilityMonitor({
   schedule: backendAvailabilitySchedule,
   log: console,
   warningIconHtml: () => iconHtml('alertTriangle', 18),
-  isVisible: () => document.visibilityState === 'visible',
+  isVisible: () => !nativeVisibility.isEffectivelyHidden(),
   probeHealth: availabilityHealthProbe.probe,
   copy: {
     unavailableTitle: () => t('conn.storageUnavailableTitle'),
@@ -727,6 +770,20 @@ import {
 // composed once; no compatibility name is published to `window`.
 const _detectBrand = detectModelBrand;
 const _brandSvg = brandIconHtml;
+// The one brand-resolution interface for every model surface: explicit
+// Creator identity wins, the registered-models catalog covers id-only
+// callers, and name-pattern detection remains as the fallback for ids the
+// catalog has never seen.
+const modelBrandResolver = createModelBrandResolver({
+  lookupCreatorId(modelId) {
+    const match = Array.isArray(_registeredModels)
+      ? _registeredModels.find((model) => model
+        && model.model_id === modelId && model.creator_id)
+      : null;
+    return match ? match.creator_id : '';
+  },
+});
+const _modelBrand = modelBrandResolver.modelBrand;
 const modelDisplayNames = createModelDisplayNames({
   lookupModelDisplayName(modelId) {
     const pricing = _modelPricingCache && _modelPricingCache[modelId];
@@ -753,8 +810,7 @@ const {
 
 // Former file-scope exports live here instead of leaking onto `window`.
 // The ESM entry exposes only selected functions through TofuModules v3.
-const runtimeScope = Object.create(null);
-runtimeScope.t = t;
+runtimeScope.nativeVisibility = nativeVisibility;
 runtimeScope.BackendAvailabilityRestartScope = backendAvailabilityRestartScope;
 retainedCompositionLifecycle.add(() => {
   if (runtimeScope.BackendAvailabilityRestartScope ===
@@ -1363,7 +1419,8 @@ function _spliceInjectRow(arr, row, anchorLlmRound) {
     for (let i = 0; i < arr.length; i++) {
       const r = arr[i];
       if (r && !r._userSteerInject && !r._peerInject && !r._inboxInject
-          && !r._stallNudge && r.llmRound === anchorLlmRound) { at = i; break; }
+          && !r._bgCommandInject && !r._stallNudge
+          && r.llmRound === anchorLlmRound) { at = i; break; }
     }
   }
   if (at >= 0) arr.splice(at, 0, row);
@@ -1381,14 +1438,15 @@ if (typeof window !== "undefined") runtimeScope._spliceInjectRow = _spliceInject
  * four lanes collision-free with each other and with real (small sequential)
  * roundNums; `+ injectRound` keeps one inject event's key fixed for the whole
  * turn, so rehydrate passes and live appends land on the SAME DOM node. */
-const _INJECT_ROUND_BASE = { inbox: 9000000, peer: 9100000, steer: 9200000, stall: 9300000 };
+const _INJECT_ROUND_BASE = { inbox: 9000000, peer: 9100000, steer: 9200000, stall: 9300000, bgcmd: 9400000 };
 function _rehydrateInjectRows(msg, base) {
   if (!msg) return base;
   const swarm = Array.isArray(msg._inboxInjects) ? msg._inboxInjects : [];
   const peer = Array.isArray(msg._peerInjects) ? msg._peerInjects : [];
   const steer = Array.isArray(msg._userSteerInjects) ? msg._userSteerInjects : [];
+  const bgcmd = Array.isArray(msg._bgCommandInjects) ? msg._bgCommandInjects : [];
   const stall = Array.isArray(msg._stallNudges) ? msg._stallNudges : [];
-  if (!swarm.length && !peer.length && !steer.length && !stall.length) return base;
+  if (!swarm.length && !peer.length && !steer.length && !bgcmd.length && !stall.length) return base;
   const out = base.slice();
   const _has = (pred) => out.some(pred);
   for (const s of swarm) {
@@ -1429,6 +1487,19 @@ function _rehydrateInjectRows(msg, base) {
       steerRound: rnd,
       steerCount: s.count || 0,
       steerPreviews: Array.isArray(s.previews) ? s.previews : [],
+    }, rnd - 1);
+  }
+  for (const s of bgcmd) {
+    const rnd = s.round || 0;
+    if (_has(r => r._bgCommandInject && r._bgcmdKey === "bgcmd:" + rnd)) continue;
+    _spliceInjectRow(out, {
+      roundNum: _INJECT_ROUND_BASE.bgcmd + rnd,
+      status: "done",
+      _bgCommandInject: true,
+      _bgcmdKey: "bgcmd:" + rnd,
+      bgCommandRound: rnd,
+      bgCommandCount: s.count || 0,
+      bgCommandPreviews: Array.isArray(s.previews) ? s.previews : [],
     }, rnd - 1);
   }
   for (const s of stall) {
@@ -1903,7 +1974,11 @@ const _LEGACY_PRESET_TO_MODEL = {
   'gemini': 'gemini-3-flash-preview', 'gemini_flash': 'gemini-3-flash-preview',
   'minimax': 'MiniMax-M2.7', 'doubao': 'Doubao-Seed-2.0-pro',
   'opus': 'aws.claude-opus-4.7',
+  'xhigh': 'aws.claude-opus-4.7',
   'medium': 'aws.claude-opus-4.7', 'high': 'aws.claude-opus-4.7', 'max': 'aws.claude-opus-4.7',
+  // Early GPT-5.6 integration mistakenly represented Pro reasoning as a
+  // separate SKU; the canonical form is gpt-5.6 + reasoning.mode='pro'.
+  'gpt-5.6-pro': 'gpt-5.6',
 };
 if (!config.model || config.model === serverModel) {
   // Try migrating from old preset/effort keys
@@ -3876,8 +3951,7 @@ if (typeof window !== 'undefined') {
           { query: { ...(turn ? { turn } : {}), ...(kind ? { kind } : {}) },
             onError: 'null' }),
     getRawArchiveChunk: (taskId, archiveId, part, offset) =>
-      get(`/api/v1/tasks/${encodeURIComponent(taskId)}/raw-archives/` +
-          `${encodeURIComponent(archiveId)}/${encodeURIComponent(part)}`,
+      get(`/api/v1/tasks/${encodeURIComponent(taskId)}/raw-archives/${encodeURIComponent(archiveId)}/${encodeURIComponent(part)}`,
           { query: { offset: offset || 0, limit: 256 * 1024 },
             onError: 'null' }),
     // Turn Trace (docs/TURN_TRACE_CONTRACT.md): the server-folded timing
@@ -3939,9 +4013,9 @@ if (typeof window !== 'undefined') {
     scaffoldManuscript: (payload) =>
       post('/api/v1/research/manuscript/scaffold', payload),
     sourceArchiveUrl: (direction, lang) =>
-      '/api/v1/research/manuscript/source.zip?direction=' +
+      _resolve('/api/v1/research/manuscript/source.zip?direction=' +
         encodeURIComponent(direction || '') + '&lang=' +
-        encodeURIComponent(lang || 'en'),
+        encodeURIComponent(lang || 'en')),
   };
 
   // optimizer -------------------------------------------------------
@@ -4455,6 +4529,13 @@ if (typeof window !== 'undefined') {
         secret,
         expected_revision: expectedRevision,
       }),
+    revealCredentialSecret: (credentialId) => post(
+      `/api/v1/model-routing/credentials/${encodeURIComponent(credentialId)}/secret/reveal`,
+      {}, { onError: 'null' }),
+    probeCellsStart: (providerId, body) => post(
+      `/api/v1/providers/${encodeURIComponent(providerId)}/probe-cells/start`, body || {}),
+    probeCellsStatus: (providerId) => get(
+      `/api/v1/providers/${encodeURIComponent(providerId)}/probe-cells/status`),
   };
 
   // dispatch (model routing — observability + per-key overrides) ----
@@ -4462,8 +4543,7 @@ if (typeof window !== 'undefined') {
     endpointMetrics: () => get('/api/v1/dispatch/endpoint-metrics', { onError: 'null' }),
     keyStats:        () => get('/api/v1/dispatch/key-stats', { onError: 'null' }),
     modelHealth:     () => get('/api/v1/dispatch/model-health', { onError: 'null' }),
-    keyOverride:     (body) =>
-      post('/api/v1/dispatch/key-override', body, { onError: 'null', parse: 'none' }),
+    keyOverride:     (body) => post('/api/v1/dispatch/key-override', body, { onError: 'null' }),
   };
 
   // oauth (Claude / Codex login flows) ------------------------------
@@ -4768,11 +4848,6 @@ if (typeof window !== 'undefined') {
     brainSummary:  (path) =>
       get('/api/v1/project/brain/summary',
           { query: { path }, onError: 'null' }),
-    brainAttention: (path) =>
-      get('/api/v1/project/brain/attention',
-          { query: { path }, onError: 'null' }),
-    brainAttentionAdd: (path, text) =>
-      post('/api/v1/project/brain/attention/add', { path, text }),
     // Token-free Git integration control plane. These endpoints never ask an
     // agent to inspect or repair changes: immutable checkpoints are merged by
     // Git, and conflicts/gate failures are surfaced as quarantine records.
@@ -5223,7 +5298,11 @@ const _push = (() => {
   }
 
   function _pageHidden() {
-    return typeof document !== 'undefined' && !!document.hidden;
+    // The Android WebView reports visible while backgrounded; the shell's
+    // nativeVisibility bridge is the only reliable pocket signal there.
+    return (typeof document !== 'undefined' && !!document.hidden)
+      || (typeof runtimeScope !== 'undefined'
+        && runtimeScope.nativeVisibility?.isHidden() === true);
   }
 
   function _pingIntervalMs() {
@@ -5861,6 +5940,27 @@ function _featureLoadError(name, error) {
   } catch (_) { /* the console error remains authoritative */ }
 }
 
+/* One bounded self-heal for a module graph that never became ready: a failed
+ * chunk fetch is cached by the browser module map for the document's whole
+ * lifetime, so only a reload can clear it. Guard interval and storage keys
+ * mirror frontend/src/core/feature-load-recovery.ts (parity pinned by
+ * tests/test_frontend_feature_load_recovery.py); this classic bridge cannot
+ * import that typed owner because the failed ESM graph is exactly what it
+ * must survive. */
+function _attemptModuleGraphRecovery(name) {
+  try {
+    var now = Date.now();
+    var last = Number(window.sessionStorage.getItem('tofu:feature-load-reload') || 0);
+    if (Number.isFinite(last) && last > 0 && now - last < 60000) return false;
+    window.sessionStorage.setItem('tofu:feature-load-reload', String(now));
+    window.sessionStorage.setItem('tofu:feature-load-pending', name);
+    window.location.reload();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function _invokeFeatureOwner(name, args, stub) {
   var bridge = window.TofuModules;
   if (!bridge || typeof bridge.invokeFeature !== 'function') return false;
@@ -5887,6 +5987,7 @@ function _installFeatureStub(name) {
       window.clearTimeout(timer);
       window.removeEventListener('tofu:modules-ready', finish);
       if (!_invokeFeatureOwner(name, args, stub)) {
+        if (_attemptModuleGraphRecovery(name)) return;
         _featureLoadError(name, new Error('Vite module graph did not become ready'));
       }
     };
@@ -9556,7 +9657,10 @@ function _startWaitingBlockPoll(details) {
   _pollWaitingBlock(details);
   _waitingBlockPolls.set(details, setInterval(() => _pollWaitingBlock(details), 3000));
 }
-if (typeof document !== 'undefined') document.addEventListener('toggle', (event) => {
+/* Feature-detect, not existence-detect (the push.js pattern): bare-node
+ * harnesses stub `document = {}` without addEventListener, and an existence
+ * check alone crashes module evaluation there. */
+if (typeof document !== 'undefined' && document.addEventListener) document.addEventListener('toggle', (event) => {
   const details = event.target;
   if (!details?.classList?.contains('wait-block')) return;
   if (details.open) _startWaitingBlockPoll(details);
@@ -9596,7 +9700,9 @@ function renderFinishInfo(msg, turnId) {
   const _keyDisplay = _keyTail ? ('••' + _keyTail) : _route.keyName || "";
 
   if (_realModel) {
-    const _brand = typeof _detectBrand === 'function' ? _detectBrand(_realModel) : 'generic';
+    const _brand = typeof _modelBrand === 'function'
+      ? _modelBrand(_realModel)
+      : (typeof _detectBrand === 'function' ? _detectBrand(_realModel) : 'generic');
     const icon = (typeof _brandSvg === 'function') ? _brandSvg(_brand, 12) : Icon('star', 12);
     // Show the actual model id (e.g. "aws.claude-opus-4.8"), not the
     // friendly short name — the user wants the real upstream model here.
@@ -11123,15 +11229,22 @@ function _renderToolSlot(r, allRounds) {
  * request R(llmRound+1) produced the call and R(llmRound+2) consumed its
  * result. The post-tool mirror supersedes the former duplicate request/result
  * controls; data-ri-state links the row to that state. Only render when both
- * task and round identity are known. */
+ * task and round identity are known.
+ * Swarm rounds are the exception: the row carries `agentId`, its llmRound is
+ * the sub-agent's 1-based loop round, and the snapshots live under the
+ * agent's OWN inspector stream `{parent}#agent:{agentId}` (lib/swarm/
+ * agent.py persists kind='request' rows only, so the panel degrades to the
+ * request axis there). */
 function _renderDebugEntry(r) {
   if (typeof _featureFlags === 'undefined' || !_featureFlags.debug_mode) return '';
-  if (!r || r._inboxInject || r._peerInject || r._userSteerInject || r._stallNudge || r._programSynthetic) return '';
-  const taskId = r._taskId || (typeof _riTaskIdForRound === 'function'
+  if (!r || r._inboxInject || r._peerInject || r._userSteerInject || r._bgCommandInject || r._stallNudge || r._programSynthetic) return '';
+  const baseTaskId = r._taskId || (typeof _riTaskIdForRound === 'function'
     ? _riTaskIdForRound(r) : '');
   const lr = r.llmRound;
-  if (!taskId || lr == null) return '';
-  const round = Number(lr) + 1;          // llmRound 0-based → roundNum 1-based
+  if (!baseTaskId || lr == null) return '';
+  const agentId = r.agentId ? String(r.agentId) : '';
+  const taskId = agentId ? `${baseTaskId}#agent:${agentId}` : baseTaskId;
+  const round = agentId ? Number(lr) : Number(lr) + 1;  // chat llmRound 0-based → roundNum 1-based
   const tip = (typeof t === 'function') ? t('ri.toolAnchorTip', { round }) : '';
   const esc = escapeHtml(String(taskId));
   return `<button type="button" class="ri-tool-anchor" ` +
@@ -11257,6 +11370,34 @@ function _roundsByToolCallId(rounds) {
   return { byId, noId };
 }
 
+/* Engine-authored intervention notes (SEG_SYSTEM_NOTE). Inline SVGs per
+ * §3.4; the stall lane reuses the chip family's redo glyph so the note and
+ * the legacy chip read as the same event. */
+const _NOTE_STALL_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M3 2v6h6"/><path d="M3 8a9 9 0 1 0 3-5.7L3 8"/></svg>';
+const _NOTE_TODO_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>';
+
+/* One engine-authored intervention (stall nudge / todo reminder) as its own
+ * timeline block, in the injection-chip visual family but keyed off the
+ * SEGMENT — it sits at the exact wire position instead of the chip's
+ * recomputed anchor. Collapsed by default: visible, not noisy. The body is
+ * the verbatim text the model was sent (escaped, never markdown) so the
+ * render cannot drift from the wire. */
+function _renderSegSystemNoteHTML(s) {
+  const kind = (s.noteKind === 'todo-continuation') ? 'todo-continuation' : 'intent-stall';
+  const labelKey = (kind === 'todo-continuation')
+    ? 'systemNote.todoContinuationLabel' : 'systemNote.intentStallLabel';
+  const icon = (kind === 'todo-continuation') ? _NOTE_TODO_ICON_SVG : _NOTE_STALL_ICON_SVG;
+  const text = (typeof s.text === 'string') ? s.text : '';
+  return `<details class="sw-inbox-row sw-system-note-row" data-note-kind="${kind}">` +
+    `<summary class="ptool-line sw-inbox-row-header">` +
+    `<span class="ptool-icon">${icon}</span>` +
+    `<span class="ptool-text">${escapeHtml(t(labelKey))}</span>` +
+    `<span class="ptool-badge ptool-badge-info">${escapeHtml(t('peer.injectRowBadge'))}</span>` +
+    `</summary>` +
+    `<div class="sw-inbox-row-body">` +
+    `<div class="sw-card sw-stall-card-item"><div class="sw-card-head"><span class="sw-card-role">${escapeHtml(t('stall.promptLabel'))}</span></div><pre class="sw-card-raw-pre">${escapeHtml(text)}</pre></div>` +
+    `</div></details>`;
+}
 /* Render one llmRound's prose before its resolved rich tool rows. */
 function _renderTimelineBatch(batch, rounds, allRounds, idx) {
   let html = "";
@@ -11294,6 +11435,8 @@ function _renderTimelineBatch(batch, rounds, allRounds, idx) {
        * painter (see _renderSegNarrationHTML). */
       const _rk = (s.llmRound != null) ? ` data-seg-round="L${escapeHtml(String(s.llmRound))}"` : '';
       html += `<div class="md-content seg-narration"${_rk}>${renderMarkdown(_segClean)}</div>`;
+    } else if (s.type === "system_note" && s.text) {
+      html += _renderSegSystemNoteHTML(s);
     }
   }
   // Then the tool rows for this batch (rich bodies from toolRounds).
@@ -11328,6 +11471,13 @@ function renderSegmentTimelineHTML(segments, msg, idx) {
    * round's batch. Real-round resolution + the header count below use
    * `realRounds` ONLY, so a synthetic row (no toolCallId) can never be picked
    * up as a positional tool body nor inflate the "N tools" header. */
+  /* The stall nudge is dual-recorded: the display-only sidecar chip AND a
+   * system_note segment at its wire position. When the segment is present it
+   * owns the render — skip the chip or the same intervention shows twice.
+   * The chip stays the only render for turns that predate note recording. */
+  const _hasStallNote = segments.some((segment) => (
+    segment && segment.type === "system_note" && segment.noteKind === "intent-stall"
+  ));
   const _injByAnchor = new Map();
   const realRounds = [];
   /* Drop backend-stamped result-less superseded rounds before segment
@@ -11335,10 +11485,12 @@ function renderSegmentTimelineHTML(segments, msg, idx) {
    * segments cannot fall through to positional resolution. */
   const _supersededTcIds = new Set();
   for (const r of allRounds) {
-    if (r && (r._userSteerInject || r._peerInject || r._inboxInject || r._stallNudge)) {
+    if (r && (r._userSteerInject || r._peerInject || r._inboxInject || r._bgCommandInject || r._stallNudge)) {
+      if (r._stallNudge && _hasStallNote) continue;
       const injRound = r._userSteerInject ? r.steerRound
         : (r._peerInject ? r.peerRound
-          : (r._stallNudge ? r.stallRound : r.inboxRound));
+          : (r._bgCommandInject ? r.bgCommandRound
+            : (r._stallNudge ? r.stallRound : r.inboxRound)));
       const anchor = (injRound || 0) - 1;
       if (!_injByAnchor.has(anchor)) _injByAnchor.set(anchor, []);
       _injByAnchor.get(anchor).push(r);
@@ -11454,7 +11606,7 @@ function _renderUnifiedGroup(allRounds, segments) {
    *   header is omitted entirely — "0 tools used" is not a useful claim; the
    *   trimmed-activity affordance below the panel carries the real count. */
   const realRounds = allRounds.filter((r) => r && !r._inboxInject
-    && !r._peerInject && !r._userSteerInject && !r._stallNudge
+    && !r._peerInject && !r._userSteerInject && !r._bgCommandInject && !r._stallNudge
     && !r._programSynthetic);
   const count = allRounds.length;
   const panel = presentToolExecutionPanel(realRounds, allRounds, anyActive, t, escapeHtml, Icon('chevronDown', 16));
@@ -11644,7 +11796,8 @@ function _tickCmdTimers() {
 
 function _toolElapsedDocumentHidden() {
   return typeof document !== 'undefined'
-    && (document.hidden === true || document.visibilityState === 'hidden');
+    && (document.hidden === true || document.visibilityState === 'hidden'
+      || runtimeScope.nativeVisibility?.isHidden() === true);
 }
 
 function _subscribeToolElapsedVisibility(listener) {
@@ -13657,8 +13810,9 @@ function _handleSwarmAgent(ev, c) {
           sr._swarmAgents.push(agent);
         }
         if (agent) {
-          agent.status = ev.status === "failed" ? "failed" : "done";
-          agent.phase = ev.status === "failed" ? "error" : "done";
+          const failed = ev.status === "failed" || ev.status === "error" || !!ev.error;
+          agent.status = failed ? "failed" : "done";
+          agent.phase = failed ? "error" : "done";
           if (ev.preview || ev.summary) agent.preview = ev.preview || ev.summary;
           if (ev.elapsed) agent.elapsed = ev.elapsed;
           if (ev.tokens) agent.tokens = ev.tokens;
@@ -17207,14 +17361,11 @@ async function _promoteNativeDecision(conv, turnId, projection) {
     const checkers = Array.isArray(catalog?.items)
       ? catalog.items.filter(item => item?.enabled) : [];
     if (!checkers.length) {
-      const saveForTriage = typeof showConfirm !== 'function' || await showConfirm(
-        'No checker is registered. Save this conclusion to Attention for later triage? You can also export the answer to docs.',
-      );
-      if (saveForTriage && api.brainAttentionAdd && sourceText) {
-        await api.brainAttentionAdd(projectPath, sourceText.slice(0, 4000));
-        if (typeof showToast === 'function') {
-          showToast('Saved to Attention; it will not enter the model prompt.', 'success');
-        }
+      if (typeof showToast === 'function') {
+        showToast(
+          'No checker is registered. Register one in Project Charter first, or export the answer to docs.',
+          'warning',
+        );
       }
       if (typeof runtimeScope.openProjectBrain === 'function') {
         runtimeScope.openProjectBrain({ tab: 'charter', path: projectPath });
@@ -17597,6 +17748,7 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
       taskId: block.source?.taskId,
       roundNum: block.source?.llmRound == null ? undefined : Number(block.source.llmRound) + 1,
       llmRound: block.source?.llmRound,
+      agentId: block.source?.agentId,
       toolCallId: block.toolCallId,
       toolName: block.name,
       toolArgs: block.input,
@@ -17658,6 +17810,7 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
     const fieldByChannel = {
       inbox: '_inboxInjects', peer: '_peerInjects',
       'user-steer': '_userSteerInjects', 'stall-nudge': '_stallNudges',
+      'background-command': '_bgCommandInjects',
     };
     const field = fieldByChannel[block.channel];
     if (!field || typeof _rehydrateInjectRows !== 'function') return '';
@@ -18927,7 +19080,15 @@ function _buildToolbarOverrides() {
     // translates the assistant reply to it instead of the old Chinese hard-pin.
     uiLang: (typeof _i18nLang !== 'undefined' ? _i18nLang : 'zh'),
     autoApply: autoApplyWrites,
-    browserClientId: runtimeScope._browserClientId || null,
+    /* _browserClientId is refreshed only while the Local Control panel is
+     * open. Outside it, fall back to the DOM stamp the LOCAL extension left
+     * on this document (origin_marker.js) so a conversation started without
+     * ever opening the panel still pins automation to THIS machine instead
+     * of drifting across the owner's other connected browsers. */
+    browserClientId: runtimeScope._browserClientId ||
+      ((typeof document !== 'undefined' && document.documentElement)
+        ? document.documentElement.getAttribute('data-tofu-browser-bridge')
+        : '') || null,
     cache: Object.assign({}, config.cache || {}),
     tools: Object.assign({}, config.tools || {}),
     responses: Object.assign({}, config.responses || {}),
@@ -20433,7 +20594,9 @@ function _populateModelDropdown(models) {
       ? _rowBrand
       : _rowCredKind
         ? runtimeScope.modelGroupKey({ brand: m.brand, name: m.provider_name }, m)
-        : (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic');
+        : (typeof _modelBrand === 'function'
+          ? _modelBrand(m.model_id, m.creator_id)
+          : (typeof _detectBrand === 'function' ? _detectBrand(m.model_id) : 'generic'));
     const item = document.createElement('div');
     item.className = 'preset-dropdown-item' + (opts.sub ? ' ps-dd-sub-item' : '');
     item.setAttribute('data-value', m.model_id);
@@ -22888,7 +23051,9 @@ function _applyModelUI(modelId) {
   }
   config.model = modelId;
   config._modelIsProvisional = _provisional;
-  const brand = typeof _detectBrand === 'function' ? _detectBrand(modelId) : 'generic';
+  const brand = typeof _modelBrand === 'function'
+    ? _modelBrand(modelId)
+    : (typeof _detectBrand === 'function' ? _detectBrand(modelId) : 'generic');
   const shortName = _modelShortName(modelId);
   const isThinking = _isThinkingCapable(modelId);
   /* Ensure thinkingDepth is always set for thinking models, null for non-thinking.
@@ -23195,7 +23360,9 @@ function selectThinkingDepth(depth) {
   if (toggle) {
     const iconEl = toggle.querySelector(".ps-icon");
     if (iconEl) {
-      const brand = typeof _detectBrand === 'function' ? _detectBrand(config.model) : 'generic';
+      const brand = typeof _modelBrand === 'function'
+        ? _modelBrand(config.model)
+        : (typeof _detectBrand === 'function' ? _detectBrand(config.model) : 'generic');
       if (brand === 'generic') iconEl.innerHTML = _DEPTH_ICONS[depth] || _DEPTH_ICON_FALLBACK;
     }
   }
@@ -24220,7 +24387,13 @@ function _startBuildWatch() {
   };
   window.addEventListener('pagehide', _persistLastActiveConv);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') _persistLastActiveConv();
+    // The Android shell-hide flip arrives as a synthetic visibilitychange
+    // with document.visibilityState still 'visible' — persist on it too, so
+    // a backgrounded-then-killed app still restores the last conversation.
+    if (document.visibilityState === 'hidden'
+        || runtimeScope.nativeVisibility?.isHidden() === true) {
+      _persistLastActiveConv();
+    }
   });
 
   /* Resolve this tab's storage owner before any push subscriber is wired.
@@ -24292,7 +24465,8 @@ function _startBuildWatch() {
    * core/conversation_invalidation.js. */
   // ── Tab visibility: resume pending translations when user switches back ──
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && activeConvId) {
+    if (document.visibilityState === 'visible'
+        && runtimeScope.nativeVisibility?.isHidden() !== true && activeConvId) {
       // Small delay to let the page settle after tab switch
       setTimeout(() => {
         if (activeConvId) {
@@ -25470,15 +25644,9 @@ function loadCompactionHistory(conversationId) {
 
   function segments(summary) {
     var status = summary?.status || {};
-    var attention = Array.isArray(summary?.attention?.items)
-      ? summary.attention.items.length : Number(status.attentionCount || 0);
     var active = Number(status.activeCount || 0);
     var recent = Number(status.recentOutcomeCount || 0);
     var values = [];
-    if (attention > 0) values.push({
-      className: 'collab-seg-needsyou',
-      label: text('collab.needsYou', { n: attention }, attention + ' need you'),
-    });
     if (active > 0) values.push({
       className: 'collab-seg-progress',
       label: text('projectBrain.activeWork', null, 'Active') + ': ' + active,
@@ -25525,8 +25693,7 @@ function loadCompactionHistory(conversationId) {
     host.hidden = false;
     host.querySelector('.collab-bar-inner')?.addEventListener('click', function () {
       if (typeof runtimeScope.openProjectBrain === 'function') {
-        var attention = Number(summary?.status?.attentionCount || 0);
-        runtimeScope.openProjectBrain({ tab: attention ? 'attention' : 'board' });
+        runtimeScope.openProjectBrain({ tab: 'board' });
       }
     });
   }
@@ -25740,7 +25907,11 @@ function loadCompactionHistory(conversationId) {
    * id — reuses the typed model-brand icon owner so the mark + color match
    * the model picker. Falls back to '' for isolated alternate entries. */
   function _brandLogo(modelId, size) {
-    if (typeof _detectBrand === 'function' && typeof _brandSvg === 'function') {
+    if (typeof _brandSvg !== 'function') return '';
+    if (typeof _modelBrand === 'function') {
+      return _brandSvg(_modelBrand(modelId || ''), size || 15);
+    }
+    if (typeof _detectBrand === 'function') {
       return _brandSvg(_detectBrand(modelId || ''), size || 15);
     }
     return '';
@@ -26845,7 +27016,7 @@ const _conversationCatalogRevisionGate = createConversationCatalogRevisionGate({
     );
   },
   refreshCatalog: () => loadConversationCatalog(),
-  isVisible: () => document.visibilityState === 'visible',
+  isVisible: () => !_effectiveHidden(),
   warn: (message) => debugLog(`[conversation-catalog] ${message}`, 'warn'),
 });
 retainedCompositionLifecycle.add(() => _conversationCatalogRevisionGate.destroy());
@@ -26854,12 +27025,11 @@ function _scheduleConvListRefresh(conversationId, revision) {
   _conversationCatalogRevisionGate.schedule(conversationId, revision);
 }
 
-function _onConvNotifyPush(frame) {
-  if (!frame || (frame.type !== 'conv_changed'
-      && frame.type !== 'conv_deleted')) return;
+function _onConvNotifyPush(rawFrame) {
+  const frame = narrowConvCatalogFrame(rawFrame);
+  if (!frame) return;
   if (!_frameIsOurs(frame.userId)) return;
   const conversationId = frame.convId;
-  if (!conversationId) return;
   if (frame.type === 'conv_deleted') {
     _applyRemoteConvDeleted(conversationId);
     return;
@@ -26893,18 +27063,26 @@ function _onConversationInvalidation(frame) {
 runtimeScope._onConversationInvalidation = _onConversationInvalidation;
 
 let _foldersRefreshTimer = 0;
+
+// The Android WebView reports visible while backgrounded; fold the shell's
+// bridge state in so reconcile/probe cadence suspends in a pocket too.
+function _effectiveHidden() {
+  return document.visibilityState !== 'visible'
+    || runtimeScope.nativeVisibility?.isHidden() === true;
+}
+
 function _scheduleFoldersRefresh() {
   clearTimeout(_foldersRefreshTimer);
   _foldersRefreshTimer = setTimeout(() => {
-    if (document.visibilityState !== 'visible'
-        || typeof loadFolders !== 'function') return;
+    if (_effectiveHidden() || typeof loadFolders !== 'function') return;
     void Promise.resolve(loadFolders()).catch((error) =>
       debugLog(`[folders] refresh failed: ${error?.message || error}`, 'warn'));
   }, 150);
 }
 
-function _onFoldersChangedPush(frame) {
-  if (!frame || frame.type !== 'folders_changed') return;
+function _onFoldersChangedPush(rawFrame) {
+  const frame = narrowFoldersChangedFrame(rawFrame);
+  if (!frame) return;
   if (!_frameIsOurs(frame.userId)) return;
   const deletedFolderId = frame.deletedFolderId;
   if (deletedFolderId) {
@@ -26970,7 +27148,7 @@ function _revalidateOnResume(trigger) {
 runtimeScope._revalidateOnResume = _revalidateOnResume;
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible') return;
+  if (_effectiveHidden()) return;
   _revalidateOnResume('visibilitychange');
 });
 
@@ -27001,7 +27179,7 @@ function _reconcileIntervalMs() {
     ? _RECONCILE_MS_PUSH_UP : _RECONCILE_MS_PUSH_DOWN;
 }
 function _crossDeviceReconcile() {
-  if (document.visibilityState !== 'visible') return false;
+  if (_effectiveHidden()) return false;
   return _revalidateOnResume('periodic');
 }
 
@@ -27469,6 +27647,8 @@ function _buildSwarmPanelHTML(round, allRounds) {
     statusPill = `<span class="sw-status-pill sw-pill-error" title="${escapeHtml(round._swarmError)}">${_SW_STATUS_SVG.failed} Failed</span>`;
   } else if (failed > 0 && done === 0) {
     statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Failed</span>`;
+  } else if (failed > 0) {
+    statusPill = `<span class="sw-status-pill sw-pill-error">${_SW_STATUS_SVG.failed} Completed with errors</span>`;
   } else if (finished === 0 && total > 0
              && !(round._swarmSnapshot && round._swarmSnapshot.settled)) {
     /* No terminal agent or settled snapshot is never Complete. Deliberately
@@ -27493,7 +27673,7 @@ function _buildSwarmPanelHTML(round, allRounds) {
         `<div class="sw-progress-fill${fillClass}" style="width:${pctDone + pctFailed + pctRunning}%"${fillStyle}></div>` +
       `</div>` +
       `<div class="sw-progress-label">` +
-        `<span>${finished}/${total} agents complete</span>` +
+        `<span>${finished}/${total} agents finished</span>` +
         (elapsed ? `<span>${elapsed}</span>` : "") +
       `</div>` +
     `</div>`;
@@ -28127,7 +28307,8 @@ async function _reconcileStuckSwarmPanelsOnce() {
 
 function _swReconcileDocumentHidden() {
   return typeof document !== 'undefined'
-    && (document.hidden === true || document.visibilityState === 'hidden');
+    && (document.hidden === true || document.visibilityState === 'hidden'
+      || runtimeScope.nativeVisibility?.isHidden() === true);
 }
 
 function _swResumeTimerTicker() {
@@ -29059,6 +29240,7 @@ Object.assign(runtimeScope, {
   _getCurrentTheme,
   _findRenderedNativeTurnNode,
   _loadServerConfigAndPopulate,
+  _modelBrand,
   _modelRoutingDropdownModels,
   _modelShortName,
   _orchestrationFlowCatalog,

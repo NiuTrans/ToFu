@@ -82,7 +82,7 @@ def _handle_integration_tool(
                 labels = ', '.join(str(item.get('label') or 'checker')
                                    for item in failed)
                 return (f'Error: integration submission rejected because '
-                        f'checker(s) failed: {labels}. See Project Attention.')
+                        f'checker(s) failed: {labels}. See Project Feed.')
         from lib.integration_control import execute_integration_tool
         return execute_integration_tool(
             _fn_name,

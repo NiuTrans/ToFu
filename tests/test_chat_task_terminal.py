@@ -7,6 +7,7 @@ import pytest
 from lib.tasks_pkg.manager._terminal import (
     finalize_chat_task_aborted,
     finalize_chat_task_error,
+    reject_unstarted_chat_task,
     stamp_chat_task_terminal,
 )
 
@@ -258,6 +259,113 @@ def test_error_finalizer_emits_only_once():
     assert len(events) == 1
     assert persisted == [task]
     assert task['error']['message'] == 'first'
+
+
+def test_pre_spawn_rejection_settles_persists_then_discards(monkeypatch):
+    from lib.agent_core.execution_session import (
+        ExecutionPhase,
+        ExecutionSession,
+        bind_model_route,
+    )
+    import lib.tasks_pkg.manager._events as event_module
+    import lib.tasks_pkg.manager._persist as persist_module
+    import lib.tasks_pkg.manager._registry as registry_module
+
+    order = []
+    task = {
+        'id': 'pre-spawn-rejection-success',
+        'convId': 'conv-rejected',
+        'status': 'pending',
+        '_executionSession': ExecutionSession(
+            execution_id='pre-spawn-rejection-success',
+            kind='chat',
+            owner_user_id=1,
+        ),
+    }
+    bind_model_route(
+        task['_executionSession'], lambda: order.append('release'))
+    monkeypatch.setattr(
+        event_module, 'append_event',
+        lambda _task, _event: order.append('event'),
+    )
+    monkeypatch.setattr(
+        persist_module, 'persist_task_result',
+        lambda _task: order.append('persist') or True,
+    )
+    monkeypatch.setattr(
+        registry_module, 'notify_terminal_conversation_change',
+        lambda _task: order.append('notify'),
+    )
+    monkeypatch.setattr(
+        registry_module, 'discard_task',
+        lambda task_id, conv_id=None: order.append(
+            f'discard:{task_id}:{conv_id}'),
+    )
+
+    event = reject_unstarted_chat_task(
+        task,
+        RuntimeError('admission refused'),
+        cause='task_admission_refused',
+        conv_id='conv-rejected',
+    )
+
+    assert event['type'] == 'done'
+    assert task['status'] == 'error'
+    assert task['_executionSession'].phase is ExecutionPhase.FAILED
+    assert order == [
+        'release', 'event', 'persist', 'notify',
+        'discard:pre-spawn-rejection-success:conv-rejected',
+    ]
+    assert '_terminalPersistencePending' not in task
+
+
+def test_pre_spawn_rejection_retains_task_until_terminal_persist(monkeypatch):
+    from lib.agent_core.execution_session import (
+        ExecutionPhase,
+        ExecutionSession,
+        bind_model_route,
+    )
+    import lib.tasks_pkg.manager._events as event_module
+    import lib.tasks_pkg.manager._persist as persist_module
+    import lib.tasks_pkg.manager._registry as registry_module
+
+    released = []
+    discarded = []
+    task = {
+        'id': 'pre-spawn-rejection-pending',
+        'convId': 'conv-rejected',
+        'status': 'pending',
+        '_executionSession': ExecutionSession(
+            execution_id='pre-spawn-rejection-pending',
+            kind='chat',
+            owner_user_id=1,
+        ),
+    }
+    bind_model_route(task['_executionSession'], lambda: released.append(True))
+    monkeypatch.setattr(event_module, 'append_event', lambda *_args: None)
+    monkeypatch.setattr(
+        persist_module, 'persist_task_result', lambda _task: False)
+    monkeypatch.setattr(
+        registry_module, 'notify_terminal_conversation_change',
+        lambda _task: None,
+    )
+    monkeypatch.setattr(
+        registry_module, 'discard_task',
+        lambda *_args, **_kwargs: discarded.append(True),
+    )
+
+    reject_unstarted_chat_task(
+        task,
+        RuntimeError('storage unavailable'),
+        cause='task_spawn_failed',
+        conv_id='conv-rejected',
+    )
+
+    assert released == [True]
+    assert discarded == []
+    assert task['status'] == 'error'
+    assert task['_terminalPersistencePending'] is True
+    assert task['_executionSession'].phase is ExecutionPhase.FAILED
 
 
 def test_queued_abort_finalizer_settles_without_worker_entry():

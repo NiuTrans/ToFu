@@ -94,27 +94,22 @@ def build_branch_api_messages(
                 and not last.get('toolRounds')):
             trimmed_branch = trimmed_branch[:-1]
 
-    # ── Decorate the first branch user message with topic + selection context ──
-    decorated_branch = []
-    for k, m in enumerate(trimmed_branch):
-        if k == 0 and m.get('role') == 'user':
-            m = dict(m)  # copy to avoid mutating original
-            prefix = f'[分支话题: {branch.get("title", "")}]'
-            parent_selection = branch.get('parentSelection', '')
-            if parent_selection:
-                prefix += (f'\n[选中的上下文]\n'
-                           f'{parent_selection[:2000]}\n[/选中的上下文]')
-            m['content'] = f'{prefix}\n{m.get("content", "")}'
-            decorated_branch.append(m)
-        else:
-            decorated_branch.append(m)
-
     # ── Combine and transform ──
-    combined = main_context + decorated_branch
+    combined = main_context + trimmed_branch
     logger.info('[MsgBuilder] Branch conv=%s msg=%d branch=%d: context=%d + branch=%d msgs',
-                conv_id[:8], msg_idx, branch_idx, len(main_context), len(decorated_branch))
+                conv_id[:8], msg_idx, branch_idx, len(main_context), len(trimmed_branch))
 
-    return _transform_messages(combined, config, user_id=user_id)
+    transformed = _transform_messages(combined, config, user_id=user_id)
+    prefix = f'[分支话题: {branch.get("title", "")}]'
+    parent_selection = branch.get('parentSelection', '')
+    if parent_selection:
+        prefix += (f'\n[选中的上下文]\n'
+                   f'{parent_selection[:2000]}\n[/选中的上下文]')
+    transformed.append({
+        'role': 'user', 'content': prefix,
+        '_isMeta': True, '_isBranchContext': True,
+    })
+    return transformed
 
 
 def build_api_messages_from_db(
@@ -169,7 +164,7 @@ def build_api_messages_from_db(
         raw_messages, config, exclude_last=exclude_last, user_id=user_id)
 
     if caution and built:
-        if _prepend_note_to_last_user(built, caution):
+        if _append_note_as_tail_user(built, caution):
             logger.warning('[MsgBuilder] conv=%s lifecycle no-refire note '
                            'injected (interrupted tail carried a restart-class '
                            'call)', conv_id[:8])
@@ -215,23 +210,17 @@ def _lifecycle_caution_note(raw_messages: list[dict]) -> str | None:
     return None
 
 
-def _prepend_note_to_last_user(built: list[dict], note: str) -> bool:
-    """Prepend ``note`` to the last user message of an API message list.
-
-    Handles both content shapes (plain string and block list). Returns False
-    when there is no user message to carry the note (caller then skips).
-    """
-    for msg in reversed(built or []):
-        if not isinstance(msg, dict) or msg.get('role') != 'user':
-            continue
-        content = msg.get('content')
-        if isinstance(content, str):
-            msg['content'] = note + '\n\n' + content
-            return True
-        if isinstance(content, list):
-            content.insert(0, {'type': 'text', 'text': note})
-            return True
-    return False
+def _append_note_as_tail_user(built: list[dict], note: str) -> bool:
+    """Append an engine-authored recovery note without rewriting history."""
+    if not isinstance(built, list) or not note:
+        return False
+    built.append({
+        'role': 'user',
+        'content': note,
+        '_isMeta': True,
+        '_isLifecycleRecoveryNote': True,
+    })
+    return True
 
 
 def _load_messages_from_db(

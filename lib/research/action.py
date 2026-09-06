@@ -18,6 +18,7 @@ from typing import Any
 
 import lib as _lib
 from lib.agent_loop import AbortSignal
+from lib.agent_core.events import Phase, build_phase
 from lib.identity import require_user_id
 from lib.llm_json import extract_json
 from lib.llm_errors import AbortedError
@@ -689,7 +690,7 @@ def _run_agent(task: dict, workspace: Mapping[str, Any], epoch: PaperToolEpochV2
         round_entry['results'] = display
         round_entry['toolContent'] = str(result)[:4_000]
         round_entry['_elapsed'] = f'{elapsed:.1f}s'
-        result_budget.append(
+        visible_result = result_budget.append(
             messages, round_index=round_index, tool_name=name,
             tool_call_id=call_id, content=result, round_entry=round_entry,
             tool_arguments=args)
@@ -700,6 +701,7 @@ def _run_agent(task: dict, workspace: Mapping[str, Any], epoch: PaperToolEpochV2
             'status': round_entry['status'], 'elapsed': round(elapsed, 1),
             'toolContent': round_entry.get('toolContent', ''),
         })
+        return visible_result
 
     outcome = run_guarded_paper_agent_loop(
         context=f'Research {task["action"]} agent', usage_meter=meter,
@@ -725,8 +727,8 @@ def run_research_action(task: dict) -> None:
     task_id = task['task_id']
     try:
         _research_action_runtime.mark_running(task_id)
-        append_action_event(task, {
-            'type': 'phase', 'phase': 'start', 'action': task['action']})
+        append_action_event(
+            task, build_phase(Phase.START, action=task['action']))
         workspace = load_workspace(
             task['direction'], task['lang'], user_id=int(task['user_id']))
         if int(workspace.get('revision') or 0) != int(task['expected_revision']):
@@ -741,10 +743,9 @@ def run_research_action(task: dict) -> None:
         )
         task['toolEpochV2'] = epoch.telemetry()
         task['bindingProblems'] = binding_problems
-        append_action_event(task, {
-            'type': 'phase', 'phase': 'agent', 'action': task['action'],
-            'toolCount': len(epoch.executable_schemas),
-        })
+        append_action_event(
+            task, build_phase(Phase.AGENT, action=task['action'],
+                              toolCount=len(epoch.executable_schemas)))
         payload, receipts = _run_agent(task, workspace, epoch, bindings)
         updated = apply_action_result(
             action=task['action'], workspace=workspace, payload=payload,

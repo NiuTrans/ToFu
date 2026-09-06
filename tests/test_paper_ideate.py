@@ -286,6 +286,8 @@ def test_parameter_level_delta_caps_novelty_and_sinks_stitch():
     # Use the REAL _score_idea with a fake dispatch that declares parameter-level.
     def _fake_dispatch(messages, on_content=None, **kw):
         import json
+        from lib.paper.agent_loop_policy import PAPER_AGENT_ROUTE_MAX_RETRIES
+        assert kw['max_retries'] == PAPER_AGENT_ROUTE_MAX_RETRIES
         payload = json.dumps({'mechanism_delta': 'parameter-level', 'closest_neighbor': '2402.55555',
                               'scores': {'novelty': 5, 'falsifiability': 5, 'mechanism_depth': 5,
                                          'value': 5}, 'justifications': {}, 'verdict': 'stitch'})
@@ -664,6 +666,47 @@ def test_no_gaps_is_clean_failure():
     _ok('empty open_gaps → clean ok=False with a run-survey-first message')
 
 
+def test_empty_forced_synthesis_retries_only_current_dispatch():
+    """An empty provider-final answer must not replay the ideation stage."""
+    import json
+
+    import lib.paper.ideate as it
+    from lib.paper.agent_usage import PaperAgentUsageMeter
+
+    calls = []
+    payload = json.dumps({'ideas': [{'title': 'Recovered idea'}]})
+
+    def _fake_dispatch(_messages, *, on_content, tools, **_kwargs):
+        calls.append(tools)
+        if len(calls) == 1:
+            return (
+                {'role': 'assistant', 'content': ''}, 'stop',
+                {'prompt_tokens': 10, 'completion_tokens': 2,
+                 '_empty_stop': True},
+            )
+        on_content(payload)
+        return (
+            {'role': 'assistant', 'content': payload}, 'stop',
+            {'prompt_tokens': 10, 'completion_tokens': 8},
+        )
+
+    meter = PaperAgentUsageMeter(
+        'ideate', token_budget=1_000, dispatch_budget=1, repeat_limit=0)
+    restore = _patch({'dispatch_stream': _fake_dispatch})
+    try:
+        ideas = it._generate_raw_ideas(
+            'direction', _OPEN_GAPS, '', 'en', usage_meter=meter)
+    finally:
+        restore()
+
+    assert ideas == [{'title': 'Recovered idea'}]
+    assert len(calls) == 2 and all(not tools for tools in calls), \
+        'retry must remain tool-less'
+    assert meter.calls == 2, 'both paid attempts must be accounted'
+    assert meter.agent_dispatches == 2, 'retry must consume dispatch budget'
+    _ok('empty forced synthesis retries one dispatch without replaying tools')
+
+
 def main():
     print()
     print(_color('═══ R3 Ideate / Anti-A+B Gate Tests ═══', '36'))
@@ -686,6 +729,7 @@ def main():
         test_partial_structural_rejection_is_not_degraded,
         test_zero_accepted_on_rubric_is_honest_not_degraded,
         test_no_gaps_is_clean_failure,
+        test_empty_forced_synthesis_retries_only_current_dispatch,
     ]
     for fn in tests:
         try:

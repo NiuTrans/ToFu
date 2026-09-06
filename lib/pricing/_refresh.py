@@ -8,7 +8,7 @@ Owns the live pricing state and the background refresh machinery:
     get_pricing_data()        — thread-safe copy of live pricing state
     refresh_pricing_async()   — trigger background pricing refresh (non-blocking)
 
-Internal fetchers (_fetch_exchange_rate / _fetch_model_pricing_online) and
+Internal fetchers (_fetch_exchange_rates / _fetch_model_pricing_online) and
 the updater (_update_pricing_locked / _do_update_pricing) live here too.
 ``_pricing_data`` is mutated in place under ``_pricing_lock`` by
 ``_do_update_pricing``; keeping the dict + lock + updater in one module
@@ -207,11 +207,6 @@ def _fetch_exchange_rates():
                 url, e, exc_info=True)
     return None
 
-
-def _fetch_exchange_rate():
-    """Backward-compatible USD→CNY scalar wrapper."""
-    rates = _fetch_exchange_rates()
-    return rates.get('CNY') if rates else None
 
 def _fetch_model_pricing_online(model_name):
     try:

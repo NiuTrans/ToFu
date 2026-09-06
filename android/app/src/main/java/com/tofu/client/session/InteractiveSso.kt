@@ -33,6 +33,7 @@ object InteractiveSso {
         is LoginResult.BadCredentials -> false
         is LoginResult.NoCredential -> false
         is LoginResult.Error -> false
+        is LoginResult.Incompatible -> false
     }
 
     /**

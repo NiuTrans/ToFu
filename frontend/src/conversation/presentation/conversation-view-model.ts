@@ -70,6 +70,7 @@ export type ConversationBlockKind =
   | 'attachments'
   | 'injections'
   | 'provenance'
+  | 'system-note'
   | 'file-changes'
   | 'origin'
   | 'context'
@@ -146,9 +147,20 @@ export interface AttachmentsBlockViewModel extends ConversationBlockBase {
 
 export interface InjectionsBlockViewModel extends ConversationBlockBase {
   kind: 'injections';
-  channel: 'inbox' | 'peer' | 'user-steer' | 'stall-nudge';
+  channel: 'inbox' | 'peer' | 'user-steer' | 'background-command' | 'stall-nudge';
   items: ReadonlyArray<TurnMessageInjection | TurnStallInjection>;
   anchorLlmRound: number | null;
+}
+
+/* Engine-authored intervention (SEG_SYSTEM_NOTE on the wire): the stall
+ * nudge / todo-continuation reminder, carried as a first-class segment so it
+ * renders at its true insertion position instead of a recomputed chip anchor.
+ * `text` is the verbatim content the model was sent. */
+export interface SystemNoteBlockViewModel extends ConversationBlockBase {
+  kind: 'system-note';
+  noteKind: 'intent-stall' | 'todo-continuation';
+  text: string;
+  llmRound: number | null;
 }
 
 export interface FileChangesBlockViewModel extends ConversationBlockBase {
@@ -278,6 +290,7 @@ export type ConversationBlockViewModel =
   | AttachmentsBlockViewModel
   | InjectionsBlockViewModel
   | ProvenanceBlockViewModel
+  | SystemNoteBlockViewModel
   | FileChangesBlockViewModel
   | OriginBlockViewModel
   | ContextBlockViewModel
@@ -666,6 +679,17 @@ function blockFromSegment(
       ...(segment.signature ? { signature: segment.signature } : {}),
     };
   }
+  if (segment.type === 'system_note') {
+    return {
+      blockId,
+      kind: 'system-note',
+      identitySource,
+      source: segment,
+      noteKind: segment.noteKind,
+      text: segment.text,
+      llmRound: typeof segment.llmRound === 'number' ? segment.llmRound : null,
+    };
+  }
   const richRound = richRoundsBySegment[occurrence] ?? segment._round;
   return {
     blockId,
@@ -815,10 +839,19 @@ function addProjectionSidecarBlocks(
     ['inbox', projection._inboxInjects],
     ['peer', projection._peerInjects],
     ['user-steer', projection._userSteerInjects],
+    ['background-command', projection._bgCommandInjects],
     ['stall-nudge', projection._stallNudges],
   ];
+  /* The stall nudge is dual-recorded: sidecar chip AND a system_note segment
+   * at its wire position. When the segment is present it owns the render —
+   * skip the chip or the same intervention shows twice. The chip stays the
+   * only render for turns that predate note recording. */
+  const hasStallNoteSegment = (projection.segments ?? []).some((segment) => (
+    segment.type === 'system_note' && segment.noteKind === 'intent-stall'
+  ));
   for (const [channel, items] of injections) {
     if (!items?.length) continue;
+    if (channel === 'stall-nudge' && hasStallNoteSegment) continue;
     for (const item of items) {
       const round = Number.isInteger(item.round) && Number(item.round) >= 0
         ? Number(item.round) : null;
@@ -1008,11 +1041,13 @@ function addProjectionSidecarBlocks(
   const rolledBack = projection.rolledBack;
   if (rolledBack?.length) {
     const rolledBlocks: ConversationBlockViewModel[] = [];
+    const rolledEntries: TurnRolledBackEntry[] = [];
     for (const entry of rolledBack) {
       if (!entry || typeof entry.blockId !== 'string'
           || !entry.blockId.trim()) continue;
       if (!String(entry.content ?? '').trim()
           && !String(entry.thinking ?? '').trim()) continue;
+      rolledEntries.push(entry);
       rolledBlocks.push({
         blockId: claimedBlockId(
           turn.turnId, entry.blockId, 'contract', claims, diagnostics,
@@ -1025,14 +1060,66 @@ function addProjectionSidecarBlocks(
     }
     if (rolledBlocks.length) {
       /* The rewound tail belongs where it was generated: after the retained
-       * rounds, before the terminal lanes the resumed attempt re-streams. */
+       * rounds of the interrupted attempt, before the first block its
+       * successor attempt streams. Anchor on durable attempt attribution —
+       * present from the successor's first streamed token — instead of the
+       * terminal lanes, which only exist after settlement: until then the
+       * terminal anchor falls through to blocks.length and the rolled-back
+       * block renders below everything the successor is still streaming
+       * (the "previous thought stuck at the bottom" bug). Multi-resume turns
+       * get one anchor per entry; turns predating attempt stamps fall back
+       * to the terminal-lane anchor. */
+      const attemptIdOf = (candidate: ConversationBlockViewModel): string => {
+        const round = (candidate as { round?: unknown }).round;
+        if (round && typeof round === 'object' && !Array.isArray(round)) {
+          const id = (round as { attemptId?: unknown }).attemptId;
+          if (typeof id === 'string' && id) return id;
+        }
+        const source = candidate.source as { attemptId?: unknown } | null;
+        const id = source && typeof source === 'object'
+          ? source.attemptId : undefined;
+        return typeof id === 'string' ? id : '';
+      };
+      const successorBoundary = (rolledAttemptId: string): number => {
+        if (!rolledAttemptId) return -1;
+        let lastOwn = -1;
+        blocks.forEach((candidate, index) => {
+          if (attemptIdOf(candidate) === rolledAttemptId) lastOwn = index;
+        });
+        if (lastOwn < 0) return -1;
+        for (let index = lastOwn + 1; index < blocks.length; index += 1) {
+          const id = attemptIdOf(blocks[index]);
+          if (id && id !== rolledAttemptId) return index;
+        }
+        return -1;
+      };
+      const currentAttemptId = typeof turn.currentAttemptId === 'string'
+        ? turn.currentAttemptId : '';
       const firstTerminal = blocks.findIndex((candidate) => (
         (candidate.kind === 'text' || candidate.kind === 'thinking')
         && candidate.terminal
       ));
-      blocks.splice(
-        firstTerminal >= 0 ? firstTerminal : blocks.length, 0, ...rolledBlocks,
-      );
+      const fallbackAnchor = currentAttemptId
+        ? blocks.findIndex((candidate) => attemptIdOf(candidate) === currentAttemptId)
+        : -1;
+      const groupAnchor = fallbackAnchor >= 0
+        ? fallbackAnchor
+        : firstTerminal >= 0 ? firstTerminal : blocks.length;
+      const inserts = new Map<number, ConversationBlockViewModel[]>();
+      rolledBlocks.forEach((block, position) => {
+        const entry = rolledEntries[position];
+        const rolledAttemptId = entry && typeof entry.attemptId === 'string'
+          ? entry.attemptId : '';
+        const boundary = successorBoundary(rolledAttemptId);
+        const anchor = boundary >= 0 ? boundary : groupAnchor;
+        const bucket = inserts.get(anchor);
+        if (bucket) bucket.push(block);
+        else inserts.set(anchor, [block]);
+      });
+      const anchors = [...inserts.keys()].sort((a, b) => b - a);
+      for (const anchor of anchors) {
+        blocks.splice(anchor, 0, ...inserts.get(anchor)!);
+      }
     }
   }
 }
@@ -1251,7 +1338,8 @@ function settleThinkingActivity(
       block.terminal = settled || laterContent;
     }
     if (block.kind === 'thinking' || block.kind === 'text'
-        || block.kind === 'tool' || block.kind === 'program') {
+        || block.kind === 'tool' || block.kind === 'program'
+        || block.kind === 'system-note') {
       laterContent = true;
     }
   }

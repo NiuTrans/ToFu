@@ -63,6 +63,7 @@ _PROJECTION_INJECTION_LANES = (
     ('_inboxInjects', '_inboxInjects', 'inbox'),
     ('_peerInjects', '_peerInjects', 'peer'),
     ('_userSteerInjects', '_userSteerInjects', 'user-steer'),
+    ('_bgCommandInjects', '_bgCommandInjects', 'background-command'),
     ('_stallNudges', '_stallNudges', 'stall-nudge'),
 )
 _PROJECTION_PROVENANCE_FIELDS = (
@@ -206,8 +207,9 @@ def _delta_text_fields(task: dict[str, Any],
     owns_visible_run_turns = bool(task.get('_turnVisibleRunTurnIds'))
     content = (previous.get('content', '') if owns_visible_run_turns else
                (task.get('content') or cfg.get('contentPrefix') or ''))
-    thinking = (task.get('thinking') if task.get('thinking') is not None
-                else previous.get('thinking', ''))
+    thinking = (previous.get('thinking', '') if owns_visible_run_turns else
+                (task.get('thinking') if task.get('thinking') is not None
+                 else previous.get('thinking', '')))
     return content, thinking
 
 
@@ -777,6 +779,8 @@ def _task_projection(
     # Flow phases commit their visible rows independently through
     # ``sync_visible_run_turns``.  Later orchestration bookkeeping events must
     # not fold the aggregate task buffer back over the first phase's bubble.
+    # The per-node flow_iteration reset clears task['thinking'] as well, so
+    # the first turn's committed thinking needs the same guard as content.
     owns_visible_run_turns = bool(task.get('_turnVisibleRunTurnIds'))
     content = (projection.get('content', '') if owns_visible_run_turns else
                (task.get('content') or cfg.get('contentPrefix') or ''))
@@ -806,8 +810,10 @@ def _task_projection(
     projected_rounds = compact_tool_rounds_for_frame_budget(projected_rounds)
     projection.update({
         'content': content,
-        'thinking': (task.get('thinking') if task.get('thinking') is not None
-                     else projection.get('thinking', '')),
+        'thinking': (projection.get('thinking', '') if owns_visible_run_turns
+                     else (task.get('thinking')
+                           if task.get('thinking') is not None
+                           else projection.get('thinking', ''))),
         'toolRounds': projected_rounds,
     })
 

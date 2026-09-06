@@ -121,6 +121,17 @@ def _is_request_payload_error(exc: BaseException) -> bool:
     return isinstance(exc, (BadRequestError, RequestScopedError))
 
 
+def _is_local_request_preparation_error(exc: BaseException) -> bool:
+    """True when dispatch proves no provider request was attempted."""
+    try:
+        from lib.llm import LocalRequestPreparationError
+    except Exception as import_error:
+        logger.debug('lib.llm import failed in local-prepare check: %s',
+                     import_error)
+        return False
+    return isinstance(exc, LocalRequestPreparationError)
+
+
 def _attempt_pool_rescue(task, body, round_num, max_tokens, tool_list,
                          accumulated_usage, api_rounds,
                          *, failed_models, original_model, cause_exc,
@@ -870,6 +881,23 @@ def _llm_call_with_fallback(task, body, model, round_num, max_tokens,
             except Exception as _attr_err:
                 logger.debug('[%s] Could not attach _user_message: %s',
                              tid, _attr_err)
+            raise
+
+        # Local request construction failed before provider ingress. This is
+        # our defect, not model availability; rotating models only hides the
+        # cause and spends unrelated capacity.
+        if _is_local_request_preparation_error(e):
+            logger.error(
+                '[%s] Local request preparation failed on model=%s at %s — '
+                'NOT switching models or attempting pool rescue',
+                tid, model, getattr(e, 'stage', 'request_prepare'))
+            try:
+                e._user_message = format_llm_error_for_user(  # type: ignore[attr-defined]
+                    e, model=model, context='request-prepare',
+                    source='llm-stream')
+            except Exception as attribute_error:
+                logger.debug('[%s] Could not attach _user_message: %s',
+                             tid, attribute_error)
             raise
 
         # Deterministic request rejection — never switch models or attempt a

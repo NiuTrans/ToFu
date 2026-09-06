@@ -1213,15 +1213,22 @@ function _renderToolSlot(r, allRounds) {
  * request R(llmRound+1) produced the call and R(llmRound+2) consumed its
  * result. The post-tool mirror supersedes the former duplicate request/result
  * controls; data-ri-state links the row to that state. Only render when both
- * task and round identity are known. */
+ * task and round identity are known.
+ * Swarm rounds are the exception: the row carries `agentId`, its llmRound is
+ * the sub-agent's 1-based loop round, and the snapshots live under the
+ * agent's OWN inspector stream `{parent}#agent:{agentId}` (lib/swarm/
+ * agent.py persists kind='request' rows only, so the panel degrades to the
+ * request axis there). */
 function _renderDebugEntry(r) {
   if (typeof _featureFlags === 'undefined' || !_featureFlags.debug_mode) return '';
-  if (!r || r._inboxInject || r._peerInject || r._userSteerInject || r._stallNudge || r._programSynthetic) return '';
-  const taskId = r._taskId || (typeof _riTaskIdForRound === 'function'
+  if (!r || r._inboxInject || r._peerInject || r._userSteerInject || r._bgCommandInject || r._stallNudge || r._programSynthetic) return '';
+  const baseTaskId = r._taskId || (typeof _riTaskIdForRound === 'function'
     ? _riTaskIdForRound(r) : '');
   const lr = r.llmRound;
-  if (!taskId || lr == null) return '';
-  const round = Number(lr) + 1;          // llmRound 0-based → roundNum 1-based
+  if (!baseTaskId || lr == null) return '';
+  const agentId = r.agentId ? String(r.agentId) : '';
+  const taskId = agentId ? `${baseTaskId}#agent:${agentId}` : baseTaskId;
+  const round = agentId ? Number(lr) : Number(lr) + 1;  // chat llmRound 0-based → roundNum 1-based
   const tip = (typeof t === 'function') ? t('ri.toolAnchorTip', { round }) : '';
   const esc = escapeHtml(String(taskId));
   return `<button type="button" class="ri-tool-anchor" ` +
@@ -1347,6 +1354,34 @@ function _roundsByToolCallId(rounds) {
   return { byId, noId };
 }
 
+/* Engine-authored intervention notes (SEG_SYSTEM_NOTE). Inline SVGs per
+ * §3.4; the stall lane reuses the chip family's redo glyph so the note and
+ * the legacy chip read as the same event. */
+const _NOTE_STALL_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M3 2v6h6"/><path d="M3 8a9 9 0 1 0 3-5.7L3 8"/></svg>';
+const _NOTE_TODO_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>';
+
+/* One engine-authored intervention (stall nudge / todo reminder) as its own
+ * timeline block, in the injection-chip visual family but keyed off the
+ * SEGMENT — it sits at the exact wire position instead of the chip's
+ * recomputed anchor. Collapsed by default: visible, not noisy. The body is
+ * the verbatim text the model was sent (escaped, never markdown) so the
+ * render cannot drift from the wire. */
+function _renderSegSystemNoteHTML(s) {
+  const kind = (s.noteKind === 'todo-continuation') ? 'todo-continuation' : 'intent-stall';
+  const labelKey = (kind === 'todo-continuation')
+    ? 'systemNote.todoContinuationLabel' : 'systemNote.intentStallLabel';
+  const icon = (kind === 'todo-continuation') ? _NOTE_TODO_ICON_SVG : _NOTE_STALL_ICON_SVG;
+  const text = (typeof s.text === 'string') ? s.text : '';
+  return `<details class="sw-inbox-row sw-system-note-row" data-note-kind="${kind}">` +
+    `<summary class="ptool-line sw-inbox-row-header">` +
+    `<span class="ptool-icon">${icon}</span>` +
+    `<span class="ptool-text">${escapeHtml(t(labelKey))}</span>` +
+    `<span class="ptool-badge ptool-badge-info">${escapeHtml(t('peer.injectRowBadge'))}</span>` +
+    `</summary>` +
+    `<div class="sw-inbox-row-body">` +
+    `<div class="sw-card sw-stall-card-item"><div class="sw-card-head"><span class="sw-card-role">${escapeHtml(t('stall.promptLabel'))}</span></div><pre class="sw-card-raw-pre">${escapeHtml(text)}</pre></div>` +
+    `</div></details>`;
+}
 /* Render one llmRound's prose before its resolved rich tool rows. */
 function _renderTimelineBatch(batch, rounds, allRounds, idx) {
   let html = "";
@@ -1384,6 +1419,8 @@ function _renderTimelineBatch(batch, rounds, allRounds, idx) {
        * painter (see _renderSegNarrationHTML). */
       const _rk = (s.llmRound != null) ? ` data-seg-round="L${escapeHtml(String(s.llmRound))}"` : '';
       html += `<div class="md-content seg-narration"${_rk}>${renderMarkdown(_segClean)}</div>`;
+    } else if (s.type === "system_note" && s.text) {
+      html += _renderSegSystemNoteHTML(s);
     }
   }
   // Then the tool rows for this batch (rich bodies from toolRounds).
@@ -1418,6 +1455,13 @@ function renderSegmentTimelineHTML(segments, msg, idx) {
    * round's batch. Real-round resolution + the header count below use
    * `realRounds` ONLY, so a synthetic row (no toolCallId) can never be picked
    * up as a positional tool body nor inflate the "N tools" header. */
+  /* The stall nudge is dual-recorded: the display-only sidecar chip AND a
+   * system_note segment at its wire position. When the segment is present it
+   * owns the render — skip the chip or the same intervention shows twice.
+   * The chip stays the only render for turns that predate note recording. */
+  const _hasStallNote = segments.some((segment) => (
+    segment && segment.type === "system_note" && segment.noteKind === "intent-stall"
+  ));
   const _injByAnchor = new Map();
   const realRounds = [];
   /* Drop backend-stamped result-less superseded rounds before segment
@@ -1425,10 +1469,12 @@ function renderSegmentTimelineHTML(segments, msg, idx) {
    * segments cannot fall through to positional resolution. */
   const _supersededTcIds = new Set();
   for (const r of allRounds) {
-    if (r && (r._userSteerInject || r._peerInject || r._inboxInject || r._stallNudge)) {
+    if (r && (r._userSteerInject || r._peerInject || r._inboxInject || r._bgCommandInject || r._stallNudge)) {
+      if (r._stallNudge && _hasStallNote) continue;
       const injRound = r._userSteerInject ? r.steerRound
         : (r._peerInject ? r.peerRound
-          : (r._stallNudge ? r.stallRound : r.inboxRound));
+          : (r._bgCommandInject ? r.bgCommandRound
+            : (r._stallNudge ? r.stallRound : r.inboxRound)));
       const anchor = (injRound || 0) - 1;
       if (!_injByAnchor.has(anchor)) _injByAnchor.set(anchor, []);
       _injByAnchor.get(anchor).push(r);
@@ -1544,7 +1590,7 @@ function _renderUnifiedGroup(allRounds, segments) {
    *   header is omitted entirely — "0 tools used" is not a useful claim; the
    *   trimmed-activity affordance below the panel carries the real count. */
   const realRounds = allRounds.filter((r) => r && !r._inboxInject
-    && !r._peerInject && !r._userSteerInject && !r._stallNudge
+    && !r._peerInject && !r._userSteerInject && !r._bgCommandInject && !r._stallNudge
     && !r._programSynthetic);
   const count = allRounds.length;
   const panel = presentToolExecutionPanel(realRounds, allRounds, anyActive, t, escapeHtml, Icon('chevronDown', 16));
@@ -1734,7 +1780,8 @@ function _tickCmdTimers() {
 
 function _toolElapsedDocumentHidden() {
   return typeof document !== 'undefined'
-    && (document.hidden === true || document.visibilityState === 'hidden');
+    && (document.hidden === true || document.visibilityState === 'hidden'
+      || runtimeScope.nativeVisibility?.isHidden() === true);
 }
 
 function _subscribeToolElapsedVisibility(listener) {

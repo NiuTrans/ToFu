@@ -726,6 +726,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                                         task_id=task['id'], **_no_proj_kw)
         else:
             _progress_cb = None
+            _spawn_cb = None
             _extra_kw = {}
             if fn_name == 'read_files':
                 _extra_kw['result_projection_items'] = _result_projection_items
@@ -738,9 +739,12 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                 _runtime_context = active_context_for_call(
                     task, round_num=rn, tool_call_id=tc_id,
                     round_entry=round_entry)
+                _spawn_cb = _make_run_command_spawn_cb(
+                    task, rn, round_entry)
                 _progress_cb = _make_run_command_progress_cb(
                     task, rn, round_entry, _cmd,
-                    runtime_context=_runtime_context)
+                    runtime_context=_runtime_context,
+                    lifecycle=_spawn_cb)
                 _extra_kw = {
                     'stdin_callback': _stdin_cb,
                     'on_chunk': _progress_cb,
@@ -750,7 +754,7 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                     # appeared exactly where it mattered most. The same factory
                     # _handle_code_exec uses, so both entry points share ONE
                     # implementation (the lesson of the entrance-count drift).
-                    'on_spawn': _make_run_command_spawn_cb(task, rn, round_entry),
+                    'on_spawn': _spawn_cb,
                     'on_grep_intercept': _make_grep_intercept_cb(
                         task, rn, round_entry),
                     'task': task,  # enable cooperative abort of subprocesses
@@ -758,11 +762,43 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                     'runtime_context': _runtime_context,
                 }
             try:
-                tool_content = (execute_tool(fn_name, fn_args, project_path,
-                                             conv_id=_root_conv_id, task_id=task['id'],
-                                             **_extra_kw)
-                                if project_path else 'Error: No project path.')
+                if fn_name == 'run_command' and project_path:
+                    from lib.tasks_pkg.handlers._background_command import (
+                        run_with_steer_handoff,
+                    )
+
+                    def _detach_progress():
+                        detach = getattr(_progress_cb, 'detach', None)
+                        if callable(detach):
+                            detach()
+
+                    def _execute_run(command_task):
+                        command_kw = dict(_extra_kw)
+                        command_kw['task'] = command_task
+                        return execute_tool(
+                            fn_name, fn_args, project_path,
+                            conv_id=_root_conv_id, task_id=task['id'],
+                            **command_kw,
+                        )
+
+                    tool_content = run_with_steer_handoff(
+                        task=task,
+                        config=cfg,
+                        command=_cmd,
+                        execute=_execute_run,
+                        on_detach=_detach_progress,
+                    )
+                else:
+                    tool_content = (
+                        execute_tool(
+                            fn_name, fn_args, project_path,
+                            conv_id=_root_conv_id, task_id=task['id'],
+                            **_extra_kw,
+                        ) if project_path else 'Error: No project path.'
+                    )
             finally:
+                if _spawn_cb is not None:
+                    _spawn_cb.finish()
                 # Flush any buffered run_command output tail.
                 if _progress_cb is not None:
                     try:
@@ -773,11 +809,15 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
                     _finalize_output = getattr(
                         _progress_cb, 'finalize_output', None)
                     if callable(_finalize_output):
+                        from lib.tasks_pkg.handlers._background_command import (
+                            is_background_command_result,
+                        )
                         _incomplete = (
                             _runtime_context is not None
                             and _runtime_context.cancellation_requested
                         ) or '[Command timed out]' in tool_content or (
-                            '[Command interrupted by' in tool_content)
+                            '[Command interrupted by' in tool_content) or (
+                            is_background_command_result(tool_content))
                         _artifact = _finalize_output(complete=not _incomplete)
                         from lib.tasks_pkg.handlers.code_exec import (
                             _project_output_artifact,
@@ -894,6 +934,21 @@ def _handle_project_tool(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg
             snippet=f'{fn_name} (meta build error)',
             extra={'url': ''},
         )
+
+    if fn_name == 'run_command':
+        from lib.tasks_pkg.handlers._background_command import (
+            is_background_command_result,
+        )
+        if is_background_command_result(tool_content):
+            meta.pop('notRun', None)
+            meta.pop('reason', None)
+            meta.update({
+                'exitCode': 'background',
+                'timedOut': False,
+                'backgrounded': True,
+                'badge': 'background',
+                'snippet': f'$ {str(fn_args.get("command") or "")[:120]}',
+            })
 
     if fn_name == 'run_command' and round_entry.get('grepSearchIntercepted'):
         meta['grepSearchIntercepted'] = True

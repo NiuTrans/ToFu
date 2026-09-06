@@ -62,9 +62,11 @@ class TestLiveMultirootSchema(unittest.TestCase):
         tools, _ = assemble_tool_list(self._single('_mr_conv'))
         self.assertNotIn('rootname:', _edit_file_desc(tools))
 
-    def test_multi_root_adds_path_hint(self):
-        tools, _ = assemble_tool_list(self._multi('_mr_conv'))
-        self.assertIn('rootname:', _edit_file_desc(tools))
+    def test_multi_root_keeps_canonical_schema(self):
+        single, _ = assemble_tool_list(self._single('_mr_conv'))
+        multi, _ = assemble_tool_list(self._multi('_mr_conv'))
+        self.assertEqual(_edit_file_desc(multi), _edit_file_desc(single))
+        self.assertNotIn('rootname:', _edit_file_desc(multi))
 
     def test_downgrade_removes_path_hint_next_assembly(self):
         assemble_tool_list(self._multi('_mr_conv'))

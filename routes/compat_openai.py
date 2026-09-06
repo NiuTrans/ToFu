@@ -22,8 +22,7 @@ from lib.agent_core.admission import (
     unregister_waiter,
 )
 from lib.agent_core.execution_session import (
-    ExecutionPhase,
-    bind_admission_lease,
+    acquire_and_bind_admission,
     bind_model_route,
     execution_session_for_task,
 )
@@ -126,7 +125,7 @@ async def chat_completions():
               model=cfg.get('model', '?'),
               n_messages=len(messages), stream=options['stream'])
 
-    from lib.tasks_pkg.manager import create_task
+    from lib.tasks_pkg.manager import create_task, reject_unstarted_chat_task
     from lib.tasks_pkg.spawn import spawn_task
     conv_id = short_id('compat-openai-', 12)
     task = create_task(
@@ -144,33 +143,41 @@ async def chat_completions():
         else _selection.provider_offering.public_dict()
     )
     execution_session = execution_session_for_task(task)
-    bind_model_route(
-        execution_session,
-        lambda: dispose_routed_slot_group(_route_group),
-    )
+    try:
+        bind_model_route(
+            execution_session,
+            lambda: dispose_routed_slot_group(_route_group),
+        )
+    except Exception as exc:
+        reject_unstarted_chat_task(
+            task, exc, cause='model_route_bind_failed', conv_id=conv_id)
+        raise
 
     # ── Admission control: refuse with 503 when at capacity ───────
-    admission_lease = controller.acquire()
+    try:
+        admission_lease = acquire_and_bind_admission(
+            execution_session, controller)
+    except Exception as exc:
+        reject_unstarted_chat_task(
+            task, exc, cause='admission_acquire_failed', conv_id=conv_id)
+        raise
     if admission_lease is None:
-        execution_session.settle(
-            ExecutionPhase.FAILED, cause='task_admission_refused')
+        reject_unstarted_chat_task(
+            task, RuntimeError('Task admission refused'),
+            cause='task_admission_refused', conv_id=conv_id)
         logger.warning('[compat:openai] admission refused (in_flight=%d/%d) '
                        'key=%s model=%s', controller.in_flight,
                        controller.capacity, auth.key_id, cfg.get('model', '?'))
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
-    bind_admission_lease(
-        execution_session,
-        lambda: controller.release(admission_lease),
-    )
     register_waiter(task['id'])
 
     try:
         spawn_task(task)
     except Exception as e:
-        execution_session.settle(
-            ExecutionPhase.FAILED, cause='task_spawn_failed')
         unregister_waiter(task['id'])
+        reject_unstarted_chat_task(
+            task, e, cause='task_spawn_failed', conv_id=conv_id)
         logger.exception('[compat:openai] spawn_task failed task=%s',
                          task['id'][:8])
         return api_internal_error(e, context='compat:openai',
@@ -264,70 +271,49 @@ def embeddings():
     preferred_provider_id = str(
         tofu.get('preferred_provider_id')
         or body.get('tofu_preferred_provider_id') or '').strip()
-    route_group = None
     try:
-        from lib.model_routing import (
-            ModelRoutingRepository,
-            OPENAI_COMPATIBLE_PROTOCOLS,
-            OwnerBoundary,
-            mint_capability_slot_group,
+        from lib.model_routing.embedding_execution import (
+            EmbeddingCapacityError,
+            EmbeddingUnavailableError,
+            EmbeddingUpstreamError,
+            execute_embeddings,
         )
-        model, route_group = mint_capability_slot_group(
-            ModelRoutingRepository(),
-            OwnerBoundary.create(auth.owner_user_id, auth.tenant_id),
-            'embedding',
-            prefer_model=model,
+        payload = execute_embeddings(
+            inputs,
+            model=model,
+            owner_user_id=auth.owner_user_id,
+            tenant_id=auth.tenant_id,
             preferred_provider_id=preferred_provider_id,
-            required_protocols=OPENAI_COMPATIBLE_PROTOCOLS,
-            owner_tag=f'compat-embeddings:{auth.owner_user_id}',
         )
-        from lib.llm_dispatch import get_dispatcher
-        from lib.llm_dispatch.provider_pin import provider_pin
-        with provider_pin(route_group.pin_id):
-            slot = get_dispatcher().pick_and_reserve(
-                capability='embedding', prefer_model=model,
-                strict_model=True)
-            if slot is None:
-                return api_error(
-                    'No embedding deployment is currently available',
-                    status=503,
-                )
-            from lib.http_client import http_post
-            url = slot.base_url.rstrip('/') + '/embeddings'
-            headers = dict(slot.extra_headers or {})
-            if slot.api_key:
-                headers['Authorization'] = f'Bearer {slot.api_key}'
-            try:
-                resp = http_post(
-                    url,
-                    json={'model': slot.model, 'input': inputs},
-                    headers=headers,
-                    timeout=60,
-                )
-            except Exception as exc:
-                slot.record_error()
-                logger.warning(
-                    '[compat:openai] embeddings fetch failed url=%s: %s',
-                    url, exc, exc_info=True)
-                return api_internal_error(
-                    exc,
-                    context='compat:openai',
-                    source='routes.compat_openai.embeddings',
-                    log_traceback=False,
-                )
-            if not resp.ok:
-                slot.record_error(is_rate_limit=resp.status_code == 429)
-                return api_bad_request(
-                    f'Upstream embedding failed: {resp.status_code}',
-                    upstream_status=resp.status_code,
-                    upstream_body=resp.text[:500])
-            slot.record_success(latency_ms=0)
-            from quart import jsonify
-            return jsonify(resp.json())
+        from quart import jsonify
+        return jsonify(payload)
+    except ValueError as exc:
+        return api_bad_request(str(exc), field='input')
+    except EmbeddingCapacityError:
+        return api_error(
+            'Server at capacity; retry shortly.', status=503,
+            error_kind='overloaded', retry_after=5,
+        )
+    except EmbeddingUnavailableError as exc:
+        return api_error(str(exc), status=503)
+    except EmbeddingUpstreamError as exc:
+        return api_bad_request(
+            f'Upstream embedding failed: {exc.status_code}',
+            upstream_status=exc.status_code,
+            upstream_body=exc.body_excerpt,
+        )
     except ModelRoutingError as exc:
         return api_bad_request(str(exc), **routing_error_fields(exc))
-    finally:
-        dispose_routed_slot_group(route_group)
+    except Exception as exc:
+        logger.warning(
+            '[compat:openai] embeddings execution failed type=%s',
+            type(exc).__name__, exc_info=True)
+        return api_internal_error(
+            exc,
+            context='compat:openai',
+            source='routes.compat_openai.embeddings',
+            log_traceback=False,
+        )
 
 
 __all__ = ['compat_openai_bp']

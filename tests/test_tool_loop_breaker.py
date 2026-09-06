@@ -1349,7 +1349,6 @@ class TestSemanticProgressGuard:
 
 def _stagnation_thresholds(**over):
     base = {
-        'obs_nudge': 16, 'obs_grace': 8,
         'fail_nudge': 4, 'fail_grace': 2,
         'poll_nudge': 4, 'poll_grace': 2,
     }
@@ -1423,6 +1422,19 @@ class TestFailureFingerprint:
         row_b = {'toolContent': 'build failed: E1\n[exit code: 2]'}
         assert _failure_fingerprint(row_a) != _failure_fingerprint(row_b)
 
+    def test_different_command_differs_even_when_error_is_generic(self):
+        row_a = {
+            'toolName': 'run_command',
+            'toolArgs': {'command': 'pytest tests/a.py'},
+            'toolContent': 'failed\n[exit code: 1]',
+        }
+        row_b = {
+            'toolName': 'run_command',
+            'toolArgs': {'command': 'pytest tests/b.py'},
+            'toolContent': 'failed\n[exit code: 1]',
+        }
+        assert _failure_fingerprint(row_a) != _failure_fingerprint(row_b)
+
 
 class TestSuccessPollDetector:
     def test_nudges_then_clean_finishes(self):
@@ -1431,10 +1443,15 @@ class TestSuccessPollDetector:
         with registered_chat_task(task):
             result = False
             for rn in range(5):
-                _shell_ok(task, rn)
+                _round(
+                    task, rn,
+                    args=json.dumps({'command': 'npm test'}),
+                    content='12 passed\n[exit code: 0]',
+                )
                 result = handle_tool_loop_circuit_breaker(
                     task, rs, messages=messages, round_num=rn,
-                    tid='abcdef12', stagnation_thresholds=thresholds)
+                    tid='abcdef12', stagnation_thresholds=thresholds,
+                    max_consecutive_identical=99)
                 if rn < 4:
                     assert result is False, rn
         assert result is True
@@ -1475,8 +1492,7 @@ class TestSuccessPollDetector:
     def test_observation_commands_do_not_poll(self):
         """Read-only commands exiting 0 are inspection, not verification."""
         task, rs, messages = _task(), _rs(), []
-        thresholds = _stagnation_thresholds(
-            poll_nudge=2, poll_grace=1, obs_nudge=100)
+        thresholds = _stagnation_thresholds(poll_nudge=2, poll_grace=1)
         for rn in range(5):
             _shell_ok(task, rn, cmd='cat build.log')
             assert handle_tool_loop_circuit_breaker(
@@ -1484,19 +1500,35 @@ class TestSuccessPollDetector:
                 tid='abcdef12', stagnation_thresholds=thresholds) is False
         assert '_toolLoopNudges' not in task
 
+    def test_same_command_with_advancing_output_is_progress(self):
+        """Polling a changing external/build state must never be auto-finished."""
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(poll_nudge=2, poll_grace=1)
+        for rn in range(8):
+            _shell_ok(task, rn, cmd='npm test')
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages, round_num=rn,
+                tid='abcdef12', stagnation_thresholds=thresholds) is False
+        assert '_toolLoopNudges' not in task
+        assert '_toolLoopCleanFinish' not in task
+
     def test_isolated_caller_finishes_at_first_threshold(self):
         """No message lane -> the breaker ends the turn immediately."""
         task, rs = _task(), _rs()
         thresholds = _stagnation_thresholds(poll_nudge=2, poll_grace=5)
         with registered_chat_task(task):
-            _shell_ok(task, 0)
+            _round(task, 0, args=json.dumps({'command': 'npm test'}),
+                   content='12 passed\n[exit code: 0]')
             assert handle_tool_loop_circuit_breaker(
                 task, rs, round_num=0, tid='abcdef12',
-                stagnation_thresholds=thresholds) is False
-            _shell_ok(task, 1)
+                stagnation_thresholds=thresholds,
+                max_consecutive_identical=99) is False
+            _round(task, 1, args=json.dumps({'command': 'npm test'}),
+                   content='12 passed\n[exit code: 0]')
             assert handle_tool_loop_circuit_breaker(
                 task, rs, round_num=1, tid='abcdef12',
-                stagnation_thresholds=thresholds) is True
+                stagnation_thresholds=thresholds,
+                max_consecutive_identical=99) is True
         assert rs.exit_reason == 'success_poll_finish'
         # The registered runtime adoption adds an ``error: None`` key; the
         # production invariant is that no envelope was ever attached.
@@ -1507,17 +1539,20 @@ class TestPersistentFailureDetector:
     def test_nudges_then_stops(self):
         task, rs, messages = _task(), _rs(), []
         thresholds = _stagnation_thresholds(fail_nudge=3, fail_grace=2)
-        for pair in range(5):
-            _edit(task, pair * 2)
-            _shell_fail(task, pair * 2 + 1)
+        for rn in range(5):
+            _shell_fail(
+                task, rn,
+                err=f'2026-09-01T10:00:0{rn} '
+                    'AssertionError: expected 1 got 2')
         with registered_chat_task(task):
             results = [
                 handle_tool_loop_circuit_breaker(
                     task, rs, messages=messages, round_num=rn,
-                    tid='abcdef12', stagnation_thresholds=thresholds)
-                for rn in range(10)
+                    tid='abcdef12', stagnation_thresholds=thresholds,
+                    max_consecutive_identical=99)
+                for rn in range(5)
             ]
-        assert results == [False] * 9 + [True]
+        assert results == [False] * 4 + [True]
         assert task['error']['kind'] == 'tool_loop'
         assert rs.exit_reason == 'semantic_persistent_failure_loop'
         nudges = [
@@ -1533,17 +1568,32 @@ class TestPersistentFailureDetector:
     def test_changed_error_is_progress_and_resets(self):
         task, rs, messages = _task(), _rs(), []
         thresholds = _stagnation_thresholds(fail_nudge=3, fail_grace=1)
-        for pair, err in enumerate((
+        for rn, err in enumerate((
                 'AssertionError: expected 1 got 2',
                 'AssertionError: expected 1 got 2',
                 'TypeError: None has no attribute x',
                 'TypeError: None has no attribute x')):
-            _edit(task, pair * 2)
-            _shell_fail(task, pair * 2 + 1, err=err)
-        for rn in range(8):
+            _shell_fail(task, rn, err=err)
+        for rn in range(4):
             assert handle_tool_loop_circuit_breaker(
                 task, rs, messages=messages, round_num=rn,
-                tid='abcdef12', stagnation_thresholds=thresholds) is False
+                tid='abcdef12', stagnation_thresholds=thresholds,
+                max_consecutive_identical=99) is False
+        assert '_toolLoopNudges' not in task
+
+    def test_confirmed_write_resets_identical_failure(self):
+        task, rs, messages = _task(), _rs(), []
+        thresholds = _stagnation_thresholds(fail_nudge=3, fail_grace=1)
+        _shell_fail(task, 0)
+        _shell_fail(task, 1)
+        _edit(task, 2)
+        _shell_fail(task, 3)
+        _shell_fail(task, 4)
+        for rn in range(5):
+            assert handle_tool_loop_circuit_breaker(
+                task, rs, messages=messages, round_num=rn,
+                tid='abcdef12', stagnation_thresholds=thresholds,
+                max_consecutive_identical=99) is False
         assert '_toolLoopNudges' not in task
 
     def test_success_resets_the_failure_tracker(self):
@@ -1561,79 +1611,52 @@ class TestPersistentFailureDetector:
         assert '_toolLoopNudges' not in task
 
 
-class TestObservationStallDetector:
-    def test_nudges_then_stops(self):
+class TestReadOnlyExplorationIsProductive:
+    def test_many_unique_read_rounds_never_nudge_or_stop(self):
+        """Regression for mtjka09o7g8mit: novelty is progress, not mutation."""
         task, rs, messages = _task(), _rs(), []
-        thresholds = _stagnation_thresholds(obs_nudge=3, obs_grace=2)
         with registered_chat_task(task):
             results = []
-            for rn in range(5):
-                _shell_ok(task, rn, cmd='grep -rn TODO src/')
-                results.append(handle_tool_loop_circuit_breaker(
-                    task, rs, messages=messages, round_num=rn,
-                    tid='abcdef12', stagnation_thresholds=thresholds))
-        assert results == [False, False, False, False, True]
-        assert task['error']['kind'] == 'tool_loop'
-        assert rs.exit_reason == 'semantic_observation_stall'
-        nudges = [
-            message for message in messages
-            if 'OBSERVATION-ONLY STALL' in str(message.get('content'))
-        ]
-        assert len(nudges) == 1
-
-    def test_substantive_command_resets_the_streak(self):
-        task, rs, messages = _task(), _rs(), []
-        thresholds = _stagnation_thresholds(obs_nudge=3, obs_grace=1)
-        _shell_ok(task, 0, cmd='grep -rn TODO src/')
-        _shell_ok(task, 1, cmd='grep -rn TODO src/')
-        _shell_ok(task, 2, cmd='make build')
-        _shell_ok(task, 3, cmd='grep -rn TODO src/')
-        _shell_ok(task, 4, cmd='grep -rn TODO src/')
-        for rn in range(5):
-            assert handle_tool_loop_circuit_breaker(
-                task, rs, messages=messages, round_num=rn,
-                tid='abcdef12', stagnation_thresholds=thresholds) is False
-        assert '_toolLoopNudges' not in task
-
-    def test_read_only_tool_rounds_count_toward_the_streak(self):
-        task, rs, messages = _task(), _rs(), []
-        thresholds = _stagnation_thresholds(obs_nudge=2, obs_grace=1)
-        with registered_chat_task(task):
-            results = []
-            for rn in range(3):
+            for rn in range(24):
                 _round(task, rn, name='read_files',
                        args=json.dumps({'path': f'src/file_{rn}.py'}),
                        content=f'contents of file {rn}')
                 results.append(handle_tool_loop_circuit_breaker(
                     task, rs, messages=messages, round_num=rn,
-                    tid='abcdef12', stagnation_thresholds=thresholds))
-        assert results == [False, False, True]
+                    tid='abcdef12'))
+        assert results == [False] * 24
+        assert not task.get('error')
+        assert '_toolLoopNudges' not in task
+        assert '_toolLoopBreakerAudit' not in task
 
 
 class TestStagnationEnvControls:
     def test_extended_kill_switch_disables_all_detectors(self, monkeypatch):
         monkeypatch.setenv('TOFU_LOOP_EXTENDED', '0')
         task, rs, messages = _task(), _rs(), []
-        thresholds = _stagnation_thresholds(obs_nudge=2, obs_grace=1)
+        thresholds = _stagnation_thresholds(fail_nudge=2, fail_grace=1)
         for rn in range(6):
-            _shell_ok(task, rn, cmd='grep -rn TODO src/')
+            _shell_fail(task, rn, err=(
+                f'2026-09-01T10:00:0{rn} failure'))
             assert handle_tool_loop_circuit_breaker(
                 task, rs, messages=messages, round_num=rn,
-                tid='abcdef12', stagnation_thresholds=thresholds) is False
+                tid='abcdef12', stagnation_thresholds=thresholds,
+                max_consecutive_identical=99) is False
         assert '_toolLoopNudges' not in task
         assert '_toolLoopBreakerAudit' not in task
 
     def test_thresholds_come_from_the_environment(self, monkeypatch):
-        monkeypatch.setenv('TOFU_LOOP_OBS_NUDGE', '2')
-        monkeypatch.setenv('TOFU_LOOP_OBS_GRACE', '1')
+        monkeypatch.setenv('TOFU_LOOP_FAIL_NUDGE', '2')
+        monkeypatch.setenv('TOFU_LOOP_FAIL_GRACE', '1')
         task, rs, messages = _task(), _rs(), []
         with registered_chat_task(task):
             results = []
             for rn in range(3):
-                _shell_ok(task, rn, cmd='grep -rn TODO src/')
+                _shell_fail(task, rn, err=(
+                    f'2026-09-01T10:00:0{rn} failure'))
                 results.append(handle_tool_loop_circuit_breaker(
                     task, rs, messages=messages, round_num=rn,
-                    tid='abcdef12'))
+                    tid='abcdef12', max_consecutive_identical=99))
         assert results == [False, False, True]
 
 

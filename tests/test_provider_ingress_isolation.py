@@ -82,26 +82,31 @@ def test_slow_storage_and_push_never_enter_provider_callback(
         'content': 'upstream bytes',
     })
     callback_elapsed = time.perf_counter() - started
+    # The boundary flush waits for the bounded delivery worker: persistence
+    # and push did happen (streamed live), just never on the drain thread.
     receipt = end_provider_ingress(task, token=token)
 
     try:
         assert callback_elapsed < 0.08
-        assert storage_calls == []
-        assert push_calls == []
-        assert task['_pushWithheldAt'] == 123.0
+        assert len(storage_calls) == 1
+        assert len(push_calls) == 1
+        # A successful async persist clears an earlier delivery wedge, the
+        # same as the synchronous authoritative path would.
+        assert '_pushWithheldAt' not in task
         assert receipt['deferredEvents'] == 1
+        assert receipt['deliveredEvents'] == 1
+        assert receipt['droppedEvents'] == 0
         assert receipt['eventTypes'] == [EventType.DELTA]
 
         # Once upstream consumption is over, the ordinary authoritative seam
-        # resumes and a successful convergence clears an earlier delivery wedge.
+        # resumes synchronously.
         slow['enabled'] = False
         event_manager.append_event(task, {
-            'type': EventType.MODEL_REQUEST_COMPLETE,
-            'status': 'completed',
+            'type': EventType.DELTA,
+            'content': 'post-ingress convergence',
         })
-        assert len(storage_calls) == 1
-        assert len(push_calls) == 1
-        assert '_pushWithheldAt' not in task
+        assert len(storage_calls) == 2
+        assert len(push_calls) == 2
     finally:
         chat_task_runtime.discard(task['id'])
 
@@ -200,6 +205,98 @@ def test_registry_repair_never_reads_storage_on_provider_ingress(monkeypatch):
     assert repair_calls == []
     assert task['_registryWithheldCount'] == 1
 
+
+def test_ingress_delivery_is_fifo_and_flushed_at_boundary():
+    """Queued deliveries run in sequence order and finish before the
+    provider boundary returns."""
+    from lib.tasks_pkg.manager._provider_ingress_guard import (
+        enqueue_ingress_delivery,
+    )
+
+    task = {'id': 'provider-delivery-fifo'}
+    token = begin_provider_ingress(task, span_id='model:fifo:wire:1')
+    delivered = []
+    for sequence in range(5):
+        assert enqueue_ingress_delivery(
+            task,
+            token=token,
+            sequence=sequence,
+            event_type=EventType.DELTA,
+            deliver=lambda s=sequence: delivered.append(s),
+        )
+    receipt = end_provider_ingress(task, token=token)
+
+    assert delivered == [0, 1, 2, 3, 4]
+    assert receipt['deliveredEvents'] == 5
+    assert receipt['droppedEvents'] == 0
+    assert receipt['deliveryFailures'] == 0
+
+
+def test_ingress_delivery_drops_oldest_when_observers_lag(monkeypatch):
+    """A full queue must never block the drain thread: the oldest
+    undelivered event is dropped and accounted."""
+    import lib.tasks_pkg.manager._provider_ingress_guard as guard
+
+    monkeypatch.setattr(guard, '_DELIVERY_QUEUE_MAX', 4)
+    task = {'id': 'provider-delivery-drop'}
+    token = guard.begin_provider_ingress(task, span_id='model:drop:wire:1')
+    delivered = []
+    worker_busy = threading.Event()
+    release_worker = threading.Event()
+
+    def _blocking_deliver():
+        worker_busy.set()
+        release_worker.wait(timeout=5)
+        delivered.append(0)
+
+    assert guard.enqueue_ingress_delivery(
+        task, token=token, sequence=0, event_type=EventType.DELTA,
+        deliver=_blocking_deliver)
+    assert worker_busy.wait(timeout=5)
+    # Six more into a capacity-4 queue: two oldest get dropped.
+    for sequence in range(1, 7):
+        assert guard.enqueue_ingress_delivery(
+            task, token=token, sequence=sequence, event_type=EventType.DELTA,
+            deliver=lambda s=sequence: delivered.append(s))
+    release_worker.set()
+    receipt = guard.end_provider_ingress(task, token=token)
+
+    assert receipt['droppedEvents'] == 2
+    assert delivered == [0, 3, 4, 5, 6]
+    assert receipt['deliveredEvents'] == 5
+
+
+def test_ingress_delivery_stale_attempt_fence_drops_rest_quietly():
+    """Once persistence fences the attempt as stale, remaining queued
+    closures are dropped instead of flooding identical failures."""
+    import lib.tasks_pkg.manager._provider_ingress_guard as guard
+
+    task = {'id': 'provider-delivery-fence'}
+    token = guard.begin_provider_ingress(task, span_id='model:fence:wire:1')
+    attempted = []
+    first_ran = threading.Event()
+
+    def _fenced_deliver():
+        attempted.append(0)
+        task['aborted'] = True
+        first_ran.set()
+        raise RuntimeError(
+            'conversation event rejected: attempt is stale or no longer current')
+
+    assert guard.enqueue_ingress_delivery(
+        task, token=token, sequence=0, event_type=EventType.DELTA,
+        deliver=_fenced_deliver)
+    assert first_ran.wait(timeout=5)
+    for sequence in (1, 2):
+        assert guard.enqueue_ingress_delivery(
+            task, token=token, sequence=sequence, event_type=EventType.DELTA,
+            deliver=lambda s=sequence: attempted.append(s))
+    receipt = guard.end_provider_ingress(task, token=token)
+
+    assert attempted == [0]
+    assert receipt['deliveryFailures'] == 1
+    assert receipt['droppedEvents'] == 2
+    assert receipt['deliveredEvents'] == 0
 
 def test_provider_ingress_receipt_has_fixed_shape_and_bounded_types():
     task = {'id': 'provider-receipt-budget'}

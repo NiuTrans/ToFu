@@ -55,6 +55,39 @@ def test_legacy_projection_is_derived_once_with_stable_reserved_ids():
     )
 
 
+def test_system_note_segment_survives_projection_normalization():
+    """The durable intervention note is a first-class contract segment: the
+    projection boundary validates and carries it (never strips, never
+    reclassifies as prose)."""
+    from lib.turn_projection_segments import projection_with_stable_segments
+
+    note = {
+        "type": "system_note",
+        "blockId": "system-note:intent-stall-0",
+        "text": "[SYSTEM] keep going",
+        "noteKind": "intent-stall",
+        "llmRound": 0,
+    }
+    normalized = projection_with_stable_segments({
+        "content": "",
+        "thinking": "",
+        "segments": [
+            {"type": "text", "blockId": "text:llm-0", "text": "narration",
+             "llmRound": 0},
+            dict(note),
+        ],
+        "toolRounds": [],
+    })
+
+    carried = [item for item in normalized["segments"]
+               if item["type"] == "system_note"]
+    assert len(carried) == 1
+    assert carried[0]["blockId"] == note["blockId"]
+    assert carried[0]["text"] == note["text"]
+    assert carried[0]["noteKind"] == "intent-stall"
+    assert carried[0]["llmRound"] == 0
+
+
 def test_existing_terminal_identity_survives_slim_text_and_sidecar_collision():
     from lib.turn_projection_segments import projection_with_stable_segments
 

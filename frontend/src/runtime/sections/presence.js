@@ -51,15 +51,9 @@
 
   function segments(summary) {
     var status = summary?.status || {};
-    var attention = Array.isArray(summary?.attention?.items)
-      ? summary.attention.items.length : Number(status.attentionCount || 0);
     var active = Number(status.activeCount || 0);
     var recent = Number(status.recentOutcomeCount || 0);
     var values = [];
-    if (attention > 0) values.push({
-      className: 'collab-seg-needsyou',
-      label: text('collab.needsYou', { n: attention }, attention + ' need you'),
-    });
     if (active > 0) values.push({
       className: 'collab-seg-progress',
       label: text('projectBrain.activeWork', null, 'Active') + ': ' + active,
@@ -106,8 +100,7 @@
     host.hidden = false;
     host.querySelector('.collab-bar-inner')?.addEventListener('click', function () {
       if (typeof runtimeScope.openProjectBrain === 'function') {
-        var attention = Number(summary?.status?.attentionCount || 0);
-        runtimeScope.openProjectBrain({ tab: attention ? 'attention' : 'board' });
+        runtimeScope.openProjectBrain({ tab: 'board' });
       }
     });
   }

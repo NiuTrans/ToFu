@@ -135,6 +135,7 @@ def _document() -> dict:
             'offering_id': 'alpha-a',
             'connection_id': 'connection-a',
             'wire_model_id': 'alpha-wire-a',
+            'max_output_tokens': 65_535,
             'enabled': True,
             'identity_confidence': 'high',
             'probe_status': 'passed',
@@ -190,6 +191,7 @@ def test_v2_materialization_preserves_wire_contract_and_nonchat_slots(
     assert by_wire['alpha-wire-a'].protocol == 'openai'
     assert by_wire['alpha-wire-a'].extra_headers == {'X-Route': 'a'}
     assert by_wire['alpha-wire-a'].rpm_limit == 31
+    assert by_wire['alpha-wire-a'].max_output_tokens == 65_535
     assert by_wire['alpha-wire-b'].protocol == 'anthropic'
     assert by_wire['whisper-wire'].capabilities == {'transcription'}
     assert dispatcher._is_chat_compatible(by_wire['whisper-wire']) is False

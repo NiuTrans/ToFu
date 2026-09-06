@@ -309,6 +309,14 @@ after hot task-registry and event-retention expiry.
 Private task-result field-codec envelopes never cross this API: full legacy
 reads hydrate the original value, while compact replay may decode only the
 metadata/error or explicitly requested terminal fields it returns.
+`GET /api/v1/tasks/{taskId}/requests` folds ONE run's request rounds; a
+delegating run (Goal mode workers run as swarm agents) merges each
+`{taskId}#agent:{agentId}` child's rounds into the parent list. Merged rows
+carry `sourceTaskId`, and per-round payload/state/raw-archive reads for
+those rounds MUST address that child task id — the parent's own event log
+holds no snapshots for rounds it delegated. A run whose flow markers exist
+but whose round list is empty reports `coverage:full` (nothing ambiguous
+to disclose); `flow-untagged` requires actual untagged rows.
 
 The per-round payload may include `rawArchives` metadata for provider-bound
 request/response evidence. Bodies remain lazy: consumers read one bounded
@@ -494,6 +502,19 @@ boundary. It contains Creators, official Models, Providers, the owner's
 ProviderAccess resources, Connections, redacted Credential metadata,
 Offerings, and Deployments. Route is a bounded runtime computation, never a
 persisted configuration entity.
+
+Per-endpoint request/response payloads for this route family are declared in
+[`contracts/api_v1_model_routing.yaml`](../contracts/api_v1_model_routing.yaml)
+and generated into `lib/api_v1_model_routing_generated.py` (server-side
+runtime validation authority) plus
+`frontend/src/api/api-v1-model-routing.generated.ts` (type-level mirror).
+Entity fields reference the aggregate schema above — never restate them.
+Write routes validate request bodies fail-closed against the generated
+schemas before any repository mutation, and
+tests/test_api_v1_model_routing_contract.py keeps the route surface and live
+success envelopes in lockstep with the contract. Regenerate with
+`python3 scripts/gen_api_v1_model_routing_contract.py`; drift is rejected by
+`make contracts-check`.
 
 | Endpoint | Contract |
 |---|---|
@@ -717,6 +738,14 @@ after visible output, an attempt restart ends with a typed error instead of
 combining discarded and authoritative attempts. Bounded relay overflow is also
 terminal and never drops text before publishing `finish_reason=stop`. Callers
 requiring reconnect/replay use `POST /api/v1/chat/completions`.
+
+Task-backed chat, compatibility chat, and direct chat bind their request route,
+billing reservation, and exact admission lease to one operational
+`ExecutionSession`. Terminal resource settlement happens once and precedes a
+success terminal frame. Durable billing recovery and admission TTL recovery may
+produce a `deferred` receipt; a non-recoverable resource failure is a typed
+error, never `finish_reason=stop`. Deadline reconciliation requests owner
+cancellation and never releases resources underneath a live provider call.
 
 This boundary does not manufacture an impossible process-level guarantee.
 Explicit owner Stop/supersede, provider or network failure, configured
@@ -1060,8 +1089,7 @@ scope the Sidecar operation by owner plus normalized project.
 | `GET` | `/api/v1/project/feed` | `{events: NarrativeEvent[], headSequence}`; optional `since`, bounded `limit` |
 | `GET` | `/api/v1/project/charter` | `{project, decisions: CharterDecision[]}` |
 | `GET` | `/api/v1/project/brain/status` | derived counts; no independent status snapshot |
-| `GET` | `/api/v1/project/brain/attention` | `{project, items}` from the shared projection |
-| `GET` | `/api/v1/project/brain/summary` | compact Board/Status/Attention/Charter/Watch projection |
+| `GET` | `/api/v1/project/brain/summary` | compact Board/Status/Charter/Watch projection |
 | `GET` | `/api/v1/project/brain/watch` | current human-maintained Watch items |
 | `GET` | `/api/v1/project/brain/checkers` | immutable Checker versions |
 
@@ -1073,7 +1101,6 @@ commit/pending/dismiss/update/delete routes are not registered.
 
 | Method | Path | Required body |
 |---|---|---|
-| `POST` | `/api/v1/project/brain/attention/add` | `path, text`; saves a human-selected unchecked conclusion for non-prompt triage |
 | `POST` | `/api/v1/project/brain/watch/add` | `path, kind, text`; optional `conversationId` |
 | `POST` | `/api/v1/project/brain/watch/update` | `path, itemId`; optional `text, status, latestResult` |
 | `POST` | `/api/v1/project/brain/watch/delete` | `path, itemId` |
@@ -1084,9 +1111,6 @@ commit/pending/dismiss/update/delete routes are not registered.
 Checker registration is immutable by `{checkerId, version}`. Execution passes
 the registered `argv` without a shell. Decision promotion rejects missing or
 unknown Checker versions; unchecked text never enters Charter.
-When no Checker exists, the assistant-turn action may save the conclusion as
-`pending_decision` Attention instead; this state is explicitly excluded from
-Project Context.
 
 Integration create/register/checkpoint/submit/retry/discard association uses
 `workId`, the automatic Project Work ID. Human Integration status/review and

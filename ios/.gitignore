@@ -1,0 +1,8 @@
+# XcodeGen outputs — regenerate with `xcodegen generate` (authority: project.yml)
+TofuClient.xcodeproj/
+TofuClient/Info.plist
+
+# SwiftPM / Xcode build outputs
+.build/
+DerivedData/
+*.xcuserstate

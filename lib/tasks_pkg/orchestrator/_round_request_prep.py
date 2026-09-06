@@ -5,18 +5,15 @@ run_task's stream loop, where the cluster ran inline once per stream
 round after inbox drain and before the streaming-tool accumulator
 construction. Byte-identical behaviour.
 
-Five steps, in order:
+Four steps, in order:
 
 1. Reuse the turn's stable tool list. Tools remain available on every round
    until the model naturally returns a response without tool calls.
-2. Cache-aware tool-result ordering: sort consecutive tool results by
-   tool_call_id so the prefix is deterministic across rounds
-   (important for automatic prefix caching on OpenAI/Qwen).
-3. Build the request body through the explicit ``_ports`` dependency owner.
-4. Emit the messages-snapshot debug event from that canonical body, avoiding a
+2. Build the request body through the explicit ``_ports`` dependency owner.
+3. Emit the messages-snapshot debug event from that canonical body, avoiding a
    second full-history sanitize; body-build failures retain the old diagnostic
-   fallback from the sorted source messages.
-5. Attach validated prompt-admission evidence and internal task/conversation
+   fallback from the untouched source messages.
+4. Attach validated prompt-admission evidence and internal task/conversation
    context — the session-stable TTL latch, Responses prompt-cache namespace,
    and user-approved economic working-set threshold. Protocol converters
    consume these keys; none reach an upstream wire unchanged.
@@ -27,11 +24,11 @@ needed downstream by the round-checkpoint call (slice 20).
 
 from __future__ import annotations
 
+import copy
 import hashlib
 
 import lib.tasks_pkg.orchestrator._ports as orchestrator_ports
 from lib.log import get_logger
-from lib.tasks_pkg.cache_tracking._prefix import sort_tool_results
 from lib.tasks_pkg.orchestrator._messages_snapshot import (
     emit_messages_snapshot_event,
 )
@@ -60,11 +57,6 @@ def build_round_request(task, rs, messages, tool_list, *,
     LLM-call writeback, so read fresh each round).
     """
     _tools_this_round = tool_list
-
-    # Cache-aware tool result ordering: sort consecutive tool results
-    # by tool_call_id so the prefix is deterministic across rounds
-    # (important for automatic prefix caching on OpenAI/Qwen).
-    sort_tool_results(messages, conv_id=task.get('convId', ''))
 
     _snapshot_arguments = {
         'tid': tid,
@@ -156,15 +148,25 @@ def build_round_request(task, rs, messages, tool_list, *,
         from lib.tasks_pkg.tool_orchestration_policy import (
             resolve_tool_orchestration)
         from lib.tools.programmatic import ACTIVE_PROGRAMMATIC_MODES
-        _optimization = resolve_tool_orchestration(
-            requested_programmatic=(
-                _experiment_flags['tools']['programmaticCalling']),
-            requested_programmatic_exposure=(
-                _experiment_flags['tools']['programmaticExposure']),
-            requested_multi_agent=_orchestration_flags['multiAgent'],
-            messages=messages, tools=_tools_this_round, round_num=round_num,
-            model=rs.model,
-            policy_version=_orchestration_flags['policy'])
+        _latched_optimization = task.get('_toolOrchestrationPromptLatch')
+        if isinstance(_latched_optimization, dict):
+            _optimization = copy.deepcopy(_latched_optimization)
+            _optimization['round'] = int(round_num)
+        else:
+            _optimization = resolve_tool_orchestration(
+                requested_programmatic=(
+                    _experiment_flags['tools']['programmaticCalling']),
+                requested_programmatic_exposure=(
+                    _experiment_flags['tools']['programmaticExposure']),
+                requested_multi_agent=_orchestration_flags['multiAgent'],
+                messages=messages, tools=_tools_this_round, round_num=round_num,
+                model=rs.model,
+                policy_version=_orchestration_flags['policy'])
+            # Tool schemas are part of the provider cache prefix. Freeze the
+            # first task decision so observed fan-out, later round numbers, or
+            # retry state can never add/remove an orchestration schema midway
+            # through one task.
+            task['_toolOrchestrationPromptLatch'] = copy.deepcopy(_optimization)
         body['_programmatic_tool_calling'] = _optimization[
             'programmaticCalling']
         body['_programmatic_stage'] = _optimization['programmaticStage']
@@ -175,27 +177,18 @@ def build_round_request(task, rs, messages, tool_list, *,
         # that activated it.
         body['_programmatic_tier'] = _optimization.get(
             'programmaticTier') or ''
-        # Two consecutive zero-child authoring failures prove that continuing
-        # to ask this model for free-form ToolScript is wasting rounds. The
-        # task-local latch makes one sticky, cache-visible transition to the
-        # schema-validated calls[] batch surface; a later task starts fresh.
-        if (task.get('_toolScriptBatchFallback')
-                and body['_programmatic_tier'] == 'program'):
-            body['_programmatic_tier'] = 'batch'
+        # A late ToolScript authoring failure is execution telemetry, not
+        # permission to rewrite execute_tools in the cached tools prefix.
         body['_programmatic_eligible_tools'] = list(
             _optimization.get('programmaticEligibleTools') or [])
-        from lib.tasks_pkg.programmatic_escalation import (
-            resolve_programmatic_exposure)
         _programmatic_active = (
             _optimization['programmaticCalling']
             in ACTIVE_PROGRAMMATIC_MODES)
-        _programmatic_exposure, _programmatic_exposure_reason = (
-            resolve_programmatic_exposure(
-                task, messages, round_num=round_num,
-                requested_policy=(
-                    _experiment_flags['tools']['programmaticExposure']),
-                programmatic_active=_programmatic_active,
-            ))
+        # Hiding ordinary tools for a one-request adoption trial made the
+        # provider's tool prefix oscillate. Keep the stable additive surface;
+        # routing preference belongs in composer tail context and telemetry.
+        _programmatic_exposure = 'additive'
+        _programmatic_exposure_reason = 'cache_stable_additive'
         body['_programmatic_exposure'] = _programmatic_exposure
         _optimization['programmaticExposure'] = _programmatic_exposure
         _optimization['programmaticExposureReason'] = (

@@ -41,6 +41,8 @@ class OrchestrationFeedbackState:
         self._node_memory: dict[str, str] = {}
         self._pending_feedback = ''
         self._pending_directive = ''
+        # Similarity history supports a non-terminal strategy hint only. It is
+        # never sufficient evidence for a loop cutoff.
         self._history: list[str] = []
         self._vu_progress: list[dict] = []
         self._verifier_tool_rounds = 0
@@ -152,14 +154,24 @@ class OrchestrationFeedbackState:
             return dict(entry)
 
     def detects_stuck(self, *, verifier_role: str = '') -> bool:
-        """Apply the verifier-specific repetition window to current history."""
+        """Detect repeated feedback for an advisory strategy nudge.
+
+        Kept under its compatibility name, but callers must not treat prose
+        similarity as terminal evidence: identical acceptance feedback can be
+        legitimate while the worker is still making progress.
+        """
         window = AUTOPILOT_STUCK_WINDOW if verifier_role == 'virtual_user' else 2
         with self._lock:
             history = list(self._history)
         return detect_stuck(history, threshold=STUCK_JACCARD, window=window)
 
     def no_progress_window(self) -> int:
-        """Return the active VU diminishing-returns window, or zero."""
+        """Return an advisory VU diminishing-returns window, or zero.
+
+        Even complete structured progress plus overlapping edits cannot prove
+        that a complex fix has stopped advancing, so this signal may nudge a
+        strategy review but must never terminate a loop.
+        """
         window = autopilot_progress_window()
         if not window:
             return 0

@@ -36,7 +36,7 @@ def test_shared_constant_carries_the_full_persona():
     assert 'verify' in low
     assert 'creativ' in low
     assert 'provenance' in low
-    # The mandatory hard-signal line the diminishing-returns guard consumes.
+    # The mandatory structured line the progress ledger consumes.
     assert '[progress: resolved=x remaining=y]' in low
     # Routes completion through the shared sentinel (defined in the same module).
     assert VU_DONE_SENTINEL in p

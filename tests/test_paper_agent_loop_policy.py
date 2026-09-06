@@ -33,7 +33,7 @@ PAPER_AGENT_CALLERS = (
 )
 
 
-def test_identical_call_loop_halts_before_fourth_tool_execution():
+def test_identical_call_and_visible_result_loop_halts_after_fourth_execution():
     calls = {'dispatch': 0, 'execute': 0}
 
     def dispatch(round_index, _tools):
@@ -56,6 +56,7 @@ def test_identical_call_loop_halts_before_fourth_tool_execution():
 
     def execute_tool(_round_index, _tool_call):
         calls['execute'] += 1
+        return 'same model-visible result'
 
     with pytest.raises(PaperAgentLoopHalted) as raised:
         run_guarded_paper_agent_loop(
@@ -66,7 +67,10 @@ def test_identical_call_loop_halts_before_fourth_tool_execution():
             execute_tool=execute_tool,
         )
 
-    assert calls == {'dispatch': 4, 'execute': 3}
+    # The fourth occurrence executes before the detector can prove its visible
+    # result is unchanged. This fail-open placement prevents legal polling
+    # from being killed merely because the call arguments repeat.
+    assert calls == {'dispatch': 4, 'execute': 4}
     assert raised.value.reason == 'no_progress'
     assert raised.value.no_progress_streak == 3
 

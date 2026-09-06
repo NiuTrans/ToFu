@@ -8,17 +8,16 @@ declare victory" driver) could loop forever, and a crash-looping run evaded any
 bound entirely. This suite covers the mechanical backstop:
 
   1. ``lib.agent_verdict`` pure helpers:
-       - ``detect_stuck(window=N)`` — the endpoint default (window=2) stays
-         byte-identical; autopilot uses window=3.
+       - ``detect_stuck(window=N)`` — advisory feedback-similarity helper;
        - ``autopilot_max_turns()`` — env-driven, FAIL-OPEN (unset→default,
          ``0``→unlimited, garbage→default).
        - ``is_incomplete_stop()`` — the shared "cut off by a cap, not finished"
          classification both loops escalate on.
   2. ``autopilot._record_vu_turn_and_check_budget`` — the per-run counter that
      lives in ``settings`` (durable across the recursive follow-up tasks AND a
-     crash+kick-resume), fires ``budget_exhausted`` at the turn ceiling and
-     ``stuck`` on repeated near-identical VU nudges, and is reset atomically
-     with the run pins in ``_clear_run_id``.
+     crash+kick-resume), fires ``budget_exhausted`` at the turn ceiling, never
+     stops on prose similarity alone, and is reset atomically with the run
+     pins in ``_clear_run_id``.
 
 Pure-unit: a fake serialized settings store (mirroring
 ``update_conversation_settings``' re-read/mutate/skip-on-False/return contract)
@@ -179,9 +178,9 @@ def test_budget_exhausted_fires_at_ceiling(store, monkeypatch):
     assert r3['turn'] == 3
 
 
-def test_stuck_fires_on_three_near_identical(store, monkeypatch):
-    """Three near-identical VU nudges in a row → stuck, BEFORE the turn
-    ceiling. Non-similar nudges never trigger it."""
+def test_near_identical_vu_text_never_stops_without_hard_evidence(
+        store, monkeypatch):
+    """Prose similarity is diagnostic only, not a cutoff condition."""
     monkeypatch.setenv('TOFU_AUTOPILOT_MAX_TURNS', '40')
     ap = _reload_ap()
     store.ensure('c3', autopilotRunId='ar-3')
@@ -191,8 +190,8 @@ def test_stuck_fires_on_three_near_identical(store, monkeypatch):
     r2 = ap._record_vu_turn_and_check_budget('c3', nudge, user_id=1)
     r3 = ap._record_vu_turn_and_check_budget('c3', nudge, user_id=1)
     assert r1['stop'] is False and r2['stop'] is False
-    assert r3['stop'] is True
-    assert r3['reason'] == 'stuck'
+    assert r3['stop'] is False
+    assert r3['reason'] == ''
 
 
 def test_varied_nudges_never_stuck(store, monkeypatch):
@@ -286,26 +285,22 @@ def test_NC_detect_stuck_window_load_bearing():
     assert av.detect_stuck(hist, window=2) is True
 
 
-def test_NC_budget_check_removed_never_stops(store, monkeypatch):
-    """Neuter: monkeypatch autopilot_max_turns→0 (unlimited) AND detect_stuck→
-    always-False on the agent_verdict module the autopilot function imports.
-    Prove that WITHOUT the guards the loop never stops even on a pathological
-    repeated nudge that WOULD have tripped stuck."""
+def test_NC_hard_guards_removed_never_stop(store, monkeypatch):
+    """With the hard cap disabled and no progress evidence, the loop is open."""
     ap = _reload_ap()
     store.ensure('c7', autopilotRunId='ar-8')
     import lib.agent_verdict as _av
     monkeypatch.setattr(_av, 'autopilot_max_turns', lambda: 0)
-    monkeypatch.setattr(_av, 'detect_stuck', lambda *a, **k: False)
 
     nudge = 'identical nudge that would normally trip the stuck guard hard'
     stops = []
     for _ in range(6):
         stops.append(ap._record_vu_turn_and_check_budget('c7', nudge, user_id=1)['stop'])
-    assert stops == [False] * 6, 'neutered guards must never stop the loop'
+    assert stops == [False] * 6, 'disabled hard guards must never stop the loop'
 
 
 # ══════════════════════════════════════════════════════════
-#  Part 2 — diminishing-returns / no-value-progress guard
+#  Part 2 — advisory diminishing-returns signal
 # ══════════════════════════════════════════════════════════
 
 def test_parse_progress():
@@ -380,18 +375,16 @@ def test_progress_window_env_fail_open(monkeypatch):
     assert av.autopilot_progress_window() == 3
 
 
-def test_no_progress_fires_end_to_end(store, monkeypatch):
-    """★ Integrated: 4 VU turns, each with a DISTINCT nudge (so 'stuck' does
-    NOT fire) reporting cumulative resolved=2 (no new items) while the worker
-    re-touches the SAME file every turn → the no_progress guard fires. This is
-    the exact 'over-fixating on a triviality / parameter tuning' failure."""
+def test_flat_progress_same_target_is_diagnostic_not_terminal(
+        store, monkeypatch):
+    """Incremental work can stay flat until a criterion is fully resolved."""
     monkeypatch.setenv('TOFU_AUTOPILOT_MAX_TURNS', '40')  # not the budget
     monkeypatch.setenv('TOFU_AUTOPILOT_PROGRESS_WINDOW', '4')
     ap = _reload_ap()
     store.ensure('cp', autopilotRunId='ar-p')
     # Turn 1 legitimately resolves 2 items (baseline); turns 2–5 stay flat at
     # 2 while re-touching the SAME file → the 4-turn window (turns 2–5) shows
-    # zero net progress + full target overlap → no_progress fires on turn 5.
+    # zero net progress + full target overlap is diagnostic only.
     nudges = [
         'establish baseline and fix the first two items [PROGRESS: resolved=2 remaining=1]',
         'tweak the timeout constant a bit higher [PROGRESS: resolved=2 remaining=1]',
@@ -403,9 +396,8 @@ def test_no_progress_fires_end_to_end(store, monkeypatch):
     for text in nudges:
         results.append(ap._record_vu_turn_and_check_budget(
             'cp', text, targets=['lib/config.py'], user_id=1))
-    # Turns 1–4 accumulate; turn 5 completes a fully-flat 4-turn window → stop.
-    assert [r['stop'] for r in results] == [False, False, False, False, True]
-    assert results[-1]['reason'] == 'no_progress'
+    assert [r['stop'] for r in results] == [False] * 5
+    assert results[-1]['reason'] == ''
 
 
 def test_no_progress_not_when_files_differ(store, monkeypatch):
@@ -425,10 +417,9 @@ def test_no_progress_not_when_files_differ(store, monkeypatch):
         assert r['stop'] is False  # different targets each turn → not fixation
 
 
-def test_NC_diminishing_returns_disabled_never_fires(store, monkeypatch):
-    """Neuter: force autopilot_progress_window→0 (guard disabled) on the module
-    the autopilot fn imports. Prove the SAME churning input that fired
-    no_progress above now never stops → the guard is load-bearing."""
+def test_progress_diagnostic_config_never_changes_stop_decision(
+        store, monkeypatch):
+    """The compatibility diagnostic knob cannot become a hidden cutoff."""
     monkeypatch.setenv('TOFU_AUTOPILOT_MAX_TURNS', '40')
     ap = _reload_ap()
     store.ensure('cr', autopilotRunId='ar-r')

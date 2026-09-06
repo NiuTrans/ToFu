@@ -29,7 +29,262 @@ except Exception as _e:  # pragma: no cover - defensive: never break run_command
 # user approval — defaults agreed in chat).
 _COALESCE_MS = 200            # max wall-clock between flushes
 _COALESCE_BYTES = 4096        # flush as soon as buffered output exceeds this
+# Keep very short commands on the terminal-result path only. Persisting a
+# running-round checkpoint is essential for long commands, but doing it before
+# every ``pwd``/``git status``/``echo`` makes storage latency part of command
+# latency. Commands that outlive this grace period retain the existing live
+# output + reconnect durability contract.
+RUN_COMMAND_LIVE_GRACE_MS = 350
 RUN_COMMAND_RECOVERY_OUTPUT_MAX_CHARS = max(1, int(MAX_COMMAND_OUTPUT))
+
+
+class _RunCommandSpawnLifecycle:
+    """Delay presentation/durability until a command proves it is long-lived.
+
+    The subprocess callback itself only stamps the authoritative clocks and
+    arms a timer. The timer publishes the running frame and checkpoint from a
+    background thread, keeping event-store latency out of the subprocess start
+    path. ``finish`` cancels that work for commands that settle inside the
+    grace window.
+    """
+
+    def __init__(self, task, rn, round_entry, grace_ms):
+        self._task = task
+        self._rn = rn
+        self._round_entry = round_entry
+        self._grace_s = max(0.0, float(grace_ms) / 1000.0)
+        self._condition = threading.Condition()
+        self._started = False
+        self._finished = False
+        self._publishing = False
+        self._ready = False
+        self._timer = None
+        self._exec_start_ms = None
+        self._deadline_ms = None
+        self._live_callbacks = []
+
+    def __call__(self, exec_start_ms, deadline_ms):
+        with self._condition:
+            if self._started:
+                return
+            self._started = True
+            self._exec_start_ms = exec_start_ms
+            self._deadline_ms = deadline_ms
+            self._round_entry['execStartTs'] = exec_start_ms
+            if deadline_ms is not None:
+                self._round_entry['deadlineTs'] = deadline_ms
+            else:
+                self._round_entry.pop('deadlineTs', None)
+            if self._finished:
+                return
+            timer = threading.Timer(self._grace_s, self._start_publish)
+            timer.daemon = True
+            self._timer = timer
+            timer.start()
+
+    def add_live_callback(self, callback):
+        call_now = False
+        with self._condition:
+            if self._ready:
+                call_now = True
+            elif not self._finished:
+                self._live_callbacks.append(callback)
+        if call_now:
+            callback()
+
+    @property
+    def is_live(self):
+        with self._condition:
+            return self._ready
+
+    def ensure_live(self):
+        """Promote a chatty command before the time grace expires."""
+        self._start_publish(background=True)
+
+    def _start_publish(self, background=False):
+        with self._condition:
+            if (not self._started or self._finished or self._publishing
+                    or self._ready):
+                return
+            self._publishing = True
+            timer = self._timer
+            self._timer = None
+            if timer is not None and timer is not threading.current_thread():
+                timer.cancel()
+        if background:
+            worker = threading.Thread(
+                target=self._publish,
+                name='tofu-run-command-live-start',
+                daemon=True,
+            )
+            worker.start()
+        else:
+            self._publish()
+
+    def _publish(self):
+        ev = {
+            'type': 'tool_progress',
+            'roundNum': self._rn,
+            'toolCallId': self._round_entry.get('toolCallId', ''),
+            'toolName': self._round_entry.get('toolName') or 'run_command',
+            'stream': 'stdout',
+            'chunk': '',
+            'execStartTs': self._exec_start_ms,
+        }
+        if self._deadline_ms is not None:
+            ev['deadlineTs'] = self._deadline_ms
+        try:
+            append_event(self._task, ev)
+        except Exception as exc:
+            logger.warning(
+                '[code_exec] live-start event failed (non-fatal) task=%s '
+                'round=%s: %s',
+                (self._task.get('id') or '?')[:8], self._rn, exc)
+
+        # Output may only overtake the empty live-start frame after that frame
+        # has passed through append_event, preserving presentation order.
+        with self._condition:
+            self._ready = True
+            callbacks = self._live_callbacks
+            self._live_callbacks = []
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception as exc:
+                logger.warning(
+                    '[code_exec] live-start callback failed (non-fatal): %s',
+                    exc)
+
+        if not self._task.get('_suppressCheckpoint'):
+            try:
+                from lib.tasks_pkg.manager import checkpoint_task_partial
+                checkpoint_task_partial(self._task, force=True)
+            except Exception as exc:
+                logger.warning(
+                    '[code_exec] spawn checkpoint failed (non-fatal) '
+                    'task=%s round=%s: %s',
+                    (self._task.get('id') or '?')[:8], self._rn, exc)
+        with self._condition:
+            self._publishing = False
+            self._condition.notify_all()
+
+    def finish(self):
+        """Settle the lifecycle and return whether live state was published."""
+        with self._condition:
+            self._finished = True
+            timer = self._timer
+            self._timer = None
+            if timer is not None:
+                timer.cancel()
+            # A promoted command must finish its running checkpoint before the
+            # terminal round can be emitted; otherwise an older running
+            # snapshot could race and overwrite the terminal state.
+            while self._publishing:
+                self._condition.wait()
+            return self._ready
+
+
+def _defer_run_command_progress(callback, lifecycle):
+    """Buffer small early output until the command enters its live phase."""
+    if lifecycle is None:
+        return callback
+
+    state = {
+        'lock': threading.Lock(),
+        'active': False,
+        'detached': False,
+        'buffer': [],
+        'bytes': 0,
+    }
+
+    def _activate():
+        with state['lock']:
+            if state['detached']:
+                state['buffer'] = []
+                state['bytes'] = 0
+                return
+            state['active'] = True
+            buffered = state['buffer']
+            state['buffer'] = []
+            state['bytes'] = 0
+        for stream, text in buffered:
+            callback(stream, text)
+
+    lifecycle.add_live_callback(_activate)
+
+    def _on_chunk(stream, text):
+        if not text:
+            return
+        activate = False
+        with state['lock']:
+            if state['detached']:
+                return
+            if state['active']:
+                direct = True
+            else:
+                direct = False
+                state['buffer'].append((stream, text))
+                state['bytes'] += len(text.encode('utf-8'))
+                activate = state['bytes'] >= _COALESCE_BYTES
+        if direct:
+            callback(stream, text)
+        elif activate:
+            lifecycle.ensure_live()
+
+    def _flush():
+        with state['lock']:
+            active = state['active']
+            if not active or state['detached']:
+                # The final authoritative tool result already contains this
+                # small output; an intermediate progress write adds no value.
+                state['buffer'] = []
+                state['bytes'] = 0
+        if active and not state['detached']:
+            callback.flush()
+
+    _on_chunk.flush = _flush
+
+    close = getattr(callback, 'close', None)
+    if callable(close):
+        def _close(terminal_reason=None):
+            with state['lock']:
+                active = state['active']
+                if not active:
+                    state['buffer'] = []
+                    state['bytes'] = 0
+            return close(terminal_reason if active else None)
+        _on_chunk.close = _close
+
+    finalize_output = getattr(callback, 'finalize_output', None)
+    if callable(finalize_output):
+        def _finalize(*, complete=True):
+            with state['lock']:
+                active = state['active']
+                if not active:
+                    state['buffer'] = []
+                    state['bytes'] = 0
+            if active:
+                return finalize_output(complete=complete)
+            # Close without a terminal progress frame. The writer has not
+            # received data on this path, but finalizing it preserves the
+            # artifact API expected by the shared handler.
+            if callable(close):
+                close()
+            return callback.output_writer.finalize(complete=complete)
+        _on_chunk.finalize_output = _finalize
+
+    if hasattr(callback, 'output_writer'):
+        _on_chunk.output_writer = callback.output_writer
+
+    def _detach():
+        """Stop foreground presentation while the subprocess keeps draining."""
+        with state['lock']:
+            state['detached'] = True
+            state['buffer'] = []
+            state['bytes'] = 0
+
+    _on_chunk.detach = _detach
+    return _on_chunk
 
 
 def _remember_bounded_partial_output(state, text):
@@ -67,7 +322,7 @@ def _render_bounded_partial_output(state):
 
 
 def _make_run_command_progress_cb(
-        task, rn, round_entry, command, runtime_context=None):
+        task, rn, round_entry, command, runtime_context=None, lifecycle=None):
     """Build an ``on_chunk(stream, text)`` callback for tool_run_command.
 
     Each call appends the chunk to ``round_entry['_partialOutput']`` for
@@ -119,7 +374,7 @@ def _make_run_command_progress_cb(
         _publish.close = sink.close
         _publish.finalize_output = _finalize
         _publish.output_writer = writer
-        return _publish
+        return _defer_run_command_progress(_publish, lifecycle)
 
     state = {
         'buf': [],            # list[(stream, text)]
@@ -254,14 +509,16 @@ def _make_run_command_progress_cb(
         with state['lock']:
             _flush_locked()
     _on_chunk.flush = _final_flush  # attribute on closure for the handler
-    return _on_chunk
+    return _defer_run_command_progress(_on_chunk, lifecycle)
 
 
 def _make_run_command_spawn_cb(task, rn, round_entry):
     """Build an ``on_spawn(exec_start_ms, deadline_ms)`` callback.
 
-    Fires ONCE, the instant the subprocess is spawned. Does two things that
-    must happen together, and neither of which any existing seam does:
+    Fires ONCE when the subprocess is spawned. The authoritative clocks are
+    stamped immediately, while their presentation event and running-round
+    checkpoint are delayed briefly so short commands only pay for their final
+    result.
 
     1. **Publishes the deadline.** The countdown cannot be derived on the
        client: the effective budget is the requested ``timeout`` AFTER the
@@ -281,47 +538,8 @@ def _make_run_command_spawn_cb(task, rn, round_entry):
 
     Best-effort throughout: telemetry must never abort a running command.
     """
-    fired = {'done': False}
-
-    def _on_spawn(exec_start_ms, deadline_ms):
-        if fired['done']:
-            return
-        fired['done'] = True
-        round_entry['execStartTs'] = exec_start_ms
-        if deadline_ms is not None:
-            round_entry['deadlineTs'] = deadline_ms
-        ev = {
-            'type': 'tool_progress',
-            'roundNum': rn,
-            'toolCallId': round_entry.get('toolCallId', ''),
-            'toolName': round_entry.get('toolName') or 'run_command',
-            'stream': 'stdout',
-            'chunk': '',
-            'execStartTs': exec_start_ms,
-        }
-        if deadline_ms is not None:
-            ev['deadlineTs'] = deadline_ms
-        append_event(task, ev)
-        # Durability. See the docstring: this is the ONLY write that puts a
-        #   still-running round + its deadline into the DB, so a conversation
-        #   switch / reload mid-command can project a live countdown instead of
-        #   restarting it. Deliberately NOT throttled — it happens once per
-        #   command, not per output chunk.
-        # Sub-agent executor proxies deliberately suppress parent-stream
-        # events and own durability through lib/swarm/persistence. Writing the
-        # inner run_command round under the parent's task id would both corrupt
-        # that ownership boundary and used to fail on the proxy's partial task
-        # shape (`content_lock`). Main-chat tasks keep the existing checkpoint.
-        if not task.get('_suppressCheckpoint'):
-            try:
-                from lib.tasks_pkg.manager import checkpoint_task_partial
-                checkpoint_task_partial(task, force=True)
-            except Exception as e:
-                logger.warning('[code_exec] spawn checkpoint failed (non-fatal) '
-                               'task=%s round=%s: %s',
-                               (task.get('id') or '?')[:8], rn, e)
-
-    return _on_spawn
+    return _RunCommandSpawnLifecycle(
+        task, rn, round_entry, RUN_COMMAND_LIVE_GRACE_MS)
 
 
 def _make_grep_intercept_cb(task, rn, round_entry):
@@ -481,25 +699,46 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     from lib.tasks_pkg.tool_runtime import active_context_for_call
     runtime_context = active_context_for_call(
         task, round_num=rn, tool_call_id=tc_id, round_entry=round_entry)
-    progress_cb = _make_run_command_progress_cb(
-        task, rn, round_entry, cmd, runtime_context=runtime_context)
     spawn_cb = _make_run_command_spawn_cb(task, rn, round_entry)
+    progress_cb = _make_run_command_progress_cb(
+        task, rn, round_entry, cmd, runtime_context=runtime_context,
+        lifecycle=spawn_cb)
     grep_intercept_cb = _make_grep_intercept_cb(task, rn, round_entry)
+    from lib.tasks_pkg.handlers._background_command import (
+        is_background_command_result,
+        run_with_steer_handoff,
+    )
+
+    def _detach_progress():
+        detach = getattr(progress_cb, 'detach', None)
+        if callable(detach):
+            detach()
+
     try:
         # task= (): without it the runner got task=None — the
         #   subprocess was NEVER registered (_subprocess_pid), so a silent
         #   >30min code_exec was still whole-task-reaped (the reaper could
         #   not interrupt it) and even Stop could not kill the process
         #   (the aborted poll was dead code under task=None).
-        tool_content = execute_standalone_command(fn_name, fn_args,
-                                                  stdin_callback=cb,
-                                                  on_chunk=progress_cb,
-                                                  on_spawn=spawn_cb,
-                                                  on_grep_intercept=grep_intercept_cb,
-
-                                                  runtime_context=runtime_context,
-                                                  task=task)
+        tool_content = run_with_steer_handoff(
+            task=task,
+            config=cfg,
+            command=cmd,
+            on_detach=_detach_progress,
+            execute=lambda command_task: execute_standalone_command(
+                fn_name, fn_args,
+                stdin_callback=cb,
+                on_chunk=progress_cb,
+                on_spawn=spawn_cb,
+                on_grep_intercept=grep_intercept_cb,
+                runtime_context=runtime_context,
+                task=command_task,
+            ),
+        )
     finally:
+        # Cancel the live-start timer for short commands, or join an in-flight
+        # running checkpoint before the terminal round is emitted.
+        spawn_cb.finish()
         # Flush any buffered tail that didn't reach the coalescing threshold.
         try:
             progress_cb.flush()
@@ -508,10 +747,11 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     artifact = None
     finalize_output = getattr(progress_cb, 'finalize_output', None)
     if callable(finalize_output):
+        backgrounded = is_background_command_result(tool_content)
         incomplete = (
             runtime_context is not None and runtime_context.cancellation_requested
         ) or '[Command timed out]' in tool_content or (
-            '[Command interrupted by' in tool_content)
+            '[Command interrupted by' in tool_content) or backgrounded
         artifact = finalize_output(complete=not incomplete)
         tool_content = _project_output_artifact(tool_content, artifact)
         _register_output_artifact_origin(
@@ -533,11 +773,12 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
     #   as lib/tools/meta.py::_build_run_command: an amber neutral stop, the
     #   task CONTINUED, never the red `exit -1` error frame.
     interrupted = '[Command interrupted by' in tool_content
+    backgrounded = is_background_command_result(tool_content)
     # No marker + not a timeout = the command was REFUSED/BLOCKED before it
     # ran (read-only root, dangerous pattern, no project path, pre-hook block,
     # abort, or a start error). Classify it as not-run with the full message
     # as the reason so the UI shows a clear cause instead of "exit ?".
-    not_run = (m_exit is None) and (not timed_out)
+    not_run = (m_exit is None) and (not timed_out) and (not backgrounded)
     prefix = f'$ {cmd}\n'
     if tool_content.startswith(prefix):
         output_text = tool_content[len(prefix):]
@@ -557,6 +798,13 @@ def _handle_code_exec(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, p
             'output': reason, 'reason': reason,
             'exitCode': 'not-run', 'notRun': True, 'timedOut': False,
             'badge': _classify_not_run_badge(reason),
+        }
+    elif backgrounded:
+        meta = {
+            'toolName': 'code_exec', 'command': cmd,
+            'output': output_text, 'exitCode': 'background',
+            'timedOut': False, 'backgrounded': True,
+            'badge': 'background',
         }
     else:
         meta = {

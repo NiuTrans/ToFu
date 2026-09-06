@@ -176,6 +176,15 @@ private val TofuShapes = Shapes(
 /** Convenience alias so screens can name a shape without importing Shapes. */
 val CardShape: Shape = RoundedCornerShape(16.dp)
 
+
+/**
+ * Every button uses the brand radius, not M3's stadium default — pill buttons
+ * next to 12dp fields and 16dp cards read as two different products on one
+ * screen (the web's buttons use --radius 12px / --radius-sm 8px, never pills).
+ * FABs stay stadium: that shape is their Material idiom.
+ */
+val TofuButtonShape: Shape = RoundedCornerShape(12.dp)
+
 @Composable
 fun TofuTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),

@@ -282,7 +282,7 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
             dispatch_terminal['result'] = result
             return result
         except BaseException as exc:
-            dispatch_terminal['error'] = exc
+            dispatch_terminal['exception'] = exc
             raise
         finally:
             # Cross-thread callbacks were scheduled before an adapter future
@@ -298,6 +298,24 @@ async def run_direct_stream(messages, *, model, cfg, completion_id,
                     logger.error(
                         '[chat_direct] dispatch-settle observer failed type=%s',
                         type(e).__name__)
+                    if (execution_session is not None
+                            and not execution_session.is_terminal):
+                        dispatch_terminal['execution_receipt'] = (
+                            execution_session.settle(
+                                ExecutionPhase.FAILED,
+                                cause='dispatch_settlement_failed',
+                            )
+                        )
+            if (execution_session is not None
+                    and not execution_session.is_terminal):
+                # A production owner must leave one terminal receipt. A
+                # missing/no-op settlement callback cannot authorize success.
+                dispatch_terminal['execution_receipt'] = (
+                    execution_session.settle(
+                        ExecutionPhase.FAILED,
+                        cause='dispatch_settlement_missing',
+                    )
+                )
             await q.put((_STREAM_END, None))
 
     drive_task = asyncio.ensure_future(_drive())

@@ -177,6 +177,18 @@ def is_kimi_k3(model: str) -> bool:
     return 'kimi-k3' in model.lower()
 
 
+def is_kimi_k27_code(model: str) -> bool:
+    """Moonshot Kimi K2.7 Code (kimi-k2.7-code, kimi-k2-7-code wire alias).
+
+    Always-thinks like K3 but speaks the K2-style ``thinking:{type:...}``
+    envelope with one hard difference: ``{'type': 'disabled'}`` is an API
+    error (thinking cannot be turned off), so callers must OMIT the field
+    instead of disabling it.
+    """
+    m = model.lower()
+    return 'kimi-k2.7-code' in m or 'kimi-k2-7-code' in m
+
+
 def is_ernie(model: str) -> bool:
     """Baidu ERNIE models (ERNIE-5.0, ERNIE-X1, ERNIE-4.5, etc.)."""
     return 'ernie' in model.lower()

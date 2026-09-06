@@ -352,6 +352,27 @@ class ResolveConvSettingsTest(unittest.TestCase):
 
 class CanonicaliseModelIdTest(unittest.TestCase):
 
+    def test_js_mirror_table_stays_in_parity(self):
+        """The JS ``_LEGACY_PRESET_TO_MODEL`` mirror must not drift from the
+        Python authority: a config migrated client-side must resolve to the
+        same model the server would have applied (2026-09: the JS table had
+        silently lost the ``xhigh`` and ``gpt-5.6-pro`` entries)."""
+        import re
+
+        from tests._runtime_sections import runtime_section_path
+
+        with open(runtime_section_path('core/cost.js'), encoding='utf-8') as f:
+            src = f.read()
+        m = re.search(
+            r'const\s+_LEGACY_PRESET_TO_MODEL\s*=\s*\{(?P<body>.*?)\};',
+            src, re.S)
+        self.assertIsNotNone(m, '_LEGACY_PRESET_TO_MODEL not found in section')
+        js_table = dict(re.findall(
+            r"'([^']+)'\s*:\s*'([^']+)'", m.group('body')))
+
+        from lib.conv_config import _legacy
+        self.assertEqual(dict(_legacy._LEGACY_PRESET_TO_MODEL), js_table)
+
     def test_legacy_preset_rewritten(self):
         self.assertEqual(canonicalise_model_id('opus'),
                           'aws.claude-opus-4.7')

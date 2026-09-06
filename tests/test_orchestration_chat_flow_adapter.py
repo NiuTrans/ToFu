@@ -761,5 +761,59 @@ class AdapterErrorFieldTest(unittest.TestCase):
         self.assertEqual(planners[0]['error'], 'dispatch exhausted')
 
 
+class AdapterModifiedFilesTest(unittest.TestCase):
+    """A flow node's edit-tool markers must become the durable message's
+    modifiedFileList/modifiedFiles — the settled file-changes block derives
+    from them exactly like a normal chat turn's journal derive."""
+
+    def _worker_step(self, adapter, **complete):
+        adapter.on_event({'type': 'step_start', 'role': 'worker',
+                          'emits': 'assistant'})
+        adapter.on_event({'type': 'step_complete', 'role': 'worker',
+                          'emits': 'assistant', 'thinking': '', **complete})
+
+    def test_worker_step_with_edit_markers_stamps_modified_files(self):
+        adapter = FlowEventAdapter()
+        self._worker_step(
+            adapter, status='completed', output='done', state_changing=2,
+            tool_log=[
+                {'round': 1, 'tool': 'write_file',
+                 'args_brief': 'a.py', 'preview': 'ok',
+                 'preview_full_chars': 2,
+                 'edited_path': 'lib/a.py', 'edited_action': 'written'},
+                {'round': 2, 'tool': 'edit_file',
+                 'args_brief': 'b.py', 'preview': 'ok',
+                 'preview_full_chars': 2,
+                 'edited_path': 'lib/b.py', 'edited_action': 'edited'},
+                # Last write per path wins; first-appearance order kept.
+                {'round': 3, 'tool': 'apply_diff',
+                 'args_brief': 'b.py', 'preview': 'ok2',
+                 'preview_full_chars': 3,
+                 'edited_path': 'lib/b.py', 'edited_action': 'patched'},
+                {'round': 4, 'tool': 'read_files',
+                 'args_brief': 'Read a.py', 'preview': 'ok',
+                 'preview_full_chars': 2},
+            ])
+        self.assertEqual(len(adapter.messages), 1)
+        msg = adapter.messages[0]
+        self.assertEqual(msg['modifiedFiles'], 2)
+        self.assertEqual(msg['modifiedFileList'], [
+            {'action': 'written', 'path': 'lib/a.py'},
+            {'action': 'patched', 'path': 'lib/b.py'},
+        ])
+
+    def test_worker_step_without_edit_markers_omits_modified_files(self):
+        """Negative control: tool-less / read-only turns stay byte-identical
+        (no empty modifiedFileList/modifiedFiles keys leak onto the wire)."""
+        adapter = FlowEventAdapter()
+        self._worker_step(
+            adapter, status='completed', output='done', state_changing=0,
+            tool_log=[{'round': 1, 'tool': 'read_files',
+                       'args_brief': 'Read a.py', 'preview': 'ok',
+                       'preview_full_chars': 2}])
+        self.assertEqual(len(adapter.messages), 1)
+        self.assertNotIn('modifiedFileList', adapter.messages[0])
+        self.assertNotIn('modifiedFiles', adapter.messages[0])
+
 if __name__ == '__main__':
     unittest.main()

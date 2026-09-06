@@ -112,6 +112,7 @@ _EXPORT_MODULES = {
     'ContextCompactionError': 'lib.llm_errors',
     'EndpointUnreachableError': 'lib.llm_errors',
     'InvalidImageError': 'lib.llm_errors',
+    'LocalRequestPreparationError': 'lib.llm_errors',
     'ModelLimitError': 'lib.llm_errors',
     'PermissionError_': 'lib.llm_errors',
     'PromptTooLongError': 'lib.llm_errors',

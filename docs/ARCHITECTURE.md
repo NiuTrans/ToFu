@@ -20,6 +20,18 @@ and follow one domain owner before editing.
 6. Every resource has an explicit lifecycle: creation, ownership, cancellation,
    disposal, retry, and failure behavior.
 
+`lib/agent_core/execution_session.py` is the operational lifecycle owner shared
+by task-backed and bounded non-task execution. It does not replace durable task
+or Turn state. It records the monotonic
+`created → routed → reserved → admitted → dispatching → settling → terminal`
+path, owns exact resource releases, and produces a content-free terminal
+invariant receipt. Acquired resources use exception-safe bind helpers, so a
+failure between acquisition and registration rolls back immediately; resource
+names are a closed metric-label set and active execution IDs cannot collide.
+HTTP routes may inspect/reset dispatcher state, but model
+execution and provider-slot reservation must enter through a task or declared
+application execution service; `scripts/check_architecture.py` enforces this.
+
 ## Runtime topology
 
 The agent kernel has a second composition boundary, not a second execution

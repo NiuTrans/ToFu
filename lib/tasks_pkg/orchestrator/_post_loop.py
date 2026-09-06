@@ -131,9 +131,11 @@ def finalize_after_loop(
             # post-tool one (skipped on a no-tool-call completion), so
             # without this the panel is stuck on [system?, user].
             try:
+                from lib.tasks_pkg.manager import task_user_id
                 _wire = apply_wire_sanitize(
                     messages, conv_id=task.get('convId', ''),
-                    provider_id=task.get('provider_id') or '')
+                    provider_id=task.get('provider_id') or '',
+                    user_id=task_user_id(task))
                 snap = _strip_base64_for_snapshot(_wire)
                 snap_evt = build_event(
                     EventType.MESSAGES_SNAPSHOT,

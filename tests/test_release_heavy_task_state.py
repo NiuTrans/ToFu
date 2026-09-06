@@ -215,6 +215,46 @@ def test_terminal_persist_captures_metadata_before_projection_release(
     assert task['programRuns'] is None
 
 
+def test_failed_terminal_persist_returns_debt_receipt_and_keeps_state(
+        monkeypatch):
+    """A failed durable write must fence eviction and preserve retry input."""
+    import lib.storage as storage_module
+    import lib.tasks_pkg.manager._persist as persist_module
+
+    task = _big_task('error')
+    monkeypatch.setattr(
+        persist_module,
+        '_upsert_task_row',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError('storage unavailable')),
+    )
+    monkeypatch.setattr(
+        storage_module, 'storage_status', lambda: {'state': 'running'})
+
+    assert persist_module.persist_task_result(task) is False
+    assert task['_terminalPersistencePending'] is True
+    assert task['_terminalPersistenceRetryReady'] is True
+    assert task['messages'] is not None
+    assert task['_tool_result_cache'] is not None
+
+
+def test_terminal_persist_preparation_failure_is_retryable(monkeypatch):
+    import lib.tasks_pkg.manager._persist as persist_module
+
+    task = _big_task('error')
+    monkeypatch.setattr(
+        persist_module,
+        'build_result_meta',
+        lambda _task: (_ for _ in ()).throw(
+            ValueError('metadata serialization failed')),
+    )
+
+    assert persist_module.persist_task_result(task) is False
+    assert task['_terminalPersistencePending'] is True
+    assert task['_terminalPersistenceRetryReady'] is True
+    assert task['messages'] is not None
+
+
 def test_running_task_untouched():
     from lib.tasks_pkg.manager._persist import _release_heavy_task_state
     task = _big_task('running')

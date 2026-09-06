@@ -164,7 +164,8 @@ def test_loop_runtime_zero_deliverable_guard_forces_a_new_iteration():
         if event['type'] == 'zero_deliverable_guard'
     ]
     assert guards and guards[0]['iteration'] == 2
-    assert 'START EXECUTING' in feedback.pending_directive()
+    assert 'Do not mutate state merely to satisfy this guard' in (
+        feedback.pending_directive())
     assert outcomes.loop_exits_snapshot()[0]['iterations'] >= 3
 
 

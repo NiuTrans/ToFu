@@ -105,6 +105,24 @@ def test_search_result_names_the_stable_execution_gateway():
     assert empty['notice'] == result['notice']
 
 
+def test_search_namespace_bonus_never_admits_zero_match_tools():
+    # Regression: the same-namespace tie-break was added before the score>0
+    # admission check, so a namespace filter alone paged the whole namespace
+    # (alphabetically-first junk like mcp__12306-train__* for 'xuecheng doc').
+    catalog = [
+        _tool('mcp__xuecheng__read_doc', description='Read a Xuecheng doc'),
+        _tool('mcp__12306-train__get-tickets', description='查询12306余票信息'),
+        _tool('mcp__12306-train__get-current-date',
+              description='获取当前日期，以上海时区为准'),
+    ]
+    namespaces = {tool['function']['name']: 'mcp' for tool in catalog}
+    result = search_executable_catalog(
+        catalog, 'xuecheng doc', namespace='mcp',
+        namespace_by_name=namespaces)
+    assert [item['name'] for item in result['items']] == [
+        'mcp__xuecheng__read_doc']
+
+
 def test_search_rejects_oversized_address_fields_before_catalog_work():
     query = search_executable_catalog(
         [_tool('read_doc')],

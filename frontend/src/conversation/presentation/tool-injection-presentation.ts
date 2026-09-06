@@ -83,6 +83,7 @@ const INBOX_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentCol
 const PEER_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 const PEER_JUMP_ICON_HTML = '<svg class="sw-peer-jump" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:.85em;height:.85em"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>';
 const STEER_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+const BGCMD_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
 const STALL_ICON_HTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:1em;height:1em"><path d="M3 2v6h6"/><path d="M3 8a9 9 0 1 0 3-5.7L3 8"/></svg>';
 
 function record(value: unknown): UnknownRecord {
@@ -507,6 +508,55 @@ export function createToolInjectionPresentation(
      </details>`;
   }
 
+  function bgCommandResultText(value: unknown): BoundedText {
+    const raw = safeText(value);
+    const match = raw.match(
+      /<background-command\s[^>]*>([\s\S]*?)<\/background-command>/,
+    );
+    return boundedText(
+      (match ? match[1] : raw).trim(),
+      RAW_TEXT_UNITS,
+    );
+  }
+
+  function renderBgCommandRow(round: UnknownRecord): string {
+    const allPreviews = arrayField(round, 'bgCommandPreviews');
+    const previews = boundedArray(allPreviews);
+    const count = safeCount(field(round, 'bgCommandCount'), allPreviews.length);
+    const word = count === 1
+      ? translatedHtml('bgCommand.injectRowOne')
+      : translatedHtml('bgCommand.injectRowMany');
+    const label = translatedHtml('bgCommand.injectRowLabel');
+    const badge = translatedHtml('peer.injectRowBadge');
+    let bodyHtml = '';
+    for (const previewValue of previews) {
+      const commandId = boundedText(
+        field(previewValue, 'commandId'),
+        IDENTIFIER_UNITS,
+      ).value;
+      const text = bgCommandResultText(field(previewValue, 'text'));
+      const headHtml = commandId
+        ? `<div class="sw-card-head"><span class="sw-card-agent">${escapeHtmlText(commandId)}</span><span class="ptool-badge ptool-badge-ok sw-card-status">completed</span></div>`
+        : '';
+      bodyHtml += `<div class="sw-card sw-bgcmd-card-item">${headHtml}<pre class="sw-card-raw-pre">${escapeHtmlText(text.value)}</pre>${text.truncated ? contentLimitHtml(RAW_TEXT_UNITS) : ''}</div>`;
+    }
+    if (previews.length === 0) {
+      bodyHtml = `<div class="sw-inbox-row-empty">${translatedHtml(
+        'bgCommand.noPayload',
+      )}</div>`;
+    } else {
+      bodyHtml += itemsLimitHtml(allPreviews.length);
+    }
+    return `<details class="sw-inbox-row sw-bgcmd-row" data-rn="${roundNumberHtml(round)}">
+       <summary class="ptool-line sw-inbox-row-header">
+         <span class="ptool-icon">${BGCMD_ICON_HTML}</span>
+         <span class="ptool-text">${label} <b>${count}</b> ${word}</span>
+         <span class="ptool-badge ptool-badge-info">${badge}</span>
+       </summary>
+       <div class="sw-inbox-row-body">${bodyHtml}</div>
+     </details>`;
+  }
+
   function renderStallRow(round: UnknownRecord): string {
     const label = translatedHtml('stall.injectRowLabel');
     const badge = translatedHtml('peer.injectRowBadge');
@@ -544,6 +594,7 @@ export function createToolInjectionPresentation(
     if (Boolean(field(round, '_inboxInject'))) return renderInboxRow(round);
     if (Boolean(field(round, '_peerInject'))) return renderPeerRow(round);
     if (Boolean(field(round, '_userSteerInject'))) return renderSteerRow(round);
+    if (Boolean(field(round, '_bgCommandInject'))) return renderBgCommandRow(round);
     if (Boolean(field(round, '_stallNudge'))) return renderStallRow(round);
     return '';
   }

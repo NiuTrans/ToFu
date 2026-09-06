@@ -113,7 +113,7 @@ def _convert_to_svg(saved_url: str, project_save_path: str,
                 # Record modification for undo support
                 try:
                     from lib.project_mod.modifications import _record_modification
-                    from lib.project_mod.tools import _touch_for_vscode
+                    from lib.project_mod.write_tools import _touch_for_vscode
                     _record_modification(
                         project_path, 'write_file', svg_rel,
                         original_content=None,

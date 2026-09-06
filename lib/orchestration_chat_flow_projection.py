@@ -118,6 +118,11 @@ def project_flow_tool_rounds(tool_log) -> list[dict]:
         }
         if isinstance(agent_round, int) and agent_round > 0:
             entry['llmRound'] = agent_round
+        agent_id = str(row.get('agentId') or '')
+        if agent_id:
+            # The debug entry re-derives this call's Request Inspector
+            # stream ``{parent}#agent:{agentId}`` from the round row.
+            entry['agentId'] = agent_id
         timestamp = row.get('timestamp')
         if isinstance(timestamp, (int, float)) and timestamp > 0:
             entry['tStart'] = int(timestamp * 1000)
@@ -184,8 +189,32 @@ def project_flow_tool_rounds(tool_log) -> list[dict]:
         rounds.append(entry)
     return rounds
 
+def project_flow_modified_files(tool_log) -> list[dict]:
+    """Project one node's ``tool_log`` edit markers into modifiedFileList rows.
+
+    The swarm SubAgent records ``edited_path`` / ``edited_action`` on each
+    edit-tool row at dispatch time (the same probe presence overlap
+    detection uses). Last write per path wins, first-appearance order kept —
+    the same shape commit_round's journal derive produces for a normal chat
+    turn, so the settled file-changes block renders identically.
+    """
+    seen: dict[str, dict] = {}
+    for row in tool_log or ():
+        if not isinstance(row, Mapping):
+            continue
+        path = str(row.get('edited_path') or '').strip()
+        if not path:
+            continue
+        seen[path] = {
+            'action': str(row.get('edited_action') or 'edited'),
+            'path': path,
+        }
+    return list(seen.values())
+
+
 __all__ = [
     'flow_emits_for_role',
+    'project_flow_modified_files',
     'project_flow_next_phase',
     'project_flow_phase_event',
     'project_flow_tool_rounds',

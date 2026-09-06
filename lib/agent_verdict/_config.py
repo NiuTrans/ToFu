@@ -5,7 +5,8 @@ module-level defaults they fall back to:
 
   * ``AUTOPILOT_MAX_TURNS_DEFAULT`` / ``autopilot_max_turns`` — hard VU-turn
     ceiling (safety valve);
-  * ``AUTOPILOT_STUCK_WINDOW`` — the detect_stuck window autopilot feeds;
+  * ``AUTOPILOT_STUCK_WINDOW`` — compatibility window for advisory feedback
+    repetition diagnostics;
   * ``AUTOPILOT_SUMMARY_RETENTION_DEFAULT`` / ``autopilot_summary_retention`` —
     max concluded-run (fold) records retained in settings.
 
@@ -32,9 +33,8 @@ logger = get_logger(__name__)
 # agent task) and legitimately longer-horizon, so the default is higher.
 AUTOPILOT_MAX_TURNS_DEFAULT = 40
 
-# Autopilot feeds detect_stuck its VU REQUEST-text history with this window:
-# three near-identical nudges in a row = a non-converging loop (two can be a
-# legitimate "you didn't do it, try again").
+# Compatibility window for advisory VU feedback-repetition diagnostics.
+# Similar wording is never a production stop condition.
 AUTOPILOT_STUCK_WINDOW = 3
 
 # Max concluded-run (fold) records retained in ``settings.autopilotSummaries``

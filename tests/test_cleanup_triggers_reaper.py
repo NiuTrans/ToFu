@@ -75,6 +75,43 @@ def test_reaper_failure_does_not_break_cleanup(monkeypatch):
     _maintenance.cleanup_old_tasks()
 
 
+def test_terminal_persistence_retry_is_bounded_and_clears_debt(monkeypatch):
+    import lib.tasks_pkg.manager._maintenance as _maintenance
+
+    tasks = [
+        {
+            'id': f'pending-terminal-{index}',
+            'status': 'error',
+            '_terminalPersistencePending': True,
+            '_terminalPersistenceRetryReady': True,
+        }
+        for index in range(3)
+    ]
+    tasks.insert(0, {
+        'id': 'terminal-write-still-in-flight',
+        'status': 'error',
+        '_terminalPersistencePending': True,
+    })
+    attempted = []
+
+    def _persist(task):
+        attempted.append(task['id'])
+        task.pop('_terminalPersistencePending', None)
+        task.pop('_terminalPersistenceRetryReady', None)
+        return True
+
+    monkeypatch.setattr(
+        _maintenance.chat_task_runtime, 'snapshot', lambda: tasks)
+    monkeypatch.setattr(_maintenance, 'persist_task_result', _persist)
+
+    assert _maintenance.retry_pending_terminal_persistence(limit=2) == (2, 2)
+    assert attempted == ['pending-terminal-0', 'pending-terminal-1']
+    assert tasks[0]['_terminalPersistencePending'] is True
+    assert '_terminalPersistencePending' not in tasks[1]
+    assert '_terminalPersistencePending' not in tasks[2]
+    assert tasks[3]['_terminalPersistencePending'] is True
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # (3) Structural guard (AST): encode the exact fix so the accident cannot
 #     silently return. The reaper call must be INSIDE cleanup_old_tasks and

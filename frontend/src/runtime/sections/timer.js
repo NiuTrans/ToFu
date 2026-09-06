@@ -301,8 +301,16 @@ async function _viewTimerLog(timerId) {
   document.addEventListener("keydown", _onKey);
 }
 
+/* The Android WebView reports visible while backgrounded; the shell's
+   nativeVisibility bridge is the only reliable pocket signal there. */
+function _timerShellHidden() {
+  return typeof runtimeScope !== "undefined"
+    && runtimeScope.nativeVisibility?.isHidden() === true;
+}
+
 function _refreshVisibleTimerUi() {
-  if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+  if ((typeof document !== "undefined" && document.visibilityState === "hidden")
+      || _timerShellHidden()) return;
   if (_timerPanelOpen) _refreshTimerPanel();
   else _refreshTimerBadge();
 }
@@ -339,7 +347,8 @@ function _wireTimerPush() {
 function _startTimerPolling() {
   if (_timerPollInterval) return;
   _timerPollInterval = setInterval(() => {
-    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    if ((typeof document !== "undefined" && document.visibilityState === "hidden")
+        || _timerShellHidden()) return;
     // An open panel needs progress details. A closed panel is event-driven
     // while push is healthy and polls only when the socket is unavailable.
     if (_timerPanelOpen) _refreshTimerPanel();
@@ -388,6 +397,8 @@ _startTimerPolling();
 setTimeout(_refreshTimerBadge, 3000);
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") _scheduleTimerRefresh();
+  if (document.visibilityState === "visible" && !_timerShellHidden()) {
+    _scheduleTimerRefresh();
+  }
 });
 

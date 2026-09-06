@@ -127,6 +127,27 @@ def test_projection_ignores_malformed_result_meta():
         assert 'todos' not in meta, bad
 
 
+# ── agent identity ────────────────────────────────────────────────────
+
+def test_projection_carries_agent_identity_for_inspector_stream():
+    """``agentId`` on the durable row must survive projection — the debug
+    entry re-derives the ``{parent}#agent:{agentId}`` Request Inspector
+    stream from the settled round."""
+    from lib.orchestration_chat_flow_projection import project_flow_tool_rounds
+
+    rounds = project_flow_tool_rounds([_todo_tool_log_row(agentId='agent-9')])
+    assert rounds[0]['agentId'] == 'agent-9'
+
+
+def test_projection_without_agent_id_omits_the_key():
+    """Negative control: ordinary flow rows stay byte-identical (no empty
+    agentId key leaking into the wire shape)."""
+    from lib.orchestration_chat_flow_projection import project_flow_tool_rounds
+
+    rounds = project_flow_tool_rounds([_todo_tool_log_row()])
+    assert 'agentId' not in rounds[0]
+
+
 # ── dispatch-time harvest ─────────────────────────────────────────────
 
 def test_harvest_extracts_only_declared_display_keys():
@@ -166,6 +187,74 @@ def test_harvest_noops_for_other_tools_and_malformed_input():
         'badge': '0/1'}
 
 
+def test_harvest_run_command_exit_card_keys():
+    """The settled command card reads its ``$`` line and exit pill from flat
+    results[0] keys; a goal-mode shell round must carry them. ``output``
+    stays out — the prose preview already carries it and it is the heavy
+    field the checkpoint budget reclaims first."""
+    from lib.swarm.agent import flow_structured_result_meta
+
+    harvested = flow_structured_result_meta('run_command', [{
+        'toolName': 'code_exec',
+        'command': 'npm run build',
+        'output': '...12k chars of build log...',
+        'exitCode': 0,
+        'timedOut': False,
+    }])
+    assert harvested == {'command': 'npm run build', 'exitCode': 0,
+                         'timedOut': False}
+
+
+def test_harvest_run_command_terminal_badges():
+    from lib.swarm.agent import flow_structured_result_meta
+
+    harvested = flow_structured_result_meta('run_command', [{
+        'toolName': 'code_exec', 'command': 'make',
+        'exitCode': 'not-run', 'notRun': True, 'timedOut': False,
+        'badge': 'precheck failed', 'reason': 'denied',
+        'interrupted': True, 'recovered': True,
+        'grepSearchIntercepted': True,
+    }])
+    assert harvested['notRun'] is True
+    assert harvested['badge'] == 'precheck failed'
+    assert harvested['reason'] == 'denied'
+    assert harvested['interrupted'] is True
+    assert harvested['grepSearchIntercepted'] is True
+    assert 'output' not in harvested
+
+
+def test_projection_run_command_card_keys_render_settled_command():
+    """Without the harvested meta the settled card degrades to a bare ``$``
+    and an unknown-exit pill (the pre-fix goal-mode rendering)."""
+    from lib.orchestration_chat_flow_projection import project_flow_tool_rounds
+
+    row = {
+        'round': 3, 'tool': 'run_command',
+        'args_brief': 'npm run build',
+        'timestamp': 1_700_000_000,
+        'preview': '$ npm run build\n…\n[exit code: 0]',
+        'preview_full_chars': 34,
+        'result_meta': {'command': 'npm run build', 'exitCode': 0,
+                        'timedOut': False},
+    }
+    rounds = project_flow_tool_rounds([row])
+    meta = rounds[0]['results'][0]
+    assert meta['command'] == 'npm run build'
+    assert meta['exitCode'] == 0
+    assert meta['timedOut'] is False
+
+
+def test_dispatch_records_edited_path_on_tool_log_row():
+    """The settled file-changes block derives from per-row edit markers;
+    without the durable stamp a goal-mode turn could never render it."""
+    import inspect
+    import lib.swarm.agent as agent_mod
+
+    single_src = inspect.getsource(agent_mod.SubAgent._execute_single_tool)
+    assert "tool_log_row['edited_path'] = _edited" in single_src
+    assert "tool_log_row['edited_action']" in single_src
+
+
 def test_dispatch_tool_persists_result_meta_onto_tool_log_row():
     """End of the capture seam: _execute_single_tool hands _dispatch_tool a
     sink and writes the harvested payload onto the durable tool_log row."""
@@ -177,6 +266,9 @@ def test_dispatch_tool_persists_result_meta_onto_tool_log_row():
     assert 'flow_structured_result_meta' in dispatch_src
     single_src = inspect.getsource(agent_mod.SubAgent._execute_single_tool)
     assert "tool_log_row['result_meta'] = meta_sink" in single_src
-    # Bounded checkpoint: the historical-row compaction drops the payload
-    # together with the prose fields.
-    assert "historical.pop('result_meta', None)" in single_src
+    # Bounded checkpoint: the historical-row compaction reclaims prose bodies
+    # and heavy meta lists, but keeps args_brief (the settled card's command
+    # line) and the flat meta scalars (badge / exitCode / counters).
+    assert "historical['args_brief'] = ''" not in single_src
+    assert "historical.pop('result_meta', None)" not in single_src
+    assert "old_meta = historical.get('result_meta')" in single_src

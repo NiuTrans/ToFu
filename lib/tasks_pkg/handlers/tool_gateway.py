@@ -713,6 +713,38 @@ def _execute_program(
             'tier': str(latch.get('tier') or ''),
         }
 
+    # PTC-local read-only contract, refreshed every round by the orchestrator
+    # (``task['_ptc_local']``).  While a programmatic round is active, program
+    # child calls may only reach the reviewed read-only tools plus
+    # ``search_tools`` discovery; anything else is a typed rejection so the
+    # model re-issues it as an ordinary direct call with normal admission and
+    # approval.  An absent latch leaves the generic Tool Search program path
+    # fully open.
+    latch = task.get('_ptc_local')
+    gate_active = isinstance(latch, dict) and bool(latch)
+    program_allowed = (
+        {str(name) for name in (latch.get('eligible') or ())}
+        if gate_active else set())
+    if gate_active:
+        run['ptcLocal'] = {
+            'tier': str(latch.get('tier') or ''),
+            'eligible': sorted(program_allowed),
+        }
+
+    def _assert_program_eligible(name: str) -> None:
+        if not gate_active:
+            return
+        if name in program_allowed or name == SEARCH_TOOLS_NAME:
+            return
+        raise ToolScriptError(
+            'tool_not_program_eligible',
+            f'Tool {name!r} is not eligible for this programmatic round.',
+            tool=name, eligible=sorted(program_allowed),
+            retry_hint=(
+                'Programs may only call the reviewed read-only tools and '
+                'search_tools in this round. Issue writes, approvals, and '
+                'other tools as ordinary direct calls instead.'))
+
     def search(query, namespace='', limit=8, cursor=''):
         from lib.tools.disclosure_state import disclosed_names_for_catalog
         return search_executable_catalog(

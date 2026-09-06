@@ -67,10 +67,12 @@ def _notify_folders_changed(*, deleted_folder_id: str | None = None,
     poll + next refocus still reconcile).
     """
     try:
+        from lib.agent_core.events import build_push_frame
         from lib.agent_core.push import push_event
-        payload = {'type': 'folders_changed', 'userId': user_id}
+        frame_fields = {'userId': user_id}
         if deleted_folder_id is not None:
-            payload['deletedFolderId'] = deleted_folder_id
+            frame_fields['deletedFolderId'] = deleted_folder_id
+        payload = build_push_frame('folders_changed', **frame_fields)
         # taskId is a routing key only; folders aren't task-scoped, so a stable
         # sentinel is fine — the client subscribes notify:* (channel-wide).
         push_event('notify', '__folders__', payload, user_id=user_id)

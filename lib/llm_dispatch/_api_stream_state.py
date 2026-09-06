@@ -284,9 +284,29 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
         if tools is not None:
             body['tools'] = tools
         if 'max_tokens' in body:
-            from lib.llm import _clamp_max_tokens
+            from lib.model_info import (
+                _clamp_route_max_tokens,
+                _route_output_limit_key,
+            )
             from lib.llm.body import _clamp_completion_to_context_window
-            body['max_tokens'] = _clamp_max_tokens(slot.model, body['max_tokens'])
+            route_limit_key = _route_output_limit_key(
+                provider_id=str(getattr(slot, 'routing_provider_id', '')
+                                or slot.provider_id or ''),
+                offering_id=str(
+                    getattr(slot, 'route_offering_id', '') or ''),
+                deployment_id=str(
+                    getattr(slot, 'route_deployment_id', '') or ''),
+                protocol=str(slot.protocol or 'openai'),
+                model=str(slot.model or ''),
+            )
+            body['_route_output_limit_key'] = route_limit_key
+            body['max_tokens'] = _clamp_route_max_tokens(
+                slot.model,
+                body['max_tokens'],
+                route_key=route_limit_key,
+                declared_limit=int(
+                    getattr(slot, 'max_output_tokens', 0) or 0),
+            )
             body['max_tokens'] = _clamp_completion_to_context_window(
                 slot.model, body.get('messages'), body['max_tokens'],
                 provider_id=(getattr(slot, 'routing_provider_id', '')
@@ -322,6 +342,22 @@ def _adapt_stream_body_for_slot(slot, body_or_messages, is_body, *,
         thinking_format=slot.thinking_format or '',
         provider_id=(getattr(slot, 'routing_provider_id', '')
                      or slot.provider_id or ''),
+    )
+    from lib.model_info import _clamp_route_max_tokens, _route_output_limit_key
+    route_limit_key = _route_output_limit_key(
+        provider_id=str(getattr(slot, 'routing_provider_id', '')
+                        or slot.provider_id or ''),
+        offering_id=str(getattr(slot, 'route_offering_id', '') or ''),
+        deployment_id=str(getattr(slot, 'route_deployment_id', '') or ''),
+        protocol=str(slot.protocol or 'openai'),
+        model=str(slot.model or ''),
+    )
+    body['_route_output_limit_key'] = route_limit_key
+    body['max_tokens'] = _clamp_route_max_tokens(
+        slot.model,
+        body.get('max_tokens'),
+        route_key=route_limit_key,
+        declared_limit=int(getattr(slot, 'max_output_tokens', 0) or 0),
     )
     if (slot.protocol or '') == 'responses':
         body['_responses_feature_profile'] = (

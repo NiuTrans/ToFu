@@ -8,5 +8,5 @@
   "balance_url": "",
   "thinking_format": "",
   "offering_recipes": [],
-  "_hint": "Use 'Bulk Add Local Endpoints' to register many self-hosted vLLM/SGLang/Ollama servers at once. The probe auto-discovers models from /v1/models on each endpoint."
+  "_hint": "Use Settings → Providers → 本地部署模型: paste one or more vLLM/SGLang/Ollama/llama.cpp endpoint URLs (one per line) and Tofu probes /v1/models on each, or hand a model path to the managed local_serve chat flow."
 }

@@ -116,6 +116,7 @@ _RUNTIME_OWNED_TASK_FIELDS = frozenset({
     '_principalContext',
     '_requestId',
     '_executionSession',
+    '_executionTerminalizing',
     'kind',
     'status',
     'artifact_quality',
@@ -224,8 +225,9 @@ class TaskRuntime:
             kind: Task kind identifier (e.g. 'chat', 'paper-report').
             ttl: Seconds to retain finished tasks for late pollers.
             max_tasks: Maximum retained task records per kind. Running tasks
-                are never evicted; terminal records are removed oldest-first
-                when a new task reaches this capacity.
+                and terminal records awaiting durable persistence are never
+                evicted; safely persisted terminal records are removed
+                oldest-first when a new task reaches this capacity.
             max_events: Maximum replay events retained per task. Sequence
                 numbers remain absolute after old events are trimmed and poll
                 responses mark a cursor reset when a client fell behind.
@@ -344,6 +346,10 @@ class TaskRuntime:
                 owner_user_id=owner_user_id,
                 request_id=request_id,
             ),
+            # Serializes the final cancellation decision with terminal
+            # resource settlement without holding the runtime lock while
+            # storage/provider cleanup callbacks execute.
+            '_executionTerminalizing': False,
         }
         capacity_evicted = []
         over_capacity = False
@@ -351,7 +357,10 @@ class TaskRuntime:
             if task_id not in self._tasks and len(self._tasks) >= self.max_tasks:
                 terminal = sorted(
                     (item for item in self._tasks.values()
-                     if item.get('status') in TASK_REPLAY_TERMINAL_STATUSES),
+                     if (item.get('status') in TASK_REPLAY_TERMINAL_STATUSES
+                         and not item.get('_executionTerminalizing')
+                         and not item.get('_finalize_started_at')
+                         and not item.get('_terminalPersistencePending'))),
                     key=lambda item: float(item.get('finished_at')
                                            or item.get('created_at') or 0),
                 )
@@ -381,7 +390,8 @@ class TaskRuntime:
             # create/TTL sweep returns the registry below its retention cap.
             logger.warning(
                 '[TaskRuntime:%s] registry over capacity=%d; all retained '
-                'tasks are active', self.kind, self.max_tasks)
+                'tasks are active or awaiting durable persistence',
+                self.kind, self.max_tasks)
         logger.debug('[TaskRuntime:%s] created task %s', self.kind, task_id[:8])
         return task
 
@@ -447,19 +457,27 @@ class TaskRuntime:
         self._validate_custom_fields(custom_fields, ())
         with self._lock:
             task = self._tasks.get(task_id)
-            if task is None or task.get('status') not in ('pending', 'running'):
+            if (task is None
+                    or task.get('status') not in ('pending', 'running')
+                    or task.get('_executionTerminalizing')):
+                return False
+            try:
+                session = execution_session_for_task(task)
+                if session.is_terminal:
+                    return False
+                session.mark_dispatch_started()
+                if session.is_terminal:
+                    return False
+            except (RuntimeError, ValueError) as exc:
+                logger.error(
+                    '[TaskRuntime:%s] execution start invariant failed '
+                    'task=%s: %s',
+                    self.kind, task_id[:8], exc,
+                )
                 return False
             task['status'] = 'running'
             task.update(custom_fields)
             task['updated_at'] = time.time()
-        try:
-            execution_session_for_task(task).mark_dispatch_started()
-        except (RuntimeError, ValueError) as exc:
-            logger.error(
-                '[TaskRuntime:%s] execution start invariant failed task=%s: %s',
-                self.kind, task_id[:8], exc,
-            )
-            return False
         return True
 
     def update_fields(
@@ -627,6 +645,7 @@ class TaskRuntime:
         task.setdefault('result', None)
         task.setdefault('error', None)
         task.setdefault('artifact_quality', None)
+        task.setdefault('_executionTerminalizing', False)
         _now = time.time()
         task.setdefault('created_at', _now)
         task.setdefault('updated_at', _now)
@@ -906,14 +925,19 @@ class TaskRuntime:
         fields (type/status/result/error/quality) always win, so a caller
         cannot publish a terminal frame that disagrees with task state.
         """
-        task = self.get(task_id)
-        if not task:
-            return False
         envelope = _make_envelope(error, context=error_context or self.kind,
                                   source=self.error_source)
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if (task is None
+                    or task.get('status') in TASK_REPLAY_TERMINAL_STATUSES
+                    or task.get('_executionTerminalizing')):
+                return False
+            task['_executionTerminalizing'] = True
+            abort_requested = task['abort_event'].is_set()
         requested_outcome = (
             ExecutionPhase.CANCELLED
-            if task['abort_event'].is_set() and envelope is None
+            if abort_requested and envelope is None
             else ExecutionPhase.FAILED if envelope
             else ExecutionPhase.COMPLETED
         )
@@ -926,18 +950,33 @@ class TaskRuntime:
         except ValueError:
             # Adopted legacy/test carriers may predate the private session.
             execution_receipt = None
+        except BaseException:
+            with self._lock:
+                if self._tasks.get(task_id) is task:
+                    task['_executionTerminalizing'] = False
+            raise
+        settled_cancelled = bool(
+            execution_receipt is not None
+            and execution_receipt.outcome in {
+                ExecutionPhase.CANCELLED,
+                ExecutionPhase.TIMED_OUT,
+            }
+        )
         if (execution_receipt is not None
-                and not execution_receipt.invariants_satisfied
+                and execution_receipt.outcome is ExecutionPhase.FAILED
                 and envelope is None):
             envelope = _make_envelope(
-                RuntimeError('terminal resource invariant failed'),
+                RuntimeError(
+                    'execution failed before task terminal publication'),
                 context=error_context or self.kind,
                 source=self.error_source,
             )
         with self._lock:
-            if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
+            if (self._tasks.get(task_id) is not task
+                    or task['status'] in TASK_REPLAY_TERMINAL_STATUSES):
+                task['_executionTerminalizing'] = False
                 return False
-            if task['abort_event'].is_set() and envelope is None:
+            if (abort_requested or settled_cancelled) and envelope is None:
                 task['status'] = 'aborted'
             elif envelope:
                 task['status'] = 'error'
@@ -974,7 +1013,12 @@ class TaskRuntime:
             terminal_event['artifact_quality'] = quality
         if result is not None and final_status == 'done':
             terminal_event['result'] = result
-        self.append_event(task_id, terminal_event)
+        try:
+            self.append_event(task_id, terminal_event)
+        finally:
+            with self._lock:
+                if self._tasks.get(task_id) is task:
+                    task['_executionTerminalizing'] = False
         logger.debug('[TaskRuntime:%s] task %s finished: %s%s',
                      self.kind, task_id[:8], final_status,
                      ' (DEGRADED)' if (quality or {}).get('degraded') else '')
@@ -991,7 +1035,8 @@ class TaskRuntime:
         # decide done-vs-aborted). Without this an abort racing a finish could
         # be lost, marking a cancelled task 'done'.
         with self._lock:
-            if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
+            if (task['status'] in TASK_REPLAY_TERMINAL_STATUSES
+                    or task.get('_executionTerminalizing')):
                 return False
             task['abort_event'].set()
         logger.info('[TaskRuntime:%s] abort requested for task %s',
@@ -1008,7 +1053,8 @@ class TaskRuntime:
             task = self._tasks.get(task_id)
             if task is None or int(task.get('_userId') or 0) != user_id:
                 return False
-            if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
+            if (task['status'] in TASK_REPLAY_TERMINAL_STATUSES
+                    or task.get('_executionTerminalizing')):
                 return False
             task['abort_event'].set()
         logger.info('[TaskRuntime:%s] owner abort requested for task %s',
@@ -1030,7 +1076,30 @@ class TaskRuntime:
             task = self._tasks.get(task_id)
             if task is None or int(task.get('_userId') or 0) != user_id:
                 return False
+            if (task.get('_executionTerminalizing')
+                    or task.get('_finalize_started_at')
+                    or task.get('_terminalPersistencePending')):
+                return False
+            try:
+                execution_session = execution_session_for_task(task)
+            except ValueError:
+                execution_session = None
+            if (execution_session is not None
+                    and execution_session.dispatch_started
+                    and not execution_session.is_terminal):
+                # Removing registry authority while a worker is inside a
+                # provider/tool call would either leak its session forever or
+                # release admission/routes underneath live work. Request Stop
+                # and let the ordinary terminal owner remove it later.
+                task['abort_event'].set()
+                return False
             self._tasks.pop(task_id, None)
+        try:
+            execution_session_for_task(task).settle(
+                ExecutionPhase.CANCELLED, cause='task_removed')
+        except ValueError:
+            # Adopted legacy/test carriers may predate the private session.
+            pass
         logger.info('[TaskRuntime:%s] owner removed task %s',
                     self.kind, task_id[:8])
         return True
@@ -1044,7 +1113,13 @@ class TaskRuntime:
         the removed record lets the manager tombstone it against re-adoption.
         """
         with self._lock:
-            task = self._tasks.pop(task_id, None)
+            task = self._tasks.get(task_id)
+            if (task is None
+                    or task.get('_executionTerminalizing')
+                    or task.get('_finalize_started_at')
+                    or task.get('_terminalPersistencePending')):
+                return None
+            self._tasks.pop(task_id, None)
         if task is not None:
             try:
                 execution_session_for_task(task).settle(
@@ -1364,6 +1439,10 @@ class TaskRuntime:
         with self._lock:
             for tid, task in list(self._tasks.items()):
                 if task['status'] in TASK_REPLAY_TERMINAL_STATUSES:
+                    if (task.get('_executionTerminalizing')
+                            or task.get('_finalize_started_at')
+                            or task.get('_terminalPersistencePending')):
+                        continue
                     finished = task.get('finished_at') or task.get('created_at', 0)
                     if now - finished > ttl:
                         expired.append(tid)

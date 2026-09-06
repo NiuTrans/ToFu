@@ -439,3 +439,83 @@ class TestParseTokenLimit:
             'Something completely different error', 'test-model'
         )
         assert result is None
+
+    def test_camel_case_exclusive_upper_bound(self):
+        from lib.model_info import (
+            _parse_token_limit_evidence,
+            _parse_token_limit_from_error,
+        )
+        message = (
+            'Unable to submit request because it has a maxOutputTokens value '
+            'of 65536 but the supported range is from 1 (inclusive) to '
+            '65536 (exclusive).')
+
+        evidence = _parse_token_limit_evidence(message, 'gemini-2.5-flash-lite')
+
+        assert evidence is not None
+        assert evidence.field == 'maxOutputTokens'
+        assert evidence.boundary == 65536
+        assert evidence.inclusive is False
+        assert evidence.maximum_allowed == 65535
+        assert _parse_token_limit_from_error(
+            message, 'gemini-2.5-flash-lite') == 65535
+
+    def test_route_limit_does_not_leak_to_same_model_on_other_route(self,
+                                                                    monkeypatch):
+        import lib.model_info._limits as limits
+
+        monkeypatch.setitem(limits._LEARNED_ROUTE_LIMITS, 'p|o|d1|openai', 8191)
+
+        assert limits._clamp_route_max_tokens(
+            'gemini-2.5-flash-lite', 65536,
+            route_key='p|o|d1|openai') == 8191
+        assert limits._clamp_route_max_tokens(
+            'gemini-2.5-flash-lite', 65536,
+            route_key='p|o|d2|openai') == 65536
+        assert limits._clamp_route_max_tokens(
+            'gemini-2.5-flash-lite', 65536,
+            route_key='p|o|d2|openai', declared_limit=32768) == 32768
+
+    def test_route_identity_is_collision_free_and_legacy_model_scoped(self):
+        from lib.model_info import _route_output_limit_key
+
+        common = {
+            'provider_id': 'provider',
+            'deployment_id': '',
+            'protocol': 'openai',
+        }
+        delimited = _route_output_limit_key(
+            **common, offering_id='a|b', model='c')
+        separately_delimited = _route_output_limit_key(
+            **common, offering_id='a', model='b|c')
+        other_legacy_model = _route_output_limit_key(
+            **common, offering_id='a|b', model='different')
+
+        assert delimited != separately_delimited
+        assert delimited != other_legacy_model
+
+    def test_http_classifier_learns_exclusive_limit_for_route(self,
+                                                               monkeypatch):
+        import lib.model_info as model_info
+        from lib.llm_errors import ModelLimitError, _classify_http_error
+
+        learned = []
+        monkeypatch.setattr(
+            model_info, '_learn_model_limit',
+            lambda model, limit, **kwargs: learned.append(
+                (model, limit, kwargs)))
+        message = (
+            'maxOutputTokens value of 65536 but the supported range is from '
+            '1 (inclusive) to 65536 (exclusive)')
+
+        with pytest.raises(ModelLimitError) as raised:
+            _classify_http_error(
+                400, message, 'gemini-2.5-flash-lite', '[test]',
+                max_tokens=65536,
+                route_limit_key='provider|offering|deployment|openai')
+
+        assert raised.value.detected_limit == 65535
+        assert learned == [(
+            'gemini-2.5-flash-lite', 65535,
+            {'route_key': 'provider|offering|deployment|openai'},
+        )]

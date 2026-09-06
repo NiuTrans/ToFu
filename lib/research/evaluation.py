@@ -24,7 +24,9 @@ from lib.log import get_logger
 
 logger = get_logger(__name__)
 
-EVALUATION_SCHEMA_VERSION = 1
+# v2 adds per-idea judge assessments so the UI can attribute criticism to a
+# specific candidate instead of one opaque artifact-level verdict.
+EVALUATION_SCHEMA_VERSION = 2
 EVALUATION_AXES = (
     'survey_coverage',
     'evidence_traceability',
@@ -142,7 +144,14 @@ def _judge_messages(direction: str, result: dict) -> list[dict]:
         '"strengths":[up to 3 strings],"failure_modes":[short snake_case strings],'
         '"recommended_changes":[{"target":"survey|retrieval|ideate|gate|prompt|parser",'
         '"priority":"high|medium|low","change":"specific mechanism change",'
-        '"evidence":"artifact fact motivating it"}],"verdict":"concise verdict"}. '
+        '"evidence":"artifact fact motivating it"}],'
+        '"idea_assessments":[{"idea":"exact title of one accepted idea",'
+        '"score":number 1..5,"verdict":"one-sentence judgement of THIS idea",'
+        '"main_risk":"strongest objection to THIS idea"}],'
+        '"verdict":"concise verdict"}. '
+        'Produce exactly one idea_assessments entry per accepted idea, keyed by '
+        'the exact idea title. When a strength, failure mode, verdict or '
+        'recommended change concerns one specific idea, name that idea. '
         'worth_following_up means this artifact gives a researcher at least one '
         'evidence-backed next experiment worth spending time on; it does not mean '
         'the proposed idea is publication-ready.'
@@ -206,6 +215,20 @@ def _clean_judgement(raw, *, model: str = '') -> Optional[dict]:
             'change': str(item.get('change') or '').strip()[:600],
             'evidence': str(item.get('evidence') or '').strip()[:600],
         })
+    assessments = []
+    for item in (raw.get('idea_assessments') or [])[:12]:
+        if not isinstance(item, dict):
+            continue
+        idea = str(item.get('idea') or '').strip()[:240]
+        score = _score(item.get('score'))
+        if not idea or score is None:
+            continue
+        assessments.append({
+            'idea': idea,
+            'score': score,
+            'verdict': str(item.get('verdict') or '').strip()[:300],
+            'main_risk': str(item.get('main_risk') or '').strip()[:300],
+        })
     return {
         'scores': scores,
         'worth_following_up': worth_following_up,
@@ -216,6 +239,7 @@ def _clean_judgement(raw, *, model: str = '') -> Optional[dict]:
                           for x in (raw.get('failure_modes') or [])[:8]
                           if str(x).strip()],
         'recommended_changes': changes,
+        'idea_assessments': assessments,
         'verdict': str(raw.get('verdict') or '').strip()[:1000],
         'model': model or '',
     }
@@ -225,6 +249,7 @@ def _call_judge(messages: list[dict], *, model: str, abort,
                 max_429_attempts: int) \
         -> tuple[Optional[dict], str, Optional[dict]]:
     from lib.llm_json import extract_json
+    from lib.paper.agent_loop_policy import PAPER_AGENT_ROUTE_MAX_RETRIES
 
     buf = {'content': ''}
 
@@ -238,7 +263,7 @@ def _call_judge(messages: list[dict], *, model: str, abort,
             prefer_model=model or None, strict_model=bool(model),
             capability='text', max_tokens=_JUDGE_MAX_TOKENS,
             temperature=0.0, thinking_enabled=False,
-            max_retries=2,
+            max_retries=PAPER_AGENT_ROUTE_MAX_RETRIES,
             max_429_attempts=max_429_attempts,
             log_prefix='[Research:Evaluate]'),
             context='research evaluation judge')
@@ -282,6 +307,7 @@ def _aggregate(judges: list[dict], attempted: int, errors: list[str], usage) -> 
             'worth_following_up': False, 'consensus': 'unavailable',
             'disagreement': {'max_axis_delta': 0.0, 'verdict_split': False},
             'strengths': [], 'failure_modes': [], 'recommended_changes': [],
+            'idea_assessments': [],
             'verdict': '', 'judges': [], 'errors': errors,
             'degraded': True,
             'degraded_reason': 'no valid LLM judge result',
@@ -316,6 +342,27 @@ def _aggregate(judges: list[dict], attempted: int, errors: list[str], usage) -> 
             if key not in seen_changes:
                 seen_changes.add(key)
                 changes.append(item)
+    assessments_by_idea: dict[str, list[dict]] = {}
+    for judge in judges:
+        for item in judge['idea_assessments']:
+            assessments_by_idea.setdefault(item['idea'], []).append(item)
+    idea_assessments = []
+    for idea, rows in assessments_by_idea.items():
+        verdicts: list[str] = []
+        risks: list[str] = []
+        for row in rows:
+            if row['verdict'] and row['verdict'] not in verdicts:
+                verdicts.append(row['verdict'])
+            if row['main_risk'] and row['main_risk'] not in risks:
+                risks.append(row['main_risk'])
+        idea_assessments.append({
+            'idea': idea,
+            'score': round(float(median(row['score'] for row in rows)), 2),
+            'judge_count': len(rows),
+            'verdicts': verdicts[:2],
+            'main_risks': risks[:2],
+        })
+    idea_assessments.sort(key=lambda row: row['score'], reverse=True)
     changes.sort(key=lambda item: {'high': 0, 'medium': 1, 'low': 2}[item['priority']])
     disagreement = _disagreement(judges)
     return {
@@ -327,6 +374,7 @@ def _aggregate(judges: list[dict], attempted: int, errors: list[str], usage) -> 
         'disagreement': disagreement,
         'strengths': strengths[:5], 'failure_modes': failure_modes[:12],
         'recommended_changes': changes[:8],
+        'idea_assessments': idea_assessments,
         'verdict': judges[-1]['verdict'],
         'judges': judges, 'errors': errors,
         'degraded': len(judges) < 2,

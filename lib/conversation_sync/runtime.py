@@ -17,7 +17,7 @@ def _build_user_message(
     message: Mapping[str, Any], config: Mapping[str, Any], conversation_id: str,
     user_id: Any,
 ) -> Any:
-    from lib.chat import build_user_msg_from_payload
+    from lib.chat.turn_builder import build_user_msg_from_payload
 
     return build_user_msg_from_payload(
         dict(message), dict(config), conv_id=conversation_id, user_id=user_id

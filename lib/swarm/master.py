@@ -579,12 +579,17 @@ class MasterOrchestrator:
             pair = results.get(spec.id)
             if pair is not None:
                 _, result = pair
+                terminal_status = (
+                    SubAgentStatus.FAILED.value
+                    if (result.status == SubAgentStatus.COMPLETED.value
+                        and result.error_message)
+                    else result.status)
                 # Normalise the SubAgentStatus value ('completed'/'failed') to
                 # the frontend vocabulary ('done'/'failed').
                 status = ('done'
-                          if result.status == SubAgentStatus.COMPLETED.value
-                          else 'failed' if result.status == SubAgentStatus.FAILED.value
-                          else result.status)
+                          if terminal_status == SubAgentStatus.COMPLETED.value
+                          else 'failed' if terminal_status == SubAgentStatus.FAILED.value
+                          else terminal_status)
                 total_tokens += result.total_tokens or 0
                 _tools, _tool_calls, _tool_calls_omitted = (
                     _snapshot_tool_timeline(result.tool_log))
@@ -606,9 +611,7 @@ class MasterOrchestrator:
                     'tools':         _tools,
                     'toolCalls':     _tool_calls,
                     'toolCallsOmitted': _tool_calls_omitted,
-                    'error':         (result.error_message or '')
-                                     if result.status != SubAgentStatus.COMPLETED.value
-                                     else '',
+                    'error':         result.error_message or '',
                 })
             else:
                 # No result yet. If the swarm has TERMINATED this agent is
@@ -806,9 +809,19 @@ class MasterOrchestrator:
 
     def _on_agent_complete_callback(self, spec: SubTaskSpec,
                                      result: SubAgentResult) -> None:
+        # Compatibility repair for results persisted by older workers, which
+        # could label an LLM exception ``completed`` when a prior round left
+        # partial prose. An explicit error always wins over that stale label.
+        terminal_status = (
+            SubAgentStatus.FAILED.value
+            if (result.status == SubAgentStatus.COMPLETED.value
+                and result.error_message)
+            else result.status)
+        if terminal_status != result.status:
+            result.status = terminal_status
         logger.info('[Master:%s] AGENT_COMPLETE agent-%s-%s status=%s elapsed=%.1fs tokens=%d rounds=%d',
                     self.task_id, spec.role, spec.id,
-                    result.status, result.elapsed_seconds,
+                    terminal_status, result.elapsed_seconds,
                     result.total_tokens, result.rounds_used)
         # 1) UI event (kept identical to legacy schema for the swarm panel)
         # ``objective`` is the agent-card body — full text, no truncation.
@@ -826,8 +839,7 @@ class MasterOrchestrator:
         # Error transparency: a failed agent's reason MUST reach the panel —
         # previously only the model-facing inbox payload carried it, so the UI
         # card showed a bare ❌ with an empty body and no way to say WHY.
-        _agent_error = ((result.error_message or '')
-                        if result.status != SubAgentStatus.COMPLETED.value else '')
+        _agent_error = result.error_message or ''
         if self.on_progress:
             self.on_progress({
                 'type':      'swarm_agent_complete',
@@ -836,7 +848,7 @@ class MasterOrchestrator:
                 'objective': spec.objective,
                 'model':     (getattr(self._agents.get(spec.id), 'model', '')
                               or self._resolve_spec_model(spec)),
-                'status':    result.status,
+                'status':    terminal_status,
                 'elapsed':   round(result.elapsed_seconds, 1),
                 'tokens':    result.total_tokens,
                 'summary':   (result.final_answer or ''),
@@ -846,7 +858,7 @@ class MasterOrchestrator:
                 #   are flagged for closer review.
                 'modifiedFiles': modified_files,
                 'content': (
-                    f'{"✅" if result.status == SubAgentStatus.COMPLETED.value else "❌"} '
+                    f'{"✅" if terminal_status == SubAgentStatus.COMPLETED.value else "❌"} '
                     f'[{spec.role}] Done in {result.elapsed_seconds:.1f}s'
                 ),
             })

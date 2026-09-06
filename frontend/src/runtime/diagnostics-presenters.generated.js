@@ -1241,7 +1241,12 @@ function _riSchedulePoll(delayMs) {
 async function _riPollTick() {
   _riPollTimer = null;
   if (!_riOpen) return;
-  if (document.hidden) { _riSchedulePoll(_RI_POLL_IDLE_MS); return; }
+  // The Android WebView reports visible while backgrounded; the shell's
+  // nativeVisibility bridge is the only reliable pocket signal there.
+  if (document.hidden || runtimeScope.nativeVisibility?.isHidden() === true) {
+    _riSchedulePoll(_RI_POLL_IDLE_MS);
+    return;
+  }
   await _riRefreshTasks({ silent: true });
   const live = Object.keys(_riTaskRows).some((id) => _riRowIsLive(_riTaskRows[id]));
   _riSchedulePoll(live ? _RI_POLL_LIVE_MS : _RI_POLL_IDLE_MS);
@@ -1789,7 +1794,7 @@ async function _riSelectTask(taskId, opts) {
   if (!reqs.length) {
     const emp = document.createElement('div');
     emp.className = 'ri-empty';
-    emp.textContent = t('ri.empty');
+    emp.textContent = t('ri.noRounds');
     technicalBody.appendChild(emp);
   }
   for (const row of reqs) {
@@ -1797,6 +1802,10 @@ async function _riSelectTask(taskId, opts) {
     el.className = 'ri-round';
     el.dataset.round = String(row.roundNum);
     el.dataset.turn = row.turn || '';
+    /* Rows merged from a swarm child's event log carry sourceTaskId: the
+     * per-round payload/state endpoints must be addressed with THAT task
+     * id (the child's own log), never the selected parent's. */
+    el.dataset.sourceTaskId = row.sourceTaskId || '';
     const attempts = Array.isArray(row.attempts) ? row.attempts : [];
     const attemptBits = attempts.map((a) => {
       const el2 = (a.streamElapsedMs / 1000).toFixed(1) + 's';
@@ -1813,15 +1822,22 @@ async function _riSelectTask(taskId, opts) {
       `<span class="ri-tool-chip">${_riEsc(name)}</span>`).join('');
     const turnBadge = row.turn
       ? `<span class="ri-turn-badge">${_riEsc(_riTurnLabel(row))}</span>` : '';
+    /* Merged child rows share round numbers with the parent (and with
+     * sibling agents) — the agent badge is what tells them apart. */
+    const agentBadge = row.sourceTaskId
+      ? `<span class="ri-agent-badge">${_riEsc(row.agentId ||
+          String(row.sourceTaskId).split('#agent:').pop())}</span>` : '';
     el.innerHTML =
       `<div class="ri-round-top">` +
       turnBadge +
+      agentBadge +
       `<span class="ri-round-n">${_riEsc(t('ri.roundNumber', {
         n: row.roundNum }))}</span>` +
       `</div>` +
       (toolChips ? `<div class="ri-round-tools">${toolChips}</div>` : '') +
       (attemptBits ? `<div class="ri-round-attempts">${attemptBits}</div>` : '');
-    el.onclick = () => _riSelectRound(taskId, row.roundNum, el, row.turn || '');
+    el.onclick = () => _riSelectRound(taskId, row.roundNum, el,
+      row.turn || '', row.sourceTaskId || '');
     technicalBody.appendChild(el);
   }
   if (silent) rounds.scrollTop = scrollTop;
@@ -2022,8 +2038,12 @@ function _riTailSlice(messages) {
   return messages.filter((m) => m && m.role !== 'system');
 }
 
-async function _riSelectRound(taskId, roundNum, el, turn) {
+async function _riSelectRound(taskId, roundNum, el, turn, sourceTaskId) {
   turn = turn || '';
+  /* Merged swarm-child rows read from the CHILD's event log; the parent's
+   * log has no snapshots for those rounds (the delegator never issued
+   * them). Selection identity (stale guards) stays the selected task. */
+  const fetchId = sourceTaskId || taskId;
   _riSel.traceOpen = false;
   _riRevealTechnical();
   const rounds = _riEl('riRoundList');
@@ -2033,17 +2053,17 @@ async function _riSelectRound(taskId, roundNum, el, turn) {
     rounds.querySelectorAll('.ri-trace-entry').forEach((r) =>
       r.classList.remove('ri-sel'));
   }
-  const payload = await _riFetchPayload(taskId, roundNum, turn);
+  const payload = await _riFetchPayload(fetchId, roundNum, turn);
   // Stale: the user moved on — including into the Turn Trace view, which a
   // late round-payload resolve must not clobber (the reverse race is
   // already guarded in _riOpenTrace).
   if (!_riOpen || _riSel.taskId !== taskId || _riSel.traceOpen) return;
   if (!payload || !payload.messages) return;
-  /* Fold against the previous round in the same Flow phase. */
+  /* Fold against the previous round in the same Flow phase / agent log. */
   let opts = { resetScroll: true };
   const num = parseInt(roundNum, 10);
   if (Number.isFinite(num) && num > 1) {
-    const prev = await _riFetchPayload(taskId, num - 1, turn);
+    const prev = await _riFetchPayload(fetchId, num - 1, turn);
     if (!_riOpen || _riSel.taskId !== taskId || _riSel.traceOpen) return;  // stale
     if (prev && prev.messages) {
       const k = _riSharedPrefix(prev.messages, payload.messages);
@@ -2057,7 +2077,7 @@ async function _riSelectRound(taskId, roundNum, el, turn) {
       payload.tools || undefined, false, undefined,
       Object.assign(opts, { contextManifest: payload.contextManifest || [] }));
     _riShowWireProjection(payload.wireProjection);
-    _riShowRawArchives(taskId, payload.rawArchives);
+    _riShowRawArchives(fetchId, payload.rawArchives);
   }
 }
 
@@ -2075,9 +2095,14 @@ async function openRequestInspectorForToolRound(taskId, roundNum) {
     reqs[reqs.length - 1];
   if (!pick) return;
   const targetTurn = pick.turn || '';
+  const targetSource = pick.sourceTaskId || '';
   const el = document.querySelector(
     '#riRoundList .ri-round[data-round="' + String(pick.roundNum) +
-    '"][data-turn="' + targetTurn + '"]') ||
+    '"][data-turn="' + targetTurn +
+    '"][data-source-task-id="' + targetSource + '"]') ||
+    document.querySelector(
+      '#riRoundList .ri-round[data-round="' + String(pick.roundNum) +
+      '"][data-turn="' + targetTurn + '"]') ||
     document.querySelector(
       '#riRoundList .ri-round[data-round="' + String(pick.roundNum) + '"]');
   if (el) {
@@ -2086,7 +2111,7 @@ async function openRequestInspectorForToolRound(taskId, roundNum) {
     el.classList.add('ri-flash');
     setTimeout(() => el.classList.remove('ri-flash'), 1600);
   }
-  await _riSelectRound(taskId, pick.roundNum, el, targetTurn);
+  await _riSelectRound(taskId, pick.roundNum, el, targetTurn, targetSource);
 }
 
 /* ── Tool-row debug panel (ONE view: the post-tool result state) ──────────

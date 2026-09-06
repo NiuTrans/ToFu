@@ -105,6 +105,16 @@ archive/settings fallback request.
 The cursor is the exact read boundary: state at or before it is present in the
 snapshot; later committed state is replayable after it.
 
+Persisted turns decode fail-closed: a stored shape the schema no longer
+accepts raises `ContractViolation` instead of silently mis-rendering.
+Declared legacy shapes cross the boundary only through
+`TURN_READ_ADAPTERS` in `lib/conversation_sync/service.py` — the explicit,
+ordered registry of copy-on-write lifts (today: pre-`attemptId` client
+observations). Every registered adapter is pinned by a legacy fixture
+under `contracts/fixtures/sync_v3/` that must fail raw decode and pass
+after adaptation (`tests/test_wire_fixtures.py`); a shape without a
+fixture is not an adapter.
+
 The endpoint defaults to `segmentPayload=full` and a complete Turn set for
 independent and older clients. The generated browser client fixes
 `segmentPayload=refs&turnWindow=tail-96&artifactHint=has-any`. The artifact

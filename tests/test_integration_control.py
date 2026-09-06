@@ -552,6 +552,29 @@ def test_git_211_scratch_merge_fallback_preserves_both_trees(
     assert _run(repository, 'git', 'show', f'{candidate}:two.txt') == 'two'
 
 
+def test_peek_ready_delegates_keyword_only_to_repository(monkeypatch):
+    """Regression pin for the 2026-09-03 incident: a checkpoint resurrected a
+    stale second ``_peek_ready`` that shadowed the real one and called
+    ``_state.peek_ready(_db_path())`` with ``_db_path`` undefined, so the
+    worker loop crashed on every poll (786 NameErrors in error.log)."""
+    import inspect
+
+    source = inspect.getsource(control)
+    assert source.count('def _peek_ready') == 1, \
+        'a duplicate _peek_ready definition shadows the real probe'
+    seen = {}
+
+    def fake_peek_ready(*, now=None):
+        seen['now'] = now
+        return {'id': 7}
+
+    monkeypatch.setattr(control._state, 'peek_ready', fake_peek_ready)
+    monkeypatch.setattr(control, '_now', lambda: 123.0)
+
+    assert control._peek_ready() == {'id': 7}
+    assert seen == {'now': 123.0}
+
+
 def test_worker_loop_survives_transient_storage_error(monkeypatch):
     """A transient StorageError in claim_next must not kill the poll thread.
 

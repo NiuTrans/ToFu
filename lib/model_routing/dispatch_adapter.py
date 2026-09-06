@@ -190,6 +190,8 @@ def mint_routed_slot_group(
             slot.route_deployment_id = candidate.deployment["deployment_id"]
             slot.route_connection_id = candidate.connection["connection_id"]
             slot.route_credential_id = credential["credential_id"]
+            slot.max_output_tokens = int(
+                candidate.deployment.get("max_output_tokens") or 0)
             snapshot_builder = RouteSnapshotBuilder(selection)
             if endpoint_errors:
                 snapshot_builder.record_degradation(

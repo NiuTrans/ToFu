@@ -543,20 +543,21 @@ class TestBuildBranchApiMessages:
         with self._mock_load(conv_messages):
             result = build_branch_api_messages('conv1', 3, 0, {}, user_id=1)
         # Context: Q1, A1 (Q2 excluded because branch is on A2 which was triggered by Q2)
-        # + decorated branch user + branch assistant + branch user
+        # + unchanged branch turns + a tail branch-context user carrier
         # Context ends before Q2 (msgIdx=3 is assistant, walk back: Q2 at idx=2 is user → contextEnd=2)
         assert result is not None
-        assert len(result) == 5
+        assert len(result) == 6
         assert result[0]['content'] == 'Q1'
         assert result[1]['content'] == 'A1'
-        # First branch user decorated with topic
-        assert '[分支话题: Deep dive]' in result[2]['content']
-        assert 'Tell me more about X' in result[2]['content']
+        assert result[2]['content'] == 'Tell me more about X'
         assert result[3]['content'] == 'Here is more about X'
         assert 'And Y?' in result[4]['content']
+        assert result[5]['role'] == 'user'
+        assert result[5]['_isBranchContext'] is True
+        assert '[分支话题: Deep dive]' in result[5]['content']
 
     def test_branch_with_selection_context(self):
-        """Branch with parentSelection should include it in the first user message."""
+        """Branch selection context rides a separate tail user message."""
         conv_messages = [
             {'role': 'user', 'content': 'Q1'},
             {'role': 'assistant', 'content': 'A1 with details',
@@ -574,11 +575,11 @@ class TestBuildBranchApiMessages:
         assert result is not None
         # Context: empty (branch on msg[1] which is assistant preceded by user at [0],
         #   contextEnd = 0, main_context = messages[:0] = [])
-        # + decorated branch user (with topic + selection)
-        assert len(result) == 1
-        assert '[选中的上下文]' in result[0]['content']
-        assert 'selected text from A1' in result[0]['content']
-        assert 'Explain this' in result[0]['content']
+        # + unchanged branch user + tail branch context
+        assert len(result) == 2
+        assert result[0]['content'] == 'Explain this'
+        assert '[选中的上下文]' in result[1]['content']
+        assert 'selected text from A1' in result[1]['content']
 
     def test_branch_with_system_prompt(self):
         """System prompt from config should be injected."""
@@ -685,10 +686,11 @@ class TestBuildBranchApiMessages:
         # contextEnd = msgIdx = 2 (user message, not assistant)
         # main_context = messages[:2] = [Q1, A1]
         assert result is not None
-        assert len(result) == 3
+        assert len(result) == 4
         assert result[0]['content'] == 'Q1'
         assert result[1]['content'] == 'A1'
-        assert '[分支话题: Sidebar]' in result[2]['content']
+        assert result[2]['content'] == 'Side question'
+        assert '[分支话题: Sidebar]' in result[3]['content']
 
     def test_branch_multi_turn(self):
         """Multi-turn branch conversation preserves full alternation."""
@@ -711,14 +713,15 @@ class TestBuildBranchApiMessages:
             result = build_branch_api_messages('conv1', 1, 0, {}, user_id=1)
         # No main context (branch on msg[1], which is assistant at idx 1,
         # walk back: idx 0 is user → contextEnd=0, main_context=[])
-        # Branch: 5 messages (6 minus placeholder)
+        # Branch: 5 messages (6 minus placeholder) + tail branch context.
         assert result is not None
-        assert len(result) == 5
+        assert len(result) == 6
         assert result[0]['role'] == 'user'
         assert result[1]['role'] == 'assistant'
         assert result[2]['role'] == 'user'
         assert result[3]['role'] == 'assistant'
         assert result[4]['role'] == 'user'
+        assert result[5]['_isBranchContext'] is True
 
     def test_branch_reply_quotes_handled(self):
         """Reply quotes in branch messages should be processed by _transform_messages."""

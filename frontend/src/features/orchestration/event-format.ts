@@ -99,7 +99,7 @@ export function formatOrchestrationEventLines(
       })}`));
       break;
     case 'zero_deliverable_guard':
-      rows.push(line(`${icon('warn')} ${text('orch.ev.zeroGuard')}`, 'is-err'));
+      rows.push(line(`${icon('warn')} ${text('orch.ev.zeroGuard')}`));
       break;
     case 'replan':
       rows.push(line(`${icon('compass')} ${text('orch.ev.replan', {
@@ -107,12 +107,12 @@ export function formatOrchestrationEventLines(
       })}${dim(event.defect || translate('orch.ev.structuralDefect'), 100)}`));
       break;
     case 'stuck_detected':
-      rows.push(line(`${icon('loop')} ${text('orch.ev.stuck')}`, 'is-err'));
+      rows.push(line(`${icon('loop')} ${text('orch.ev.stuck')}`));
       break;
     case 'no_progress':
       rows.push(line(`${icon('warn')} ${text('orch.ev.noProgress', {
         n: event.window == null ? 0 : event.window,
-      })}`, 'is-err'));
+      })}`));
       break;
     case 'parallel_start':
       rows.push(line(`${icon('fanout')} ${text('orch.ev.fanout', {

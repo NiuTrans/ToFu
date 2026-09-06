@@ -57,6 +57,14 @@ _PRE_TERMINAL_ORDER = {
     ExecutionPhase.SETTLING: 5,
 }
 _MAX_RESOURCES_PER_EXECUTION = 16
+_ALLOWED_RESOURCE_NAMES = frozenset({
+    "admission",
+    "billing",
+    "model_route",
+    "route",
+    "tool_environment",
+    "upstream",
+})
 
 
 class ResourceDisposition(str, Enum):
@@ -151,6 +159,10 @@ class ExecutionSession:
         self._lock = threading.RLock()
 
         with _active_sessions_lock:
+            if _active_sessions.get(self.execution_id) is not None:
+                raise ValueError(
+                    f"active execution id already exists: {self.execution_id}"
+                )
             _active_sessions[self.execution_id] = self
         _record_metric("record_execution_started", self.kind, self._phase.value)
 
@@ -209,9 +221,30 @@ class ExecutionSession:
         return self._advance(ExecutionPhase.ADMITTED)
 
     def mark_dispatch_started(self) -> bool:
-        changed = self._advance(ExecutionPhase.DISPATCHING)
         with self._lock:
+            current = self._phase
+            if current in TERMINAL_EXECUTION_PHASES:
+                return False
+            if (_PRE_TERMINAL_ORDER[ExecutionPhase.DISPATCHING]
+                    < _PRE_TERMINAL_ORDER[current]):
+                raise ValueError(
+                    "execution phase cannot regress "
+                    f"{current.value} -> {ExecutionPhase.DISPATCHING.value}"
+                )
+            changed = current != ExecutionPhase.DISPATCHING
+            now = time.monotonic()
+            if changed:
+                self._phase = ExecutionPhase.DISPATCHING
+                self._phase_changed_monotonic = now
+            self._heartbeat_monotonic = now
             self._dispatch_started = True
+        if changed:
+            _record_metric(
+                "record_execution_phase_transition",
+                self.kind,
+                current.value,
+                ExecutionPhase.DISPATCHING.value,
+            )
         return changed
 
     def heartbeat(self) -> None:
@@ -238,8 +271,10 @@ class ExecutionSession:
         recoverable: bool = False,
     ) -> None:
         resource_name = str(name or "").strip()
-        if not resource_name or len(resource_name) > 64:
-            raise ValueError("execution resource name must be 1..64 characters")
+        if resource_name not in _ALLOWED_RESOURCE_NAMES:
+            raise ValueError(
+                f"unsupported execution resource name: {resource_name or '<empty>'}"
+            )
         if not callable(release):
             raise TypeError("execution resource release must be callable")
         with self._lock:
@@ -348,7 +383,8 @@ class ExecutionSession:
             )
 
         with _active_sessions_lock:
-            _active_sessions.pop(self.execution_id, None)
+            if _active_sessions.get(self.execution_id) is self:
+                _active_sessions.pop(self.execution_id, None)
         _record_metric(
             "record_execution_terminal",
             self.kind,
@@ -393,12 +429,17 @@ def bind_model_route(
     release: Callable[[], Any],
 ) -> None:
     """Bind an already-minted request route to canonical terminal cleanup."""
-    session.mark_routed()
-
     def _release(_context: ExecutionSettlementContext) -> None:
         release()
 
-    session.hold_resource("model_route", _release, release_order=200)
+    _bind_acquired_resource(
+        session,
+        name="model_route",
+        release=_release,
+        rollback=release,
+        release_order=200,
+        mark_phase=session.mark_routed,
+    )
 
 
 def bind_billing_reservation(
@@ -409,16 +450,21 @@ def bind_billing_reservation(
     release: Callable[[], Any],
 ) -> None:
     """Bind billing whether it settles actual usage or releases pre-dispatch."""
-    if int(reservation_micro or 0) > 0:
-        session.mark_reserved()
-
     def _release(context: ExecutionSettlementContext) -> None:
         result = settle() if context.dispatch_started else release()
         if result is False:
             raise RuntimeError("billing operation did not acknowledge settlement")
 
-    session.hold_resource(
-        "billing", _release, release_order=300, recoverable=True,
+    _bind_acquired_resource(
+        session,
+        name="billing",
+        release=_release,
+        rollback=release,
+        release_order=300,
+        recoverable=True,
+        mark_phase=(
+            session.mark_reserved if int(reservation_micro or 0) > 0 else None
+        ),
     )
 
 
@@ -427,16 +473,104 @@ def bind_admission_lease(
     release: Callable[[], Any],
 ) -> None:
     """Bind an explicit TTL-backed admission lease to one execution."""
-    session.mark_admitted()
-
     def _release(_context: ExecutionSettlementContext) -> None:
         result = release()
         if result is False:
             raise RuntimeError("admission lease release was not acknowledged")
 
-    session.hold_resource(
-        "admission", _release, release_order=100, recoverable=True,
+    _bind_acquired_resource(
+        session,
+        name="admission",
+        release=_release,
+        rollback=release,
+        release_order=100,
+        recoverable=True,
+        mark_phase=session.mark_admitted,
     )
+
+
+def bind_tool_environment(
+    session: ExecutionSession,
+    release: Callable[[], Any],
+) -> None:
+    """Bind a request-scoped tool environment without an open-coded gap."""
+    def _release(_context: ExecutionSettlementContext) -> None:
+        release()
+
+    _bind_acquired_resource(
+        session,
+        name="tool_environment",
+        release=_release,
+        rollback=release,
+        release_order=250,
+    )
+
+
+def _bind_acquired_resource(
+    session: ExecutionSession,
+    *,
+    name: str,
+    release: Callable[[ExecutionSettlementContext], Any],
+    rollback: Callable[[], Any],
+    release_order: int,
+    recoverable: bool = False,
+    mark_phase: Callable[[], Any] | None = None,
+) -> None:
+    """Close the acquire-to-registration gap for every execution resource."""
+    held = False
+    try:
+        session.hold_resource(
+            name,
+            release,
+            release_order=release_order,
+            recoverable=recoverable,
+        )
+        held = True
+        if mark_phase is not None:
+            mark_phase()
+    except BaseException:
+        if held:
+            session.settle(
+                ExecutionPhase.FAILED, cause=f"{name}_bind_failed")
+        else:
+            try:
+                rollback()
+            except Exception as exc:
+                logger.error(
+                    "[ExecutionSession] unbound resource rollback failed "
+                    "execution=%s kind=%s resource=%s type=%s",
+                    session.execution_id[:20], session.kind, name,
+                    type(exc).__name__,
+                )
+            session.settle(
+                ExecutionPhase.FAILED, cause=f"{name}_bind_failed")
+        raise
+
+
+def acquire_and_bind_admission(
+    session: ExecutionSession,
+    controller: Any,
+) -> str | None:
+    """Acquire one exact lease or settle every earlier preflight resource.
+
+    Capacity refusal returns ``None`` after cleanup. Store/controller failures
+    also settle earlier resources, then propagate for the HTTP error boundary.
+    """
+    try:
+        lease_id = controller.acquire()
+    except BaseException:
+        session.settle(
+            ExecutionPhase.FAILED, cause="admission_acquire_failed")
+        raise
+    if lease_id is None:
+        session.settle(
+            ExecutionPhase.FAILED, cause="task_admission_refused")
+        return None
+    bind_admission_lease(
+        session,
+        lambda: controller.release(lease_id),
+    )
+    return str(lease_id)
 
 
 def execution_outcome_for_task(task: dict, event: dict | None = None) -> ExecutionPhase:
@@ -502,9 +636,11 @@ __all__ = [
     "ResourceDisposition",
     "TERMINAL_EXECUTION_PHASES",
     "active_execution_snapshots",
+    "acquire_and_bind_admission",
     "bind_admission_lease",
     "bind_billing_reservation",
     "bind_model_route",
+    "bind_tool_environment",
     "execution_outcome_for_task",
     "execution_session_for_task",
     "reconcile_overdue_execution_sessions",

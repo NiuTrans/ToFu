@@ -15,7 +15,7 @@ _DOMAIN_MODULES = (
     'core', 'identity', 'providers', 'model_routing', 'artifacts', 'billing', 'integration', 'workflows', 'research',
     'knowledge',
     'queue', 'worker_jobs', 'conversations', 'archives', 'timers', 'scheduler', 'turns',
-    'observability', 'plugins', 'desktop', 'project_brain',
+    'observability', 'plugins', 'desktop', 'browser', 'project_brain',
 )
 
 

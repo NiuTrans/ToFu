@@ -20,6 +20,28 @@ from lib.llm_dispatch._api_stream_state import _StreamRetryState, _adapt_stream_
 logger = get_logger('lib.llm_dispatch.api')
 
 
+def _notify_retry(
+    callback,
+    slot,
+    *,
+    strict_model: bool,
+    attempt: int,
+    reason: str,
+    status_code: int,
+) -> None:
+    """Report a retry with the physical route currently being attempted."""
+    if callback is None:
+        return
+    callback(
+        attempt=attempt,
+        reason=reason,
+        status_code=status_code,
+        attempt_model=slot.model,
+        provider_id=(slot.routing_provider_id or slot.provider_id),
+        strict_model=bool(strict_model),
+    )
+
+
 def _notify_attempt_restart(callback, reason, *, log_prefix):
     """Fence a discarded partial attempt without trusting caller callbacks."""
     if callback is None:
@@ -83,6 +105,7 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         BadRequestError,
         ContentFilterError,
         InvalidImageError,
+        LocalRequestPreparationError,
         PermissionError_,
         PromptTooLongError,
         RateLimitError,
@@ -313,10 +336,19 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
         tag = f'{log_prefix}[D:{slot.key_name}:{slot.model}]'
 
         # Build this slot's provider-specific body through the shared adapter.
-        body = _adapt_stream_body_for_slot(
-            slot, body_or_messages, is_body,
-            tools=tools, max_tokens=max_tokens, temperature=temperature,
-            thinking_enabled=thinking_enabled, preset=preset, effort=effort)
+        try:
+            body = _adapt_stream_body_for_slot(
+                slot, body_or_messages, is_body,
+                tools=tools, max_tokens=max_tokens, temperature=temperature,
+                thinking_enabled=thinking_enabled, preset=preset,
+                effort=effort)
+        except Exception as error:
+            slot.release()
+            from lib.llm_errors import LocalRequestPreparationError
+            raise LocalRequestPreparationError(
+                f'local request preparation failed: {error}',
+                stage='slot_body_adaptation',
+            ) from error
 
         # Prefix size is needed only by the same-conversation cache-write
         # visibility guard below. The retired cross-conversation admission gate
@@ -426,6 +458,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     max_retries)
             return stream_result
 
+        except LocalRequestPreparationError:
+            slot.release()
+            raise
+
         except DispatchSharedContentionDeferred:
             slot.release()
             raise
@@ -461,9 +497,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                     '%s Quota exhausted on %s:%s — disabling key for '
                     'today: %s',
                     log_prefix, slot.key_name, slot.model, _err_str)
-                if on_retry:
-                    on_retry(attempt=state.hard_attempts,
-                             reason='Key balance exhausted', status_code=429)
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state.hard_attempts,
+                    reason='Key balance exhausted', status_code=429)
                 _fire_attempt_restart('key balance exhausted')
                 continue
             state.note_free_429(is_gateway=bool(getattr(e, 'is_gateway', False)))
@@ -492,9 +529,9 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             # Log response body periodically to diagnose persistent 429s
             _err_body = str(e)[:300]
             # 2026-05-05 noise-reduction: per-cycle 429 is ROUTINE backpressure
-              # (handler already rotates to the next key). Log at INFO, not
-              # WARNING — only the final exhaustion path (all keys excluded)
-              # remains WARNING/ERROR.
+            # (handler already rotates to the next key). Log at INFO, not
+            # WARNING — only the final exhaustion path (all keys excluded)
+            # remains WARNING/ERROR.
             if state._429_count <= 3 or state._429_count % 100 == 0:
                 logger.info(
                     '%s 429 rate-limited on %s:%s (cycle #%d) — body: %s',
@@ -505,16 +542,19 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 logger.debug(
                     '%s 429 rate-limited on %s:%s (cycle #%d)',
                     log_prefix, slot.key_name, slot.model, state._429_count)
-            if on_retry:
-                if _is_gateway:
-                    # Upstream-outage class (gateway 5xx / vendor transient
-                    # wrapped in 4xx) — NOT 限流; the cause is a sick
-                    # upstream, not per-key contention.
-                    on_retry(attempt=state._429_count,
-                             reason='Upstream error',
-                             status_code=int(getattr(e, 'status_code', 0) or 0))
-                else:
-                    on_retry(attempt=state._429_count, reason='Rate limited (429)', status_code=429)
+            if _is_gateway:
+                # Upstream-outage class (gateway 5xx / vendor transient
+                # wrapped in 4xx) — NOT 限流; the cause is a sick upstream,
+                # not per-key contention.
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state._429_count, reason='Upstream error',
+                    status_code=int(getattr(e, 'status_code', 0) or 0))
+            else:
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state._429_count, reason='Rate limited (429)',
+                    status_code=429)
             _fire_attempt_restart('rate limited (429) — rotating slot')
             if _retry_delay_s > 0:
                 _sleep_and_record_queue_wait(
@@ -577,9 +617,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                 log_prefix, slot.key_name, slot.model,
                 getattr(e, 'base_url', '') or '?', _UNREACHABLE_COOLDOWN,
                 str(e)[:160])
-            if on_retry:
-                on_retry(attempt=state.hard_attempts,
-                         reason='Endpoint unreachable', status_code=0)
+            _notify_retry(
+                on_retry, slot, strict_model=strict_model,
+                attempt=state.hard_attempts,
+                reason='Endpoint unreachable', status_code=0)
             _fire_attempt_restart('endpoint unreachable — rotating slot')
 
         except AbortedError:
@@ -629,9 +670,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             logger.warning('%s Model %s has no route on this gateway '
                            '(HTTP 400) — excluded model, trying next: %.300s',
                            log_prefix, slot.model, str(e))
-            if on_retry:
-                on_retry(attempt=state.hard_attempts,
-                         reason='Upstream error', status_code=400)
+            _notify_retry(
+                on_retry, slot, strict_model=strict_model,
+                attempt=state.hard_attempts,
+                reason='Upstream error', status_code=400)
             _fire_attempt_restart('model route missing — rotating slot')
 
         except BadRequestError as e:
@@ -646,9 +688,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             logger.warning('%s Bad request (HTTP 400, deterministic) on %s:%s '
                            '— released slot, excluded pair, trying next: %.500s',
                            log_prefix, slot.key_name, slot.model, str(e))
-            if on_retry:
-                on_retry(attempt=state.hard_attempts,
-                         reason='Upstream error', status_code=400)
+            _notify_retry(
+                on_retry, slot, strict_model=strict_model,
+                attempt=state.hard_attempts,
+                reason='Upstream error', status_code=400)
             _fire_attempt_restart('bad request — rotating slot')
 
         except Exception as e:
@@ -670,10 +713,10 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
                                '(cooldown %ss) — rotating slot: %s',
                                log_prefix, slot.key_name, slot.model,
                                f'{_ra:.0f}' if _ra else '0.5', str(e)[:160])
-                if on_retry:
-                    on_retry(attempt=state._429_count,
-                             reason='Subscription quota reached',
-                             status_code=429)
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state._429_count,
+                    reason='Subscription quota reached', status_code=429)
                 _fire_attempt_restart('subscription quota reached — rotating slot')
                 _sleep_and_record_queue_wait(
                     state, 0.3, abort_check=abort_check)
@@ -683,14 +726,16 @@ def dispatch_stream(body_or_messages, *, on_thinking=None, on_content=None,
             state.last_err = e
             _is_timeout = 'timed out' in str(e).lower() or 'timeout' in type(e).__name__.lower()
             # Notify frontend about retry so user sees status instead of "Waiting…"
-            if on_retry:
-                _status = getattr(e, 'status_code', 0) or 0
-                _reason = str(e)[:120]
-                if _is_timeout:
-                    _reason = 'Request timed out'
-                elif _status:
-                    _reason = f'HTTP {_status}'
-                on_retry(attempt=state.hard_attempts + 1, reason=_reason, status_code=_status)
+            _status = getattr(e, 'status_code', 0) or 0
+            _reason = str(e)[:120]
+            if _is_timeout:
+                _reason = 'Request timed out'
+            elif _status:
+                _reason = f'HTTP {_status}'
+            _notify_retry(
+                on_retry, slot, strict_model=strict_model,
+                attempt=state.hard_attempts + 1, reason=_reason,
+                status_code=_status)
             # Timeout / strict-model → exclude the PAIR (other keys of the
             # model still tried); otherwise exclude the whole MODEL.
             state.note_generic_error(slot, is_timeout=_is_timeout, strict_model=strict_model)
@@ -748,6 +793,7 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
         BadRequestError,
         ContentFilterError,
         InvalidImageError,
+        LocalRequestPreparationError,
         PermissionError_,
         PromptTooLongError,
         RateLimitError,
@@ -899,10 +945,19 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
 
         tag = f'{log_prefix}[aD:{slot.key_name}:{slot.model}]'
 
-        body = _adapt_stream_body_for_slot(
-            slot, body_or_messages, is_body,
-            tools=tools, max_tokens=max_tokens, temperature=temperature,
-            thinking_enabled=thinking_enabled, preset=preset, effort=effort)
+        try:
+            body = _adapt_stream_body_for_slot(
+                slot, body_or_messages, is_body,
+                tools=tools, max_tokens=max_tokens, temperature=temperature,
+                thinking_enabled=thinking_enabled, preset=preset,
+                effort=effort)
+        except Exception as error:
+            slot.release()
+            from lib.llm_errors import LocalRequestPreparationError
+            raise LocalRequestPreparationError(
+                f'local request preparation failed: {error}',
+                stage='slot_body_adaptation',
+            ) from error
 
         # ── Cache write-visibility settle gate (async path) — see the sync
         #    dispatch_stream branch + cache_settle.py for the rationale. Waits
@@ -974,6 +1029,10 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                          stream_result.state.value, finish, slot.model, latency)
             return stream_result
 
+        except LocalRequestPreparationError:
+            slot.release()
+            raise
+
         except DispatchSharedContentionDeferred:
             slot.release()
             raise
@@ -1000,9 +1059,10 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 dispatcher, slot, _is_contention, log_prefix)
             if _is_quota:
                 state.note_quota_key(slot)
-                if on_retry:
-                    on_retry(attempt=state.hard_attempts, reason='Key balance exhausted',
-                             status_code=429)
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state.hard_attempts,
+                    reason='Key balance exhausted', status_code=429)
                 _fire_attempt_restart('key balance exhausted')
                 continue
             state.note_free_429(is_gateway=bool(getattr(e, 'is_gateway', False)))
@@ -1023,13 +1083,16 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                     getattr(e, 'credential_delivery_anomaly_attempts', 0),
                     slot.model)
                 raise
-            if on_retry:
-                if _is_gateway:
-                    on_retry(attempt=state._429_count,
-                             reason='Upstream error',
-                             status_code=int(getattr(e, 'status_code', 0) or 0))
-                else:
-                    on_retry(attempt=state._429_count, reason='Rate limited (429)', status_code=429)
+            if _is_gateway:
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state._429_count, reason='Upstream error',
+                    status_code=int(getattr(e, 'status_code', 0) or 0))
+            else:
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state._429_count, reason='Rate limited (429)',
+                    status_code=429)
             _fire_attempt_restart('rate limited (429) — rotating slot')
             if _retry_delay_s > 0:
                 _wait_started = time.monotonic()
@@ -1081,9 +1144,10 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                 'excluded pair, failing over',
                 log_prefix, slot.key_name, slot.model,
                 getattr(e, 'base_url', '') or '?', _UNREACHABLE_COOLDOWN)
-            if on_retry:
-                on_retry(attempt=state.hard_attempts,
-                         reason='Endpoint unreachable', status_code=0)
+            _notify_retry(
+                on_retry, slot, strict_model=strict_model,
+                attempt=state.hard_attempts,
+                reason='Endpoint unreachable', status_code=0)
             _fire_attempt_restart('endpoint unreachable — rotating slot')
 
         except AbortedError:
@@ -1130,9 +1194,10 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             logger.warning('%s Model %s has no route on this gateway '
                            '(HTTP 400) — excluded model, trying next: %.300s',
                            log_prefix, slot.model, str(e))
-            if on_retry:
-                on_retry(attempt=state.hard_attempts,
-                         reason='Upstream error', status_code=400)
+            _notify_retry(
+                on_retry, slot, strict_model=strict_model,
+                attempt=state.hard_attempts,
+                reason='Upstream error', status_code=400)
             _fire_attempt_restart('model route missing — rotating slot')
 
         except BadRequestError as e:
@@ -1147,9 +1212,10 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             logger.warning('%s Bad request (HTTP 400, deterministic) on %s:%s '
                            '— released slot, excluded pair, trying next: %.500s',
                            log_prefix, slot.key_name, slot.model, str(e))
-            if on_retry:
-                on_retry(attempt=state.hard_attempts,
-                         reason='Upstream error', status_code=400)
+            _notify_retry(
+                on_retry, slot, strict_model=strict_model,
+                attempt=state.hard_attempts,
+                reason='Upstream error', status_code=400)
             _fire_attempt_restart('bad request — rotating slot')
 
         except Exception as e:
@@ -1170,10 +1236,10 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
                                '(cooldown %ss) — rotating slot: %s',
                                log_prefix, slot.key_name, slot.model,
                                f'{_ra:.0f}' if _ra else '0.5', str(e)[:160])
-                if on_retry:
-                    on_retry(attempt=state._429_count,
-                             reason='Subscription quota reached',
-                             status_code=429)
+                _notify_retry(
+                    on_retry, slot, strict_model=strict_model,
+                    attempt=state._429_count,
+                    reason='Subscription quota reached', status_code=429)
                 _fire_attempt_restart(
                     'subscription quota reached — rotating slot')
                 _wait_started = time.monotonic()
@@ -1183,11 +1249,13 @@ async def async_dispatch_stream(body_or_messages, *, on_thinking=None,
             slot.record_error(is_rate_limit=False)
             state.last_err = e
             _is_timeout = 'timed out' in str(e).lower() or 'timeout' in type(e).__name__.lower()
-            if on_retry:
-                _status = getattr(e, 'status_code', 0) or 0
-                on_retry(attempt=state.hard_attempts + 1,
-                         reason='Request timed out' if _is_timeout else (f'HTTP {_status}' if _status else str(e)[:120]),
-                         status_code=_status)
+            _status = getattr(e, 'status_code', 0) or 0
+            _reason = ('Request timed out' if _is_timeout else
+                       f'HTTP {_status}' if _status else str(e)[:120])
+            _notify_retry(
+                on_retry, slot, strict_model=strict_model,
+                attempt=state.hard_attempts + 1, reason=_reason,
+                status_code=_status)
             state.note_generic_error(slot, is_timeout=_is_timeout, strict_model=strict_model)
             _fire_attempt_restart('stream failure — rotating slot')
             logger.debug('%s async_dispatch_stream error: %s — next slot',

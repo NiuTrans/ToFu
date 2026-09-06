@@ -332,13 +332,6 @@ def project_message_for_window(message):
     return projected
 
 
-# Backward-compatible private names: the task-manager facade has historically
-# exported these spellings and tests/migration scripts import them directly.
-_sanitize_usage_for_persist = sanitize_usage_for_persist
-_sanitize_api_rounds_for_persist = sanitize_api_rounds_for_persist
-_trim_round_for_persist = trim_tool_round_for_persist
-
-
 __all__ = [
     '_USAGE_TRANSIENT_KEYS',
     'sanitize_usage_for_persist',
@@ -348,7 +341,4 @@ __all__ = [
     'project_task_result_metadata_for_storage',
     'trim_tool_round_for_persist',
     'project_message_for_window',
-    '_sanitize_usage_for_persist',
-    '_sanitize_api_rounds_for_persist',
-    '_trim_round_for_persist',
 ]

@@ -317,33 +317,28 @@ def _record_vu_turn_and_check_budget(
 
     ``targets`` is the set of files the WORKER touched this turn
     (``task['modifiedFileList']`` paths) — the churn signal for the
-    diminishing-returns guard.  The VU reply's ``[PROGRESS: resolved=X
-    remaining=Y]`` line supplies the hard net-progress signal.
+    advisory diminishing-returns ledger. The VU reply's ``[PROGRESS:
+    resolved=X remaining=Y]`` line supplies its structured progress signal.
 
     Returns ``{'stop': bool, 'reason': str, 'turn': int}`` — ``reason`` is
-    ``'budget_exhausted'`` (turn ceiling), ``'stuck'`` (``AUTOPILOT_STUCK_WINDOW``
-    near-identical VU nudges), or ``'no_progress'`` (``window`` edit-shipping
-    turns re-touching the same targets without resolving new objective items),
-    else ''.  FAIL-OPEN: any error resolving/persisting returns no-stop so a
-    settings glitch never wedges a healthy loop, and the no_progress guard
-    never fires without the hard ``[PROGRESS]`` signal.
+    ``'budget_exhausted'`` (turn ceiling), else ''. Similar VU wording and the
+    structured progress ledger are retained as bounded diagnostics but are
+    never stop conditions: neither prose similarity nor several edits without
+    a newly completed acceptance criterion can prove that work failed to
+    advance. FAIL-OPEN: any error resolving/persisting returns no-stop so a
+    settings glitch never wedges a healthy loop.
     """
     out = {'stop': False, 'reason': '', 'turn': 0}
     if not conv_id:
         return out
     try:
         from lib.agent_verdict import (
-            AUTOPILOT_STUCK_WINDOW,
             autopilot_max_turns,
-            autopilot_progress_window,
-            detect_diminishing_returns,
-            detect_stuck,
             parse_progress,
         )
         from lib.conversations import update_conversation_settings
 
         max_turns = autopilot_max_turns()
-        prog_window = autopilot_progress_window()
         resolved, _remaining = parse_progress(vu_text)
         turn_targets = sorted({str(t) for t in (targets or []) if t})
 
@@ -388,13 +383,6 @@ def _record_vu_turn_and_check_budget(
             if max_turns and count >= max_turns:
                 out['stop'] = True
                 out['reason'] = 'budget_exhausted'
-            elif detect_stuck(hist, window=AUTOPILOT_STUCK_WINDOW):
-                out['stop'] = True
-                out['reason'] = 'stuck'
-            elif prog_window and detect_diminishing_returns(
-                    ledger, window=prog_window):
-                out['stop'] = True
-                out['reason'] = 'no_progress'
             return None  # always persist the incremented counters
 
         # notify=False: turn-count / VU-history / progress ledger are internal

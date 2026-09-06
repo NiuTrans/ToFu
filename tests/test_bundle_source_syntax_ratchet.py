@@ -89,3 +89,15 @@ def test_restart_availability_bridge_is_published_after_runtime_scope_exists():
     assert prelude.count(declaration) == 1
     assert prelude.count(publication) == 1
     assert prelude.index(declaration) < prelude.index(publication)
+
+
+def test_native_visibility_bridge_is_published_after_runtime_scope_exists():
+    """Keep native visibility wiring from creating an import-time TDZ."""
+    prelude = (
+        ROOT / 'frontend/src/runtime/sections/_prelude.js'
+    ).read_text(encoding='utf-8')
+    declaration = 'const runtimeScope = Object.create(null);'
+    publication = 'runtimeScope.nativeVisibility = nativeVisibility;'
+    assert prelude.count(declaration) == 1
+    assert prelude.count(publication) == 1
+    assert prelude.index(declaration) < prelude.index(publication)

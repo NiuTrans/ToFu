@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 
 from lib.log import get_logger
+from lib.project_mod.path_resolution import _resolve_base
 from lib.tasks_pkg.executor_image._resolve import _images_dir
 
 logger = get_logger(__name__)
@@ -60,7 +61,7 @@ def _save_image_to_project(image_b64, mime_type, output_path, project_path,
 
     from lib.project_mod.modifications import _record_modification
     from lib.project_mod.scanner import _safe_path
-    from lib.project_mod.tools import _resolve_base, _touch_for_vscode
+    from lib.project_mod.write_tools import _touch_for_vscode
 
     try:
         eff_base, eff_rel = _resolve_base(project_path, output_path, conv_id=conv_id)

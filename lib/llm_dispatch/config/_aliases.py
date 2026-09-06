@@ -36,8 +36,11 @@ MODEL_ALIAS_GROUPS = [
      'us.anthropic.claude-sonnet-4-6-v1:0'},
     # DeepSeek V3.2 — Meituan gateway mirrors across Tencent/Baidu/Huawei/Doubao clouds
     {'deepseek-v3.2-tencent', 'deepseek-v3.2-baidu', 'deepseek-v3.2-huawei', 'deepseek-v3.2-doubao'},
-    # DeepSeek V4 Flash — direct DeepSeek API + Meituan gateway Huawei-cloud mirror
-    {'deepseek-v4-flash', 'deepseek-v4-flash-huawei'},
+    # DeepSeek V4 Flash — direct DeepSeek API + Meituan gateway cloud mirrors
+    {'deepseek-v4-flash', 'deepseek-v4-flash-huawei', 'deepseek-v4-flash-tencent',
+     'deepseek-v4-flash-meituan'},
+    # DeepSeek V4 Pro — direct DeepSeek API + Meituan gateway Tencent-cloud mirror
+    {'deepseek-v4-pro', 'deepseek-v4-pro-tencent'},
     # GLM-5.1 — Meituan gateway default + Huawei-cloud mirror
     {'glm-5.1', 'glm-5.1-huawei'},
 ]

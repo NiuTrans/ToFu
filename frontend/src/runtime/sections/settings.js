@@ -25,6 +25,7 @@ var _modelPriceDisplayPolicy = {
 let _stgModelRouting = null;
 let _stgModelRoutingRevision = 0;
 let _stgModelRoutingLoadError = '';
+let _stgModelRoutingLoadPromise = null;
 let _stgPendingCredentialSecrets = {};
 let _stgPresets = {};
 

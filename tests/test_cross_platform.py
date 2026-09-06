@@ -192,13 +192,13 @@ class TestOptionalDependencyFlags:
 @pytest.mark.unit
 class TestCommandSafety:
     def test_echo_safe(self):
-        from lib.project_mod.tools import _is_destructive_command
+        from lib.project_mod.command_analysis import _is_destructive_command
         assert not _is_destructive_command('echo hello')
 
     def test_rm_rf_destructive(self):
-        from lib.project_mod.tools import _is_destructive_command
+        from lib.project_mod.command_analysis import _is_destructive_command
         assert _is_destructive_command('rm -rf /tmp/foo')
 
     def test_git_status_safe(self):
-        from lib.project_mod.tools import _is_destructive_command
+        from lib.project_mod.command_analysis import _is_destructive_command
         assert not _is_destructive_command('git status')

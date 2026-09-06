@@ -35,16 +35,79 @@ This domain turns durable conversation/project state, memory, tool history, and 
 
 Tool-round continuations preserve round-zero provider/model binding and stable prefix order; providers do not silently reread mutable globals later.
 
-Cache-stable prefix layout: the cached head (tools manifest + `platform_static`) is kept byte-stable within a session, and everything that can legitimately change between turns renders as a per-turn TAIL block instead.
-- `environment` (cwd / is-git / platform / model) ships as a tail block, never inside `platform_static`, so changing the project path does not rewrite the cached prefix. The model perceives the path from that block each turn; on the one turn where the path actually moved, the block additionally carries a short note (old → new, earlier absolute paths may be stale) and the turn projection gains a `projectPathChange` provenance chip. First sight and steady state never fire; baselines are in-memory, conversation-scoped, and bounded (256 scopes), so a restart re-baselines without false transitions.
-- The wire `tools` array freezes at the session's first tool selection: MCP server disconnects/reconnects and newly discovered tools no longer mutate it. Schemas of tools that appear after the freeze are injected at the tail `mcp_tools_delta` block (name + description + input schema, bounded) and are callable through `execute_tools`; the block refreshes every turn, so a dropped server simply empties it. Turns where the reachable set actually changed vs the frozen wire carry a `mcpToolsDelta` provenance chip (added/removed names, capped at 8 each).
+Cache-stable prefix layout: the operator/user-authored base system message and
+canonical included tool declarations are never rewritten by runtime context.
+Every composer-owned block—including `platform_static`, project rules,
+preferences, memory/skill/vault guidance, and orchestration guidance—first
+renders in an appended user-role TAIL carrier. Subsequent composition is
+content-addressed: an identical block stays at its existing byte position; a
+changed block appends only its new version, and an explicit retraction appends
+a tombstone. No composer pass deletes and rebuilds surviving carriers.
+
+- `environment` (cwd / is-git / platform / model) ships as a tail block, never inside `platform_static`, so changing the project path does not rewrite the cached prefix. The model perceives the path from that block each turn; a move appends a separately addressed one-shot event (old → new, earlier absolute paths may be stale) and the turn projection gains a `projectPathChange` provenance chip. The next steady turn leaves the new environment bytes untouched. First sight and steady state never fire; baselines are in-memory, conversation-scoped, and bounded (256 scopes), so a restart re-baselines without false transitions.
+- Environment-specific multi-root, remote-worktree, programmatic, and
+  multi-agent routing guidance also lives in the tail. Included tool schemas
+  retain their canonical descriptions; a schema budget may omit an optional
+  tool but never strip annotations from an included tool.
+- The wire `tools` array freezes at the session's first tool selection: MCP server disconnects/reconnects and newly discovered tools no longer mutate it. Schemas of tools that appear after the freeze are injected at the tail `mcp_tools_delta` block (name + description + input schema, bounded) and are callable through `execute_tools`. An unchanged reachable set reuses the existing bytes; a changed set appends a new version, and losing the last delta appends one retraction tombstone. Turns where the reachable set actually changed vs the frozen wire carry a `mcpToolsDelta` provenance chip (added/removed names, capped at 8 each).
+- Programmatic and multi-agent wire projection is latched from the task's first orchestration decision. Observed fan-out, later round numbers, retries, serial-gateway experiments, and ToolScript fallback state may update telemetry or execution behavior, but cannot add/remove tools or switch an existing tool schema mid-task. Local programmatic projection remains additive.
 Both transition chips ride the existing task-sidecar → turn-projection `provenance` lane (declared in `contracts/conversation_sync_v3.yaml`) and render in the turn-provenance strip (`frontend/src/conversation/presentation/turn-provenance.ts`); they appear only on the turn that observed the change.
+
+### Runtime message-mutation boundary
+
+The durable Turn transcript is immutable during automatic execution. The
+orchestrator deep-copies its nested message projection before context
+composition, cache ordering, compaction, sanitization, or provider conversion.
+Automatic Layer 1 never reads or writes conversation authority. Dynamic
+guidance—including MCP deltas, skills/memory, environment, lifecycle recovery,
+URL prefetch, branch context, Paper gateway routing, local PTC, and native
+multi-agent hints—is represented by an appended tail `user` carrier. Provider
+converters must not add ephemeral per-round copies: stable PTC and multi-agent
+policy is composer-owned, while dynamic stage/capacity stays in execution
+telemetry rather than prompt bytes.
+The former cache-oriented `tool_call_id` sorter is a compatibility no-op;
+produced tool-result order is preserved.
+
+Tool inclusion may still change at an explicit capability/permission boundary,
+but an included first-party tool keeps its canonical name, description, and
+schema. Runtime project roots, remote bindings, memory scope, filter settings,
+swarm capacity, routing stage, and schema pressure do not rewrite those bytes.
+MCP definitions are copied from the task's frozen bridge snapshot; later MCP
+reachability changes are described by the tail delta carrier rather than by
+editing the wire prefix.
+
+The remaining transformations are narrow exceptions, not context injection:
+
+- conversation projection renders structured user-owned fields (reply quotes,
+  referenced conversations, plans, documents, images, and videos) into the API
+  representation without changing stored Turns;
+- `UserPromptSubmit` hooks may deliberately replace the newest request text
+  because PII redaction and safety filtering would be defeated if the original
+  text remained provider-visible;
+- automatic L2/advanced/reactive compaction may remove or summarize history in
+  the request-local working copy to satisfy a hard provider context limit;
+  manual compaction is the separately authorized persistent operation;
+- provider adapters operate on fresh wire bodies and may normalize roles,
+  tool-call/result blocks, images, cache-control annotations, or alternating
+  message constraints required by the destination protocol;
+- Claude OAuth cloaking rebuilds the provider-only system envelope but moves
+  the user's system text to a stable carrier after the first user; and swarm checkpoint
+  recovery replaces only a stale provider-policy system carrier so withdrawn
+  tool authority cannot survive a process restart;
+- token counters may construct synthetic counting-only messages. These never
+  enter the task projection or conversation authority.
+
+Natural execution appends—assistant output, tool calls/results, loop-breaker
+prompts, inbox messages, and user-visible error recovery—are new events, not
+rewrites of an earlier message. Any new automatic context feature must use the
+tail composer lane; any new exception requires an executable regression test
+and an update to this boundary.
 
 Provider reads share one lazy process-wide daemon pool sized from the launch-probed Agent worker budget (`min(8, 2 × agent workers)`). Its pending queue is `max(8, 3 × provider workers)`; saturation degrades optional context with typed timing evidence instead of creating another thread or unbounded queue entry. A permanently wedged adapter can therefore consume only this fixed budget, not one new pool per request.
 
 `ContextPlanV2` is the request-local global budget authority. It classifies objective/constraints, structured task state, evidence/recovery, hot tail, and recoverable cold history.
 Required blocks lock first; permission, priority, freshness, access value, and token cost deterministically select optional blocks.
-Its manifest records selection/suppression, hashes, token counts, recovery handles, stable segment hashes, and cache epoch. Per-block `max_tokens` remains a hard ceiling but cannot bypass the global budget. Multi-agent task shapes receive only a 128-token trigger/discipline block; the live role/tool catalogue has one prompt owner in the `spawn_agents` schema and is never duplicated into system context.
+Its manifest records selection/suppression, hashes, token counts, recovery handles, stable segment hashes, and cache epoch. Per-block `max_tokens` remains a hard ceiling but cannot bypass the global budget. Multi-agent task shapes receive only a bounded tail trigger/discipline block; the canonical `spawn_agents` schema is never rewritten with per-round stage or capacity prose.
 
 `TaskStateSnapshotV1` is rebuilt from turn/tool events: goal, hard constraints, decisions, completed work, files, tests, errors, open questions, TODOs, evidence IDs, observation time, and world version.
 It is a request projection, never a second transcript authority; assistant prose cannot mark work complete.
@@ -89,6 +152,9 @@ A bounded launch-probed LRU may retain recursively frozen parsed frontmatter onl
 - One context-window authority and one token-counter resolution API.
 - Deterministic provider order and observable segment provenance.
 - Durable messages are never mutated by request-local preparation; same-role diagnostics classify original pair boundaries using short-lived producer identity that is deleted before provider/debug wire output, so synthetic carriers and relocated objective anchors stay silent while naked real-to-real duplicates still warn.
+- Runtime context is append-only at the message level: composer-owned guidance
+  uses a trailing user carrier and never extends system content or inserts a
+  historical-head user message.
 - Persistent compaction is atomic and revision-guarded.
 - Turn-native compaction authority stores the public block once; private v1
   markers exist only in the compatibility projection.

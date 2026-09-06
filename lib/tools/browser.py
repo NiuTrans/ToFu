@@ -69,7 +69,10 @@ BROWSER_TOOL_RESEARCH_PAGE = {
         "description": (
             "Deep-read an exact URL in the user's logged-in browser. Traverses "
             "bounded same-origin pages and returns DOM plus ranked/redacted "
-            "API/state data and shapes."
+            "API/state data and shapes. If the user names an internal service "
+            "without giving its URL, call browser_get_history with that name "
+            "first and let the user-visible history identify the URL; never "
+            "guess an internal hostname."
         ),
         "parameters": {
             "type": "object",
@@ -274,7 +277,9 @@ BROWSER_TOOL_GET_HISTORY = {
     "function": {
         "name": "browser_get_history",
         "description": (
-            "Search the user's browser history. Returns URLs, titles, visit counts and timestamps."
+            "Search the user's browser history. Returns URLs, titles, visit "
+            "counts and timestamps. Use this to resolve a user-named internal "
+            "service before browser_research_page when no exact URL was given."
         ),
         "parameters": {
             "type": "object",

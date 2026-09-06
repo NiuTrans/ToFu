@@ -550,6 +550,10 @@ function renderDefaultBlock(
     node.textContent = `${block.channel}: ${block.items.length}`;
     return;
   }
+  if (block.kind === 'system-note') {
+    node.textContent = block.text;
+    return;
+  }
   if (block.kind === 'file-changes') {
     node.textContent = `${block.count} file change${block.count === 1 ? '' : 's'}`;
     return;
@@ -686,6 +690,10 @@ function sameBlock(
     return previous.channel === current.channel
       && previous.anchorLlmRound === current.anchorLlmRound
       && samePresentationValue(previous.items, current.items);
+  }
+  if (previous.kind === 'system-note' && current.kind === 'system-note') {
+    return previous.noteKind === current.noteKind
+      && previous.text === current.text;
   }
   if (previous.kind === 'file-changes' && current.kind === 'file-changes') {
     return previous.count === current.count

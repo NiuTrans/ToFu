@@ -196,6 +196,7 @@ def stream_responses_websocket(
             plan.t0, url=plan.url, log_prefix=log_prefix,
             on_thinking=on_thinking, on_content=on_content,
             on_tool_call_ready=on_tool_call_ready,
+            route_output_limit_key=plan.route_output_limit_key,
             progress=progress)
         idle_timeout = _tp.stream_idle_timeout_seconds()
         last_beat = time.monotonic()

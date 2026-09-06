@@ -122,6 +122,7 @@ class Slot:
     route_deployment_id: str = ''
     route_connection_id: str = ''
     route_credential_id: str = ''
+    max_output_tokens: int = 0
     route_snapshot: dict = field(default_factory=dict)
     extra_headers: dict = field(default_factory=dict)  # provider-specific custom HTTP headers
     thinking_format: str = ''       # per-provider thinking param format:

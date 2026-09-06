@@ -29,6 +29,10 @@ from __future__ import annotations
 import importlib
 import pathlib
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PY = ROOT / 'lib' / 'tasks_pkg' / 'orchestrator' / '_run.py'
@@ -160,11 +164,13 @@ def test_leaf_carries_peer_and_steer_event_names():
 
 
 def test_leaf_carries_durable_dedup_call():
-    """The leaf must call dedup_peer_durable_rows for the peer flush —
-    that call is the never-double-delivery invariant enforcement."""
+    """The leaf must call dedup_inbox_durable_rows for the peer and
+    background-command flushes — that call is the never-double-delivery
+    invariant enforcement. (Renamed from dedup_peer_durable_rows when the
+    background-command lane joined the same dual-write contract.)"""
     src = LEAF_PY.read_text()
-    assert 'dedup_peer_durable_rows' in src, (
-        'flush leaf must call dedup_peer_durable_rows to enforce the '
+    assert 'dedup_inbox_durable_rows' in src, (
+        'flush leaf must call dedup_inbox_durable_rows to enforce the '
         'never-double-delivery invariant')
 
 

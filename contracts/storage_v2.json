@@ -1,0 +1,143 @@
+{
+  "format": "tofu.storage-protocol.v2",
+  "protocolVersion": 2,
+  "encoding": "canonical-flat-messagepack",
+  "frame": {
+    "lengthPrefix": "u32-big-endian-body-bytes",
+    "checksumSuffix": "crc32c-u32-big-endian-over-body",
+    "maximumBodyBytes": 8388608,
+    "maximumPayloadBytes": 8384512,
+    "maximumBlobChunkBytes": 1048576,
+    "maximumInFlightFrames": 64,
+    "maximumInFlightFrameBytes": 134217728,
+    "readAdmission": "reserve-declared-body-before-allocation",
+    "writeAdmission": "reserve-maximum-body-before-encoding",
+    "canonicalFieldOrder": "strictly-increasing-numeric-id",
+    "unknownFieldPolicy": "reject"
+  },
+  "messageKinds": {
+    "hello": 1,
+    "request": 2,
+    "response": 3,
+    "blobChunk": 4,
+    "responseChunk": 5
+  },
+  "fields": [
+    {"id": 0, "name": "kind", "type": "u8"},
+    {"id": 1, "name": "protocolVersion", "type": "u16"},
+    {"id": 2, "name": "correlationId", "type": "binary[16]-nonzero"},
+    {"id": 3, "name": "deadlineUnixMs", "type": "u64-positive"},
+    {"id": 4, "name": "ownerId", "type": "u64-positive"},
+    {"id": 5, "name": "tenantId", "type": "u64-positive|null"},
+    {"id": 6, "name": "commandId", "type": "utf8[1..256]|null"},
+    {"id": 7, "name": "schemaId", "type": "u32-positive"},
+    {"id": 8, "name": "operation", "type": "utf8[1..128]"},
+    {"id": 9, "name": "payload", "type": "binary[0..8384512]"},
+    {"id": 10, "name": "status", "type": "u16"},
+    {"id": 11, "name": "errorCode", "type": "utf8[1..64]|null"},
+    {"id": 12, "name": "errorMessage", "type": "utf8[1..1024]|null"},
+    {"id": 13, "name": "retryable", "type": "bool"},
+    {"id": 14, "name": "streamId", "type": "binary[16]-nonzero"},
+    {"id": 15, "name": "chunkIndex", "type": "u32"},
+    {"id": 16, "name": "final", "type": "bool"},
+    {"id": 17, "name": "minimumVersion", "type": "u16"},
+    {"id": 18, "name": "maximumVersion", "type": "u16"},
+    {"id": 19, "name": "schemaIds", "type": "sorted-unique-u32-positive[1..32]"},
+    {"id": 20, "name": "authToken", "type": "binary[32]-secret-nonzero"},
+    {"id": 21, "name": "totalPayloadBytes", "type": "u64-positive"}
+  ],
+  "requiredFields": {
+    "hello": [0, 2, 17, 18, 19, 20],
+    "request": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "response": [0, 1, 2, 7, 9, 10, 11, 12, 13],
+    "blobChunk": [0, 1, 2, 3, 4, 5, 6, 7, 9, 14, 15, 16, 21],
+    "responseChunk": [0, 1, 2, 7, 9, 14, 15, 16]
+  },
+  "serverSession": {
+    "negotiation": "authenticate-token-then-exactly-one-hello-before-requests",
+    "helloResponse": "zero-status-response-with-hello-correlation-and-negotiated-schema",
+    "authority": "authenticated-owner-and-tenant-fixed-for-session",
+    "responseCorrelation": "exact-request-correlation-id",
+    "responseSchema": "negotiated-schema-id",
+    "statusCodes": {
+      "badRequest": 400,
+      "forbidden": 403,
+      "deadlineElapsed": 408,
+      "conflict": 409,
+      "resourceExhausted": 429,
+      "notImplemented": 501,
+      "unavailable": 503,
+      "integrityFailure": 550
+    }
+  },
+  "loopbackListener": {
+    "bindPolicy": "numeric-loopback-only",
+    "maximumConnections": 64,
+    "minimumConnectionStackBytes": 262144,
+    "maximumConnectionStackBytes": 2097152,
+    "maximumIoTimeoutMilliseconds": 300000,
+    "maximumAcceptPollMilliseconds": 1000,
+    "authorityLockScope": "one-semantic-request",
+    "parentLease": "nonblocking-empty-pipe-eof-stops-admission-then-joins-connections"
+  },
+  "daemon": {
+    "command": "serve",
+    "authorityOpen": "existing-only",
+    "endpoint": "numeric-ipv4-loopback-ephemeral-port",
+    "authSecretSource": "TOFU_STORAGE_TOKEN-environment",
+    "authSecretMinimumBytes": 32,
+    "authSecretMaximumBytes": 256,
+    "authTokenDerivation": "sha256-tofu.storage.v2.auth-token-nul-plus-ascii-secret",
+    "ownerScope": "explicit-positive-owner-and-optional-positive-tenant",
+    "ownershipChannel": "stdin-empty-pipe-eof",
+    "readinessChannel": "stdout-single-json-line-maximum-4096-bytes-no-secrets",
+    "supervisorSelection": "forbidden-while-pre-authority"
+  },
+  "resourceProbe": {
+    "lifecycle": "one-shot-before-authority-open",
+    "cpu": "minimum-of-process-affinity-and-cgroup-v1-or-v2-quota",
+    "memory": "minimum-of-proc-memavailable-and-cgroup-v1-or-v2-limit-minus-current",
+    "volume": "authority-volume-available-bytes",
+    "failurePolicy": "fixed-lean-profile",
+    "leanConnections": 4,
+    "leanFrameBytes": 16777216,
+    "connectionStackBytes": 1048576,
+    "minimumWritableVolumeFreeBytes": 150994944,
+    "maximumConnections": 64,
+    "maximumFrameBytes": 134217728
+  },
+  "streamedRequests": {
+    "maximumPayloadBytes": 67108864,
+    "maximumChunks": 64,
+    "allowedOperations": ["artifact.create", "task_results.checkpoint", "tool_result_artifact.put"],
+    "ordering": "one-incomplete-stream-per-connection-strict-zero-based-chunk-index",
+    "identity": "every-chunk-exactly-matches-correlation-deadline-owner-tenant-command-schema-stream-and-declared-total; terminator-matches-request-identity",
+    "terminator": "final-chunk-then-empty-payload-request-carries-operation",
+    "memoryAdmission": "first-chunk-declared-total-is-validated-and-reserved-once-before-exact-capacity-allocation; one decoded chunk is the only additional transport buffer"
+  },
+  "streamedResponses": {
+    "maximumPayloadBytes": 67108864,
+    "maximumChunks": 64,
+    "chunkPayloadBytes": 1048576,
+    "eligibility": "successful-response-payload-larger-than-one-chunk",
+    "ordering": "strict-zero-based-chunk-index-with-final-on-last-chunk",
+    "identity": "every-chunk-and-terminator-exactly-match-correlation-and-schema",
+    "terminator": "empty-payload-success-response-after-final-chunk",
+    "memoryAdmission": "each-encoded-chunk-holds-shared-frame-budget-through-write"
+  },
+  "invariants": [
+    "Hello ranges must contain protocol version 2; schemaIds are sorted and unique, negotiation selects the highest common schema ID, and the 256-bit nonzero private token is authenticated before a session exists.",
+    "Owner and schema IDs are positive; tenant is explicit null or positive.",
+    "Correlation and blob stream IDs are fixed-width and nonzero.",
+    "Write semantics require a non-null commandId at semantic dispatch, never from a client-supplied write flag.",
+    "A zero response status has null error fields and retryable=false; nonzero status has both error fields and an empty payload.",
+    "Blob request chunks require commandId and an identical positive totalPayloadBytes no larger than 64 MiB, are ordered by streamId plus chunkIndex, reserve that aggregate before exact-capacity allocation, and final must complete the declared total before one identity-matched empty-payload Request consumes it.",
+    "A successful payload above one chunk is emitted as responseChunk frames followed by one empty success Response; correlation, schema, stream identity, order, final placement, aggregate size, and chunk count are exact and bounded.",
+    "CRC, canonical encoding, field set, and semantic invariants are validated before dispatch.",
+    "A server session is constructible only after constant-time comparison of a SHA-256 token witness, negotiates exactly once, fixes its authenticated owner and tenant authority, emits only the negotiated schema plus the request correlation ID in every response, and never formats token material.",
+    "A connection requires Hello as its first frame, returns a zero-status response as negotiation acknowledgement, distinguishes clean boundary EOF from truncated frames, and shares a 64-frame/134217728-byte in-flight admission budget across connections; streamed aggregates consume one frame slot and their full declared byte capacity until dispatch.",
+    "The network acceptor binds only a numeric loopback address, admits at most 64 connections, holds the authority mutex for one semantic request rather than a connection lifetime, uses bounded socket I/O and accept polling, and treats EOF on an inherited nonblocking empty pipe as the signal to stop admission, cancel connections at frame boundaries, and join them.",
+    "The pre-authority daemon opens only an existing explicit authority, derives its wire token from a bounded ASCII environment secret that is removed after reading, publishes one bounded credential-free readiness line, and cannot be selected by the application Supervisor.",
+    "Daemon connection and frame budgets derive from one launch observation of affinity/cgroup CPU, host/cgroup memory headroom and authority-volume free bytes; missing CPU or memory selects the fixed lean profile, and every derived value remains under the contract hard ceilings."
+  ]
+}

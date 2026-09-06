@@ -23,13 +23,18 @@ DEFAULT_SLOT_CONFIGS = {
     'fable-5':                       {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     'aws.fable-5':                   {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     'us.anthropic.fable-5-v1:0':     {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
-    # Meituan-gateway name for Fable 5 (Jul 2026 marketplace) — pricier tier
+    # YourProvider-gateway name for Fable 5 (Jul 2026 marketplace) — pricier tier
     # than the public API (¥72/¥360 per 1M ≈ $9.94/$49.72).
     'claude-fable-5':                {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.030},
+    # ── Anthropic Fable 5.1 (Sep 2026) — $10/$50 per 1M, ~2x Fable 5 list price ──
+    'fable-5.1':                       {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.030},
+    'aws.fable-5.1':                   {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.030},
+    'us.anthropic.fable-5-1-v1:0':     {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.030},
+    'claude-fable-5-1':                {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.030},
     # ── Claude (Anthropic — 5th gen: Sonnet 5, Jun 2026) ──
-    # Promo price $2/$10 until 2026-08-31, then $3/$15 — at $3 input the
-    # derived 'cheap' tag no longer applies; drop it when the price row moves.
-    'claude-sonnet-5':               {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 50,  'latency': 2000, 'cost': 0.009},
+    # Promo ended 2026-08-31 as announced: at the standard $3/$15 the input
+    # price is no longer under the cheap bracket, so the tag is dropped.
+    'claude-sonnet-5':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 50,  'latency': 2000, 'cost': 0.015},
     # ── Claude (Anthropic — current gen: 4.8 flagship, May 2026) ──
     'claude-opus-4-8':               {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 5000, 'cost': 0.015},
     # ── Claude (Anthropic — 4.7 family, Apr 2026) ──
@@ -102,21 +107,36 @@ DEFAULT_SLOT_CONFIGS = {
     'deepseek-v4-pro':               {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.001},
     'deepseek-v4-flash':             {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
     'deepseek-v4-flash-huawei':      {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
+    'deepseek-v4-flash-tencent':     {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
+    'deepseek-v4-flash-yourprovider':     {'caps': {'text', 'thinking', 'cheap'},      'rpm': 60,  'latency': 2000, 'cost': 0.0002},
+    'deepseek-v4-pro-tencent':       {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.001},
+    # Dated GA pin of V4 Pro (2026-08-12) — same checkpoint the rolling alias serves.
+    'deepseek-v4-pro-0813':          {'caps': {'text', 'thinking', 'cheap'},      'rpm': 30,  'latency': 3000, 'cost': 0.001},
+    'deepseek-v4-flash-vision-exp':  {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30, 'latency': 2000, 'cost': 0.0002},
     # RETIRED 2026-07-24 15:59 UTC (api-docs.deepseek.com/updates): the legacy
     # aliases 'deepseek-chat' and 'deepseek-reasoner' now ERROR on the official
     # API — their rows were removed. Successors: deepseek-v4-flash (chat →
     # non-thinking, reasoner → thinking) / deepseek-v4-pro. Do NOT re-add.
     'deepseek-v3.2':                 {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
-    'deepseek-v3.2-tencent':         {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
-    'deepseek-v3.2-baidu':           {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
-    'deepseek-v3.2-huawei':          {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
-    'deepseek-v3.2-doubao':          {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.001},
+    # RETIRED 2026-09-04 (YourProvider-gateway probe 95a225612ce5cf84): the -tencent/
+    # -baidu/-huawei/-doubao mirror spellings all 400 "invalid model name" on
+    # your-llm-gateway.example.com — mirror rows removed. Plain deepseek-v3.2 stays: the
+    # Tencent TokenHub template still serves it.
 
     # ── Gemini ──
     'gemini-2.5-pro':                {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 100, 'latency': 2000, 'cost': 0.005},
     'gemini-2.5-flash':              {'caps': {'text', 'vision', 'cheap'},         'rpm': 200, 'latency': 1500, 'cost': 0.001},
     'gemini-2.0-flash-lite':         {'caps': {'text', 'cheap'},                   'rpm': 200, 'latency': 1000, 'cost': 0.001},
     'gemini-3.1-flash-lite-preview': {'caps': {'text', 'vision', 'cheap'},         'rpm': 30,  'latency': 1500, 'cost': 0.001},
+    'gemini-3.1-flash-lite':         {'caps': {'text', 'vision', 'cheap'},         'rpm': 30,  'latency': 1500, 'cost': 0.001},
+    'gemini-2.5-flash-lite':         {'caps': {'text', 'vision', 'cheap'},         'rpm': 200, 'latency': 1000, 'cost': 0.001},
+    'doubao-seed-1-6-vision-250815': {'caps': {'text', 'vision', 'cheap'},         'rpm': 60,  'latency': 2000, 'cost': 0.001},
+    'grok-4.6':                      {'caps': {'text', 'vision', 'thinking'},      'rpm': 30,  'latency': 3000, 'cost': 0.010},
+    'kimi-k2.7-code':                {'caps': {'text', 'thinking', 'cheap'},       'rpm': 30,  'latency': 3000, 'cost': 0.003},
+    'kimi-k2.7-code-highspeed':      {'caps': {'text', 'thinking', 'cheap'},       'rpm': 30,  'latency': 1500, 'cost': 0.005},
+    'o3-pro':                        {'caps': {'text', 'thinking'},                'rpm': 10,  'latency': 8000, 'cost': 0.060},
+    'qwen-mt-plus':                  {'caps': {'text', 'cheap'},                   'rpm': 60,  'latency': 2000, 'cost': 0.001},
+    'gpt-5.3-codex':                 {'caps': {'text', 'vision', 'thinking'},      'rpm': 10,  'latency': 3000, 'cost': 0.006},
     'gemini-3.1-pro-preview':        {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 5,   'latency': 3000, 'cost': 0.006},
     'gemini-3-flash-preview':        {'caps': {'text', 'vision', 'thinking', 'cheap', 'audio_chat'}, 'rpm': 60,  'latency': 1500, 'cost': 0.001},
     # Omni chat model: audio arrives inline as an input_audio content-part via
@@ -128,6 +148,8 @@ DEFAULT_SLOT_CONFIGS = {
     # Aug 2026 marketplace addition (released 2026-08-13, 1M ctx / 64K out) —
     # marketplace default quota 20 RPM.
     'gemini-3.7-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 2000, 'cost': 0.005},
+    # Sep 2026 marketplace addition — marketplace default quota 20 RPM.
+    'gemini-3.8-flash':              {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 2000, 'cost': 0.005},
     'gemini-3.5-flash-lite':         {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 20,  'latency': 1500, 'cost': 0.001},
 
     # ── Qwen (DashScope) ──
@@ -184,7 +206,7 @@ DEFAULT_SLOT_CONFIGS = {
     # ── Mistral AI ──
     'mistral-large-latest':          {'caps': {'text', 'vision', 'thinking', 'cheap'}, 'rpm': 30, 'latency': 3000, 'cost': 0.008},
     'mistral-small-latest':          {'caps': {'text', 'cheap'},                   'rpm': 60,  'latency': 2000, 'cost': 0.001},
-    'codestral-latest':              {'caps': {'text', 'cheap'},                  'rpm': 60,  'latency': 2000, 'cost': 0.003},
+    'mistral-medium-latest':         {'caps': {'text', 'vision'},                 'rpm': 60,  'latency': 2000, 'cost': 0.003},
 
     # ── xAI (Grok) ──
     'grok-3':                        {'caps': {'text', 'thinking'},                'rpm': 30,  'latency': 3000, 'cost': 0.010},
@@ -245,7 +267,7 @@ DEFAULT_SLOT_CONFIGS = {
     'whisper-1':                     {'caps': {'transcription'},                   'rpm': 60,  'latency': 4000, 'cost': 0.006},
     'whisper-large-v3-turbo':        {'caps': {'transcription'},                   'rpm': 120, 'latency': 2000, 'cost': 0.0004},
     'whisper-large-v3':              {'caps': {'transcription'},                   'rpm': 120, 'latency': 3000, 'cost': 0.0004},
-    # Doubao-Seed-ASR-2.0 (Volcengine Seed-ASR 2.0) — served on the Meituan
+    # Doubao-Seed-ASR-2.0 (Volcengine Seed-ASR 2.0) — served on the YourProvider
     # gateway's OpenAI-native multipart /audio/transcriptions surface.
     'Doubao-Seed-ASR-2.0':           {'caps': {'transcription'},                   'rpm': 60,  'latency': 3000, 'cost': 0.001},
 

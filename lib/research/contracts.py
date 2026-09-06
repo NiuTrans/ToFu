@@ -22,6 +22,7 @@ DEFAULT_RESEARCH_HARVEST_PAPERS = 20
 MIN_RESEARCH_HARVEST_PAPERS = 3
 MAX_RESEARCH_SEED_PAPERS = 20
 MAX_RESEARCH_DIRECTION_CHARS = 2_000
+MAX_RESEARCH_MODEL_CHARS = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,11 +33,12 @@ class ResearchRequest:
     lang: str
     n_ideas: int
     seed_arxiv_ids: tuple[str, ...]
+    model: str
 
     def dedup_key(self, user_id: int) -> tuple:
         """Return the exact live-work identity, including explicit corpus."""
         return (user_id, self.direction, self.lang, self.n_ideas,
-                self.seed_arxiv_ids)
+                self.seed_arxiv_ids, self.model)
 
 
 def _bounded_integer(value, *, default: int, minimum: int, maximum: int,
@@ -117,7 +119,7 @@ def normalize_discovered_arxiv_ids(values) -> tuple[str, ...]:
 
 
 def normalize_research_request(direction, *, lang='en', n_ideas=None,
-                               seed_arxiv_ids=None) -> ResearchRequest:
+                               seed_arxiv_ids=None, model=None) -> ResearchRequest:
     """Return the one canonical request used for execution and deduplication."""
     if not isinstance(direction, str):
         raise TypeError('direction must be a string')
@@ -137,17 +139,29 @@ def normalize_research_request(direction, *, lang='en', n_ideas=None,
     if normalized_lang not in ('en', 'zh'):
         raise ValueError("lang must be 'en' or 'zh'")
 
+    if model is None:
+        normalized_model = ''
+    elif isinstance(model, str):
+        normalized_model = model.strip()
+    else:
+        raise TypeError('model must be a string')
+    if len(normalized_model) > MAX_RESEARCH_MODEL_CHARS:
+        raise ValueError(
+            f'model exceeds {MAX_RESEARCH_MODEL_CHARS} characters')
+
     return ResearchRequest(
         direction=normalized_direction,
         lang=normalized_lang,
         n_ideas=normalize_research_idea_count(n_ideas),
         seed_arxiv_ids=normalize_research_seed_arxiv_ids(seed_arxiv_ids),
+        model=normalized_model,
     )
 
 
 __all__ = [
     'DEFAULT_RESEARCH_HARVEST_PAPERS', 'DEFAULT_RESEARCH_IDEAS',
     'MAX_RESEARCH_DIRECTION_CHARS', 'MAX_RESEARCH_IDEAS',
+    'MAX_RESEARCH_MODEL_CHARS',
     'MAX_RESEARCH_SEED_PAPERS', 'MIN_RESEARCH_HARVEST_PAPERS',
     'MIN_RESEARCH_IDEAS', 'ResearchRequest',
     'normalize_discovered_arxiv_ids', 'normalize_research_harvest_count',

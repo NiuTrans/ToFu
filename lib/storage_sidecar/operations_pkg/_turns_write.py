@@ -782,6 +782,12 @@ def _turn_append_settled(session: Session, payload: Mapping[str, Any]) -> Any:
     now = _integer(payload, "created_at", default=command_now, minimum=0)
     turn_id = str(payload.get("turn_id") or uuid.uuid4())
     attempt_id = str(uuid.uuid4()) if actor != "human" else None
+
+    if session.fetch_one(
+        "SELECT turn_id FROM storage_conversation_turns WHERE turn_id=?",
+        (turn_id,),
+    ) is not None:
+        raise StorageError("database_conflict", "Turn already exists")
     session.execute(
         "INSERT INTO storage_conversation_turns "
         "(turn_id,conversation_id,user_id,lane_id,parent_turn_id,ordinal,actor,"

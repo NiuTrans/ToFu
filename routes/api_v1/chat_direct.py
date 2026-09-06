@@ -1,12 +1,10 @@
 """routes/api_v1/chat_direct.py — POST /api/v1/chat/stream-direct.
 
-A NATIVE-ASYNC, ON-LOOP streaming chat endpoint. Unlike
-``/api/v1/chat/completions`` (which ``create_task`` + ``spawn_task`` onto an
-OFF-loop worker thread and then tails the task's event buffer), this handler
-drives ``lib.llm_dispatch.async_dispatch_stream`` **directly on the event
-loop** — the httpx streaming call never occupies a thread-pool worker. This is
-the production home that finally makes the native-async streaming path live
-(see docs/API_CONTRACT.md §9).
+A stateless HTTP adapter for the native-async, on-loop single-turn execution
+service in ``lib.agent_core.direct_stream``. Unlike
+``/api/v1/chat/completions`` (which creates a replayable Task), this surface
+binds request resources to one ``ExecutionSession`` and relays the service's
+SSE frames. The route never calls provider dispatch itself.
 
 How the on-loop bridge works
 ----------------------------
@@ -40,7 +38,7 @@ from lib.agent_core.admission import controller
 from lib.agent_core.execution_session import (
     ExecutionPhase,
     ExecutionSession,
-    bind_admission_lease,
+    acquire_and_bind_admission,
     bind_billing_reservation,
     bind_model_route,
 )
@@ -241,7 +239,15 @@ async def chat_stream_direct():
     # Admission control: shared backpressure with the rest of the headless
     # surface. The lease follows the upstream dispatch, not the frontend SSE
     # lifetime, so repeated disconnects cannot create uncounted model work.
-    sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
+    try:
+        sse_slot_token, sse_rejection = _try_acquire_sse_slot(auth)
+    except Exception:
+        await asyncio.to_thread(
+            execution_session.settle,
+            ExecutionPhase.FAILED,
+            cause='sse_admission_failed',
+        )
+        raise
     if sse_rejection is not None:
         await asyncio.to_thread(
             execution_session.settle,
@@ -249,22 +255,18 @@ async def chat_stream_direct():
             cause='sse_admission_refused',
         )
         return sse_rejection
-    admission_lease = controller.acquire()
+    try:
+        admission_lease = acquire_and_bind_admission(
+            execution_session, controller)
+    except Exception:
+        sse_limiter.release(sse_slot_token)
+        raise
     if admission_lease is None:
         sse_limiter.release(sse_slot_token)
-        await asyncio.to_thread(
-            execution_session.settle,
-            ExecutionPhase.FAILED,
-            cause='task_admission_refused',
-        )
         logger.warning('[chat_direct] admission refused (in_flight=%d/%d)',
                        controller.in_flight, controller.capacity)
         return api_error('Server at capacity; retry shortly.', status=503,
                          error_kind='overloaded', retry_after=5)
-    bind_admission_lease(
-        execution_session,
-        lambda: controller.release(admission_lease),
-    )
     dispatch_terminal: dict = {}
 
     def _dispatch_started():
@@ -294,7 +296,7 @@ async def chat_stream_direct():
             logger.debug(
                 '[chat_direct] usage accounting failed request=%s type=%s',
                 request_record['id'], type(exc).__name__)
-        error = dispatch_terminal.get('error')
+        error = dispatch_terminal.get('exception')
         if error is None and isinstance(result, ProviderStreamResult) \
                 and result.is_verified_complete:
             outcome = ExecutionPhase.COMPLETED

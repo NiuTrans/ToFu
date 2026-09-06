@@ -343,7 +343,7 @@ def run_report_task(task, messages, images):
             tool_done_event['verticals'] = verticals
         _append_report_event(task, tool_done_event)
 
-        _result_budget.append(
+        return _result_budget.append(
             messages, round_index=rnd, tool_name=fn_name,
             tool_call_id=tc_id, content=result, round_entry=round_entry,
             world_version=str(task.get('_worldVersion') or ''),

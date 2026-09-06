@@ -127,6 +127,11 @@ GET /api/v1/tasks/by-conv/<conv_id>      (scope: tasks; discovery)
 跨机器 `transportMs` 受墙钟偏差影响；超出可信窗口或出现负值时设置
 `clockSkewSuspected`，不得把它当精确网络耗时。
 
+旧库兼容：attempt 追踪上线前持久化的回执行没有 `attemptId`。会话同步读取适配层
+（`lib/conversation_sync/service.py::_backfill_legacy_observation_attempt_ids`）在快照/分页
+解码前把这些行的 `attemptId` 回填为空串，不回写存储；缺其他必填字段的行仍然解码失败。
+新写入的回执始终携带真实 `attemptId`。
+
 ### Span 种类与归置规则
 
 | kind | 开 → 关 | 说明 |

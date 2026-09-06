@@ -37,7 +37,7 @@ def test_sign_matches_the_node_cli_golden_vector():
     """
     hdrs = travel_flyai._sign_headers(
         '{"jsonrpc":"2.0","id":1}', key='sk-test',
-        secret='XSbdYnucPARDc9knhD8+X6hxdD1Nh6ZGI6Hadg25kBw=',
+        secret='',
         pathname='/mcp', ts='1700000000000',
         nonce='0123456789abcdef0123456789abcdef')
     assert hdrs['x-flyai-sign'] == 'ENWunecdaBXD8Qkp4XkxxvfrCMJ87F-G9L_S-JFnu3E'

@@ -79,7 +79,7 @@ FAMILY_ID_PREFIXES: dict[str, tuple[str, ...]] = {
     'amazon': ('nova-', 'amazon'),
     'perplexity': ('sonar',),
     'xiaomi': ('mimo',),
-    'bailing': ('ling-',),
+    'bailing': ('ling-', 'ring-'),
     'thinkingmachines': ('thinkingmachines/', 'inkling'),
 }
 

@@ -35,9 +35,31 @@ missing or unhealthy selected authority revokes readiness.
 | Deployment/preflight | `lib/storage_sidecar/config.py`, `preflight.py` |
 | Operator CLI | `scripts/storagectl.py`, `python -m lib.storage_sidecar.migrate` |
 
-The current machine versions are `storage.v1`, schema version 53, and operation
-registry version 33. Code constants are authoritative; update this sentence in
+The current machine versions are `storage.v1`, schema version 58, and operation
+registry version 38. Code constants are authoritative; update this sentence in
 the same change when either version advances.
+
+## Tofu-DB pre-authority work
+`packages/tofu-db/` is an isolated Rust certification target, not a selectable storage backend. Decoded `storage.v2` requests now cross an explicit authenticated session boundary: a zeroized 256-bit Hello capability is checked in constant time against an in-memory SHA-256 witness before a session can exist, owner/tenant scope is fixed for that session, negotiation happens exactly once, and every bounded response preserves correlation plus the negotiated schema. A transport-generic connection loop requires Hello first, emits a negotiation ACK, distinguishes clean EOF from truncation and shares hard-bounded RAII admission across connections. Semantic admission precedes authority acquisition, so invalid or already-expired work never waits behind storage I/O; admitted work uses only its remaining request/operation deadline to acquire the mutex and returns `deadline_elapsed` without executing when that budget expires. Its numeric-loopback-only acceptor caps connections at 64, fixes every connection stack at ≤2 MiB, and holds the authority mutex for one admitted request. Before opening the authority, the pre-authority `serve` command performs one bounded probe of process-affinity/cgroup CPU, host/cgroup memory capacity and headroom, and authority-volume free bytes; missing observations select a four-connection/16 MiB lean profile, observed pressure scales to one connection, all profiles stay below 64 connections/128 MiB frames, and observed free space below two WAL windows plus 16 MiB refuses writable startup. It then derives and clears its bounded environment secret, emits one credential-free readiness line containing only aggregate budgets, and exits after its inherited empty stdin pipe reaches EOF. Its first slice owns an exclusive process lease, two alternating 4 KiB
+BLAKE3-checked `CONTROL` slots with checkpoint/manifest/active-generation witnesses, immutable 4 MiB content-addressed blocks, and one
+CRC32C/BLAKE3-chained active log capped at 64 MiB. Commits checkpoint at a 60 MiB soft limit, packing active transactions into immutable ≤4 MiB history segments and publishing their manifest plus a new empty WAL through `CONTROL`,
+and loads history only for an explicit snapshot. History maintenance retains a complete segment suffix through one v2 manifest and same-WAL `CONTROL` republication; the existing low-priority worker keeps 16 segments after a lean probe or 64 after a complete probe, requires a current Entity authority root and an already-empty active WAL, never forces a checkpoint or rewrites transaction payloads, and leaves retired immutable segments to backup-generation-aware GC. Explicit authority GC refuses live MVCC handles, first stream-matches at most 20 million loose-directory entries while retaining two paths and removes at most one strictly named, size-bounded `.new-*` block temporary before marking, then marks current Entity/capsule/semantic/history/active-WAL references with on-volume spill bounded by `min(1 GiB, 2% free)` or a 64 MiB lean fallback, republishes unchanged state before referenced-file deletion, and deletes at most 65,536 loose blocks/256 MiB per repeatable round. It then scans at most 4,097 payload-directory entries and removes at most one strictly named, size-bounded, manifest-unreferenced complete or temporary segment; the 4,096-entry manifest ceiling guarantees an overfull scan window exposes an orphan, while unknown entries fail closed. When no earlier orphan wins, it inspects one generation-selected hash shard of at most 16 manifest segments and rewrites or retires at most one. Only after no reclaimable victim remains may it pack at least 128 reachable loose blocks from one generation-selected shard, excluding IDs already present in its manifest segments and fitting both the 65,536-block/256 MiB segment bounds and the launch-derived temporary budget; sub-threshold shards are not rewritten. An executed no-victim shard advances the durable CONTROL cursor so repeated rounds cannot starve later shards. Partial segment rewrites, but not fully dead retirement, must fit the temporary-space budget. Its existing-authority-only operator command defaults to a non-deleting plan and requires `--execute`; GC is not periodic until mark traversal gains a resumable foreground-safe cursor.
+Opening recovers only the selected active generation; a bad tail before its durable witness fails closed. Referenced blocks sync before the log, missing active references fail closed, and failed `CONTROL` publication makes the live authority restart-required before further authority work.
+Batched entity COW roots use owner-scoped MVCC/OCC witnesses and commit every new page reference; every transaction pins its exact immutable root in a per-open database-instance registry, admits at most 64 live handles, exports content-free handle/distinct-root/oldest-sequence/retained-byte metrics, releases on handle drop, and rejects handles crossing a reopen boundary. Each transaction admits at most 6,144 distinct point witnesses and 1,024 range witnesses, checks new capacity before page I/O, and reuses a point witness on repeated reads. The registry conservatively accounts point keys, worst-case range leaf witnesses, and staged key/value writes across every live transaction under a 160 MiB process hard limit; pressure is retryable resource exhaustion and transaction drop releases its entire reservation. Authority-global persistent root pins use reserved owner-scoped identities and a transactionally maintained count record: catalogued create/remove admission performs bounded point reads, scales to one million durable pins, and an absent count may scan and upgrade at most 64 legacy pins. Pin, count, and business changes publish in the same OCC commit; reachability verifies the declared count, while malformed records, forward references, empty roots and reserved identities fail closed. A pin may capture a capsule of at most 64 sorted non-overlapping ranges: complete old subtrees are shared, boundary leaves are filtered, mixed-level fragments receive unary COW wrappers, and only the capsule root plus newly built pages enter the commit, so backup and GC never traverse unrelated authority pages. A transaction may retire at most 64 sorted non-overlapping key ranges under an exact current-root witness; wholly covered subtrees are detached without reading them, only boundary paths are repacked, overlapping writes fail before commit, and the capsule plus retirement publish atomically. Restore publishes a versioned root directory with at most 64 sorted non-overlapping range mounts, normally writes one directory block regardless of capsule size, merges mounted data into point/range reads, and gives base writes and tombstones precedence; repeated retirement clips mounts and may publish an explicit empty base instead of a synthetic tombstone. Explicit lazy consolidation atomically replaces one mounted prefix with the same logical rows in base, advances or removes that mount, handles at most 999 rows/8 MiB per transaction, and collapses an exhausted directory back to a direct root; it is operator/maintenance work and never runs during open. After readiness, one 512 KiB-stack low-priority worker round-robins at most 64 explicit scopes, attempts one transaction per probe-derived 250 ms or lean 1 s interval, never waits for a busy foreground mutex, and exponentially backs empty authorities off to 60 s; terminal maintenance errors stop daemon admission. Roots without mounts remain direct B+Tree pages, so normal open still reads one bounded root node. Explicit reachability walks stream the Entity page graph and root directories without a database-sized visited set, reject child level and key-range transplants, and cap work at 20 million pages with an 8,192-node DFS frontier; only the current `CONTROL` graph declares persistent roots, while incremental backup copy, restore and retention GC traverse all declared graphs. Blobs use 1 MiB deduplicated zstd chunks, while fenced streams use immutable 2 MiB segments and bounded cursor pages. A versioned family-transaction container canonically combines an entity root, multiple stream commits, one command receipt, one logical outbox record and at most 2,048 deduplicated block references under the existing 256 KiB inline bound; entity/stream recovery remains compatible with original single-family records. The synchronous pre-authority coordinator binds transaction handles to one authority UUID, stages entity/stream/blob work, publishes exactly one family transaction, and advances all in-memory witnesses only after durability. Receipts use the existing domain-separated SHA-256 command key and 200-byte ID, 64 KiB stored/4 MiB decoded response limits; small results stay in the entity index, larger encoded results use an atomically referenced blob, and operation/request mismatches or concurrent first delivery conflict before a second business commit. The native logical-record codec uses AES-256-GCM with random 96-bit nonces, exposes only an eight-byte key fingerprint, binds owner/sequence/schema/request routing fields as AAD, limits clear payloads to 4 MiB, and rejects metadata/ciphertext transplantation. When configured, the authority requires exactly one outbox capture for each business transaction; owner-scoped OCC metadata assigns continuous sequences, applies pending-byte backpressure before blob staging, stores records above 4 KiB through atomically referenced blobs, and deletes only the next record through an idempotent ACK transaction. Pending reads materialize at most 64 records/8 MiB. The publisher validates a whole contiguous single-owner batch before side effects, performs sink I/O without borrowing the authority writer, accepts only identity-matched durable receipts, and leaves lost acknowledgements pending for idempotent retry; counters contain no user content. The native owner-bound sink reuses Engine CONTROL/WAL durability in an explicit absolute directory, holds an exclusive lease, reserves two active-log windows at capacity preflight, rejects gaps and cross-owner records, and resolves old retries with one exact active lookup or one bounded 4 MiB history-segment read. One isolated worker runs sink I/O; its 16–64 MiB launch-headroom-derived budget counts queued plus active data, deadlines do not cancel potentially durable writes, shutdown stops admission and drains to an explicit deadline, and ambiguous sink state terminally fails queued work. An automatic relay round-robins at most 64 unique explicit tenant/owner scopes through the one aggregate queue, releases the authority mutex during sink I/O, commits ordered identity-matched ACKs, accepts foreground wakeups, and uses a bounded fallback interval; retrying scopes cannot starve healthy scopes, while ambiguous authority state and thread panics fail closed. Arbitrary I/O errors, ENOSPC, short writes, and lost syncs during sink append plus capture or ACK failures recover only a complete prefix. Every WAL path, including pre-published reference commits, poisons the live authority on an ambiguous append failure until reopen recovery selects the prefix. The engine durability primitive admits at most 64 transactions and 8 MiB each of total logical payload and encoded WAL per group, then uses one WAL barrier and one final-sequence CONTROL publication; every member remains independently framed for unacknowledged-prefix recovery. Its single background sequencer prepares hashes/envelopes on submitting threads, waits no more than 1 ms and never groups more than 64 requests or 8 MiB. The queue derives from 1/128 of launch-probed memory headroom (16 MiB lean fallback), hard-caps it at 1,024 requests/256 MiB, applies count and byte backpressure, and exports queue/group/commit/failure metrics. Explicit incremental backup copies only missing reachable blocks, publishes a checksummed snapshot manifest last, and uses bounded capacity preflight plus durable restore pins to resume verified restore; plan-backed retention GC preserves pinned generations, spills up to 33.4 million marks within 1 GiB, and deletes blocks in shard batches.
+The multiplexed native sink routes up to 64 frozen source scopes into one Engine authority. An explicit administrative scope owns its COW exact-record index, per-owner sequence witnesses and aggregate capacity counter in the same transaction; records above 4 KiB reuse content-addressed blobs, and reopen uses at most 64 bounded point reads instead of a history scan. A shared deterministic VFS drives end-to-end commit faults. The explicit `certify-filesystem` operator command requires an empty persistent target, exercises the real VFS through lock, immutable-block publication, group commit, checkpoint rotation, a destructor-free child exit, and two cross-process reopens, and retains the resulting store as evidence without touching normal startup. Its contract-owned 1 MiB payload is packed by the no-destructor child through segment fsync/rename, manifest and double CONTROL publication, and loose reclamation; the parent and final child must both recover the catalog and read the exact payload through segment random I/O. Its machine-readable result records each process/reopen wall-clock observation and a 4,096-entry-bounded retained file count/length for controlled same-volume comparisons; these observations are neither release certification nor a performance claim. `contracts/storage_v2.json` is the machine authority for protocol v2 field IDs and bounds. The Rust codec implements canonical flat MessagePack with a big-endian length prefix and CRC32C suffix, explicit nonzero correlation/deadline/owner/schema identities, nullable tenant/command fields, Hello version/schema negotiation, mutually exclusive success/error responses, and command-bound 1 MiB blob chunks. It rejects oversized declared frames before allocation and exposes guard-based read/write byte admission. Its mandatory default-deny semantic admission binds decoded requests to generated metadata for all frozen operations, matches request identity against authenticated owner/tenant scope, validates negotiated schema and deadlines, and requires command IDs for every command and maintenance request independently of receipt policy; the pre-authority loopback listener accepts one identity-bound streamed artifact or task-result checkpoint request at a time, requires every chunk to repeat a positive total-length witness, reserves that total once before an exact-capacity allocation, and admits at most 64 ordered chunks/64 MiB under the shared frame budget through dispatch; successful responses above 1 MiB use at most 64 identity-bound chunks/64 MiB followed by one empty success terminator, and the Python harness validates and transparently reassembles that sequence without constructing a second chunk list or final response copy.
+
+Immutable payload compaction packs at most 65,536 same-hash-shard blocks/256 MiB payload behind a sorted index of at most 3 MiB. Its canonical CONTROL-referenced catalog admits 4,096 segments and at most 16 point-lookup candidates per shard. Compaction durably writes the segment and a forced-loose manifest root, publishes that root, installs the bounded reader, republishes the same root into the fallback CONTROL slot, and only then removes loose victims; any error before stabilization leaves those victims intact. The explicit authority planner reuses its reachability marks, loads indexes for only one selected shard, excludes already packed IDs, requires 128 live loose files before acting, and releases mark-spill files before allocating the replacement segment. Normal open reads one at-most-4-MiB catalog block, loads indexes only for a matching point lookup, and never scans the segment directory. Payload catalogs use CONTROL layout v2 while current readers accept zero-extended v1; older binaries reject v2 rather than ignore a catalog whose loose blocks may already be reclaimed. Incremental backup reads through the installed catalog and restores portable loose blocks. Index, payload, syscall, short-write, lost-sync, fallback-slot and cross-reopen faults fail closed while preserving committed references.
+The generated baseline `contracts/storage_operations_v1.json` freezes all 331 operations at
+schema 58 / registry 38 without copying SQL or handlers.  Existing operations
+retain handler-enforced ownership until their owner keys and constraints move
+into the future Schema/Transaction IR. The catalog generator also owns the sorted Rust metadata projection used by semantic admission, so catalog drift fails before dispatch code can compile against stale classifications.
+
+This slice tolerates any one silently lost file/directory sync, but lacks correlated multi-sync-loss and extended rotation fault certification and block encryption. Each v2 transaction envelope carries a tri-state entity-root update and every successful authority commit publishes the resulting current root in checksummed `CONTROL`; normal entity open reads and verifies only that content-addressed root page, descendants verify lazily on accessed paths, and locally generated commit pages no longer trigger a whole-tree scan. Legacy slots require only one exact bounded transaction lookup. Lost-ACK recovery, group commit, checkpoint rotation and incremental backup/restore preserve the same root witness, and legacy CONTROL and backup manifests decode with an explicit unknown-root state. Stream appends atomically persist their cursor and immutable segment references inside that root; normal Authority open performs no historical stream rebuild, while bounded predecessor lookup and forward traversal load at most 1,000 events and 8 MiB on demand from the caller's MVCC snapshot. The generated Schema/Transaction IR contract currently compiles or routes two hundred eighty-one operations: both `browser.site_observation` operations, all six `compaction_archive` operations, `system.schema_version`, `system.reclaim`, `rate_limit.record_and_check`, all five `daily_cost` operations, both `log_aggregate` operations, all ten `optimizer.proposal` and `optimizer.action` operations, all eleven scheduler task and poll operations, all twelve timer definition, active-feed, progress, and poll-ledger operations, all sixteen queue item, lease, reap, and autopilot-marker operations, all nineteen orchestration definition, run, event, and Goal-run operations, all eight durable swarm session and agent-checkpoint operations, all sixteen integration workspace, event, status, and global worker operations, all nineteen `project_brain` projection, active-work, work, narrative, checker, decision, watch, cursor, rebuild, owner-scoped recovery, and format-native cutover operations, `conversation.activity_dates/clone/create/count/delete/get/list/metadata.update/purge/restore/search/settings.update/trash.prune`, `turn.append_settled/create_pair/attempt.bind/attempt.claim/attempt.create/attempt.dispatch_worker/attempt.dispatchable.list/attempt.get/attempt.start/branch.create/branch.delete/compact/delete/event.record/events.list/events.prune/exists/get/image.get/list/list_delta/perception.record/projection.update/queue.activate/queue.cancel/recover/related.announce/revision/steer.commit/sync.changes/sync.page/sync.prune/sync.snapshot/timing_trace.get/timing_trace.list`, three `desktop.egress_agent` operations, `record.get/list/put/delete`, and `event.append/append_batch/list/latest/bounds/inspector_summary/prune`, plus `project.recent.list/touch/touch_many/clear` and all six `provider` operations, all seven `worker_job` operations, and all nine `model_routing` operations, and all seven `task_results` operations, plus all seven `tenant.user` account operations, all eleven `credential` operations, and all fifteen `billing` operations, with version CAS, prefix range witnesses, bounded blob overflow and atomic receipt/outbox effects. The schema-version query returns generated frozen metadata rather than inspecting a physical backend. Activity-date projection scans at most 10,000 compact owner-scoped candidate records and 100,000 aggregate 24-byte main-lane timestamp records under the same snapshot, retaining only distinct interval ordinals per conversation; a completeness marker is established only from an empty active-and-trash owner scope, while markerless legacy candidates and completely absent legacy Turn timestamps use bounded compatibility reads and partial marked indexes fail closed. Seven wallet/ledger operations atomically maintain immutable entries, exact global ID/reference claims, wallet balances, O(1) user sum/count aggregates, descending bounded indexes, and active-reserve projections; checked signed arithmetic and exhaustive fault injection preserve one complete money prefix. All eleven credential operations use exact-verified tenant-global ID and secret-hash indexes, an exact 1,000-live-row owner/tenant count, a descending created-time index, blob-capable settings, and compact mutable state; authentication/touch witness bound account state without rewriting settings, public projections redact hashes, and revocation retains identify-only hash tombstones. Settled Turn ingestion uses OCC-protected lane head and exact-count records to allocate monotonic ordinals and commits the Turn/blob document, lane and update indexes, non-human attempt, conversation revision/main-lane count/timestamp/index, search invalidation, sync event, receipt, outbox, and tenant-global Turn/attempt ID claims as one authority transaction; those claims serialize cross-owner collisions without widening ordinary owner reads. `turn.delete` resolves at most 2,000 requested and branch-lane descendants before writing, rejects pending/running attempts, then atomically removes Turn/attempt/index state, repairs exact lane and conversation counts, and writes revision- and age-ordered tombstones plus one sync event. Lane heads remain monotonic across deletion gaps, new Turns select the latest surviving predecessor, and tenant-global identity claims remain fenced through tombstone retention to prevent delete/recreate ABA. Each delete prunes at most 256 owner-scoped tombstones older than seven days through the age-leading index and releases only claims whose stored owner matches. Deterministic syscall-error and short-write injection verifies recovery to one complete append or delete transcript/index/count/tombstone prefix. Settled projection replacement uses projection-revision CAS, preserves typed stale/in-progress failures, and atomically rekeys the blob-capable document, lane/time indexes, conversation revision, search marker, outbox and a deterministic compact `turn.patch` replay event; exhaustive commit fault injection admits only the complete pre-update or post-update state. Branch create/delete uses the same projection-CAS path, derives a command-stable UUID-shaped lane identity, bounds nested deletion to 2,000 Turns across 256 lanes, and atomically publishes descendant tombstones with the parent update under one conversation revision and one compact patch event; empty branches remain deletable. `turn.get/list/exists/revision/attempt.get` remain owner scoped; `turn.list_delta` scans a bounded owner/conversation/time revision index, suppresses unchanged overlap rows before blob materialization, and refuses more than 2,000 candidates or 8 MiB instead of returning an incomplete view. Sync snapshot/page/changes use bounded tail scans, exact replay heads, stale-cursor fencing, and top-level Turn/Attempt routing identities on specific changes, and `conversation.get` plus transcript-bearing `conversation.list` derive their legacy messages from that same authority with bounded response and message-window semantics. Conversation creation atomically publishes the owner header, exact O(1) count, search-dirty marker, receipt/outbox, and a narrowly scoped tenant-global ID claim that preserves active/trash uniqueness without granting generic cross-owner entity access; deterministic syscall and short-write injection verifies replay convergence. Owner-scoped conversation get reads large settings and Turn projections through bounded blob paths and projects the storage.v1 full-transcript and message-window shapes without exposing physical document envelopes. Settings snapshot-CAS and scalar metadata updates retain transcript `rev`, use the hidden physical document version to prevent lost updates, and commit search invalidation, receipt, and outbox atomically; the shared update commit path also passes exhaustive syscall-error and short-write recovery. Create and updates maintain an owner-local covering `(updated_at DESC,id DESC)` index in the same transaction using a prefix-safe descending UTF-8 encoding; normal list and cursor-based catalog pages consume bounded range scans without N+1 entity reads, preserve snapshot-consistent counts, filters and settings projection, and reject responses above 8 MiB. Event batches accept up to 500 items even when every item targets a distinct physical stream; the entity write set, family-record count and inline transaction envelope remain independently capped at 14,336, 512 and 256 KiB. Sparse event application sequences use atomic natural-key, event-type, age-leading retention and physical-position indexes over the continuous physical stream cursor; unfiltered list resolves up to 1,000 positions in one segment pass, while exact types and literal prefixes use a bounded type catalog plus ordered index merge without scanning high-volume unmatched events. Retention deletes at most 1,000 oldest owner-scoped rows per transaction, treats blank types conservatively as structural, and atomically repairs bounds, filters and inspector aggregates. The same commit advances a durable owner-scoped retirement queue for one stream and at most 128 complete immutable segments; stream metadata v2 records the retained base while decoding v1 as base one, retired cursors fail explicitly, and monotonic append continues after fully retired history. Separate bounded authority GC then reclaims blocks no longer referenced by the current catalog, retained history, snapshots or capsules. Inspector summaries fold structural counts and first timestamps directly from the same type metadata for at most 100 roots and their bounded `#agent:` children without reading event bodies. Prefix or child expansion reaching 1,000 entries returns resource exhaustion instead of an incomplete result. Private `_wire_*` projection and payloads above 256 KiB remain explicitly rejected. Browser site observations use digest-keyed, exact-identity-verified blob-capable documents plus an atomic owner-local LRU index; passive hint validation, 30-day expiry, 64-row expiry pruning, deterministic oldest-first eviction and the 200-document owner budget require no unbounded namespace scan; deterministic syscall-error and short-write injection preserves atomic document, LRU and outbox recovery. BYO providers use blob-capable exact-identity documents, a 32-row owner/tenant-label quota, a newest-first covering index, and a tenant-global ID claim; list excludes ciphertext while mutation, receipt, outbox, count, index, and claim publish atomically. Durable worker jobs use tenant-global owner-bearing blob-capable documents, exact task and per-user idempotency identities, 1001-priority per-kind availability summaries, and ordered queue/lease indexes; enqueue, bounded multi-kind claim, monotonic heartbeat, cancellation, completion, fencing, receipt, and outbox transitions publish atomically. Model-routing revision CAS atomically publishes separate blob-capable current, backup, and migration-receipt records; sealed secrets use an exact 1,024-row owner/boundary count, reference and updated-time indexes, ciphertext-redacted lists, and 256-row pruning. `task_results` checkpoints store up to 64 MiB through an immutable tenant-global blob graph while a compact owner-bearing header owns semantic version CAS and abort fencing. Default replay reads only a separate metadata/error projection, summary scans consume owner-local covering rows, terminal replay alone materializes content/thinking, and abort updates no payload blob. Owner-local live and hashed experiment indexes make restart settlement and cost scans proportional to live or matching tasks rather than payload bytes; recovery atomically advances header, summary, and index state without rewriting the full blob, while cost results fail closed above an 8 MiB aggregate. Guarded-v1 checkpoint atomically witnesses its active parent and merges bounded cache HWM/LWW facts, using an exact response echo to retire rolling-upgrade compatibility reads; identical stale-version lost-ACK replay remains stable. Payment records additionally use exact provider/ID claims, a blob-capable 8 MiB document, a bounded created-time index, and atomic wallet/ledger settlement; duplicate provider delivery returns before unrelated payload validation, matching storage.v1. Redemption codes retain the 10,000-code mint contract through 4,096 bounded blob-capable batch, locator, and mutable-state shards: maximum mint and list workloads remain below point-witness and write-set ceilings, while one-code consumption rewrites only one compact state shard. Stale-reserve queries consume the atomically maintained age projection without ledger scans. A compact lane covering index lets `turn.compact` validate up to 100,000 structural rows without hydrating retained Turn blobs; one CAS transaction admits at most 2,000 combined deletion/reparent/projection mutations under a 64 MiB materialization ceiling, with at most 512 reparented Turns and 512 projection updates totaling 8 MiB, repairs ancestry/counts/indexes, inserts the summary, and emits one snapshot-required replay invalidation. Queued pair activation now atomically removes the exact queue binding, installs recovery, dispatchable, and lane-live indexes, and emits one replay revision; cancellation instead removes only the never-started pair and all of its queue, Attempt, event, and index state. Live steering fences the exact unqueued, task-bound Attempt and current running Turn, retires any materialized projection head, appends one command-keyed injection, and publishes its revision, compact sync patch, receipt, and outbox atomically under exhaustive commit-fault certification. Related-Turn announcement reads at most 2,000 explicit identities and advances the live root through a head-consistent no-op patch, preserving externalized projection checkpoints while publishing one Attempt/conversation replay event and revision atomically. Visible-run synchronization admits at most 2,000 messages/8 MiB, removes only provably empty virtual-user ghost pairs before authority access, inherits full live tool fields by stable call identity, and atomically publishes deterministic child Turns/Attempts, stable render segments, root projection/head state, indexes, replay, and revision. Optimizer proposals and reversible action audit rows use blob-capable owner-scoped documents, exact 4,096-proposal and 2,048-action quotas, prefix-safe compact time/status/proposal/active-expiry indexes, 500-row lists, and an 8 MiB response ceiling; proposal existence, compact status, action indexes, receipts, and outbox records publish atomically. Research Foundry reports and optimistic workspaces use bounded owner-scoped blob documents; compact prefix-safe state and a descending-created index make direction discovery independent of report size, while artifact quota, workspace revision CAS, receipts, and outbox records publish atomically. Paper notes use bounded owner-scoped blob documents and a prefix-safe chronological paper/language index; exact counts, documents, indexes, receipts, and outbox records publish atomically without list-time body scans. Raw provider archives use owner-bound blob-capable documents, compact task/round/Attempt/conversation indexes, exact tenant/Attempt/owner/conversation accounting, and strict bounded zlib reads; parent fencing, quota scrubbing, lifecycle deletion, indexes, usage, identity claims, and outbox records publish atomically without body scans. The remaining 50 operations stay default-denied. Missing release work includes
+The artifact Schema IR owns bounded chat and tool-result physical layouts: 8/16 MiB owner-bound blobs, atomic dedupe/version/library/expiry indexes, UTF-8-safe 64 KiB range reads, backup/GC reachability edges, and exhaustive single-fault commit recovery. Eleven storage.v1 operations compile through typed Transaction IR with owner checks, receipts, compact content-digest outbox evidence, and exact CPython 15.0 casefold search generated from a checked machine source. Authenticated request chunks admit the large write bounds without relaxing the 8 MiB single-frame limit. The single low-priority maintenance worker prunes at most 128 expired owner-scoped tool results per transaction with content-free progress metrics; the explicit maintenance RPC uses that same owner-scoped path with a 5,000-row hard ceiling. `system.reclaim` executes one explicit launch-budgeted physical GC round, preserves the legacy request bounds, and reports content-free block/segment progress without manufacturing a business transaction. `rate_limit.record_and_check` uses exact owner-scoped event identities, a 256-row expiry index, and a radix-256 timestamp count tree so arbitrary seven-day sliding windows require at most 2,040 counter reads rather than an event scan. The five `daily_cost` operations use chronological date keys, an exact owner count, blob-capable documents, bounded 100-row month scans, one-row reverse latest reads, and at most 366 point probes; whole-cache deletion is one range retirement, and responses fail before exceeding 8 MiB. Scheduler Schema IR fixes tenant-global owner-bearing blob-capable task documents and exact task-ID claims, owner-local exact system-key claims and counts, owner-local plus narrow tenant-global created/enabled covering indexes, a global poll sequence, and a 200-row owner/task poll index. All eleven task and poll operations now execute through the shared OCC layout: adoption preserves the oldest legacy identity while retiring duplicates, the internal cross-owner feed verifies embedded owners, due claims and result accounting update compact task state, and task deletion range-retires poll partitions. Receipt replay, SQLite differential coverage, focused owner/timestamp tests, and deterministic syscall-error/short-write create recovery preserve the frozen semantics. Timer Schema IR adds tenant-global owner-bearing blob-capable documents and exact ID claims, owner-local status/conversation indexes and exact counts, a narrow oldest-first global active index, and conversation-prefixed poll partitions. A one-shot launch probe bounds active timers at 8–16 by default with a 64 hard ceiling; historical rows are capped at 512 per owner so conversation deletion atomically retires all timer state within transaction bounds. Poll append/progress, receipt, and outbox effects share one OCC commit, and repeated poll IDs never double-advance. Differential, page-boundary, lifecycle, and exhaustive syscall-error/short-write tests preserve these semantics. Queue Schema IR separates immutable blob-capable payload cores from compact mutable position, lease, and binding state; exact tenant-global ID claims, owner-local order indexes, and narrow owner-bearing conversation, lease, and autopilot indexes keep worker feeds bounded without widening public scope. Conversations admit at most 512 items, reap releases at most 128 leases, internal indexes page through the 1,000-row Entity boundary, and responses stay below 8 MiB. All sixteen queue operations execute through one OCC transaction: real messages supersede synthetic continuation work atomically, autopilot rows never dequeue or reap, idle reap creates neither receipt nor outbox churn, and permanent conversation deletion retires queue and marker state. SQLite differential coverage and deterministic syscall-error/short-write injection preserve legacy ordering, lease, dedupe, receipt, and recovery semantics. Orchestration Schema IR separates immutable blob-capable run inputs from compact mutable state, uses exact tenant-global identities and owner-bearing bounded startup indexes, and stores versioned event documents. All nineteen orchestration and Goal-run operations share one OCC authority; exact active claims make Goal supersession O(1), public reads re-verify owner scope, and startup recovery retires at most 1,000 active runs across owners. Definition CAS, event projection, terminal fencing, receipts, and outbox effects are covered by SQLite differential and exhaustive commit-fault tests. Swarm Schema IR separates blob-capable session specifications and agent message/result cores from compact lifecycle, rounds, delivery, and exact resumability state. Exact tenant-global owner-bearing keys prevent aliasing; a 512-row owner-local resumable index makes startup proportional to useful work, 1,000-agent session deletion stays within one transaction, and delivery acknowledgement never rewrites transcripts. SQLite differential, owner-isolation, page-boundary, and exhaustive checkpoint commit-fault tests cover all eight operations. Integration Schema IR adds tenant-global owner-bearing workspace documents, exact natural and row identities, oldest-first ready/integrating indexes, one exact project-active claim across owners, bounded owner/project status indexes, and a globally sequenced 300-event retention window. All sixteen integration operations preserve worker CAS, stale-claim recovery, metadata projection, receipts, and outbox effects; SQLite differential, cross-owner serialization, retention, and exhaustive commit-fault tests lock the semantics. Attempt creation adds exact command replay, per-Turn counts, projection/input CAS, bounded checkpoint/regenerate rewrites, and atomic attempt/event/sync publication under exhaustive commit-fault testing. A tenant-global owner-bearing created-time index exposes at most 32 canonical conversation-executor attempts and revalidates exact owner Turn, attempt, and config records under the same snapshot. Worker dispatch validates a canonical explicit principal and atomically enqueues the deterministic job, binds the attempt, removes discovery eligibility, and publishes sync/outbox state; replay fails closed unless binding and durable job agree. Compact owner-scoped task/effective-time and conversation/created-time indexes make timing-trace lookup and discovery proportional to at most 100 small records; list never reads projection blobs, while detail validates the exact indexed Attempt and Turn before using the permanent trace or legacy projection fallback. `turn.perception.record` now appends the closed, content-free browser receipt lane idempotently inside the Attempt document. It enforces the shared 64-row/96-KiB bounds, derives render and transport clocks, adopts only task-matched legacy receipts, and commits without Turn/revision/sync/receipt/outbox amplification under exhaustive crash and short-write testing. Owner-scoped sync-age markers and exact Attempt-event transport references now make `turn.sync.prune` proportional to expired replay data; each transaction processes at most 999 events plus one continuation witness and 64 MiB while preserving the monotonic sync head. Terminal Attempts maintain settled-time cursors so `turn.events.prune` retires at most 64 clustered ranges and 200,000 rows under a 64 MiB hydration ceiling only after sync references and projection heads clear; permanent Turn projections are never retention data. Both operations are owner-isolated, resumable, and crash-atomic. Existing authorities will acquire these indexes only through the explicit migration required before cutover; ordinary startup never scans or backfills historical data. This leaves 281/331 operations executable and 50 unavailable.
+remaining operation payload compilers, TofuSQL, migration, GC spill scale and representative native/network/FUSE certification matrices, signed release packaging, and Supervisor selection. Normal Tofu
+startup therefore cannot discover it or store authoritative user data. Selection and packaging remain prohibited until semantic differential tests,
+deterministic syscall faults, explicit resumable migration/rollback, native durability
+tests, a 30-day shadow run, and performance/resource gates pass.
 
 ## Identity and dependency rules
 
@@ -82,19 +104,6 @@ and roll back atomically. The versioned decoder bounds output before parsing,
 fails corrupt/unknown envelopes as ``database_integrity``, and continues to
 read every legacy plain-JSON receipt byte-for-byte.
 
-Schema 52 stores new permanent receipts in `storage_command_receipts_v2`: a
-domain-separated 32-byte SHA-256 command key, the operation name, the canonical
-request SHA-256 as 32 binary bytes, the bounded response, and its commit time.
-SQLite stores the fixed primary key once with `WITHOUT ROWID`; PostgreSQL uses
-the same logical `BYTEA` columns on its ordinary primary-key table. One indexed
-`UNION ALL` probes both formats: zero rows executes, one exact row replays, a
-request mismatch is `database_conflict`, and a duplicate is `database_integrity`.
-Migration creates an empty table without scanning, rewriting, or deleting legacy
-rows; new writes use v2 and old rows remain replayable indefinitely. There is no
-time-based pruning: exact permanent replay for arbitrary IDs and a finite set
-cannot both be guaranteed. Avoiding receipts for natural-idempotent/read-only
-operations plus the fixed-width identity reduces growth without weakening ACKs.
-
 RPC accepts named operations and JSON-compatible payloads only. SQL, paths,
 connections, and transaction handles have no wire representation.
 
@@ -120,11 +129,11 @@ the authority; it is read-only and cannot delete or mutate the legacy source.
 
 `storage_conversations` is the active header/settings index.
 `storage_conversation_turns` is the sole active transcript authority.
-For Turn-native conversations, `messages_json` is empty and new header
-`search_text` values are empty; pre-C246 headers may retain a rebuildable copy
-until physical reclaim. Pre-Turn imports keep frozen, potentially non-empty
-`messages_json` for compatibility. Runtime writes never replace either shape
-with a conversation-sized message or aggregate-search document.
+For Turn-native conversations, `messages_json` and aggregate `search_text` on
+the header are frozen empty placeholders. A conversation imported before the
+Turn cutover instead keeps its frozen, potentially non-empty `messages_json`
+as the compatibility transcript until an explicit verified migration; runtime
+writes never replace either shape with a conversation-sized message document.
 
 Owner-scoped `conversation.get` exposes mutually explicit full, metadata-only,
 and bounded message projections. A `message_window` is limited to 1..500 and
@@ -133,8 +142,8 @@ window is invalid. Active Turn transcripts page through the backend-neutral
 adapter contract. Frozen pre-Turn JSON archives scan only a requested first or
 last page when its estimated and observed Python work stays within 128 KiB of
 code units; middle pages, count/shape ambiguity, or a larger suffix/prefix use
-the authoritative full decoder and then slice. Every get/list shape omits the
-header search corpus in SQL and returns an empty compatibility placeholder.
+the authoritative full decoder and then slice. Windowed reads never select or
+return the unrelated aggregate `search_text` corpus.
 
 The metadata-only `conversation.list` query accepts optional bounded
 `project_path` and `title_contains` filters. The Sidecar combines them with the
@@ -161,16 +170,16 @@ fallback. Only the interval counts cross the storage frame.
 
 At rest, a versioned private projection codec interns only tool-segment
 ``input`` / ``result.content`` values that are exactly equal to the uniquely
-identified ``toolRounds`` copy. Semantic reads hydrate references before use,
-so the public contract is unchanged; divergent/future shapes remain verbatim
-and malformed references fail closed as ``database_integrity``. Turn-native
-rows convert only on their next write; no startup rewrite competes for the
-authority. Current compaction archives use the same codec when created; explicit
-offline deep-clean backfills them and frozen pre-Turn arrays before giving each
-message of at least 64 KiB one zlib level-1 attempt. Only a smaller result gets
-a backend-neutral JSON envelope; array/message boundaries remain visible, so
-budget-admitted reads hydrate only selected envelopes. Plain/projection-only
-archives remain readable; 64 MiB limits and canonical round trips gate writes.
+identified ``toolRounds`` copy. Every semantic read hydrates those references
+before mutation, search extraction, or return, so the public turn/API contract
+is unchanged; divergent, ambiguous, partial, and future shapes remain verbatim.
+Malformed or unknown codec references fail closed as ``database_integrity``.
+Turn-native rows are converted only by their next ordinary write—there is no
+startup scan or rewrite competing for the authority writer. Frozen pre-Turn
+conversation archives remain readable in their plain form. An explicit
+physical offline deep-clean may apply the sequence form of the same codec
+message by message, but only after an exact canonical round-trip and only when
+the stored document becomes smaller; repeated passes are write-free.
 
 Conversation search is an eventually consistent, rebuildable projection. A
 turn or lifecycle mutation writes only one small version-token dirty marker to
@@ -190,55 +199,42 @@ not revoke authority readiness or roll back a user write. PostgreSQL uses the
 same tables in the shared database but writes them through independent,
 separately committed maintenance transactions.
 
-The Sidecar owns the projection worker. It drains current dirty entities
-first, then begins historical backfill after the default 60-second startup
-quiet period. Authority reads use bounded 8-row/2-MiB pages through the read
-pool; source projections whose text representation could exceed that budget
-after worst-case UTF-8 encoding and the private codec's bounded 2× hydration
-are omitted explicitly instead of being loaded. Global cursors include owner,
-conversation, and turn identity. Conversation rebuilds use generation tokens,
-so old rows remain searchable until the new generation is complete and a
-concurrent mutation forces another pass. The compatibility
-`turn.search.backfill` command now schedules one rebuild marker and returns
-immediately. Legacy `storage_turn_search` and header `search_text` are neither
-read authorities nor runtime inputs; physical cleanup retires verified copies.
+The Sidecar owns the projection worker. It drains current dirty entities first,
+then begins historical backfill after the default 60-second quiet period using
+bounded 8-row/2-MiB authority pages; oversized sources are omitted explicitly.
+Global cursors include owner, conversation, and turn identity. Generation tokens
+keep old rows searchable until rebuild completion and fence concurrent mutation.
+The pre-authority Rust target tightens publication: eight-Turn pages build an
+invisible generation in a separate Tofu-DB directory, then one transaction swaps
+its ordered header and retires old ranges. Fixed per-Turn n-gram Bloom summaries
+reject negatives before chunked text reads; exact verification preserves legacy
+phrase-first, cross-Turn word, snippet, owner, and ordering behavior. Owner bytes
+are bounded and syscall-error/short-write crash tests expose one complete generation.
+The Rust daemon can opt into a dedicated absolute persistent projection directory outside the authority. Its sole maintenance worker drains at most 16 epoch-valued dirty conversations per round, releases authority between 8-row/2-MiB source pages, and acknowledges only exact observed epochs. `conversation.search` uses a separate deadline-bounded projection mutex, returns a retryable capability error when unavailable, and never acquires or fails the foreground authority. Capacity is 2% of launch-observed free space clamped to 128 MiB..4 GiB per owner. `turn.search.backfill` remains a scheduler and legacy aggregate search fields remain non-authoritative. The separate `backfill-activity-index` operator command is explicit existing-authority maintenance: it holds the normal authority lease, persists a building cursor, materializes at most 256 source headers/16 MiB per transaction, and requires repeated invocations until `complete=true`; foreground mutations maintain membership while building, and neither daemon open nor startup performs this retrofit scan.
 
-This split follows the durable-authority/projection boundary in the vendored
-Codex state runtime: state, logs, queues, and paginated history use separate
-SQLite databases, and startup refuses a full `VACUUM` that would contend with
-foreground writers (`codex/codex-rs/state/src/sqlite.rs`). For network-mounted
-authority, Tofu additionally keeps rebuildable search host-local and rejects
-automatic page relocation before it reaches the authority writer.
+This split follows the same durable-authority/projection boundary visible in
+the vendored Codex state runtime: Codex keeps state, logs, queues, and
+paginated thread history in separate SQLite databases, and explicitly refuses
+to retrofit a full `VACUUM` during startup because maintenance would contend
+with foreground writers (`codex/codex-rs/state/src/sqlite.rs`). Tofu goes one
+step further for a network-mounted authority by placing rebuildable search on
+a host-local database and rejecting automatic page relocation before it
+reaches the authority writer.
 
 Header deletion/restore/clone is defined by
 [`contracts/conversation_lifecycle_v1.yaml`](../contracts/conversation_lifecycle_v1.yaml):
 
-- delete atomically moves the header and normalized turn graph to
-  `storage_conversation_trash*`, removes executable state, and makes every
+- delete atomically moves the header and normalized turn graph to `storage_conversation_trash*`, removes executable state, and makes every
   active query/write observe “missing” immediately;
 - restore atomically rebuilds active rows without attempts or live latches;
-- clone accepts settled or generating sources and atomically freezes the latest
-  durable projection into a terminal graph with remapped executable identities;
-  live turns become interrupted, non-terminal tools become aborted, source
-  execution continues, later source updates cannot enter, and no browser message array is uploaded;
-- maintenance permanently purges trash after 30 days in bounded oldest-first
-  batches.
+- clone atomically creates a new terminal graph and remaps executable
+  identities; the browser never uploads a message array;
+- maintenance permanently purges trash after 30 days in bounded oldest-first batches.
+
+Tofu-DB compiles delete, restore, purge, and clone through bounded lifecycle primitives. Delete pins recoverable header/Turn/tombstone ranges and detaches active indexes, attempts, and sync replay without walking transcript rows. Restore mounts those ranges, overlays a normalized header, advances revision plus a conversation execution epoch, repairs the exact owner count, and removes trash metadata/pin in one receipt-backed commit. Turns from older epochs project as inert: attempt/run latches disappear, live status becomes interrupted, and runtime/tool presentation is terminalized; post-restore Turns inherit the new epoch. Clone reads one OCC snapshot capped at 2,000 Turns, 8 MiB of projection, and 1,000 archives, atomically creates a new header/lane graph/index/identity-claim set, remaps Turn/task/archive/parent identities from the command, and copies no attempts or executable latches. Archive transcript, summary, and receipt documents are separately blob-capable: summary updates never rewrite transcript payload, and same-owner clone reuses immutable content-addressed blocks. Live source projections are terminalized while source execution remains unchanged. Identity claims remain fenced until bounded tombstone pruning or purge, and legacy randomly keyed attempts also require an active header. Explicit backup/GC traversal follows persisted stream segments and owner-bound versioned-document, command-receipt, and logical-outbox blob graphs from active or pinned Entity leaves without transaction history; normal open and foreground delete/restore operations never scan values. Payload-segment compaction and certification remain authority gates; any lifecycle action whose foreground cost or temporary bytes scale with a 90 GB transcript fails closed.
 
 Conversation Sync v3 owns turn commands, snapshots, and replay; see
 [CONVERSATION_SYNC_V3.md](CONVERSATION_SYNC_V3.md).
-
-Schema 51 removes the second durable encoding of every new `attempt.event`
-change. `storage_attempt_events` already owns the exact AttemptEvent document,
-so `storage_conversation_changes` stores `{}` plus its nullable
-`(attempt_id, attempt_sequence)` reference; one owner/conversation/turn-fenced
-LEFT JOIN reconstructs the unchanged public ConversationChange. NULL identifies
-historical self-contained rows and requires no JSON backfill. A missing or
-mismatched reference fails storage integrity. The partial reference index keeps
-retention probes proportional to candidate attempts rather than the replay log.
-Stopped-server tooling probes for the reference discriminator before building
-retention SQL, so it can safely inspect or clean a schema-50 authority before
-startup migration; once the schema-51 column exists, the reference fence is
-mandatory.
 
 ## Transaction model
 
@@ -576,22 +572,15 @@ payloads.
 - Streaming task frames: 6 hours.
 - Structural request-inspector events: 30 days.
 - Settled attempt replay events: 1 day in personal mode, 7 days in distributed
-  mode; the permanent turn projection is unaffected. A retained Conversation
-  Sync reference temporarily extends the exact AttemptEvent source through the
-  sync replay window. Sync pruning releases that fence, and the next bounded
-  attempt prune reclaims the stream. Sync pruning deletes up to 256 composite
-  keys per statement rather than paying one statement per change. Explicit
-  turn deletion/compaction instead
-  expires the affected conversation-change prefix before deleting its events,
-  so an old cursor requests a snapshot rather than resolving a dangling row.
+  mode; the permanent turn projection is unaffected.
 - Per-generation-attempt timing traces are durable user state, not replay
   transport. Schema 46 owns the bounded document in
   `storage_generation_attempts.timing_trace_json`; settlement freezes server
   spans and user-visible phase history there and mirrors the terminal snapshot
   into the current `projection.timingTrace`. Owner-scoped
-  `turn.perception.record` updates only the small attempt document under the
-  terminal-event lock, so it causes no large Turn rewrite, conversation revision,
-  sync row, or command-receipt growth. Event pruning and reclaim never delete
+  `turn.perception.record` updates only the small attempt document under the terminal-event
+  lock. Tofu-DB's sole effectless command IR step still commits its owner-scoped OCC mutation
+  without Turn/revision/sync/receipt/outbox growth or a generic exemption. Event pruning never deletes
   that snapshot, and a later attempt cannot overwrite an older task's evidence.
   One trace is capped at 256 spans, 128 gaps, 128 prompt rows, 64 client receipts,
   and 96 KiB with explicit dropped counters.
@@ -602,17 +591,17 @@ payloads.
   at most 100 compact rows plus `has_more`. Thus Request Inspector paging is
   proportional to the requested conversation page rather than a global
   `task_results` scan; index growth is exactly one derived entry per
-  externally addressable generation attempt.
+  externally addressable generation attempt. Native Turn authority also keeps one compact deletion directory per Turn: at most 64 Attempts and 64 KiB, with a 16 KiB versioned tombstone containing every retained Attempt identity. Creation and lifecycle changes update it in the same OCC transaction. Turn and branch deletion use the directory to retire all historical Attempt/event and timing/dispatch state without reading blob-capable Attempt payloads; claims remain fenced for seven days. Trash capsules retain and restore only the inert directory/count identity evidence, not Attempt documents or events, so later deletion/purge releases every claim without reviving work.
 - Conversation sync replay rows: 7 days; expired cursors require a snapshot.
 
-Generic cold chat replay uses compact semantic reads, not raw records.
-`task_results.replay_get` owner-filters before projection; its private per-field
-codec leaves outer lifecycle facts visible and selectively hydrates metadata/error
-plus explicitly requested terminal content/thinking, never segments/tool rounds.
-`event.bounds` returns exact cursors without event bodies, which still come from
-bounded `event.list` pages. Routes own neither JSON decoding nor SQL;
-missing/foreign task results are indistinguishable, and no codec envelope crosses
-a public read boundary.
+Generic cold chat replay uses two compact semantic reads rather than exposing
+raw storage records: `task_results.replay_get` filters the requested key by
+positive `user_id` before returning status/clocks and withholds cumulative
+content/thinking unless the caller explicitly reaches the terminal page;
+`event.bounds` returns exact count/min/max cursors without materializing event
+bodies. Ordered bodies still come from bounded `event.list` pages. Routes own
+neither JSON decoding nor SQL, and missing/foreign task results are
+indistinguishable.
 
 Task-result writes remain receipt-free, version-witnessed snapshots. The
 additive `tofu.task-results.checkpoint.guard/v1` mode first takes the same
@@ -677,20 +666,6 @@ checks compare the canonical decoded bytes. Stored and decoded forms are each
 bounded by the 64 MiB RPC ceiling. Unsupported, truncated, corrupt, trailing,
 or length-mismatched envelopes fail as `database_integrity`; existing plain
 JSON rows remain readable without migration.
-
-Provider raw archives are a separate durable, owner-scoped authority in
-`storage_raw_archives`; they do not inherit task-event TTL. The provider
-transport captures the final protocol-specific request body and raw response
-bytes, excludes headers, applies the shared secret redactor, and compresses
-request and response independently. All rows for one generation Attempt share
-a 16 MiB compressed ceiling. The global ceiling is 1% of launch-probed free
-space capped at 4 GiB (256 MiB when the probe is unknown), and each commit also
-preserves `TOFU_STORAGE_MIN_FREE_BYTES`. Saturation inserts metadata with
-`integrity=partial` and `truncationReason=quota_exhausted`; it never evicts an
-older archive. Reads are owner/task scoped and return at most 1 MiB per chunk.
-Explicit Turn/conversation deletion removes owned archives; maintenance has no
-TTL or implicit archive-prune operation. SQLite and PostgreSQL use the same
-semantic operations and byte accounting.
 
 `tool_result_artifacts` stores only bounded tool overflow, not durable user
 state or transcript authority. Application code uses the artifact repository
@@ -803,24 +778,21 @@ the first checkpoint's `recovery_point_at`: canonical backup manifests carry
 that boundary, and `serverctl.py doctor` measures freshness from it rather than
 the later artifact mtime. `snapshot_progress_bytes`,
 `snapshot_resume_count`, and `snapshot_resumed_bytes` expose this lifecycle. The
-backup deadline used by the scheduler, startup cutovers, and maintenance CLI
-is derived once from the same recovery-copy budget (30 minutes..6 hours); an
+backup deadline used by the scheduler and online/offline maintenance CLI is
+derived once from the same recovery-copy budget (30 minutes..6 hours); an
 explicit `TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS` remains bounded to 24
-hours. Hypercorn's outer lifespan deadline is the larger of the Sidecar seed
-and full-backup deadlines plus a fixed 60-second reserve, so it cannot cancel a
-valid startup backup before the storage operation's own bounded deadline.
-Before checkpointing, the shadow volume must fit the complete image plus
+hours. Before checkpointing, the shadow volume must fit the complete image plus
 the current WAL and reserve; publication rechecks the pair after concurrent WAL
 growth. Only the validated, actually allocated durable resume prefix counts as
 reusable capacity, and a short WAL read refuses publication.
 
 `serverctl.py doctor` derives freshness only from canonical
 `storage-sqlite-*.sqlite3` artifacts whose Sidecar checksum manifest is present
-and structurally complete. Retired `data/db_snapshots/` artifacts never count
-as current recovery health; their published/interrupted logical and allocated
-totals remain explicit. Published, ambiguous, fresh, or live-owner files always
-require operator control. Before capacity admission, the next canonical backup
-scans at most 256 entries and removes only an expired, dead-PID temporary with the exact retired timestamp/PID/UUID name plus safe regular companions.
+and structurally complete. The retired `data/db_snapshots/` owner is never
+treated as current recovery health; its published and interrupted logical byte
+and filesystem-allocated totals are reported separately for operator-controlled
+retirement after an independent canonical backup. Diagnostics never delete
+those legacy artifacts.
 
 Serialized frame allocation has two independent bounds. The four-byte fixed
 header remains bounded by active RPC count; the weighted budget below counts
@@ -956,7 +928,7 @@ Every revision after externalization remains reconstructible even when its
 projection is byte-identical: the first such revision starts a head with the
 already-carried empty patch instead of advancing beyond the revision-fenced
 checkpoint. This keeps unchanged status/heartbeat frames on the same exact
-chain invariant as structural changes without rewriting the checkpoint BLOB.
+chain invariant as structural changes without rewriting the checkpoint BLOB. Tofu-DB restart recovery is proportional to unfinished work: pending/running Attempts maintain a compact owner-scoped created-time index, and `turn.recover` reads at most 10,000 index rows while settling at most 500 Turns and 8 MiB of hydrated projections per transaction, always allowing one oversized Turn to progress. Creation-time and live-task guards apply before the byte budget. Attempt/Turn settlement, live-index removal, projection-head retirement, search invalidation, conversation revision, terminal event, sync replay, and outbox publication are one OCC commit; malformed or over-budget indexes fail closed without an authority-wide scan.
 
 Schema 48 introduced the bounded head counters; schema 49 added the checkpoint
 revision discriminator, while the latest table catalogue creates the checkpoint
@@ -966,7 +938,7 @@ values. Fresh authorities fold the bounded event range through the existing
 published schema-48 projection-chain index may retain it; schema 49 does not
 rebuild or require that index. Metrics expose checkpoint materializations and
 bytes, one-time inline bytes released, BLOB skips, and deferred BLOB bytes.
-Schema 50 repairs the exact schema-49 one-revision/no-head cohort by advancing
+Schema 51 repairs the exact schema-49 one-revision/no-head cohort by advancing
 the checkpoint row and Turn discriminator together. It matches owner,
 conversation, attempt, and revision metadata and neither selects nor rewrites
 the checkpoint JSON; any other malformed shape remains a fail-closed integrity
@@ -1008,10 +980,10 @@ before the first mutation; cleanup is enabled only after that ownership gate,
 so an existing file or dangling link is never overwritten or unlinked. The
 read-only `--analyze` report includes logical and allocated bytes, age, excess
 count, and an exact retirement command for every retained copy. The same
-bounded report totals verified SQLite backups, root files of at least 1 GiB,
-and one level (256 entries per directory) of known retired `db_snapshots`,
-`pg_backups`, and `retired_migration_artifacts-*` owners. Operator-owned rows
-receive no deletion command. The last local rollback is never automatic: after observing the replacement
+bounded shallow report totals verified SQLite backups and root-level files of
+at least 1 GiB whose lifecycle belongs to migration/cutover owner sign-off;
+those operator-managed files receive no automatic deletion command. Removing the
+last local rollback is never automatic: after observing the replacement
 healthy, stop Tofu and run
 `python3 scripts/storage_deep_clean.py --retire-rollback <basename> --confirm`.
 The command accepts no path or glob, holds the project lease, rejects links or
@@ -1023,8 +995,8 @@ read-only `python3 scripts/storage_deep_clean.py --analyze`. Its
 `compaction_plan` reports live/source bytes, required reserve, available space,
 the bulk-compaction verdict, and missing deferred indexes. The `tables` section
 measures exact encoded payload bytes and real row counts rather than multiplying
-a sparse `max(rowid)` by a sample average; it exposes rowid holes, exact large
-Turn-codec source candidates, and a 64-group event breakdown. The same canonical
+a sparse `max(rowid)` by a sample average; it also exposes rowid holes and a
+64-group exact `storage_events` stream/type breakdown. The same canonical
 selectors used by offline deletion report exact settled Sidecar
 `storage_attempt_events`, legacy `attempt_events`, and streaming/structural
 `task_events` rows plus encoded bytes for the requested `--ttl-days`; invalid
@@ -1034,9 +1006,9 @@ payload totals exclude SQLite page/index overhead. All measurements share one
 `analysis_budget_exhausted` partial results instead of continuing an unbounded
 diagnostic scan. `offline_compaction_recommended` describes existing freelist
 pressure only; `offline_maintenance` combines that signal with exact expired
-transport, rebuildable header-search, conditional legacy-mirror payload,
-deferred indexes, copy capacity, and one stopped-server command. A blocked
-verified copy returns no command rather than choosing no-rollback low-space. Physical
+transport, conditional legacy-mirror payload, deferred indexes, copy capacity,
+and one stopped-server command. A capacity-blocked verified copy returns no
+command rather than silently choosing the no-rollback low-space mode. Physical
 compaction is intentionally offline and explicit:
 `python3 scripts/storage_deep_clean.py --offline --confirm`. It acquires the
 project lease, deletes only expired transport rows, verifies a compact copy,
@@ -1069,13 +1041,13 @@ The verified-copy and low-space modes make one rowid-keyset pass over current
 canonical 6-hour streaming or 30-day structural TTL. Blank v21 migration rows
 recover `event_type` and `event_kind` from a valid top-level JSON object, after
 which the same TTL applies; malformed or type-less rows remain in the longer
-structural class. Retained `round_usage` rows reuse the canonical persistence
-projector: every private `_wire_*` usage graph is removed while unknown public
-fields remain forward-compatible, including recovered blank rows and payloads
-below the codec threshold. Other payloads use the private codec at 64 KiB; project feed/status streams never enter this pass.
-Selection is capped at 4,096 rows and 64 MiB; writes checkpoint separately and
-a repeat pass is write-free. The report exposes TTL/type/projection/codec rows,
-decoded projection input/output/removed bytes, invalid rows and batch maxima.
+structural class. Retained plain payloads of at least 64 KiB receive the private
+task-event codec, including already-typed historical rows. Project feed/status
+streams never enter this pass. Selection is capped at 4,096 rows and 64 MiB of
+stored payload, writes commit separately with a WAL checkpoint, and a repeat
+pass is write-free once the cohort is classified/compressed. The report exposes
+scan/write pages, TTL counts and bytes, recovered/opaque/invalid rows,
+compression savings, batch maxima and retained blank rows.
 
 New durable `messages_snapshot` rows use private `snapshotDeltaVersion=2`.
 The persistence-only projector keeps one chronological message baseline per
@@ -1091,23 +1063,23 @@ projected 32,728,847 stored bytes to 22,281,348 (31.92%) and 56 resident v1
 baseline chains to 32 v2 chains. This bounds future growth only; historical
 rows retain the structural TTL/offline reclaim lifecycle above.
 
-Those physical modes make metadata-first keyset passes over inactive inline Turn
-projections, frozen headers, compaction archives, and large task-result records.
-Turn rows require inactive checkpoint/head columns before reusing the production codec; header canonical proof may also clear its rebuildable search copy.
-Current compaction archives adopt the per-message codec only when smaller; the
-exact retired generic shape migrates only after unique active/trash ownership and
-full public target agreement. Large task-result documents reuse the runtime
-32 KiB per-field codec while outer owner/status/experiment facts remain visible.
-Every pass proves canonical public equality and strictly smaller stored bytes;
-malformed, conflicting, ambiguous, or over-64-MiB evidence stays intact.
-Selection caps at 64 rows/64 MiB with per-page WAL checkpoints; `--no-vacuum` skips every physical rewrite.
+Those physical modes also make one metadata-first keyset pass over non-empty
+frozen `storage_conversations.messages_json` archives. Each selected message
+uses the lossless projection-sequence codec described above; a canonical
+decode/re-encode/decode comparison gates every update, and an equal or larger
+encoding leaves the original bytes untouched. Selection is capped at 64 rows,
+one page carries at most 64 MiB of source payload, and an individual document
+above 64 MiB is counted without fetching its body. Each non-empty write page
+commits and checkpoints its WAL independently. The pass never changes message
+count or public transcript semantics, and `--no-vacuum` skips it because that
+mode cannot return the freed pages.
 
 The verified-copy and low-space physical modes also retire expired rows from
 the frozen pre-Sidecar `attempt_events` and `task_events` tables. Legacy
 attempt cleanup requires both age eligibility and a newer sequence, so the
 newest diagnostic frame for every attempt always survives. Legacy task frames
 use the same canonical 6-hour streaming and 30-day structural lifetimes as the
-Sidecar event authority. Task results are never deleted. Deletes commit in
+Sidecar event authority. `task_results` remains untouched. Deletes commit in
 pages of at most 900 rows and 128 MiB of encoded payload, and truncate the WAL
 between pages; an individual over-budget row fails closed. The report includes
 deleted rows/payload bytes, batch maxima and retained-row counts for operator
@@ -1141,8 +1113,19 @@ For SQLite on a high-tail-latency FUSE/network volume, see
 `synchronous=FULL` on the serving database and activates only after filesystem,
 WAL-recovery, capacity, lineage, and measured-speedup checks. It deliberately
 has a bounded RPO if the local disk itself is lost; enabling it is an operator
-durability decision, not an automatic response to a slow mount. First
-activation uses source-fingerprinted, fsynced copy checkpoints and resumes only
+durability decision, not an automatic response to a slow mount. New activation
+never creates or restores an absent implicit `/tmp` front; it requires an
+explicit persistent-local directory. A surviving legacy temporary front stays
+readable so it can be retired without losing an unshipped crash tail. If a
+shadow exists while no verified front is selectable, startup fails closed
+rather than opening the stale classic file. The explicit offline command
+`python3 scripts/storagectl.py retire-fastpath --confirm` is the exclusive
+transition back to classic SQLite. It prefers a uniquely verified surviving
+front, WAL-checkpoints and
+integrity-checks a private candidate, publishes only after authority-UUID
+validation, retains rollback authorities, and reclaims only exact incomplete
+shipper artifacts after success. First activation uses source-fingerprinted,
+fsynced copy checkpoints and resumes only
 owned partial bytes whose classic database/WAL identity is unchanged. The
 Sidecar reports bounded startup progress to a renewable stall watchdog inside
 one immutable topology-aware hard deadline; the ASGI lifespan shares that

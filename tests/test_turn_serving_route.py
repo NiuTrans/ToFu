@@ -314,6 +314,9 @@ def test_settings_runtime_has_one_v2_provider_editor():
     for term in ('服务商', '接入配置', '接入点', '凭证', '模型供给', '上游部署标识'):
         assert term in renderer
     assert '<details class="stg-v2-advanced">' not in renderer
+    assert '模型管理' in renderer
+    assert 'stg-v2-manager-tabs' not in renderer
+    assert '_stgProviderManagerTab' not in renderer
     assert '_stgProviderManagerLimit = 80' in renderer
     assert 'async function _showTemplateMenu' in renderer
     assert 'async function _openTemplateWizard' in renderer

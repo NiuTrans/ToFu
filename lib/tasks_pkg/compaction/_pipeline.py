@@ -3,8 +3,8 @@
 Public surface:
   * ``run_compaction_pipeline``             — called from the orchestrator
     before each LLM API call.
-  * ``recompose_context_after_compaction`` — rebuilds managed context
-    after L2 compaction drops the system message.
+  * ``recompose_context_after_compaction`` — rebuilds managed tail context
+    after L2 compaction changes the request-local working set.
 """
 
 from lib.log import audit_log, get_logger
@@ -133,9 +133,10 @@ def recompose_context_after_compaction(messages: list, task: dict | None = None)
 
     A compactor may retain the static system block while dropping a managed
     head/tail block. Marker probing therefore cannot prove that context is
-    complete. The Context Composer is idempotent: it removes every previous
-    managed render, recollects the current providers, and writes one fresh
-    manifest. Run it after every successful compaction.
+    complete. The Context Composer is content-addressed and append-only: it
+    retains surviving carriers, restores only blocks actually removed by
+    compaction, and appends a newer version only when content changed. Run it
+    after every successful compaction.
 
     Only runs if the task has the necessary config to re-inject.
     """
@@ -190,14 +191,14 @@ def run_compaction_pipeline(
         Truncates oversized results immediately.  Zero LLM cost.
 
     Layer 1 (micro_compact):
-        Archives and compacts cold tool results every round.
-        Also strips old thinking/reasoning_content.
+        Compacts cold tool results in the request-local working copy.
+        Also strips old thinking/reasoning_content from that copy.
         Zero LLM cost.  Runs unconditionally.
 
     Force compact (force_compact_if_needed):
         Fires only when estimated tokens approach the context limit.
         Injects a context_compact tool_call/result pair.
-        After compaction, re-injects system contexts if needed.
+        After compaction, re-injects managed tail contexts if needed.
 
     Layer 3 (reactive_compact):
         Emergency compaction — called from orchestrator on API 400
@@ -288,7 +289,7 @@ def run_compaction_pipeline(
         _compaction_remaining_api_rounds=remaining_api_rounds,
         _measurement_out=_l2_measurement)
 
-    # Post-compact: re-inject system contexts if compaction dropped them
+    # Post-compact: re-inject managed tail contexts if compaction dropped them
     _post_l2_tokens: int | None = None
     if compacted:
         recompose_context_after_compaction(messages, task=task)

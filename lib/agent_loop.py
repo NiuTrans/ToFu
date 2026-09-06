@@ -40,11 +40,13 @@ engine re-implements them): ``before_round`` halt hook (timeouts),
 ``retry_bonus`` (bounded premature-close retry), ``execute_tools`` batch
 hook (parallel pools), ``max_consecutive_tool_timeouts`` (timeout circuit
 breaker), ``max_consecutive_nonretryable_failure_rounds`` (typed terminal
-failure breaker) and ``on_round_end`` (crash-checkpoint placement).
+failure breaker), result-aware ``max_consecutive_no_progress_rounds``, and
+``on_round_end`` (crash-checkpoint placement).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Callable
 
@@ -261,7 +263,7 @@ def run_agent_loop(
     abort: AbortSignal,
     round_tools: Any,
     dispatch: Callable[[int, Any], ProviderStreamResult | tuple],
-    execute_tool: Callable[[int, dict], None] | None = None,
+    execute_tool: Callable[[int, dict], Any] | None = None,
     on_round_result: Callable[[int, dict, Any, Any], None] | None = None,
     on_tool_round: Callable[[int, dict], None] | None = None,
     retry_bonus: Callable[[int, dict, Any, Any], bool] | None = None,
@@ -295,10 +297,14 @@ def run_agent_loop(
             treating a no-tool round as natural completion or executing tools;
             a caller-owned ``decide_round`` may consume it first to perform a
             bounded recovery. ``msg['tool_calls']`` drives tool execution.
-        execute_tool: ``execute_tool(rnd, tool_call) -> None``. Runs ONE tool
+        execute_tool: ``execute_tool(rnd, tool_call) -> result | None``. Runs ONE tool
             and is responsible for emitting the engine's tool events and
-            appending the tool-result message. Called only AFTER the
-            between-tools abort check passes.
+            appending the tool-result message. Returning the exact
+            model-visible result lets the no-progress guard distinguish an
+            identical call with advancing evidence from a genuine repeated
+            call+result loop. ``None`` means result evidence is unavailable
+            and therefore fails open. Called only AFTER the between-tools
+            abort check passes.
         on_round_result: optional ``(rnd, msg, finish, usage) -> None`` hook
             fired after every dispatch (e.g. usage accumulation).
         on_tool_round: optional ``(rnd, msg) -> None`` hook fired once when a
@@ -326,9 +332,11 @@ def run_agent_loop(
             per-tool ``execute_tool`` contract for new engines so the
             between-tools abort check (the "Stop has limited effect" fix)
             keeps biting. The hook MAY return a note dict; the chassis
-            reads ``'timed_out'`` (bool) and
-            ``'nonretryable_failure_signatures'`` (stable error codes). See
-            the matching breaker arguments below.
+            reads ``'timed_out'`` (bool),
+            ``'nonretryable_failure_signatures'`` (stable error codes), and
+            the no-progress evidence pair ``'progress_evidence_ids'`` plus
+            ``'result_evidence_complete'``. See the matching breaker
+            arguments below.
         decide_round: optional typed policy hook fired after a successful
             dispatch (and the legacy ``retry_bonus`` hook) but before the
             runner's post-stream abort check and tool-call inspection.  It
@@ -370,11 +378,13 @@ def run_agent_loop(
             authoritative counter without reimplementing it.
         max_consecutive_no_progress_rounds: wedged-loop circuit breaker
             (0 = off, default). When > 0, the chassis fingerprints each
-            round's tool calls (name + arguments, in order) and counts
-            CONSECUTIVE rounds whose fingerprint is IDENTICAL to the
-            previous round's; a differing fingerprint resets the count. At
-            the threshold the loop halts with ``outcome.halted=True`` and
-            ``exit_reason='no_progress'``.
+            completed round's ordered tool calls AND authoritative
+            model-visible results. It counts only consecutive rounds whose
+            call, visible-result, and world fingerprints are all identical.
+            Changed results, changed world state, successful verification, or
+            unavailable/incomplete result evidence reset the count (fail
+            open). At the threshold the loop halts with
+            ``outcome.halted=True`` and ``exit_reason='no_progress'``.
 
             This is the guard the 2026-07-27 runaway needed: one sub-agent
             re-issued the same tool call for 26.7M rounds (3.5h, 9.1 GB of
@@ -392,10 +402,10 @@ def run_agent_loop(
             emit signatures only when EVERY tool in the round returned a
             canonical ``retryable=false`` error; success, retryable failure,
             mixed, malformed, and legacy-string rounds pass no signatures and
-            reset the streak. Tool arguments are deliberately irrelevant: a
-            model cannot turn a stable capability denial into progress by
-            changing a tab id, selector, or path. At the threshold the loop
-            halts with ``exit_reason='nonretryable_tool_failure'``.
+            reset the streak. Signatures should include the concrete tool and
+            arguments, so a changed operation is a new recovery attempt. At
+            the threshold the loop halts with
+            ``exit_reason='nonretryable_tool_failure'``.
         on_round_end: optional ``(rnd) -> None`` hook fired at the natural
             end of a round whose tools were executed WITHOUT an abort and
             WITHOUT a timeout-breaker halt — the seam for crash-recovery
@@ -559,34 +569,9 @@ def run_agent_loop(
             if directive_action == LoopDirective._STOP:
                 break
 
-        # Wedged-loop breaker: a round that re-issues the PREVIOUS round's
-        # tool calls byte-for-byte made no progress. Consecutive repeats are
-        # counted; any differing fingerprint resets the streak. Checked here
-        # (before the tools run) so a wedged agent cannot keep re-executing
-        # the same side-effecting call while the counter climbs.
-        if max_consecutive_no_progress_rounds > 0:
-            assert progress_ledger is not None
-            probe = progress_probe() if progress_probe is not None else {}
-            probe = probe if isinstance(probe, dict) else {}
-            decision = progress_ledger.observe(
-                tool_calls,
-                world_version=str(probe.get('worldVersion') or ''),
-                evidence_ids=probe.get('evidenceIds') or (),
-                verification=str(probe.get('verification') or ''),
-            )
-            outcome.consecutive_no_progress_rounds = int(
-                decision['noProgressStreak'])
-            if outcome.consecutive_no_progress_rounds \
-                    >= max_consecutive_no_progress_rounds:
-                logger.warning(
-                    '[AgentLoop] no-progress breaker tripped at round %d: '
-                    '%d repeated call+world rounds without new evidence',
-                    rnd + 1, outcome.consecutive_no_progress_rounds)
-                outcome.halted = True
-                outcome.exit_reason = 'no_progress'
-                break
-
         note = None
+        direct_result_evidence: list[str] = []
+        direct_result_evidence_complete = execute_tools is None
         if execute_tools is not None:
             # Batch path (e.g. swarm's parallel tool pool): the hook owns
             # intra-batch behavior incl. any abort checks.
@@ -600,7 +585,26 @@ def run_agent_loop(
                 if abort.aborted:
                     record_abort('between_tools', rnd, msg)
                     break
-                execute_tool(rnd, tc)
+                visible_result = execute_tool(rnd, tc)
+                if visible_result is None:
+                    direct_result_evidence_complete = False
+                else:
+                    try:
+                        evidence_payload = json.dumps(
+                            visible_result, ensure_ascii=False,
+                            sort_keys=True, separators=(',', ':'), default=str)
+                    except (TypeError, ValueError):
+                        evidence_payload = repr(visible_result)
+                    direct_result_evidence.append(hashlib.sha256(
+                        evidence_payload.encode('utf-8', 'replace')
+                    ).hexdigest())
+
+            if not outcome.aborted:
+                note = {
+                    'progress_evidence_ids': direct_result_evidence,
+                    'result_evidence_complete':
+                        direct_result_evidence_complete,
+                }
 
         if outcome.aborted:
             break
@@ -621,6 +625,56 @@ def run_agent_loop(
                     >= max_consecutive_tool_timeouts:
                 outcome.halted = True
                 outcome.exit_reason = 'tool_timeout'
+                break
+
+        # Evidence-grounded wedged-loop breaker. This runs after execution so
+        # an identical poll/read call with a changed visible result is real
+        # progress. Missing result evidence is ambiguity, never proof of a
+        # stall, and therefore resets/fails open.
+        if max_consecutive_no_progress_rounds > 0:
+            assert progress_ledger is not None
+            note_dict = note if isinstance(note, dict) else {}
+            probe = progress_probe() if progress_probe is not None else {}
+            probe = probe if isinstance(probe, dict) else {}
+            note_evidence = note_dict.get('progress_evidence_ids')
+            probe_evidence = probe.get('evidenceIds')
+            note_evidence_complete = bool(
+                note_dict.get('result_evidence_complete'))
+            probe_evidence_complete = bool(
+                probe.get('resultEvidenceComplete'))
+            evidence_ids = (
+                note_evidence
+                if (note_evidence_complete
+                    and isinstance(note_evidence, (list, tuple, set)))
+                else probe_evidence
+                if (probe_evidence_complete
+                    and isinstance(probe_evidence, (list, tuple, set)))
+                else ()
+            )
+            evidence_complete = bool(
+                note_evidence_complete or probe_evidence_complete)
+            decision = progress_ledger.observe(
+                tool_calls,
+                world_version=str(
+                    note_dict.get('world_version')
+                    or note_dict.get('worldVersion')
+                    or probe.get('worldVersion') or ''),
+                evidence_ids=evidence_ids,
+                verification=str(
+                    note_dict.get('verification')
+                    or probe.get('verification') or ''),
+                evidence_complete=evidence_complete,
+            )
+            outcome.consecutive_no_progress_rounds = int(
+                decision['noProgressStreak'])
+            if outcome.consecutive_no_progress_rounds \
+                    >= max_consecutive_no_progress_rounds:
+                logger.warning(
+                    '[AgentLoop] no-progress breaker tripped at round %d: '
+                    '%d repeated call+world+visible-result rounds',
+                    rnd + 1, outcome.consecutive_no_progress_rounds)
+                outcome.halted = True
+                outcome.exit_reason = 'no_progress'
                 break
 
         # Typed terminal-failure breaker. This is intentionally post-execution:

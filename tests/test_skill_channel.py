@@ -69,11 +69,15 @@ def _proj(tmp_path, name='proj'):
 
 
 def _system_full_text(messages):
-    content = messages[0]['content']
-    if isinstance(content, list):
-        return '\n\n'.join(b.get('text', '') for b in content
-                           if isinstance(b, dict))
-    return content or ''
+    parts = []
+    for message in messages:
+        content = message.get('content')
+        if isinstance(content, list):
+            parts.extend(b.get('text', '') for b in content
+                         if isinstance(b, dict))
+        elif content:
+            parts.append(str(content))
+    return '\n\n'.join(parts)
 
 
 # ── build_skills_index ───────────────────────────────────────────────
@@ -245,14 +249,13 @@ def test_injection_skills_gating_and_idempotency(isolated):
     _run_inject(twice, project_path=proj, project_enabled=True)
     assert _system_full_text(twice).count('<available_skills>') == 1
 
-    # Own cache block: the index rides its OWN content block (a skill
-    # install must not invalidate the static prefix's breakpoint).
-    content = twice[0]['content']
-    assert isinstance(content, list)
-    block_texts = [b.get('text', '') for b in content if isinstance(b, dict)]
-    idx_blocks = [t for t in block_texts if '<available_skills>' in t]
-    assert len(idx_blocks) == 1
-    assert 'Base.' not in idx_blocks[0]
+    assert twice[0]['content'] == 'Base.'
+    carriers = [message for message in twice
+                if message.get('_contextComposer')]
+    assert carriers
+    assert sum('<available_skills>' in str(row['content'])
+               for row in carriers) == 1
+    assert all('Base.' not in str(row['content']) for row in carriers)
 
 
 # ── tool registration + display wiring ───────────────────────────────

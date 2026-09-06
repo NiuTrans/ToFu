@@ -78,6 +78,10 @@ IDEATE_NOVELTY_RETRIEVAL_K = 5
 # Generation divergence — mirror insight's 0.45 (divergent but JSON-safe).
 _IDEATE_TEMPERATURE = 0.45
 _IDEATE_MAX_TOKENS = 8000
+# A forced, tool-less synthesis occasionally receives a provider-terminated
+# response with reasoning but no answer body.  Reissue that exact synthesis
+# once without replaying the completed tool history or the whole stage.
+_IDEATE_EMPTY_FINAL_RETRIES = 1
 # The open-ended generation/research loop gets a token envelope. Per-idea
 # rubric calls are finite and are accounted in the same usage snapshot, but do
 # not need a loop breaker.
@@ -646,6 +650,7 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
     """
     from lib.agent_loop import AbortSignal
     from lib.llm_errors import AbortedError
+    from lib.paper.agent_loop_policy import PAPER_AGENT_ROUTE_MAX_RETRIES
 
     abort_signal = AbortSignal.from_callback(abort)
     buf = {'content': ''}
@@ -664,7 +669,9 @@ def _score_idea(idea: dict, prior_set: dict, gap: dict, lang: str, *,
             on_content=_on_content, abort_check=abort_signal.is_set,
             prefer_model=model or None, strict_model=bool(model), capability='text',
             max_tokens=_RUBRIC_MAX_TOKENS, temperature=_RUBRIC_TEMPERATURE,
-            thinking_enabled=False, max_429_attempts=max_429_attempts,
+            thinking_enabled=False,
+            max_retries=PAPER_AGENT_ROUTE_MAX_RETRIES,
+            max_429_attempts=max_429_attempts,
             log_prefix='[Paper:Ideate:Judge]'),
             context='paper ideate judge')
         msg = stream_result.message
@@ -876,7 +883,10 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
     gate pipeline offline. Mirrors insight/survey synthesis with the narrow
     research tool profile."""
     from lib.agent_loop import AbortSignal
-    from lib.paper.agent_loop_policy import run_guarded_paper_agent_loop
+    from lib.paper.agent_loop_policy import (
+        PAPER_AGENT_ROUTE_MAX_RETRIES,
+        run_guarded_paper_agent_loop,
+    )
     from lib.paper.agent_usage import PaperAgentUsageMeter
     from lib.paper.prompts import date_anchor_clause
     from lib.paper.tools import (
@@ -913,19 +923,47 @@ def _generate_raw_ideas(direction, open_gaps, reader_context, lang, *,
     _last = {'msg': None}
 
     def _dispatch(rnd, tools):
-        _round['content'] = ''
+        from lib.llm.stream_result import (
+            ProviderStreamState,
+            ensure_provider_stream_result,
+        )
 
-        def _on_content(t):
-            _round['content'] += t
-        effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
-            tools, owner_user_id=user_id)
-        from lib.llm.stream_result import ensure_provider_stream_result
-        return ensure_provider_stream_result(dispatch_stream(
-            messages, on_content=_on_content, abort_check=abort_signal.is_set,
-            prefer_model=model or None, strict_model=bool(model), capability='text',
-            tools=effective_tools, max_tokens=_IDEATE_MAX_TOKENS,
-            temperature=_IDEATE_TEMPERATURE,
-            thinking_enabled=False, log_prefix='[Paper:Ideate]'))
+        def _attempt(admitted_tools):
+            _round['content'] = ''
+
+            def _on_content(t):
+                _round['content'] += t
+
+            effective_tools, contracts_by_round[rnd] = freeze_paper_tool_epoch(
+                admitted_tools, owner_user_id=user_id)
+            return ensure_provider_stream_result(dispatch_stream(
+                messages, on_content=_on_content,
+                abort_check=abort_signal.is_set,
+                prefer_model=model or None, strict_model=bool(model),
+                capability='text', tools=effective_tools,
+                max_tokens=_IDEATE_MAX_TOKENS,
+                temperature=_IDEATE_TEMPERATURE,
+                thinking_enabled=False,
+                max_retries=PAPER_AGENT_ROUTE_MAX_RETRIES,
+                log_prefix='[Paper:Ideate]'))
+
+        result = _attempt(tools)
+        for retry_index in range(_IDEATE_EMPTY_FINAL_RETRIES):
+            if (tools is not None
+                    or result.state is not ProviderStreamState.EMPTY_RESPONSE
+                    or abort_signal.is_set()):
+                break
+            # This is a second paid provider attempt in the same logical round.
+            # Account the empty attempt explicitly because the shared loop only
+            # observes the result ultimately returned by this callback.
+            usage_meter.observe_agent_round(result.usage, result.message)
+            usage_meter.tools_for_round(None, rnd)
+            logger.warning(
+                '[Paper:Ideate] empty tool-less synthesis; retrying current '
+                'round (%d/%d)', retry_index + 1,
+                _IDEATE_EMPTY_FINAL_RETRIES)
+            result = _attempt(None)
+        return result
 
     def _on_round_result(rnd, msg, finish, usage):
         _last['msg'] = msg
@@ -1006,6 +1044,8 @@ def _ideate_system_prompt(lang: str, n_ideas: int) -> str:
             '而不是只报警。多个 idea 要来自不同的因果机制族，不是同一指标的改写。'
             '每个 idea 还必须从 linked gap 的 evidence 中选一个 `corpus_anchor_id`，并用 '
             '`corpus_delta` 说明对该论文真实机制改了哪一处；库外近邻只能辅助查新，不能替代语料锚点。'
+            '字段值不要带 "N/A"/"不适用" 之类的占位前缀；某字段对该 idea 确实不适用时，'
+            '直接给空字符串 ""。'
             f'只返回 JSON:{{"ideas":[{{...}} × {n_ideas}]}},每个 idea 含 title/kind/linked_gap_id/'
             'corpus_anchor_id/corpus_delta/failure_cause/new_invariant/intervention_level/'
             'core_mechanism/novelty_claim/'
@@ -1033,7 +1073,9 @@ def _ideate_system_prompt(lang: str, n_ideas: int) -> str:
         'Every idea must also choose a `corpus_anchor_id` from its linked gap\'s evidence '
         'and use `corpus_delta` to state exactly what changes in that paper\'s actual '
         'mechanism. External neighbours help novelty checking but cannot replace this '
-        'in-corpus mechanism anchor. '
+        'in-corpus mechanism anchor. Never prefix a field value with "N/A" or a similar '
+        'placeholder; if a field genuinely does not apply to an idea, return an empty '
+        'string "". '
         f'Return ONLY JSON: {{"ideas":[{{...}} × {n_ideas}]}}, each idea with title/kind/'
         'linked_gap_id/corpus_anchor_id/corpus_delta/failure_cause/new_invariant/'
         'intervention_level/core_mechanism/'

@@ -359,14 +359,11 @@ def test_terminal_frame_keeps_full_projection(turn_service, storage):
 
 
 def _prune(storage, *, cutoff_ms, max_attempts=16, max_rows=4096):
-    while True:
-        sync_result = storage.client.command(
-            'turn.sync.prune',
-            {'created_before_ms': cutoff_ms, 'max_rows': max_rows},
-            None, priority='maintenance', deadline=60,
-        )
-        if not sync_result['remaining']:
-            break
+    storage.client.command(
+        'turn.sync.prune',
+        {'created_before_ms': cutoff_ms, 'max_rows': max_rows},
+        None, priority='maintenance', deadline=60,
+    )
     return storage.client.command(
         'turn.events.prune',
         {'settled_before_ms': cutoff_ms, 'max_attempts': max_attempts,

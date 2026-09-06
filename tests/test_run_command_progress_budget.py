@@ -55,3 +55,71 @@ def test_run_command_recovery_output_is_exact_below_budget(monkeypatch):
     assert round_entry['_partialOutput'] == 'prefix-suffix'
     assert round_entry['_partialOutputTotalChars'] == len('prefix-suffix')
     assert '_partialOutputTruncated' not in round_entry
+
+
+def test_short_runtime_command_skips_progress_and_terminal_frames(monkeypatch):
+    """The production ToolExecutionContext path also takes the short fast path."""
+    from lib.tasks_pkg.handlers import code_exec
+    from lib.tasks_pkg.tool_runtime.context import ToolExecutionContext
+    import lib.tasks_pkg.manager as manager
+
+    emitted = []
+    monkeypatch.setattr(
+        code_exec, 'append_event',
+        lambda _task, event: emitted.append(dict(event)))
+    monkeypatch.setattr(
+        manager, 'append_event',
+        lambda _task, event: emitted.append(dict(event)))
+    round_entry = {'toolCallId': 'call-fast', 'toolName': 'run_command'}
+    task = {'id': 'task-fast', '_userId': 1}
+    context = ToolExecutionContext(
+        task=task, round_num=5, tool_call_id='call-fast',
+        tool_name='run_command', owner_user_id=1,
+        round_entry=round_entry)
+    lifecycle = code_exec._RunCommandSpawnLifecycle(
+        task, 5, round_entry, grace_ms=5_000)
+    callback = code_exec._make_run_command_progress_cb(
+        task, 5, round_entry, 'printf ok', runtime_context=context,
+        lifecycle=lifecycle)
+
+    lifecycle(1_000.0, None)
+    callback('stdout', 'ok')
+    assert lifecycle.finish() is False
+    callback.flush()
+    artifact = callback.finalize_output(complete=True)
+
+    assert emitted == []
+    assert artifact.spilled is False
+    assert artifact.size_bytes == 0
+    assert '_partialOutput' not in round_entry
+
+
+def test_chatty_command_promotes_to_live_before_time_grace(monkeypatch):
+    """Early output above the coalescing budget is streamed, never discarded."""
+    from lib.tasks_pkg.handlers import code_exec
+    import lib.tasks_pkg.manager as manager
+
+    emitted = []
+    checkpoints = []
+    monkeypatch.setattr(
+        code_exec, 'append_event',
+        lambda _task, event: emitted.append(dict(event)))
+    monkeypatch.setattr(
+        manager, 'checkpoint_task_partial',
+        lambda _task, force=False: checkpoints.append(force))
+    round_entry = {'toolCallId': 'call-chatty', 'toolName': 'run_command'}
+    task = {'id': 'task-chatty'}
+    lifecycle = code_exec._RunCommandSpawnLifecycle(
+        task, 6, round_entry, grace_ms=5_000)
+    callback = code_exec._make_run_command_progress_cb(
+        task, 6, round_entry, 'chatty', lifecycle=lifecycle)
+    chunk = 'x' * code_exec._COALESCE_BYTES
+
+    lifecycle(2_000.0, None)
+    callback('stdout', chunk)
+    assert lifecycle.finish() is True
+    callback.flush()
+
+    assert any(event.get('execStartTs') == 2_000.0 for event in emitted)
+    assert ''.join(event.get('chunk', '') for event in emitted) == chunk
+    assert checkpoints == [True]

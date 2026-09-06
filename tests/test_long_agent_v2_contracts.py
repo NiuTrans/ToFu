@@ -1276,13 +1276,22 @@ def test_progress_ledger_requires_world_evidence_or_verification_progress():
     calls = [{"function": {"name": "read_files",
                             "arguments": '{"paths":["a.py"]}'}}]
     assert ledger.observe(calls, world_version="v1")["progress"] is True
-    assert ledger.observe(calls, world_version="v1")["noProgressStreak"] == 1
+    assert ledger.observe(calls, world_version="v1")["noProgressStreak"] == 0
+    assert ledger.observe(
+        calls, world_version="v1", evidence_ids=["ev_same"],
+        evidence_complete=True)["progress"] is True
+    assert ledger.observe(
+        calls, world_version="v1", evidence_ids=["ev_same"],
+        evidence_complete=True)["noProgressStreak"] == 1
     evidence = ledger.observe(
-        calls, world_version="v1", evidence_ids=["ev_new"])
+        calls, world_version="v1", evidence_ids=["ev_new"],
+        evidence_complete=True)
     assert evidence["progress"] is True
     assert evidence["noProgressStreak"] == 0
     assert ledger.observe(
-        calls, world_version="v1", verification="passed")["progress"] is True
+        calls, world_version="v1", evidence_ids=["ev_new"],
+        evidence_complete=True,
+        verification="passed")["progress"] is True
 
 
 def test_long_agent_experiments_isolate_arms_and_guard_combined():

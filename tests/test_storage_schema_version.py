@@ -90,7 +90,7 @@ def test_schema_39_adds_empty_bounded_compaction_receipts(tmp_path: Path):
     }
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION
+    assert int(version) == SCHEMA_VERSION == 51
     assert row['receipt_json'] == '{}'
     assert column_types['receipt_json'] == 'TEXT'
 
@@ -153,7 +153,7 @@ def test_schema_45_adds_bounded_attempt_dispatch_recovery_index(
     ).fetchone()[0]
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION
+    assert int(version) == SCHEMA_VERSION == 51
     assert columns['dispatch_mode']['notnull'] == 1
     assert columns['dispatch_mode']['dflt_value'] == "''"
     assert "status = 'pending'" in index_sql
@@ -190,7 +190,7 @@ def test_schema_46_adds_bounded_attempt_timing_authority(tmp_path: Path):
     ).fetchone()['sql']
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION
+    assert int(version) == SCHEMA_VERSION == 51
     assert columns['timing_trace_json']['notnull'] == 1
     assert columns['timing_trace_json']['dflt_value'] == "'{}'"
     assert "task_id <> ''" in task_index_sql
@@ -229,7 +229,7 @@ def test_schema_47_indexes_owner_conversation_trace_discovery(tmp_path: Path):
     ).fetchall()
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION
+    assert int(version) == SCHEMA_VERSION == 51
     assert 'conversation_id, created_at DESC, attempt_id DESC' in index_sql
     assert "WHERE task_id <> ''" in index_sql
     assert any(
@@ -306,7 +306,7 @@ def test_schema_48_and_49_add_projection_head_metadata_without_blob_backfill(
     migration_change_count = connection.total_changes - changes_before
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION
+    assert int(version) == SCHEMA_VERSION == 51
     assert row['projection_json'] == historical_projection
     assert row['projection_checkpoint_revision'] is None
     assert row['projection_materialized_revision'] is None
@@ -378,7 +378,7 @@ def test_schema_49_upgrades_an_established_schema_48_authority(
     migration_change_count = connection.total_changes - changes_before
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION
+    assert int(version) == SCHEMA_VERSION == 51
     assert row['projection_json'] == historical_projection
     assert row['projection_checkpoint_revision'] is None
     assert checkpoint_count == 0
@@ -386,72 +386,10 @@ def test_schema_49_upgrades_an_established_schema_48_authority(
     assert all('PROJECTION_JSON' not in statement for statement in migration_dml)
 
 
-def test_schema_50_repairs_the_checkpoint_unchanged_revision_cohort(
+def test_schema_50_adds_attempt_event_references_without_json_backfill(
     tmp_path: Path,
 ):
-    connection = sqlite3.connect(tmp_path / 'schema-v50-checkpoint-repair.db')
-    connection.row_factory = sqlite3.Row
-    session = SQLiteSession(connection)
-    initialize_schema(session)
-    checkpoint_projection = b'{"content":"still current"}'
-    connection.execute(
-        "INSERT INTO storage_conversation_turns("
-        "turn_id,conversation_id,user_id,ordinal,actor,status,"
-        "current_attempt_id,projection_json,projection_revision,"
-        "projection_checkpoint_revision,projection_materialized_revision,"
-        "projection_patch_count,projection_patch_bytes,created_at,updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (
-            'repair-turn', 'repair-conversation', 7, 0, 'assistant', 'running',
-            'repair-attempt', b'{}', 8, 7, None, 0, 0, 1, 2,
-        ),
-    )
-    connection.execute(
-        "INSERT INTO storage_turn_projection_checkpoints("
-        "turn_id,conversation_id,user_id,attempt_id,projection_revision,"
-        "projection_json,projection_bytes,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-        (
-            'repair-turn', 'repair-conversation', 7, 'repair-attempt', 7,
-            checkpoint_projection, len(checkpoint_projection), 1,
-        ),
-    )
-    connection.execute(
-        "UPDATE storage_meta SET meta_value='49' "
-        "WHERE meta_key='schema_version'")
-    connection.commit()
-
-    initialize_schema(session)
-
-    turn = connection.execute(
-        "SELECT projection_revision,projection_checkpoint_revision,"
-        "projection_materialized_revision,projection_patch_count,"
-        "projection_patch_bytes FROM storage_conversation_turns "
-        "WHERE turn_id='repair-turn'"
-    ).fetchone()
-    checkpoint = connection.execute(
-        "SELECT projection_revision,projection_json,projection_bytes "
-        "FROM storage_turn_projection_checkpoints WHERE turn_id='repair-turn'"
-    ).fetchone()
-    version = connection.execute(
-        "SELECT meta_value FROM storage_meta WHERE meta_key='schema_version'"
-    ).fetchone()[0]
-    connection.close()
-
-    assert int(version) == SCHEMA_VERSION
-    assert turn['projection_revision'] == 8
-    assert turn['projection_checkpoint_revision'] == 8
-    assert turn['projection_materialized_revision'] is None
-    assert turn['projection_patch_count'] == 0
-    assert turn['projection_patch_bytes'] == 0
-    assert checkpoint['projection_revision'] == 8
-    assert checkpoint['projection_json'] == checkpoint_projection
-    assert checkpoint['projection_bytes'] == len(checkpoint_projection)
-
-
-def test_schema_51_adds_attempt_event_references_without_json_backfill(
-    tmp_path: Path,
-):
-    connection = sqlite3.connect(tmp_path / 'schema-v51-from-v50.db')
+    connection = sqlite3.connect(tmp_path / 'schema-v50-from-v49.db')
     connection.row_factory = sqlite3.Row
     session = SQLiteSession(connection)
     initialize_schema(session)
@@ -468,7 +406,7 @@ def test_schema_51_adds_attempt_event_references_without_json_backfill(
     connection.execute(
         'ALTER TABLE storage_conversation_changes DROP COLUMN attempt_sequence')
     connection.execute(
-        "UPDATE storage_meta SET meta_value='50' "
+        "UPDATE storage_meta SET meta_value='49' "
         "WHERE meta_key='schema_version'")
     connection.commit()
 
@@ -504,7 +442,7 @@ def test_schema_51_adds_attempt_event_references_without_json_backfill(
     migration_change_count = connection.total_changes - changes_before
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION
+    assert int(version) == SCHEMA_VERSION == 51
     assert stored['event_json'] == historical_event
     assert stored['attempt_sequence'] is None
     assert columns['attempt_sequence']['notnull'] == 0
@@ -517,166 +455,66 @@ def test_schema_51_adds_attempt_event_references_without_json_backfill(
     assert all('EVENT_JSON' not in statement for statement in migration_dml)
 
 
-def test_schema_52_adds_empty_compact_receipts_without_legacy_backfill(
+def test_schema_51_repairs_the_checkpoint_unchanged_revision_cohort(
     tmp_path: Path,
 ):
-    connection = sqlite3.connect(tmp_path / 'schema-v52-from-v51.db')
+    connection = sqlite3.connect(tmp_path / 'schema-v51-checkpoint-repair.db')
     connection.row_factory = sqlite3.Row
     session = SQLiteSession(connection)
     initialize_schema(session)
-    legacy_response = b'{"ok":true,"contract":"legacy-receipt"}'
+    checkpoint_projection = b'{"content":"still current"}'
     connection.execute(
-        'INSERT INTO storage_command_receipts('
-        'command_id,operation,request_digest,response_json,committed_at_ms) '
-        'VALUES (?,?,?,?,?)',
-        ('legacy-command', 'record.put', 'ab' * 32, legacy_response, 1),
+        "INSERT INTO storage_conversation_turns("
+        "turn_id,conversation_id,user_id,ordinal,actor,status,"
+        "current_attempt_id,projection_json,projection_revision,"
+        "projection_checkpoint_revision,projection_materialized_revision,"
+        "projection_patch_count,projection_patch_bytes,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            'repair-turn', 'repair-conversation', 7, 0, 'assistant', 'running',
+            'repair-attempt', b'{}', 8, 7, None, 0, 0, 1, 2,
+        ),
     )
-    connection.execute('DROP TABLE storage_command_receipts_v2')
     connection.execute(
-        "UPDATE storage_meta SET meta_value='51' "
-        "WHERE meta_key='schema_version'"
+        "INSERT INTO storage_turn_projection_checkpoints("
+        "turn_id,conversation_id,user_id,attempt_id,projection_revision,"
+        "projection_json,projection_bytes,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            'repair-turn', 'repair-conversation', 7, 'repair-attempt', 7,
+            checkpoint_projection, len(checkpoint_projection), 1,
+        ),
     )
-    connection.commit()
-
-    traced_statements: list[str] = []
-    changes_before = connection.total_changes
-    connection.set_trace_callback(traced_statements.append)
-    initialize_schema(session)
-    connection.set_trace_callback(None)
-
-    legacy = connection.execute(
-        'SELECT operation,request_digest,response_json,committed_at_ms '
-        'FROM storage_command_receipts WHERE command_id=?',
-        ('legacy-command',),
-    ).fetchone()
-    compact_count = connection.execute(
-        'SELECT COUNT(*) FROM storage_command_receipts_v2'
-    ).fetchone()[0]
-    compact_sql = connection.execute(
-        "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?",
-        ('storage_command_receipts_v2',),
-    ).fetchone()[0]
-    compact_columns = {
-        row['name']: row['type']
-        for row in connection.execute(
-            'PRAGMA table_info("storage_command_receipts_v2")'
-        )
-    }
-    version = connection.execute(
-        "SELECT meta_value FROM storage_meta WHERE meta_key='schema_version'"
-    ).fetchone()[0]
-    migration_change_count = connection.total_changes - changes_before
-    receipt_dml = [
-        statement for statement in traced_statements
-        if statement.lstrip().upper().startswith(
-            ('INSERT ', 'UPDATE ', 'DELETE ')
-        ) and 'STORAGE_COMMAND_RECEIPTS' in statement.upper()
-    ]
-    connection.close()
-
-    assert int(version) == SCHEMA_VERSION
-    assert dict(legacy) == {
-        'operation': 'record.put',
-        'request_digest': 'ab' * 32,
-        'response_json': legacy_response,
-        'committed_at_ms': 1,
-    }
-    assert compact_count == 0
-    assert 'WITHOUT ROWID' in compact_sql.upper()
-    assert compact_columns['command_key'] == 'BLOB'
-    assert compact_columns['request_digest'] == 'BLOB'
-    assert migration_change_count == 1
-    assert receipt_dml == []
-
-
-def test_schema_53_adds_empty_owner_scoped_desktop_egress_preferences(
-        tmp_path: Path):
-    connection = sqlite3.connect(tmp_path / 'schema-v53-from-v52.db')
-    connection.row_factory = sqlite3.Row
-    session = SQLiteSession(connection)
-    initialize_schema(session)
-    connection.execute('DROP TABLE storage_desktop_egress_preferences')
     connection.execute(
-        "UPDATE storage_meta SET meta_value='52' "
+        "UPDATE storage_meta SET meta_value='50' "
         "WHERE meta_key='schema_version'")
     connection.commit()
 
     initialize_schema(session)
 
-    columns = {
-        row['name']: row
-        for row in connection.execute(
-            'PRAGMA table_info("storage_desktop_egress_preferences")')
-    }
-    count = connection.execute(
-        'SELECT COUNT(*) FROM storage_desktop_egress_preferences').fetchone()[0]
-    version = connection.execute(
-        "SELECT meta_value FROM storage_meta WHERE meta_key='schema_version'"
-    ).fetchone()[0]
-    connection.close()
-
-    assert int(version) == SCHEMA_VERSION
-    assert count == 0
-    assert columns['owner_user_id']['pk'] == 1
-    assert columns['agent_id']['notnull'] == 1
-    assert columns['updated_at_ms']['notnull'] == 1
-
-
-def test_schema_56_adds_project_event_columns_before_their_unique_index(
-        tmp_path: Path):
-    connection = sqlite3.connect(tmp_path / 'schema-v56-from-v55.db')
-    connection.row_factory = sqlite3.Row
-    connection.execute(
-        'CREATE TABLE storage_meta(meta_key TEXT PRIMARY KEY, meta_value TEXT)')
-    connection.execute(
-        'INSERT INTO storage_meta VALUES (?, ?)', ('schema_version', '55'))
-    connection.execute('''
-        CREATE TABLE storage_events (
-            task_id TEXT NOT NULL,
-            sequence BIGINT NOT NULL,
-            stream_kind TEXT NOT NULL DEFAULT 'task',
-            event_type TEXT NOT NULL DEFAULT '',
-            event_kind TEXT NOT NULL DEFAULT '',
-            event_json BLOB NOT NULL,
-            created_at_ms BIGINT NOT NULL,
-            PRIMARY KEY (task_id, sequence)
-        )
-    ''')
-    connection.execute(
-        'INSERT INTO storage_events('
-        'task_id, sequence, event_json, created_at_ms) VALUES (?, ?, ?, ?)',
-        ('legacy-task', 1, b'{}', 1),
-    )
-
-    initialize_schema(SQLiteSession(connection))
-
-    columns = {
-        row['name']: row
-        for row in connection.execute('PRAGMA table_info("storage_events")')
-    }
-    event = connection.execute(
-        'SELECT owner_user_id, project_key, project_sequence, event_json '
-        'FROM storage_events WHERE task_id=? AND sequence=?',
-        ('legacy-task', 1),
+    turn = connection.execute(
+        "SELECT projection_revision,projection_checkpoint_revision,"
+        "projection_materialized_revision,projection_patch_count,"
+        "projection_patch_bytes FROM storage_conversation_turns "
+        "WHERE turn_id='repair-turn'"
     ).fetchone()
-    project_index = connection.execute(
-        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
-        ('idx_storage_events_project_sequence',),
+    checkpoint = connection.execute(
+        "SELECT projection_revision,projection_json,projection_bytes "
+        "FROM storage_turn_projection_checkpoints WHERE turn_id='repair-turn'"
     ).fetchone()
     version = connection.execute(
         "SELECT meta_value FROM storage_meta WHERE meta_key='schema_version'"
     ).fetchone()[0]
     connection.close()
 
-    assert int(version) == SCHEMA_VERSION
-    assert {'owner_user_id', 'project_key', 'project_sequence'} <= columns.keys()
-    assert dict(event) == {
-        'owner_user_id': 0,
-        'project_key': '',
-        'project_sequence': 0,
-        'event_json': b'{}',
-    }
-    assert 'WHERE project_sequence > 0' in project_index['sql']
+    assert int(version) == SCHEMA_VERSION == 51
+    assert turn['projection_revision'] == 8
+    assert turn['projection_checkpoint_revision'] == 8
+    assert turn['projection_materialized_revision'] is None
+    assert turn['projection_patch_count'] == 0
+    assert turn['projection_patch_bytes'] == 0
+    assert checkpoint['projection_revision'] == 8
+    assert checkpoint['projection_json'] == checkpoint_projection
+    assert checkpoint['projection_bytes'] == len(checkpoint_projection)
 
 
 def test_jsondoc_migration_spelling_is_backend_neutral():
@@ -688,16 +526,6 @@ def test_jsondoc_migration_spelling_is_backend_neutral():
 
     assert ' receipt TEXT ' in schema._sql_for_backend(sqlite_probe, statement)
     assert ' receipt JSONB ' in schema._sql_for_backend(postgres_probe, statement)
-
-    compact = (
-        'CREATE TABLE example(command_key BLOB PRIMARY KEY) WITHOUT ROWID'
-    )
-    assert schema._sql_for_backend(sqlite_probe, compact).endswith(
-        ' WITHOUT ROWID'
-    )
-    postgres_compact = schema._sql_for_backend(postgres_probe, compact)
-    assert ' BYTEA ' in postgres_compact
-    assert 'WITHOUT ROWID' not in postgres_compact
 
 
 def test_private_postgres_contract_test_uses_a_secret_file(

@@ -29,6 +29,9 @@ class BrowserCapability(str, Enum):
     NETWORK_CAPTURE = 'network_capture'
     NETWORK_BODY = 'network_body'
     DEEP_COLLECT = 'deep_collect'
+    # Optional, passive-only response-retention bias for generic research.
+    # It never permits endpoint replay or bypasses per-response policy.
+    RESEARCH_HINTS = 'research_hints'
     DEVTOOLS_CONSOLE = 'devtools_console'
     JS_DEBUGGER = 'js_debugger'
     UPLOAD = 'upload'

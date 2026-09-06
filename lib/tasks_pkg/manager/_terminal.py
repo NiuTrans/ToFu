@@ -83,6 +83,8 @@ def finalize_chat_task_error(
         from lib.tasks_pkg.manager._registry import notify_terminal_conversation_change
         notify_terminal_fn = notify_terminal_conversation_change
 
+    persistence_was_pending = bool(task.get('_terminalPersistencePending'))
+    task['_terminalPersistencePending'] = True
     first = stamp_chat_task_terminal(
         task,
         status='error',
@@ -90,6 +92,8 @@ def finalize_chat_task_error(
         flow_reason=flow_reason,
     )
     if not first:
+        if not persistence_was_pending:
+            task.pop('_terminalPersistencePending', None)
         return None
     envelope = normalize_envelope(
         error, context='chat-task-terminal', source='chat',
@@ -112,8 +116,13 @@ def finalize_chat_task_error(
             (task.get('id') or '?')[:8], exc, exc_info=True,
         )
     try:
-        persist_task_result_fn(task)
+        persisted = persist_task_result_fn(task)
+        if persisted is False:
+            task['_terminalPersistencePending'] = True
+            task['_terminalPersistenceRetryReady'] = True
     except Exception as exc:
+        task['_terminalPersistencePending'] = True
+        task['_terminalPersistenceRetryReady'] = True
         logger.error(
             '[Task %s] terminal error persistence failed: %s',
             (task.get('id') or '?')[:8], exc, exc_info=True,
@@ -147,6 +156,8 @@ def finalize_chat_task_aborted(
         notify_terminal_fn = notify_terminal_conversation_change
 
     task['aborted'] = True
+    persistence_was_pending = bool(task.get('_terminalPersistencePending'))
+    task['_terminalPersistencePending'] = True
     first = stamp_chat_task_terminal(
         task,
         status='done',
@@ -154,6 +165,8 @@ def finalize_chat_task_aborted(
         flow_reason='aborted',
     )
     if not first:
+        if not persistence_was_pending:
+            task.pop('_terminalPersistencePending', None)
         return None
     event = build_event(EventType.DONE, finishReason='aborted')
     try:
@@ -164,8 +177,13 @@ def finalize_chat_task_aborted(
             (task.get('id') or '?')[:8], exc, exc_info=True,
         )
     try:
-        persist_task_result_fn(task)
+        persisted = persist_task_result_fn(task)
+        if persisted is False:
+            task['_terminalPersistencePending'] = True
+            task['_terminalPersistenceRetryReady'] = True
     except Exception as exc:
+        task['_terminalPersistencePending'] = True
+        task['_terminalPersistenceRetryReady'] = True
         logger.error(
             '[Task %s] queued-abort persistence failed: %s',
             (task.get('id') or '?')[:8], exc, exc_info=True,
@@ -180,8 +198,79 @@ def finalize_chat_task_aborted(
     return event
 
 
+def reject_unstarted_chat_task(
+    task: dict,
+    error: Any,
+    *,
+    cause: str,
+    conv_id: str = '',
+) -> dict | None:
+    """Settle, durably fail, then unregister work rejected before spawn.
+
+    ``create_task`` is durable-at-birth. A route that fails billing,
+    admission, resource binding, or synchronous spawn must therefore close
+    both authorities: the ExecutionSession and the durable task row. Merely
+    returning an HTTP error would strand a pending registry/storage record.
+    """
+    try:
+        from lib.agent_core.execution_session import (
+            ExecutionPhase,
+            execution_session_for_task,
+        )
+        session = execution_session_for_task(task)
+    except ValueError:
+        session = None
+    if (session is not None
+            and session.dispatch_started
+            and not session.is_terminal):
+        session.request_cancel('unstarted_rejection_after_dispatch')
+        logger.error(
+            '[Task %s] refused pre-spawn rejection after dispatch started',
+            (task.get('id') or '?')[:8],
+        )
+        return None
+    if session is not None:
+        session.settle(ExecutionPhase.FAILED, cause=cause)
+
+    # ``finalize_chat_task_error`` deliberately treats persistence as
+    # best-effort for an already-running worker. Pre-spawn rejection is
+    # stricter: removing the registry record is safe only after the terminal
+    # task-result row acknowledges its write. Otherwise retain the small,
+    # terminal task in memory so maintenance can retry instead of exposing a
+    # durable ``pending`` orphan after restart.
+    task['_terminalPersistencePending'] = True
+    from lib.tasks_pkg.manager._persist import persist_task_result
+    persisted = False
+
+    def _persist_with_receipt(owner: dict) -> bool:
+        nonlocal persisted
+        persisted = persist_task_result(owner) is True
+        return persisted
+
+    event = finalize_chat_task_error(
+        task,
+        error,
+        flow_reason=cause,
+        persist_task_result_fn=_persist_with_receipt,
+    )
+    if persisted:
+        task.pop('_terminalPersistencePending', None)
+        task.pop('_terminalPersistenceRetryReady', None)
+        from lib.tasks_pkg.manager._registry import discard_task
+        discard_task(str(task.get('id') or ''), conv_id)
+    else:
+        task['_terminalPersistencePending'] = True
+        task['_terminalPersistenceRetryReady'] = True
+        logger.error(
+            '[Task %s] rejected task retained: terminal persistence pending',
+            (task.get('id') or '?')[:8],
+        )
+    return event
+
+
 __all__ = [
     'finalize_chat_task_aborted',
     'finalize_chat_task_error',
+    'reject_unstarted_chat_task',
     'stamp_chat_task_terminal',
 ]

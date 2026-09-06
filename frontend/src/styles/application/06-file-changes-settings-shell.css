@@ -49,7 +49,10 @@
    (mirrors My Day design system)
    ═══════════════════════════════════════════ */
 
-/* ── Design tokens (inherit from myday, fallback for when myday CSS isn't loaded) ── */
+/* ── Design tokens (inherit from myday, fallback for when myday CSS isn't loaded) ──
+   Modern quiet-surface system: hairline borders, layered diffuse shadows,
+   rounded corners. --s-line* drive every border; --s-shadow-* are elevation,
+   not decoration. Brand gold survives as the focus/accent voice. */
 .settings-panel {
   --s-white:     #faf8f3;
   --s-cream:     #f2ecda;
@@ -64,12 +67,18 @@
   --s-done:      #4ade80;
   --s-blocked:   #f87171;
   --s-accent:    #6366f1;
-  --s-shadow:    5px 5px 0 var(--s-ink);
-  --s-shadow-sm: 3px 3px 0 var(--s-ink);
-  --s-shadow-xs: 2px 2px 0 var(--s-ink);
-  --s-border:    2px solid var(--s-ink);
-  --s-border-sm: 1.5px solid var(--s-ink);
-  --s-radius:    0px;
+  --s-danger:    #dc2626;
+  --s-line:        rgba(26, 24, 20, 0.08);
+  --s-line-strong: rgba(26, 24, 20, 0.15);
+  --s-shadow:    0 4px 10px rgba(26, 24, 20, 0.06), 0 18px 44px rgba(26, 24, 20, 0.14);
+  --s-shadow-md: 0 2px 4px rgba(26, 24, 20, 0.05), 0 8px 22px rgba(26, 24, 20, 0.10);
+  --s-shadow-sm: 0 1px 2px rgba(26, 24, 20, 0.04), 0 3px 8px rgba(26, 24, 20, 0.06);
+  --s-shadow-xs: 0 1px 2px rgba(26, 24, 20, 0.05);
+  --s-border:    1px solid var(--s-line-strong);
+  --s-border-sm: 1px solid var(--s-line);
+  --s-radius:    9px;
+  --s-radius-sm: 6px;
+  --s-radius-lg: 14px;
 }
 
 /* ── Modal shell — the tofu block ── */
@@ -82,9 +91,9 @@
   display: flex;
   flex-direction: column;
   background: var(--s-white);
-  border: 3px solid var(--s-ink);
-  border-radius: var(--s-radius);
-  box-shadow: 8px 8px 0 var(--s-ink);
+  border: 1px solid rgba(26, 24, 20, 0.18);
+  border-radius: var(--s-radius-lg);
+  box-shadow: 0 24px 70px rgba(26, 24, 20, 0.32), 0 6px 22px rgba(26, 24, 20, 0.14);
   color: var(--s-ink);
   font-family: 'Inter', 'SF Pro', -apple-system, system-ui, sans-serif;
   animation: tofuSlam 0.25s cubic-bezier(0.2, 1.2, 0.4, 1) both;
@@ -98,7 +107,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 18px 24px 14px;
-  border-bottom: 3px solid var(--s-ink);
+  border-bottom: 1px solid var(--s-line);
   background: var(--s-cream);
   flex-shrink: 0;
   position: relative;
@@ -130,29 +139,27 @@
 
 /* Close button — tofu block */
 .settings-close-btn {
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--s-white);
-  border: var(--s-border);
-  box-shadow: var(--s-shadow-xs);
+  background: transparent;
+  border: 1px solid transparent;
+  box-shadow: none;
   cursor: pointer;
-  color: var(--s-ink);
+  color: var(--s-ink-soft);
   padding: 0;
-  border-radius: var(--s-radius);
-  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  border-radius: 9px;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 .settings-close-btn:hover {
-  transform: translate(1px, 1px);
-  box-shadow: 1px 1px 0 var(--s-ink);
-  background: var(--s-blocked);
-  color: var(--s-white);
+  background: rgba(220, 38, 38, 0.09);
+  border-color: rgba(220, 38, 38, 0.28);
+  color: var(--s-danger);
 }
 .settings-close-btn:active {
-  transform: translate(2px, 2px);
-  box-shadow: 0 0 0 var(--s-ink);
+  transform: scale(0.94);
 }
 .settings-close-btn svg { stroke: currentColor; }
 
@@ -177,7 +184,7 @@
   width: 178px;
   min-width: 178px;
   background: var(--s-cream);
-  border-right: 3px solid var(--s-ink);
+  border-right: 1px solid var(--s-line);
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--s-skin) transparent;
@@ -206,42 +213,40 @@
   align-items: center;
   gap: 9px;
   padding: 8px 12px;
-  border: 2px solid transparent;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--s-ink-soft);
   font-family: inherit;
   font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  border-radius: var(--s-radius);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
-              transform 0.1s ease, box-shadow 0.1s ease;
+              box-shadow 0.15s ease;
   text-align: left;
   white-space: nowrap;
   position: relative;
 }
 .settings-tab:hover {
-  background: var(--s-skin);
+  background: rgba(26, 24, 20, 0.05);
   color: var(--s-ink);
 }
 .settings-tab:focus-visible {
   outline: 2px solid var(--s-gold-dim);
   outline-offset: 1px;
 }
-/* Active = white block that merges with the content surface,
+/* Active = raised white tile that merges with the content surface,
    gold kintsugi strip inlaid on the left edge */
 .settings-tab.active {
   background: var(--s-white);
-  border: 2px solid var(--s-ink);
+  border-color: var(--s-line-strong);
   color: var(--s-ink);
-  box-shadow: inset 4px 0 0 var(--s-gold), 2px 2px 0 var(--s-ink);
-  font-weight: 800;
+  box-shadow: inset 3px 0 0 var(--s-gold), var(--s-shadow-xs);
+  font-weight: 700;
 }
 .settings-tab.active:active {
-  transform: translate(1px, 1px);
-  box-shadow: inset 4px 0 0 var(--s-gold), 1px 1px 0 var(--s-ink);
+  box-shadow: inset 3px 0 0 var(--s-gold), var(--s-shadow-xs);
 }
 .settings-tab svg {
   flex-shrink: 0;
@@ -300,7 +305,7 @@
   font-weight: 500;
 }
 
-/* ── Textarea — tofu block with hard shadow ── */
+/* ── Textarea — quiet surface with a gold focus ring ── */
 .settings-textarea {
   width: 100%;
   min-height: 80px;
@@ -308,19 +313,18 @@
   background: #fff;
   border: var(--s-border);
   border-radius: var(--s-radius);
-  box-shadow: var(--s-shadow-xs);
+  box-shadow: none;
   color: var(--s-ink);
   font-family: 'JetBrains Mono', monospace;
   font-size: 13px;
   outline: none;
   resize: vertical;
   margin-bottom: 10px;
-  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
 .settings-textarea:focus {
-  transform: translate(1px, 1px);
-  box-shadow: 1px 1px 0 var(--s-ink);
-  background: #fffef5;
+  border-color: var(--s-gold);
+  box-shadow: 0 0 0 3px var(--s-gold-glow);
 }
 input.settings-mono {
   font-family: 'JetBrains Mono', monospace;
@@ -530,14 +534,113 @@ input.settings-mono {
 }
 
 /* ══════════════════════════════════════
-   Toggle Switch — quiet, tactile status control
+   Mobile-client download card (Settings › General › About & Update)
+   Same primitives as .stg-update-row above: white card, hard ink border,
+   offset shadow. Two platform rows — Android is an active download (version
+   badge served by the backend), iOS is inert until a real link exists.
+   ══════════════════════════════════════ */
+.stg-mobile-card {
+  padding: 12px 14px;
+  background: var(--s-white);
+  border: 1.5px solid var(--s-ink);
+  box-shadow: var(--s-shadow-xs);
+}
+.stg-mobile-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  min-width: 0;
+}
+.stg-mobile-rows {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.stg-mobile-row {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  font-size: 11px;
+  font-weight: 900;
+  color: var(--s-ink);
+  background: var(--s-skin);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.stg-mobile-row:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--s-ink);
+}
+.stg-mobile-row:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+}
+.stg-mobile-platform { display: inline-flex; flex-shrink: 0; }
+.stg-mobile-name { flex-shrink: 0; }
+/* Version badge — server-pinned APK versionName. */
+.stg-mobile-version {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.65;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.stg-mobile-get {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+/* iOS "coming soon": same geometry, but inert and quiet — no fake affordance. */
+.stg-mobile-row-soon,
+.stg-mobile-row-soon:hover,
+.stg-mobile-row-soon:active {
+  cursor: default;
+  opacity: 0.55;
+  transform: none;
+  box-shadow: var(--s-shadow-xs);
+}
+.stg-mobile-soon {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--s-ink);
+  color: var(--s-white);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+@media (max-width: 560px) {
+  .stg-mobile-rows { flex-direction: column; }
+}
+
+/* ══════════════════════════════════════
+   Toggle Switch — recessed track + floating thumb. The track is carved
+   into the surface (inset top shadow, bottom inner highlight); the thumb
+   hovers above it (gradient + drop shadow) and the ON state fills the
+   recess with dark cyan. Inner/outer shadows answer each other so knob
+   and capsule read as one physical whole. Geometry is var-driven so
+   compact variants (.stg-dv-toggle / .stg-key-toggle) only override vars.
    ══════════════════════════════════════ */
 .stg-toggle {
-  --stg-toggle-width: 40px;
-  --stg-toggle-height: 22px;
-  --stg-toggle-thumb-size: 16px;
+  --stg-toggle-width: 52px;
+  --stg-toggle-height: 30px;
+  --stg-toggle-thumb-size: 24px;
   --stg-toggle-thumb-gap: 3px;
-  --stg-toggle-travel: 18px;
+  --stg-toggle-travel: calc(var(--stg-toggle-width) - var(--stg-toggle-thumb-size) - 2 * var(--stg-toggle-thumb-gap));
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -563,60 +666,68 @@ input.settings-mono {
   box-sizing: border-box;
   width: var(--stg-toggle-width);
   height: var(--stg-toggle-height);
-  overflow: hidden;
-  border: 1px solid rgba(61, 54, 44, 0.34);
+  border: 0;
   border-radius: 999px;
-  background: rgba(61, 54, 44, 0.13);
-  box-shadow: inset 0 1px 2px rgba(26, 24, 20, 0.1);
-  transition: background-color 160ms ease, border-color 160ms ease,
-    box-shadow 160ms ease;
+  background: linear-gradient(180deg, #ddd6c8 0%, #e9e3d6 100%);
+  box-shadow:
+    inset 0 1.5px 3px rgba(70, 58, 35, 0.22),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.6);
+  transition: background 200ms ease, box-shadow 200ms ease;
 }
 .stg-toggle-thumb {
   position: absolute;
-  top: 50%;
+  top: var(--stg-toggle-thumb-gap);
   left: var(--stg-toggle-thumb-gap);
   box-sizing: border-box;
   width: var(--stg-toggle-thumb-size);
   height: var(--stg-toggle-thumb-size);
   border: 0;
   border-radius: 50%;
-  background: var(--s-white);
-  box-shadow: 0 1px 3px rgba(26, 24, 20, 0.3), 0 0 0 1px rgba(26, 24, 20, 0.08);
-  transform: translateY(-50%);
-  transition: transform 180ms cubic-bezier(.2, .75, .25, 1), box-shadow 160ms ease;
+  background: linear-gradient(180deg, #ffffff 0%, #f1ede4 100%);
+  box-shadow:
+    0 2px 5px rgba(50, 40, 20, 0.3),
+    0 1px 1.5px rgba(50, 40, 20, 0.18),
+    inset 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  transition: transform 260ms cubic-bezier(.34, 1.45, .64, 1);
 }
 .stg-toggle input:checked ~ .stg-toggle-track {
-  border-color: #28764f;
-  background: #3b9b68;
-  box-shadow: inset 0 1px 2px rgba(18, 75, 48, 0.2);
+  background: linear-gradient(180deg, #0c8a80 0%, #14b8a6 100%);
+  box-shadow:
+    inset 0 1.5px 3px rgba(0, 55, 50, 0.35),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.18);
 }
 .stg-toggle input:checked ~ .stg-toggle-track .stg-toggle-thumb {
-  background: var(--s-white);
-  transform: translate(var(--stg-toggle-travel), -50%);
+  transform: translateX(var(--stg-toggle-travel));
 }
-.stg-toggle:hover input:not(:disabled) ~ .stg-toggle-track {
-  border-color: rgba(61, 54, 44, 0.58);
-  background: rgba(61, 54, 44, 0.18);
+.stg-toggle:hover input:not(:disabled):not(:checked) ~ .stg-toggle-track {
+  background: linear-gradient(180deg, #d5cebf 0%, #e2dccc 100%);
 }
 .stg-toggle:hover input:checked:not(:disabled) ~ .stg-toggle-track {
-  border-color: #1f6742;
-  background: #338a5c;
+  background: linear-gradient(180deg, #0a7c73 0%, #11a898 100%);
 }
-.stg-toggle:active input:not(:disabled) ~ .stg-toggle-track .stg-toggle-thumb {
-  transform: translateY(-50%) scale(.9);
+.stg-toggle:active input:not(:disabled):not(:checked) ~ .stg-toggle-track .stg-toggle-thumb {
+  transform: scale(1.12);
 }
 .stg-toggle:active input:checked:not(:disabled) ~ .stg-toggle-track .stg-toggle-thumb {
-  transform: translate(var(--stg-toggle-travel), -50%) scale(.9);
+  transform: translateX(var(--stg-toggle-travel)) scale(1.12);
 }
 .stg-toggle input:focus-visible ~ .stg-toggle-track {
-  border-color: var(--s-gold-dim);
-  outline: 3px solid var(--s-gold-glow);
-  outline-offset: 2px;
+  box-shadow:
+    inset 0 1.5px 3px rgba(70, 58, 35, 0.22),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.6),
+    0 0 0 3px rgba(20, 184, 166, 0.3);
+}
+.stg-toggle input:checked:focus-visible ~ .stg-toggle-track {
+  box-shadow:
+    inset 0 1.5px 3px rgba(0, 55, 50, 0.35),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.18),
+    0 0 0 3px rgba(20, 184, 166, 0.3);
 }
 .stg-toggle input:disabled ~ .stg-toggle-track {
-  opacity: .48;
+  opacity: .5;
   cursor: not-allowed;
-  filter: saturate(.45);
+  filter: saturate(.3);
+  box-shadow: none;
 }
 @media (prefers-reduced-motion: reduce) {
   .stg-toggle-track,
@@ -709,25 +820,24 @@ input.settings-mono {
 .stg-btn {
   padding: 7px 15px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 650;
   font-family: inherit;
   line-height: 1;
   color: var(--s-ink);
-  background: var(--s-white);
-  border: var(--s-border-sm);
-  border-radius: var(--s-radius);
+  background: #fff;
+  border: var(--s-border);
+  border-radius: 8px;
   box-shadow: var(--s-shadow-xs);
   cursor: pointer;
   white-space: nowrap;
-  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s, transform 0.12s;
 }
 .stg-btn:hover:not(:disabled) {
-  background: var(--s-cream);
-  transform: translate(-1px, -1px);
-  box-shadow: 3px 3px 0 var(--s-ink);
+  background: #f5f0e4;
+  border-color: rgba(26, 24, 20, 0.24);
 }
 .stg-btn:active:not(:disabled) {
-  transform: translate(1px, 1px);
+  transform: translateY(1px);
   box-shadow: none;
 }
 .stg-btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
@@ -741,26 +851,26 @@ input.settings-mono {
 }
 .stg-section-head .settings-section-title { margin-bottom: 0; }
 
-/* ── Brutalist buttons — shared base ── */
+/* ── Small action buttons — shared base ── */
 .btn-xs {
   padding: 6px 12px;
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 750;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   border: var(--s-border);
-  border-radius: var(--s-radius);
-  background: var(--s-white);
+  border-radius: 7px;
+  background: #fff;
   color: var(--s-ink);
   cursor: pointer;
   box-shadow: var(--s-shadow-xs);
-  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
 }
 .btn-xs:hover {
-  transform: translate(1px, 1px);
-  box-shadow: 1px 1px 0 var(--s-ink);
-  background: var(--s-cream);
+  background: #f5f0e4;
+  border-color: rgba(26, 24, 20, 0.24);
 }
+.btn-xs:active { transform: translateY(1px); box-shadow: none; }
 .btn-xs:active {
   transform: translate(2px, 2px);
   box-shadow: 0 0 0 var(--s-ink);
@@ -878,44 +988,49 @@ input.settings-mono {
 }
 
 /* ══════════════════════════════════════
-   Provider Cards — tofu blocks with accordion
+   Provider Cards — quiet raised surfaces with accordion
    ══════════════════════════════════════ */
 .stg-provider-card {
   background: var(--s-white);
-  border: var(--s-border);
-  box-shadow: var(--s-shadow-sm);
-  border-radius: var(--s-radius);
+  border: 1px solid var(--s-line-strong);
+  box-shadow: var(--s-shadow-xs);
+  border-radius: 12px;
   overflow: hidden;
   margin-bottom: 12px;
-  transition: transform 0.1s, box-shadow 0.1s;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
 }
 .stg-provider-card:hover {
-  transform: translate(-1px, -1px);
-  box-shadow: 6px 6px 0 var(--s-ink);
+  transform: translateY(-1px);
+  border-color: rgba(26, 24, 20, 0.22);
+  box-shadow: var(--s-shadow-md);
 }
 .stg-provider-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding: 13px 16px;
   cursor: pointer;
   user-select: none;
-  transition: background 0.1s;
+  transition: background 0.12s;
 }
-.stg-provider-head:hover { background: var(--s-cream); }
+.stg-provider-head:hover { background: rgba(26, 24, 20, 0.025); }
 .stg-provider-icon {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  background: #fff;
+  border: 1px solid var(--s-line);
+  border-radius: 8px;
+  box-shadow: var(--s-shadow-xs);
 }
 .stg-provider-info { flex: 1; min-width: 0; }
-.stg-provider-name { font-size: 13px; font-weight: 800; color: var(--s-ink); }
+.stg-provider-name { font-size: 13.5px; font-weight: 750; color: var(--s-ink); }
 .stg-provider-url {
   font-size: 11px;
-  color: var(--s-ink-soft);
+  color: rgba(26, 24, 20, 0.5);
   margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -932,25 +1047,25 @@ input.settings-mono {
 }
 .stg-badge {
   font-size: 10px;
-  padding: 2px 7px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
   text-transform: uppercase;
-  border: 1.5px solid var(--s-ink);
-  background: rgba(99, 102, 241, 0.1);
-  color: #6366f1;
-  border-radius: var(--s-radius);
+  border: 1px solid transparent;
+  background: rgba(99, 102, 241, 0.12);
+  color: #4f46e5;
+  border-radius: 999px;
 }
-.stg-badge:nth-child(2) { background: rgba(74, 222, 128, 0.12); color: #16a34a; }
-.stg-badge.off { background: rgba(248, 113, 113, 0.1); color: var(--s-blocked); }
+.stg-badge:nth-child(2) { background: rgba(22, 163, 74, 0.12); color: #15803d; }
+.stg-badge.off { background: rgba(220, 38, 38, 0.1); color: #b91c1c; }
 /* Managed subscription (OAuth) badge — amber, distinct from key/model chips. */
 .stg-badge.stg-badge-oauth {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  background: rgba(245, 158, 11, 0.14);
+  background: rgba(217, 119, 6, 0.13);
   color: #b45309;
-  border-color: rgba(245, 158, 11, 0.45);
+  border-color: transparent;
 }
 .stg-badge.stg-badge-oauth > svg { display: block; }
 /* Collapsed-card sync summary: calm status tint + a readable last-run time. */
@@ -1030,9 +1145,9 @@ input.settings-mono {
   align-items: flex-start;
   margin-bottom: 12px;
   padding: 10px 12px;
-  border: 1.5px solid rgba(245, 158, 11, 0.4);
-  background: rgba(245, 158, 11, 0.08);
-  border-radius: var(--s-radius);
+  border: 1px solid rgba(217, 119, 6, 0.3);
+  background: rgba(245, 158, 11, 0.07);
+  border-radius: 10px;
 }
 .stg-oauth-note-icon { flex-shrink: 0; color: #b45309; margin-top: 1px; }
 .stg-oauth-note-icon > svg { display: block; }
@@ -1053,12 +1168,12 @@ input.settings-mono {
 .stg-provider-card.expanded .stg-chevron { transform: rotate(180deg); }
 .stg-provider-body {
   display: none;
-  padding: 0 14px 14px;
-  border-top: 2px solid var(--s-ink);
+  padding: 0 16px 16px;
+  border-top: 1px solid var(--s-line);
 }
 .stg-provider-card.expanded .stg-provider-body {
   display: block;
-  padding-top: 14px;
+  padding-top: 16px;
 }
 
 /* ── Provider fields ── */
@@ -1071,12 +1186,12 @@ input.settings-mono {
 .stg-field { margin-bottom: 12px; }
 .stg-field label {
   display: block;
-  font-size: 10px;
-  font-weight: 800;
-  color: var(--s-ink-soft);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: rgba(26, 24, 20, 0.55);
   margin-bottom: 6px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
 }
 .stg-field .stg-hint { font-weight: 500; text-transform: none; letter-spacing: 0; opacity: 0.65; }
 .stg-field input,
@@ -1086,22 +1201,21 @@ input.settings-mono {
   padding: 9px 12px;
   background: #fff;
   border: var(--s-border);
-  border-radius: var(--s-radius);
-  box-shadow: var(--s-shadow-xs);
+  border-radius: 8px;
+  box-shadow: none;
   color: var(--s-ink);
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   outline: none;
   resize: vertical;
   box-sizing: border-box;
-  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
 .stg-field input:focus,
 .stg-field textarea:focus,
 .stg-field select:focus {
-  transform: translate(1px, 1px);
-  box-shadow: 1px 1px 0 var(--s-ink);
-  background: #fffef5;
+  border-color: var(--s-gold);
+  box-shadow: 0 0 0 3px var(--s-gold-glow);
 }
 .stg-field-row {
   display: flex;
@@ -1158,11 +1272,10 @@ input.settings-mono {
   font-weight: 600;
 }
 .stg-dv-toggle {
-  --stg-toggle-width: 34px;
-  --stg-toggle-height: 20px;
-  --stg-toggle-thumb-size: 14px;
-  --stg-toggle-thumb-gap: 2px;
-  --stg-toggle-travel: 16px;
+  --stg-toggle-width: 36px;
+  --stg-toggle-height: 21px;
+  --stg-toggle-thumb-size: 15px;
+  --stg-toggle-thumb-gap: 3px;
   flex-shrink: 0;
 }
 
@@ -1203,22 +1316,21 @@ input.settings-mono {
 .stg-mcard-fold-sub.open { display: block; }
 /* ── Delete / add buttons ── */
 .stg-btn-danger {
-  background: none;
-  border: 1.5px solid var(--s-blocked);
-  color: var(--s-blocked);
+  background: transparent;
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  color: var(--s-danger);
   font-size: 11px;
   font-weight: 700;
   padding: 5px 12px;
-  border-radius: var(--s-radius);
+  border-radius: 8px;
   cursor: pointer;
-  box-shadow: var(--s-shadow-xs);
-  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  box-shadow: none;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
 .stg-btn-danger:hover {
-  background: var(--s-blocked);
-  color: var(--s-white);
-  transform: translate(1px, 1px);
-  box-shadow: 1px 1px 0 var(--s-ink);
+  background: var(--s-danger);
+  border-color: var(--s-danger);
+  color: #fff;
 }
 
 /* ══════════════════════════════════════
@@ -1245,35 +1357,35 @@ input.settings-mono {
   transition: background 0.1s;
 }
 .stg-balance-row input:focus {
-  background: #fffef5;
-  transform: none;
-  box-shadow: none;
+  border-color: var(--s-gold);
+  box-shadow: 0 0 0 3px var(--s-gold-glow);
+  position: relative;
+  z-index: 1;
 }
 .stg-btn-balance {
   white-space: nowrap;
   background: var(--s-gold);
-  border: var(--s-border);
+  border: 1px solid var(--s-gold-dim);
   color: var(--s-ink);
   font-size: 11px;
-  font-weight: 900;
+  font-weight: 800;
   padding: 0 18px;
   height: 38px;
-  border-radius: var(--s-radius);
+  border-radius: 8px;
   cursor: pointer;
   box-shadow: var(--s-shadow-xs);
-  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  transition: background 0.12s, color 0.12s, box-shadow 0.12s, transform 0.12s;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   line-height: 38px;
 }
 .stg-btn-balance:hover {
-  transform: translate(-1px, -1px);
-  box-shadow: 4px 4px 0 var(--s-ink);
   background: var(--s-gold-dim);
+  color: #fff;
 }
 .stg-btn-balance:active {
-  transform: translate(2px, 2px);
-  box-shadow: 0 0 0 var(--s-ink);
+  transform: translateY(1px);
+  box-shadow: none;
 }
 
 /* ══════════════════════════════════════
@@ -1475,33 +1587,33 @@ input.settings-mono {
 }
 
 /* ── Merged API-key card: editor row + today's runtime stats row ──
-   Matches the neo-brutalist house style of .stg-mcard / .stg-provider-card:
-   square corners, solid ink border, hard offset shadow, and a solid
-   colored accent bar on the left that encodes the key's health state. */
+   Raised white row on the paper card: hairline border, soft elevation,
+   and a slim inset accent bar on the left that encodes health state. */
 .stg-key-card {
   position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: var(--s-white);
-  border: 1.5px solid var(--s-ink);
+  background: #fff;
+  border: 1px solid var(--s-line);
   box-shadow: var(--s-shadow-xs);
-  border-radius: var(--s-radius);
-  padding: 9px 11px 9px 14px;
-  transition: transform 0.1s, box-shadow 0.1s;
+  border-radius: 10px;
+  padding: 10px 12px 10px 15px;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease;
 }
 .stg-key-card:hover {
-  transform: translate(-1px, -1px);
-  box-shadow: 4px 4px 0 var(--s-ink);
+  border-color: var(--s-line-strong);
+  box-shadow: var(--s-shadow-sm);
 }
-/* Solid left accent bar — recolored per state below. */
+/* Slim inset left accent bar — recolored per state below. */
 .stg-key-card::before {
   content: '';
   position: absolute;
   left: 0;
-  top: 0;
-  bottom: 0;
-  width: 4px;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
   background: var(--s-skin);
 }
 .stg-key-card-edit {
@@ -1516,13 +1628,13 @@ input.settings-mono {
   flex-wrap: wrap;
   min-width: 0;
   font-size: 12px;
-  /* Align metrics under the input, past the #N column (26px chip + 8px gap). */
-  padding-left: 34px;
+  /* Align metrics under the input, past the #N column (24px chip + 8px gap). */
+  padding-left: 32px;
   padding-top: 8px;
-  border-top: 1.5px dashed rgba(26, 24, 20, 0.14);
+  border-top: 1px solid rgba(26, 24, 20, 0.06);
 }
 .stg-key-card--blank .stg-key-card-stats { display: none; }
-/* Square "i" info chip — mirrors .stg-cap / .stg-badge brutalist chips. */
+/* Round "i" info chip — quiet until hovered. */
 .stg-keys-info {
   display: inline-flex;
   align-items: center;
@@ -1530,10 +1642,10 @@ input.settings-mono {
   width: 15px;
   height: 15px;
   margin-left: 5px;
-  border: 1.5px solid var(--s-ink);
-  border-radius: var(--s-radius);
-  background: var(--s-cream);
-  color: var(--s-ink);
+  border: 0;
+  border-radius: 999px;
+  background: rgba(26, 24, 20, 0.07);
+  color: rgba(26, 24, 20, 0.55);
   font-family: Georgia, 'Times New Roman', serif;
   font-style: italic;
   font-size: 11px;
@@ -1546,14 +1658,14 @@ input.settings-mono {
   letter-spacing: 0;
 }
 .stg-keys-info:hover, .stg-keys-info:focus {
-  background: var(--s-gold);
-  color: var(--s-white);
+  background: var(--s-gold-glow);
+  color: var(--s-gold-dim);
   outline: none;
 }
 .stg-keys-empty {
-  background: var(--s-cream);
-  border: 1.5px dashed var(--s-ink);
-  border-radius: var(--s-radius);
+  background: rgba(26, 24, 20, 0.02);
+  border: 1px dashed var(--s-line-strong);
+  border-radius: 10px;
   padding: 11px 12px;
   font-size: 12px;
   color: var(--s-ink-soft);
@@ -1564,15 +1676,15 @@ input.settings-mono {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
+  width: 24px;
   height: 24px;
   font-family: ui-monospace, 'JetBrains Mono', monospace;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
-  color: var(--s-ink-soft);
-  background: var(--s-cream);
-  border: 1.5px solid var(--s-skin);
-  border-radius: var(--s-radius);
+  color: rgba(26, 24, 20, 0.5);
+  background: rgba(26, 24, 20, 0.05);
+  border: 0;
+  border-radius: 6px;
   user-select: none;
 }
 .stg-key-card-edit > input.stg-keys-input {
@@ -1583,48 +1695,49 @@ input.settings-mono {
   height: 32px;
   padding: 0 10px;
   margin-bottom: 0;
-  border: 1.5px solid var(--s-ink);
-  background: var(--s-cream);
-  border-radius: var(--s-radius);
+  border: 1px solid var(--s-line);
+  background: #fdfcf8;
+  border-radius: 8px;
   color: var(--s-ink);
   outline: none;
   letter-spacing: 0.02em;
-  transition: background 0.1s, border-color 0.1s;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+}
+.stg-key-card-edit > input.stg-keys-input:hover {
+  border-color: var(--s-line-strong);
 }
 .stg-key-card-edit > input.stg-keys-input:focus {
-  background: var(--s-white);
-  box-shadow: inset 2px 2px 0 var(--s-gold-glow);
-  transform: none;
+  background: #fff;
   border-color: var(--s-gold);
+  box-shadow: 0 0 0 3px var(--s-gold-glow);
 }
 .stg-keys-btn {
   flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
-  border: 1.5px solid var(--s-ink);
-  background: var(--s-white);
-  color: var(--s-ink);
-  border-radius: var(--s-radius);
-  box-shadow: var(--s-shadow-xs);
+  width: 30px;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  color: rgba(26, 24, 20, 0.45);
+  border-radius: 8px;
+  box-shadow: none;
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.1s, transform 0.1s, box-shadow 0.1s;
+  transition: background 0.12s, color 0.12s, transform 0.12s;
 }
 .stg-keys-btn:hover {
-  background: var(--s-cream);
-  transform: translate(-1px, -1px);
-  box-shadow: 3px 3px 0 var(--s-ink);
+  background: rgba(26, 24, 20, 0.05);
+  color: var(--s-ink);
 }
-.stg-keys-btn:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--s-ink); }
+.stg-keys-btn:active { transform: scale(0.92); }
 .stg-keys-btn.danger:hover {
-  background: rgba(248, 113, 113, 0.14);
-  border-color: var(--s-blocked);
-  color: #c0392b;
+  background: rgba(220, 38, 38, 0.09);
+  color: var(--s-danger);
 }
+.stg-key-reveal[aria-pressed="true"] { color: var(--s-gold-dim); }
 
 /* ══════════════════════════════════════
    Custom Headers — structured key/value rows
@@ -1651,15 +1764,15 @@ input.settings-mono {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  background: var(--s-cream);
-  border: var(--s-border);
-  border-radius: var(--s-radius);
+  background: rgba(26, 24, 20, 0.02);
+  border: 1px solid var(--s-line);
+  border-radius: 10px;
   padding: 8px;
 }
 .stg-hdr-empty {
-  background: var(--s-cream);
-  border: 1px dashed rgba(0, 0, 0, 0.18);
-  border-radius: var(--s-radius);
+  background: rgba(26, 24, 20, 0.02);
+  border: 1px dashed var(--s-line-strong);
+  border-radius: 10px;
   padding: 10px 12px;
   font-size: 12px;
   color: var(--s-ink-soft);
@@ -1679,19 +1792,20 @@ input.settings-mono {
   height: 32px;
   padding: 0 10px;
   margin-bottom: 0;
-  border: var(--s-border);
-  background: var(--s-white);
-  border-radius: 4px;
+  border: 1px solid var(--s-line);
+  background: #fff;
+  border-radius: 7px;
   color: var(--s-ink);
   outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
 .stg-hdr-row > input.stg-hdr-name { flex-basis: 38%; font-weight: 600; }
+.stg-hdr-row > input.stg-hdr-name:hover,
+.stg-hdr-row > input.stg-hdr-value:hover { border-color: var(--s-line-strong); }
 .stg-hdr-row > input.stg-hdr-name:focus,
 .stg-hdr-row > input.stg-hdr-value:focus {
-  background: #fffef5;
-  box-shadow: none;
-  transform: none;
   border-color: var(--s-gold);
+  box-shadow: 0 0 0 3px var(--s-gold-glow);
 }
 .stg-hdr-sep {
   color: var(--s-ink-soft);
@@ -1703,27 +1817,27 @@ input.settings-mono {
   flex: 0 0 auto;
   width: 28px;
   height: 28px;
-  border: var(--s-border);
-  background: var(--s-white);
-  color: var(--s-ink);
-  border-radius: 4px;
+  border: 0;
+  background: transparent;
+  color: rgba(26, 24, 20, 0.45);
+  border-radius: 7px;
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.1s, transform 0.1s;
+  transition: background 0.12s, color 0.12s, transform 0.12s;
 }
 .stg-hdr-btn:hover {
-  background: var(--s-cream);
-  transform: translate(-1px, -1px);
+  background: rgba(26, 24, 20, 0.05);
+  color: var(--s-ink);
 }
-.stg-hdr-btn:active { transform: translate(1px, 1px); }
-.stg-hdr-btn.danger { color: #b04c4c; }
+.stg-hdr-btn:active { transform: scale(0.92); }
+.stg-hdr-btn.danger { color: rgba(220, 38, 38, 0.7); }
 .stg-hdr-btn.danger:hover {
-  background: rgba(176, 76, 76, 0.08);
-  border-color: #b04c4c;
+  background: rgba(220, 38, 38, 0.09);
+  color: var(--s-danger);
 }
 
 /* Balance result card */
@@ -1766,16 +1880,16 @@ input.settings-mono {
   font-variant-numeric: tabular-nums;
 }
 .stg-keystat-429 {
-  color: #9a3412;
+  color: #c2410c;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  padding: 1px 6px;
-  background: rgba(234, 88, 12, 0.12);
-  border: 1px solid #c2410c;
-  border-radius: var(--s-radius);
+  padding: 2px 8px;
+  background: rgba(234, 88, 12, 0.13);
+  border: 0;
+  border-radius: 999px;
 }
 .stg-keystat-gateway {
   color: #475569;
@@ -1784,10 +1898,10 @@ input.settings-mono {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  padding: 1px 6px;
-  background: rgba(100, 116, 139, 0.12);
-  border: 1px solid #64748b;
-  border-radius: var(--s-radius);
+  padding: 2px 8px;
+  background: rgba(100, 116, 139, 0.14);
+  border: 0;
+  border-radius: 999px;
 }
 .stg-keystat-err {
   color: #c0392b;
@@ -1798,20 +1912,20 @@ input.settings-mono {
   text-decoration: underline dotted;
   cursor: help;
 }
-/* Status chips — same brutalist footprint as .stg-cap (square, solid border). */
+/* Status chips — soft pills tinted by state. */
 .stg-keystat-badge {
   display: inline-block;
-  padding: 1px 7px;
-  border-radius: var(--s-radius);
-  border: 1px solid var(--s-ink);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 0;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
-.stg-keystat-badge.on   { background: rgba(74, 222, 128, 0.16); color: #15803d; border-color: #16a34a; }
-.stg-keystat-badge.off  { background: rgba(107, 114, 128, 0.16); color: #4b5563; border-color: #6b7280; }
-.stg-keystat-badge.warn { background: rgba(251, 146, 60, 0.16); color: #9a3412; border-color: #c2410c; }
+.stg-keystat-badge.on   { background: rgba(22, 163, 74, 0.13); color: #15803d; }
+.stg-keystat-badge.off  { background: rgba(107, 114, 128, 0.15); color: #4b5563; }
+.stg-keystat-badge.warn { background: rgba(251, 146, 60, 0.18); color: #b45309; }
 .stg-keystat-actions {
   display: inline-flex;
   align-items: center;
@@ -1821,11 +1935,18 @@ input.settings-mono {
 }
 /* Compact per-key toggle. */
 .stg-key-toggle {
-  --stg-toggle-width: 34px;
-  --stg-toggle-height: 20px;
-  --stg-toggle-thumb-size: 14px;
-  --stg-toggle-thumb-gap: 2px;
-  --stg-toggle-travel: 16px;
+  --stg-toggle-width: 36px;
+  --stg-toggle-height: 21px;
+  --stg-toggle-thumb-size: 15px;
+  --stg-toggle-thumb-gap: 3px;
+}
+/* One toggle geometry across the provider card — the 启用 switch, per-key
+ * switches and access-matrix switches all share the compact size. */
+.stg-provider-card-v2 .stg-toggle {
+  --stg-toggle-width: 36px;
+  --stg-toggle-height: 21px;
+  --stg-toggle-thumb-size: 15px;
+  --stg-toggle-thumb-gap: 3px;
 }
 .stg-btn-link {
   background: none;
@@ -1850,7 +1971,7 @@ input.settings-mono {
 .stg-key-card.stg-keystat-warn .stg-keystat-rate { color: #9a3412; }
 .stg-key-card.stg-keystat-disabled {
   opacity: 0.65;
-  background: var(--s-cream);
+  background: rgba(26, 24, 20, 0.02);
 }
 .stg-key-card.stg-keystat-disabled::before { background: #6b7280; }
 .stg-key-card.stg-keystat-disabled .stg-keystat-rate { color: #6b7280; }

@@ -8,6 +8,7 @@ owner-aware repository; no BYO or model-catalog state is maintained here.
 from __future__ import annotations
 
 import copy
+import time as _time
 from collections.abc import Mapping
 from typing import Any
 
@@ -20,6 +21,7 @@ from lib.api_response import (
     api_internal_error,
     api_not_found,
     api_ok,
+    api_service_unavailable,
 )
 from lib.log import audit_log, get_logger
 from lib.model_routing import (
@@ -40,8 +42,36 @@ from lib.provider_template_recipes import (
     load_provider_templates,
 )
 from lib.request_parser import parse_body
+from lib.api_v1_model_routing_generated import (
+    ContractViolation,
+    decode_request,
+)
 
 from .auth import current_auth, require_scope
+
+# Access-matrix probe engine (Settings → 服务商 → 访问矩阵). Plaintext keys
+# are resolved server-side from the owner-scoped secret store; the browser
+# only ever addresses credentials by their column index.
+from lib.json_store import read_json, write_json_atomic
+from lib.model_routing.dispatch_adapter import decode_credential_secret
+from lib.provider_probe import (
+    CELL_PROBE_LOCK,
+    CELL_PROBE_TASKS,
+    FairWorkLaneQueueFull,
+    build_probe_work,
+    normalize_probe_snapshot,
+    probe_cache_path,
+    probe_cell_key,
+    public_probe_snapshot,
+    run_cell_probe_task,
+    submit_provider_probe_task,
+)
+from lib.provider_probe_policy import (
+    PROVIDER_PROBE_MAX_ATTEMPTS,
+    PROVIDER_PROBE_MAX_CELLS,
+    PROVIDER_PROBE_MAX_TIMEOUT_SECONDS,
+    PROVIDER_PROBE_MIN_TIMEOUT_SECONDS,
+)
 
 
 api_v1_providers_bp = Blueprint("api_v1_providers", __name__)
@@ -81,6 +111,21 @@ def _error(exc: Exception):
     if "conflict" in kind.lower():
         return api_conflict(str(exc), **extras)
     return api_bad_request(str(exc), **extras)
+
+
+def _contract_rejection(operation_id: str, body: Any):
+    """Fail-closed request validation against the generated API v1 contract."""
+    try:
+        decode_request(operation_id, body)
+    except ContractViolation as exc:
+        first = exc.violations[0] if exc.violations else ""
+        # Violations render as "$.<dotted path>: <reason>".
+        field = ""
+        if first.startswith("$.") and ":" in first:
+            field = first[2:].split(":", 1)[0].split(".", 1)[0]
+        extras = {"field": field} if field else {}
+        return api_bad_request(str(exc), **extras)
+    return None
 
 
 def _provider_bundle(document: Mapping[str, Any], provider_id: str) -> dict[str, Any] | None:
@@ -265,6 +310,9 @@ def put_model_routing():
     if boundary is None:
         return api_not_found("Model routing authority not found")
     body = parse_body()
+    rejection = _contract_rejection("putModelRouting", body)
+    if rejection is not None:
+        return rejection
     try:
         expected = _expected_revision(body)
         document = body.get("model_routing")
@@ -313,6 +361,9 @@ def list_provider_templates_route():
 @api_meta(summary="Compile a provider recipe into a v2 access draft", tags=["providers"], scope="providers")
 def compile_provider_template_route():
     body = parse_body()
+    rejection = _contract_rejection("compileProviderTemplate", body)
+    if rejection is not None:
+        return rejection
     selected = body.get("selected_model_ids")
     if selected is not None and not isinstance(selected, list):
         return api_bad_request(
@@ -338,6 +389,9 @@ def probe_provider_route():
     """Discover transport facts without persisting or returning plaintext."""
 
     body = parse_body()
+    rejection = _contract_rejection("probeProvider", body)
+    if rejection is not None:
+        return rejection
     base_url = str(body.get("base_url") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     models_path = str(body.get("models_path") or "").strip()
@@ -378,6 +432,322 @@ def probe_provider_route():
         return api_internal_error(exc, context="api_v1.providers.probe_v2")
 
 
+# ── Access-matrix cell probe ────────────────────────────────────────────
+# Settings → 服务商 → 访问矩阵 probes every (credential × wire id) pair of one
+# ProviderAccess. Columns are the access's credentials in document order (the
+# frontend renders the same order, so cell key ``<idx>::<wire_id>`` aligns);
+# rows are confirmed offerings, each probed through its enabled deployments'
+# wire ids (falling back to the canonical model id when none are known).
+
+
+def _probe_cell_cache_key(boundary: OwnerBoundary, provider_id: str) -> str:
+    return f"u{boundary.owner_user_id}_{provider_id}"
+
+
+def _read_persisted_probe_snapshot(cache_key: str) -> dict[str, Any] | None:
+    """Read a public snapshot and terminalise impossible post-restart work."""
+    cache_path = probe_cache_path(cache_key)
+    cached = read_json(cache_path, default=None)
+    if not isinstance(cached, dict):
+        return None
+    cached = normalize_probe_snapshot(cached)
+    # A live generation is always present in CELL_PROBE_TASKS. A disk-only
+    # ``running`` row therefore belongs to a dead process; returning it would
+    # make Settings poll forever for work that cannot resume.
+    if cached.get("status") == "running":
+        cached = dict(cached)
+        cached["status"] = "error"
+        cached["finished_at"] = cached.get("finished_at") or _time.time()
+        cached["error"] = (
+            "Provider probe was interrupted by a server restart; run it again."
+        )
+        try:
+            write_json_atomic(cache_path, cached, fsync=False)
+        except Exception as error:
+            logger.warning(
+                "[CellProbe] failed to settle interrupted snapshot for %s: %s",
+                cache_key, error,
+            )
+    return cached
+
+
+def _matrix_probe_plan(
+    repository: ModelRoutingRepository,
+    boundary: OwnerBoundary,
+    bundle: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve one ProviderAccess bundle into engine probe inputs.
+
+    Returns ``{provider, models, api_keys, oauth, adapter, extra_headers}``:
+    ``api_keys[i]`` is the resolved plaintext key for column i (never leaves
+    the process; ``public_probe_snapshot`` strips the task's private fields).
+    A pure subscription access (every credential decodes to an oauth name)
+    switches the task to the engine's oauth mode, which resolves the live
+    token per cell instead of probing the stored sentinel.
+    """
+    connections = [
+        row for row in bundle["connections"]
+        if row.get("enabled", True) and str(row.get("base_url") or "").strip()
+    ]
+    if not connections:
+        raise ModelRoutingError(
+            "provider access has no enabled connection with a base_url",
+            kind="provider_probe_no_connection",
+        )
+    primary = connections[0]
+    credentials = list(bundle["credentials"])
+    if not credentials:
+        raise ModelRoutingError(
+            "provider access has no credentials to probe",
+            kind="provider_probe_no_credentials",
+        )
+    api_keys: list[str] = []
+    oauth_names: list[str] = []
+    for credential in credentials:
+        reference = str(credential.get("secret_reference") or "")
+        plaintext = ""
+        if reference:
+            try:
+                plaintext = repository.resolve_secret(boundary, reference)
+            except ModelRoutingError:
+                plaintext = ""
+        api_key, oauth, _headers = decode_credential_secret(
+            plaintext, kind=str(credential.get("kind") or "api_key"))
+        api_keys.append(api_key)
+        oauth_names.append(oauth)
+    oauth_mode = (
+        bool(credentials)
+        and all(name and name == oauth_names[0] for name in oauth_names)
+    )
+    deployments_by_offering: dict[str, list[str]] = {}
+    for deployment in bundle["deployments"]:
+        if deployment.get("enabled", True) is False:
+            continue
+        wire_id = str(deployment.get("wire_model_id") or "").strip()
+        if not wire_id:
+            continue
+        rows = deployments_by_offering.setdefault(deployment["offering_id"], [])
+        if wire_id not in rows:
+            rows.append(wire_id)
+    models: list[dict[str, Any]] = []
+    for offering in bundle["offerings"]:
+        if offering.get("identity_state") != "confirmed" or not offering.get("model"):
+            continue
+        entry: dict[str, Any] = {
+            "model_id": str(offering["model"].get("model_id") or ""),
+            "aliases": [],
+            "capabilities": list(offering.get("capabilities") or []),
+        }
+        wire_ids = deployments_by_offering.get(offering["offering_id"], [])
+        if wire_ids:
+            entry["request_ids"] = wire_ids
+        models.append(entry)
+    if not models:
+        raise ModelRoutingError(
+            "provider access has no confirmed offerings to probe",
+            kind="provider_probe_no_offerings",
+        )
+    return {
+        "provider": {
+            "id": str(bundle["provider"]["provider_id"]),
+            "base_url": str(primary.get("base_url") or ""),
+            "protocol": str(primary.get("protocol") or "openai") or "openai",
+            "faces": {},
+        },
+        "models": models,
+        "api_keys": (["oauth-managed"] * len(credentials)) if oauth_mode else api_keys,
+        "oauth": oauth_names[0] if oauth_mode else "",
+        "adapter": dict(primary.get("adapter") or {}),
+        "extra_headers": dict(primary.get("extra_headers") or {}),
+    }
+
+
+@api_v1_providers_bp.route(
+    "/api/v1/providers/<provider_id>/probe-cells/start", methods=["POST"])
+@require_scope("providers")
+@api_meta(
+    summary="Start or resume a per-(credential × wire id) reachability probe",
+    tags=["providers"],
+    scope="providers",
+)
+def probe_provider_cells_start(provider_id: str):
+    """Server-owned background probe behind the Settings access matrix.
+
+    Body: ``{timeout?: int, attempts?: int, force?: bool,
+    only?: {key_idxs?: [int], model_ids?: [str]}}``. ``attempts`` (default 3,
+    clamped 1..5) re-probes a transiently-failing cell to filter false 429s.
+    ``only`` restricts the run to rows/columns/cells and MERGES the fresh
+    verdicts into the persisted snapshot. The full (credential × wire id)
+    grid is always probed regardless of authorization state — the matrix
+    exists to discover reachable pairs the allow-list does not grant yet.
+    """
+    boundary = _boundary()
+    if boundary is None:
+        return api_bad_request("caller has no repository owner identity")
+    body = parse_body()
+    rejection = _contract_rejection("startProviderProbeCells", body)
+    if rejection is not None:
+        return rejection
+    try:
+        timeout = max(
+            PROVIDER_PROBE_MIN_TIMEOUT_SECONDS,
+            min(PROVIDER_PROBE_MAX_TIMEOUT_SECONDS,
+                int(body.get("timeout") or 30)),
+        )
+        attempts = max(
+            1,
+            min(PROVIDER_PROBE_MAX_ATTEMPTS, int(body.get("attempts") or 3)),
+        )
+    except (TypeError, ValueError, OverflowError):
+        return api_bad_request("timeout and attempts must be integers")
+    force = bool(body.get("force"))
+    only = body.get("only") if isinstance(body.get("only"), Mapping) else {}
+    _ok = only.get("key_idxs")
+    _om = only.get("model_ids")
+    only_key_idxs = ({i for i in _ok if isinstance(i, int) and not isinstance(i, bool)}
+                     if isinstance(_ok, list) else None)
+    only_model_ids = ({x.strip() for x in _om if isinstance(x, str) and x.strip()}
+                      if isinstance(_om, list) else None)
+    scoped = bool(only_key_idxs) or bool(only_model_ids)
+
+    repository = _repository()
+    cache_key = _probe_cell_cache_key(boundary, provider_id)
+    try:
+        with CELL_PROBE_LOCK:
+            existing = CELL_PROBE_TASKS.get(cache_key)
+            if existing and existing["status"] == "running":
+                logger.info(
+                    "[CellProbe] %s already running — returning live snapshot",
+                    cache_key,
+                )
+                return api_ok(public_probe_snapshot(existing))
+            if existing and not force and not scoped:
+                return api_ok(public_probe_snapshot(existing))
+
+        if not force and not scoped:
+            cached = _read_persisted_probe_snapshot(cache_key)
+            if isinstance(cached, dict) and cached.get("cells"):
+                logger.info(
+                    "[CellProbe] %s resumed from disk (%d cells, status=%s)",
+                    cache_key, len(cached["cells"]), cached.get("status"),
+                )
+                return api_ok(cached)
+
+        authority = repository.get(boundary)
+        bundle = _provider_bundle(authority.public_document(), provider_id)
+        if bundle is None or bundle.get("provider_access") is None:
+            return api_not_found("provider not found")
+        plan = _matrix_probe_plan(repository, boundary, bundle)
+
+        work = build_probe_work(
+            plan["provider"], plan["models"], plan["api_keys"],
+            maximum_cells=PROVIDER_PROBE_MAX_CELLS + 1,
+        )
+        if not work:
+            return api_bad_request("no testable (credential, model) pairs")
+        if len(work) > PROVIDER_PROBE_MAX_CELLS:
+            return api_bad_request(
+                "too many cells to probe (%d > %d)"
+                % (len(work), PROVIDER_PROBE_MAX_CELLS))
+
+        # Scoped probe: restrict the run to the requested cells and seed the
+        # task with the persisted snapshot's OTHER cells so the result merges
+        # into the full grid. Seeds are pruned to the provider's current
+        # (credential × wire id) space — a model/credential deleted since the
+        # cache was written must not come back as a ghost pip.
+        seed_cells: dict[str, Any] = {}
+        if scoped:
+            full_work = work
+            work = [w for w in full_work
+                    if (not only_key_idxs or w[0] in only_key_idxs)
+                    and (not only_model_ids or w[3] in only_model_ids)]
+            if not work:
+                return api_bad_request("no cells match the requested scope")
+            probed_keys = {probe_cell_key(w[0], w[3]) for w in work}
+            valid_keys = {probe_cell_key(w[0], w[3]) for w in full_work}
+            cached = _read_persisted_probe_snapshot(cache_key)
+            if isinstance(cached, dict) and isinstance(cached.get("cells"), dict):
+                for key, value in cached["cells"].items():
+                    if key in valid_keys and key not in probed_keys \
+                            and isinstance(value, dict):
+                        seed_cells[key] = value
+
+        task = {
+            "provider_id": cache_key,
+            "status": "running",
+            "started_at": _time.time(),
+            "finished_at": None,
+            "total": len(work),
+            "done_count": 0,
+            "cells": dict(seed_cells),
+            "summary": {"ok": 0, "disable": 0},
+            "error": None,
+            "attempts": attempts,
+            "_abort": False,
+            "_base_url": plan["provider"]["base_url"],
+            "_extra_headers": plan["extra_headers"],
+            "_protocol": plan["provider"]["protocol"],
+            "_oauth": plan["oauth"],
+            "_adapter": plan["adapter"],
+            "_owner_user_id": boundary.owner_user_id,
+        }
+        with CELL_PROBE_LOCK:
+            existing = CELL_PROBE_TASKS.get(cache_key)
+            if existing and existing.get("status") == "running":
+                return api_ok(public_probe_snapshot(existing))
+            CELL_PROBE_TASKS[cache_key] = task
+            if hasattr(CELL_PROBE_TASKS, "move_to_end"):
+                CELL_PROBE_TASKS.move_to_end(cache_key)
+            try:
+                submit_provider_probe_task(
+                    task, work, timeout, runner=run_cell_probe_task)
+            except FairWorkLaneQueueFull:
+                if CELL_PROBE_TASKS.get(cache_key) is task:
+                    CELL_PROBE_TASKS.pop(cache_key, None)
+                return api_service_unavailable(
+                    "Provider probe queue is full; retry shortly.",
+                    retry_after=3,
+                    retryable=True,
+                )
+            except Exception as error:
+                if CELL_PROBE_TASKS.get(cache_key) is task:
+                    CELL_PROBE_TASKS.pop(cache_key, None)
+                return api_internal_error(error, context="provider-probe-submit")
+
+        logger.info(
+            "[CellProbe] Admitted background probe for %s "
+            "(%d cells, force=%s, scoped=%s, seeded=%d)",
+            cache_key, len(work), force, scoped, len(seed_cells),
+        )
+        return api_ok(public_probe_snapshot(task))
+    except ModelRoutingError as exc:
+        return _error(exc)
+
+
+@api_v1_providers_bp.route(
+    "/api/v1/providers/<provider_id>/probe-cells/status", methods=["GET"])
+@require_scope("providers")
+@api_meta(
+    summary="Poll a provider's access-matrix probe progress",
+    tags=["providers"],
+    scope="providers",
+)
+def probe_provider_cells_status(provider_id: str):
+    """Live task if any, else the disk snapshot, else ``{status: 'none'}``."""
+    boundary = _boundary()
+    if boundary is None:
+        return api_bad_request("caller has no repository owner identity")
+    cache_key = _probe_cell_cache_key(boundary, provider_id)
+    with CELL_PROBE_LOCK:
+        task = CELL_PROBE_TASKS.get(cache_key)
+        if task:
+            return api_ok(public_probe_snapshot(task))
+    cached = _read_persisted_probe_snapshot(cache_key)
+    if isinstance(cached, dict) and cached.get("cells") is not None:
+        return api_ok(cached)
+    return api_ok({"status": "none"})
+
+
 @api_v1_providers_bp.route("/api/v1/providers", methods=["POST"])
 @require_scope("providers")
 @api_meta(summary="Create one ProviderAccess aggregate", tags=["providers"], scope="providers")
@@ -386,6 +756,9 @@ def create_provider_route():
     if boundary is None:
         return api_bad_request("caller has no repository owner identity")
     body = parse_body()
+    rejection = _contract_rejection("createProvider", body)
+    if rejection is not None:
+        return rejection
     repository = _repository()
     uncommitted_secret_references: list[str] = []
     try:
@@ -447,6 +820,9 @@ def update_provider_route(provider_id: str):
     if boundary is None:
         return api_not_found("Provider not found")
     body = parse_body()
+    rejection = _contract_rejection("updateProvider", body)
+    if rejection is not None:
+        return rejection
     repository = _repository()
     uncommitted_secret_references: list[str] = []
     try:
@@ -502,6 +878,9 @@ def delete_provider_route(provider_id: str):
     if boundary is None:
         return api_not_found("Provider not found")
     body = parse_body()
+    rejection = _contract_rejection("deleteProvider", body)
+    if rejection is not None:
+        return rejection
     repository = _repository()
     try:
         expected = _expected_revision(body)
@@ -539,6 +918,9 @@ def replace_credential_secret(credential_id: str):
     if boundary is None:
         return api_not_found("Credential not found")
     body = parse_body()
+    rejection = _contract_rejection("putCredentialSecret", body)
+    if rejection is not None:
+        return rejection
     repository = _repository()
     uncommitted_secret_references: list[str] = []
     try:
@@ -583,6 +965,41 @@ def replace_credential_secret(credential_id: str):
     finally:
         _reclaim_secret_references(
             repository, boundary, uncommitted_secret_references)
+
+
+@api_v1_providers_bp.route(
+    "/api/v1/model-routing/credentials/<credential_id>/secret/reveal", methods=["POST"])
+@require_scope("providers")
+@api_meta(summary="Reveal one credential secret plaintext (audited)", tags=["providers"], scope="providers")
+def reveal_credential_secret(credential_id: str):
+    """Return the plaintext for one owner credential — the Settings key-card
+    Show button. POST (not GET) so the deliberate read never rides a shared
+    prefetch/cache path; every call is audit-logged like the vault reveal."""
+    boundary = _boundary()
+    if boundary is None:
+        return api_not_found("Credential not found")
+    repository = _repository()
+    try:
+        authority = repository.get(boundary)
+        credential = next(
+            (row for row in authority.document["credentials"]
+             if row["credential_id"] == credential_id),
+            None,
+        )
+        if credential is None:
+            return api_not_found("Credential not found")
+        secret = repository.resolve_secret(
+            boundary, str(credential.get("secret_reference") or ""))
+        audit_log(
+            "model_routing_credential_secret_revealed",
+            owner_user_id=boundary.owner_user_id,
+            credential_id=credential_id,
+        )
+        return api_ok(credential_id=credential_id, secret=secret)
+    except ModelRoutingError as exc:
+        return _error(exc)
+    except Exception as exc:
+        return api_internal_error(exc, context="api_v1.model_routing.secret.reveal")
 
 
 def _legacy_sources_for_owner(boundary: OwnerBoundary) -> tuple[dict[str, Any], list[dict[str, Any]]]:

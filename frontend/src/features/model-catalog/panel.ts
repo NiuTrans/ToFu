@@ -369,6 +369,7 @@ function renderModel(row: ModelCatalogRow): HTMLElement {
       ? t('modelCatalog.aa.unscored') : String(Number(intelligence.toFixed(1))), 'quality'),
     renderMetric('官方价格 / 1M', formatPricing(row.pricing), 'price'),
     renderMetric('上下文', formatContextWindow(row.contextWindow)),
+    renderMetric('发布时间', row.releaseDate || '未登记'),
     renderMetric('生命周期', row.lifecycle || 'stable'),
   );
   detail.appendChild(facts);

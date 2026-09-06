@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import urllib.parse
 import uuid
 
 from lib.log import get_logger
@@ -83,6 +84,31 @@ def research_direction_hash(direction) -> str:
         return ''
     return hashlib.sha256(
         (_DIRECTION_NS + norm).encode('utf-8')).hexdigest()[:32]
+
+
+def _direction_read_candidates(direction: str) -> list:
+    """``(paper_hash, direction_text)`` lookup candidates, exact identity first.
+
+    A reverse proxy that re-escapes an already percent-encoded query string
+    (see docs/PROXY_RUNTIME.md) delivers the direction still encoded — Flask
+    undoes only one layer — so the hash of what the server receives differs
+    from the hash the writers used (POST/PUT bodies are never re-escaped),
+    and every direction-keyed GET masquerades as "no stored research". On a
+    miss, one level of percent-decoding is retried. Exact identity always
+    wins, so a direction that literally contains a ``%XX`` sequence keeps its
+    own row.
+    """
+    primary = research_direction_hash(direction)
+    if not primary:
+        return []
+    candidates = [(primary, direction)]
+    if '%' in direction:
+        decoded = urllib.parse.unquote(direction)
+        if decoded != direction:
+            alternate = research_direction_hash(decoded)
+            if alternate and alternate != primary:
+                candidates.append((alternate, decoded))
+    return candidates
 
 
 def _upsert_row(phash: str, lang_key: str, report: str, meta: dict,
@@ -276,15 +302,22 @@ def load_research_artifacts(
            'survey_md': '', 'open_gaps': {}, 'accepted': [], 'rejected': [],
            'threshold': None, 'gate_reached': '', 'degraded': False,
            'degraded_reason': '', 'evaluation': {}, 'usage': {}}
-    phash = research_direction_hash(direction)
-    if not phash:
+    candidates = _direction_read_candidates(direction)
+    if not candidates:
         return out
     try:
-        rows = _storage().query('research.artifacts.get', {
-            'user_id': require_user_id(
-                user_id, context='research artifact owner'),
-            'paper_hash': phash, 'lang': lang,
-        })
+        uid = require_user_id(user_id, context='research artifact owner')
+        rows = []
+        for phash, _candidate_direction in candidates:
+            rows = _storage().query('research.artifacts.get', {
+                'user_id': uid, 'paper_hash': phash, 'lang': lang,
+            })
+            if rows:
+                if phash != candidates[0][0]:
+                    logger.info('[Research:Persist] lookup for %.60s hit only '
+                                'after percent-decoding (proxy re-escaped the '
+                                'query string)', direction)
+                break
     except Exception as e:
         logger.warning('[Research:Persist] lookup failed for %.60s: %s',
                        direction, e)

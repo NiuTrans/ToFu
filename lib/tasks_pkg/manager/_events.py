@@ -24,7 +24,7 @@ from lib.task_replay import (
 from lib.tasks_pkg.manager.runtime import chat_task_runtime
 from lib.tasks_pkg.manager._provider_ingress_guard import (
     active_provider_ingress_token,
-    record_deferred_observer_event,
+    enqueue_ingress_delivery,
 )
 
 logger = get_logger(__name__)
@@ -284,6 +284,15 @@ def append_event(task, event):
     if task.get('_suppressEvents'):
         return
 
+    # Field-level wire contract at the DELIVERY seam: build_event validates
+    # kwargs at construction, but emitters legitimately stamp conditional
+    # fields by mutation afterwards (status / rejection / compaction fields
+    # on tool_complete). This re-checks the final post-mutation frame — the
+    # shape that actually reaches the wire. No-op for events without a
+    # declared schema (one dict lookup); warn-only in production.
+    from lib.agent_core.events import check_event
+    check_event(event)
+
     if event.get('type') in TASK_REPLAY_TERMINAL_EVENT_TYPES:
         # Resource settlement precedes every terminal persistence/push. This is
         # the one operational lifecycle seam shared by normal, Flow, reaper,
@@ -426,12 +435,14 @@ def append_event(task, event):
         # Outside provider ingress, durable-before-visible ordering remains
         # strict: the persistent task_events row commits before browser/webhook
         # push.  While an upstream model stream is actively being drained, both
-        # storage and push are observers and are deliberately bypassed here;
-        # otherwise a slow Sidecar or synchronous push listener can stop socket
-        # consumption long enough to break an otherwise healthy model request.
-        # The bounded TaskRuntime replay buffer remains live, API SSE waiters
-        # are still nudged below, and the first post-ingress authoritative event
-        # carries the cumulative projection and restores the ordinary contract.
+        # storage and push are observers and must not block this thread: the
+        # event is appended memory-locally here, then a bounded per-task
+        # delivery worker performs the same persist→push FIFO
+        # (enqueue_ingress_delivery).  A wedged observer can then only lag the
+        # stream, never stop socket consumption; if the queue overflows, the
+        # oldest undelivered event is dropped and the first post-ingress
+        # authoritative event carries the cumulative projection that restores
+        # the ordinary contract.
         _ingress_token = active_provider_ingress_token(task)
 
         def _persist_before_push(_seq):
@@ -571,11 +582,40 @@ def append_event(task, event):
             if (event.get('type') == 'phase'
                     and isinstance(task.get('phase'), dict)):
                 task['phase']['seq'] = seq
-            record_deferred_observer_event(
+
+            def _deliver_ingress_event(_seq=seq, _event_wire=_wire):
+                try:
+                    _persist_before_push(_seq)
+                except Exception:
+                    # Mirror the runtime's authoritative-frame wedge marker so
+                    # chat_poll can still escalate a delivery wedge that now
+                    # happens on the delivery worker instead of this thread.
+                    task['_pushWithheldAt'] = time.time()
+                    task['_pushWithheldCount'] = int(
+                        task.get('_pushWithheldCount') or 0) + 1
+                    raise
+                task.pop('_pushWithheldAt', None)
+                task.pop('_pushWithheldCount', None)
+                if chat_task_runtime.push_channel and task.get('_userId'):
+                    try:
+                        from lib.agent_core.push import push_event
+                        push_event(
+                            chat_task_runtime.push_channel,
+                            task['id'],
+                            _event_wire,
+                            user_id=int(task['_userId']),
+                        )
+                    except Exception as push_error:
+                        logger.debug(
+                            '[Manager] ingress delivery push failed task=%s: %s',
+                            task['id'][:8], push_error)
+
+            enqueue_ingress_delivery(
                 task,
                 token=_ingress_token,
                 sequence=seq,
                 event_type=event.get('type') or '',
+                deliver=_deliver_ingress_event,
             )
 
     # Liveness clock #1 (see reap_stuck_running_tasks): REAL progress events

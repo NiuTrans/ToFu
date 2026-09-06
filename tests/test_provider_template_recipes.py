@@ -109,6 +109,46 @@ def test_bundled_json_templates_use_recipe_authority():
             assert len(canonical['offering_recipes']) > 0, path.name
 
 
+def test_settings_templates_share_bootstrap_builtins():
+    from bootstrap_pkg.providers import _BUILTIN_PROVIDER_TEMPLATES
+
+    from lib.provider_template_recipes import load_provider_templates
+
+    templates = {row['key']: row for row in load_provider_templates()}
+    shared = {
+        row['key'] for row in _BUILTIN_PROVIDER_TEMPLATES
+        if row['key'] not in ('custom', 'anthropic')
+    }
+    assert shared <= set(templates)
+    # bootstrap-only rows stay out of the Settings picker.
+    assert 'custom' not in templates
+    assert 'anthropic' not in templates
+
+
+def test_static_template_overrides_builtin_recipe_list():
+    from lib.provider_template_recipes import load_provider_templates
+
+    templates = {row['key']: row for row in load_provider_templates()}
+    static_glm = json.loads((TEMPLATES / 'glm.json').read_text(encoding='utf-8'))
+    assert len(templates['glm']['offering_recipes']) == len(
+        static_glm['offering_recipes'])
+    assert len(templates['openai']['offering_recipes']) == 15
+
+
+def test_every_shared_builtin_compiles_an_onboarding_bundle():
+    from lib.provider_template_recipes import load_provider_templates
+
+    for row in load_provider_templates():
+        recipes = row['offering_recipes']
+        if not recipes:
+            assert row.get('category') == 'local'
+            continue
+        bundle = compile_provider_template_bundle(
+            row['key'], selected_model_ids=[recipes[0]['model_id']])
+        assert bundle['offerings'], row['key']
+        assert bundle['connections'][0]['base_url'], row['key']
+
+
 def test_deepseek_and_meituan_anchor_flash_to_the_same_model_identity():
     bundles = {
         key: compile_provider_template_bundle(
@@ -122,7 +162,11 @@ def test_deepseek_and_meituan_anchor_flash_to_the_same_model_identity():
     assert [row['wire_model_id'] for row in bundles['deepseek']['deployments']] == [
         'deepseek-v4-flash',
     ]
-    assert [row['wire_model_id'] for row in bundles['meituan']['deployments']] == [
+    assert sorted(
+        row['wire_model_id'] for row in bundles['meituan']['deployments']
+    ) == [
         'deepseek-v4-flash',
         'deepseek-v4-flash-huawei',
+        'deepseek-v4-flash-meituan',
+        'deepseek-v4-flash-tencent',
     ]

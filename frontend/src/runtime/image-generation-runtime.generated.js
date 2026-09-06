@@ -17,6 +17,8 @@ const _brandSvg = runtimeScope._brandSvg;
 if (typeof _brandSvg !== 'function') throw new Error('image-generation runtime dependency is unavailable: _brandSvg');
 const _detectBrand = runtimeScope._detectBrand;
 if (typeof _detectBrand !== 'function') throw new Error('image-generation runtime dependency is unavailable: _detectBrand');
+const _modelBrand = runtimeScope._modelBrand;
+if (typeof _modelBrand !== 'function') throw new Error('image-generation runtime dependency is unavailable: _modelBrand');
 const _modelShortName = runtimeScope._modelShortName;
 if (typeof _modelShortName !== 'function') throw new Error('image-generation runtime dependency is unavailable: _modelShortName');
 const _scheduleReflow = runtimeScope._scheduleReflow;
@@ -311,7 +313,9 @@ function selectIgModel(el) {
     const name = el.querySelector('.ig-model-name')?.textContent || ImageGenerationComposerState.selectedModel;
     if (label) label.textContent = name;
     // Update brand icon + color on the toggle
-    const brand = typeof _detectBrand === 'function' ? _detectBrand(ImageGenerationComposerState.selectedModel) : 'generic';
+    const brand = typeof _modelBrand === 'function'
+      ? _modelBrand(ImageGenerationComposerState.selectedModel)
+      : (typeof _detectBrand === 'function' ? _detectBrand(ImageGenerationComposerState.selectedModel) : 'generic');
     if (iconEl && typeof _brandSvg === 'function') iconEl.innerHTML = _brandSvg(brand, 14);
     if (toggle) toggle.setAttribute('data-brand', brand);
   }
@@ -715,9 +719,11 @@ async function _requestIgModels() {
       return;
     }
 
-    // Brand-specific SVG icons (detect from model name)
+    // Brand-specific SVG icons (unified resolver: Creator identity first)
     function _igIcon(model) {
-      const brand = typeof _detectBrand === 'function' ? _detectBrand(model) : 'generic';
+      const brand = typeof _modelBrand === 'function'
+        ? _modelBrand(model)
+        : (typeof _detectBrand === 'function' ? _detectBrand(model) : 'generic');
       return typeof _brandSvg === 'function' ? _brandSvg(brand, 14) : Icon('image', 14);
     }
 
@@ -774,7 +780,9 @@ async function _requestIgModels() {
           const label = document.getElementById('igModelLabel');
           if (label) label.textContent = friendlyName;
           // Set brand icon + color on the toggle (same as preset-toggle)
-          const brand = typeof _detectBrand === 'function' ? _detectBrand(m.model) : 'generic';
+          const brand = typeof _modelBrand === 'function'
+            ? _modelBrand(m.model, m.creator_id)
+            : (typeof _detectBrand === 'function' ? _detectBrand(m.model) : 'generic');
           const iconEl = document.getElementById('igModelIcon');
           const toggle = document.querySelector('.ig-preset');
           if (iconEl && typeof _brandSvg === 'function') iconEl.innerHTML = _brandSvg(brand, 14);

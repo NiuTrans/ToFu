@@ -2846,7 +2846,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=16,
         help="host-wide upstream connection cap shared across trial VMs",
     )
-    config.add_argument("--model", default="deepseek-v4-flash-meituan")
+    config.add_argument("--model", default="deepseek-v4-flash-yourprovider")
     config.add_argument(
         "--harness",
         choices=harness_profile_ids(),
@@ -2923,7 +2923,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     scorer = subparsers.add_parser("score")
     scorer.add_argument("jobs", nargs="+")
-    scorer.add_argument("--expected-model", default="deepseek-v4-flash-meituan")
+    scorer.add_argument("--expected-model", default="deepseek-v4-flash-yourprovider")
     scorer.add_argument("--expected-tasks", type=int, default=TASK_COUNT)
     scorer.add_argument("--expected-attempts", type=int, default=5)
     scorer.add_argument(
@@ -2940,7 +2940,7 @@ def build_parser() -> argparse.ArgumentParser:
     planner = subparsers.add_parser("plan-retries")
     planner.add_argument("jobs", nargs="+")
     planner.add_argument("--tasks-root", required=True)
-    planner.add_argument("--expected-model", default="deepseek-v4-flash-meituan")
+    planner.add_argument("--expected-model", default="deepseek-v4-flash-yourprovider")
     planner.add_argument("--expected-attempts", type=int, default=5)
     _add_provenance_arguments(planner)
     planner.set_defaults(func=plan_retries)
@@ -2951,7 +2951,7 @@ def build_parser() -> argparse.ArgumentParser:
     retry_configs.add_argument("--template", required=True)
     retry_configs.add_argument("--output-root", required=True)
     retry_configs.add_argument("--job-prefix", required=True)
-    retry_configs.add_argument("--expected-model", default="deepseek-v4-flash-meituan")
+    retry_configs.add_argument("--expected-model", default="deepseek-v4-flash-yourprovider")
     retry_configs.add_argument("--expected-attempts", type=int, default=5)
     _add_provenance_arguments(retry_configs)
     retry_configs.set_defaults(func=write_retry_configs)
@@ -2964,14 +2964,14 @@ def build_parser() -> argparse.ArgumentParser:
     autofill.add_argument("--output-root", required=True)
     autofill.add_argument("--job-prefix", required=True)
     autofill.add_argument("--max-waves", type=int, default=20)
-    autofill.add_argument("--expected-model", default="deepseek-v4-flash-meituan")
+    autofill.add_argument("--expected-model", default="deepseek-v4-flash-yourprovider")
     autofill.add_argument("--expected-attempts", type=int, default=5)
     _add_provenance_arguments(autofill)
     autofill.set_defaults(func=run_until_complete)
 
     analyzer = subparsers.add_parser("analyze")
     analyzer.add_argument("jobs", nargs="+")
-    analyzer.add_argument("--expected-model", default="deepseek-v4-flash-meituan")
+    analyzer.add_argument("--expected-model", default="deepseek-v4-flash-yourprovider")
     analyzer.add_argument(
         "--output",
         help="atomically retain the analysis as a private mode-0600 JSON file",
@@ -2983,7 +2983,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     collector.add_argument("jobs", nargs="+")
     collector.add_argument("--output-root", required=True)
-    collector.add_argument("--expected-model", default="deepseek-v4-flash-meituan")
+    collector.add_argument("--expected-model", default="deepseek-v4-flash-yourprovider")
     collector.set_defaults(func=collect_trajectories)
     return parser
 

@@ -326,45 +326,6 @@ def _enable_programmatic_tools(tools: list[dict], *,
     return converted
 
 
-def _inject_programmatic_guidance(items: list[dict], *, stage: str = '') -> None:
-    """Add the bounded read-only routing boundary recommended by OpenAI Docs."""
-    from lib.tools.programmatic import (
-        PROGRAMMATIC_MAX_CALLS,
-        PROGRAMMATIC_MAX_CONCURRENT_CALLS,
-        PROGRAMMATIC_MAX_CONTINUATIONS,
-        PROGRAMMATIC_MAX_OUTPUT_BYTES,
-    )
-
-    bounded_stage = str(stage or '').strip() or (
-        'process several eligible read-only tool results into a compact, '
-        'evidence-backed comparison or validation')
-    guidance = (
-        'Use Programmatic Tool Calling only for this bounded read-only stage: '
-        f'{bounded_stage}. '
-        'The program may filter, join, rank, deduplicate, aggregate, or validate several '
-        'eligible tool results. Every eligible tool returns exactly '
-        '{content:string,truncated:boolean}; stop and report a structured '
-        'failure when truncated is true and the missing bytes are required. '
-        f'Use at most {PROGRAMMATIC_MAX_CALLS} child calls and '
-        f'{PROGRAMMATIC_MAX_CONCURRENT_CALLS} concurrent child calls, with '
-        f'{PROGRAMMATIC_MAX_OUTPUT_BYTES} UTF-8 bytes of child output per '
-        f'program, with at most {PROGRAMMATIC_MAX_CONTINUATIONS} continuation '
-        'responses. Emit one compact JSON result with status, findings, and '
-        'evidence fields. Keep the reduced result and required evidence. '
-        'Use direct tool calls for semantic judgment, writes, approvals, and '
-        'final artifact validation. Do not retry a failed call more than once.'
-    )
-    insert_at = 0
-    while (insert_at < len(items)
-           and items[insert_at].get('type') == 'message'
-           and items[insert_at].get('role') == 'developer'):
-        insert_at += 1
-    items.insert(insert_at, {
-        'type': 'message', 'role': 'developer',
-        'content': [{'type': 'input_text', 'text': guidance}],
-    })
-
-
 def _truncate_name(name: str, reverse: dict) -> str:
     """Clamp a tool name to the 64-char limit, recording the mapping so
     the response side can restore the model's echo (first-original wins,
@@ -551,29 +512,6 @@ def openai_body_to_responses(body: dict, *, profile: str = 'default',
                            == 'original') else ''),
     )
 
-    if out.get('multi_agent'):
-        # This beta path is intentionally analysis-only.  Existing dispatch
-        # approval/write gates remain authoritative for root tool calls.
-        insert_at = 0
-        while (insert_at < len(out['input'])
-               and out['input'][insert_at].get('type') == 'message'
-               and out['input'][insert_at].get('role') == 'developer'):
-            insert_at += 1
-        out['input'].insert(insert_at, {
-            'type': 'message', 'role': 'developer',
-            'content': [{
-                'type': 'input_text',
-                'text': (
-                    'Native subagents are read-only analysts. Delegate only '
-                    + (str(body.get('_multi_agent_stage') or '').strip()
-                       or 'independent research, inspection, comparison, or verification')
-                    + '. '
-                    'Subagents must not mutate files, external '
-                    'systems, user state, schedules, browser state, or shared '
-                    'project state. The root agent owns every action.'),
-            }],
-        })
-
     if stateful_gpt56:
         cache_key = responses_cache_affinity_key(body)
         if cache_key:
@@ -604,10 +542,6 @@ def openai_body_to_responses(body: dict, *, profile: str = 'default',
         if programmatic_enabled:
             out['tools'] = _enable_programmatic_tools(
                 out['tools'], eligible=programmatic_names)
-            if any(tool.get('type') == 'programmatic_tool_calling'
-                   for tool in out['tools']):
-                _inject_programmatic_guidance(
-                    out['input'], stage=body.get('_programmatic_stage') or '')
 
         if tool_search_enabled:
             raw_pins = body.get('_frontend_selected_tool_names') or ()
@@ -632,9 +566,7 @@ def openai_body_to_responses(body: dict, *, profile: str = 'default',
                 out['tools'], pinned_names=pinned_names,
                 namespace_by_name=namespace_by_name)
 
-    # Mark after optional PTC guidance is injected so that stable developer
-    # instruction is part of the explicit floor instead of landing in the
-    # dynamic suffix. ``chatgpt.com/backend-api/codex`` is not the public
+    # Mark the stable input floor. ``chatgpt.com/backend-api/codex`` is not the public
     # Responses API and rejects this public per-content field on some models.
     if public_openai_features:
         marked = _add_stable_prefix_breakpoint(out['input'])

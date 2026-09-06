@@ -205,6 +205,44 @@ def test_research_handler_routes_one_owner_device_and_clamps_limits(
     )]
 
 
+def test_research_passes_only_active_confident_passive_capture_hints(
+        monkeypatch, allow_friday):
+    from lib.browser.research import research_page
+    from lib.browser.tool_runtime import BrowserToolRuntime
+
+    monkeypatch.setattr(
+        'lib.browser.protocol.require_capabilities',
+        lambda *_a, **_k: {
+            'capabilities': ['deep_collect', 'network_body', 'research_hints']})
+    monkeypatch.setattr(
+        'lib.browser.site_observations.load_site_observation',
+        lambda *_a, **_k: {
+            'status': 'active', 'confidence_milli': 700,
+            'api_hints': [{
+                'method': 'POST', 'origin': 'https://friday.internal.example.com',
+                'path_template': '/api/skills', 'passive_only': True,
+            }, {
+                'method': 'GET', 'origin': 'https://ignored.example',
+                'path_template': '/active', 'passive_only': False,
+            }],
+        })
+    calls = []
+
+    def sender(command, params=None, timeout=30, **route):
+        calls.append((command, params, timeout, route))
+        return _payload(), None
+
+    runtime = BrowserToolRuntime(
+        owner_user_id='41', client_id='friday-browser', sender=sender)
+    out = research_page({'url': FRIDAY_URL, 'mode': 'analysis'}, runtime)
+
+    assert out.startswith('Prior site observation')
+    assert calls[0][1]['captureHints'] == [{
+        'method': 'POST', 'origin': 'https://friday.internal.example.com',
+        'pathTemplate': '/api/skills',
+    }]
+
+
 def test_friday_adapter_uses_generic_research_and_normalized_records(
         allow_friday):
     from lib.browser.adapters import _friday_search, get_adapter
@@ -250,9 +288,23 @@ def test_extension_research_capture_is_pre_navigation_bounded_and_dynamic():
         'stopReason': 'no-safe-next-control',
     }
     assert result['network']['webSocketFrameCount'] == 1
+    assert result['network']['priorityHintCount'] == 1
+    assert result['network']['priorityBodyMatches'] == 1
+    assert result['network']['priorityReserveChars'] == 256 * 1024
+    assert probe['limits']['hintReserveChars'] == 256 * 1024
     assert probe['limits']['websocketFrames'] == 40
     assert probe['limits']['active'] == 4
-    assert 'deep_collect' in probe['limits']['capabilities']
+    assert {'deep_collect', 'research_hints'} <= set(probe['limits']['capabilities'])
+
+
+def test_extension_hint_reserve_preserves_priority_without_growing_total_budget():
+    probe = run_extension_probe('researchHintBudget')
+
+    assert probe['reserve'] == 256 * 1024
+    assert probe['normalBeforePriorityChars'] == probe['maximum'] - probe['reserve']
+    assert probe['priorityChars'] == 200_000
+    assert probe['priorityBodyMatches'] == 1
+    assert probe['totalBodyChars'] <= probe['maximum']
 
 
 def test_extension_pagination_simulation_only_uses_semantic_safe_controls():

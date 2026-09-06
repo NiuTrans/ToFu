@@ -72,3 +72,33 @@ def test_new_env_keys_forward_into_built_config():
     assert llm_cfg is not None
     assert llm_cfg.get('env', {}).get('LLM_MCP_CA_BUNDLE') \
         == '/tmp/internal-ca.pem'
+
+
+@pytest.mark.skipif(
+    reg.is_opensource_build(),
+    reason='internal MCP launchers are stripped from opensource builds',
+)
+def test_xuecheng_env_specs_include_toolset():
+    specs = _spec_by_key('xuecheng')
+    assert 'XUECHENG_TOOLSET' in specs
+    assert specs['XUECHENG_TOOLSET'].get('required') is False
+
+
+@pytest.mark.skipif(
+    reg.is_opensource_build(),
+    reason='internal MCP launchers are stripped from opensource builds',
+)
+def test_build_server_config_preserves_env_keys_not_in_specs():
+    # Regression: catalog install/reconnect rebuilds the config row via
+    # build_server_config; keys outside env_specs (hand-added in
+    # mcp_servers.json, or re-exposed by the panel) were silently dropped,
+    # e.g. XUECHENG_TOOLSET vanished and the server fell back to reader-only.
+    cfg = reg.build_server_config('xuecheng', {
+        'XUECHENG_MIS': 'u',
+        'XUECHENG_TOOLSET': 'all',
+        'HAND_ADDED_FUTURE_KEY': '1',
+    })
+    assert cfg is not None
+    env = cfg.get('env', {})
+    assert env.get('XUECHENG_TOOLSET') == 'all'
+    assert env.get('HAND_ADDED_FUTURE_KEY') == '1'

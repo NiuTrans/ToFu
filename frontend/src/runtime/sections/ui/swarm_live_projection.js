@@ -347,8 +347,9 @@ function _handleSwarmAgent(ev, c) {
           sr._swarmAgents.push(agent);
         }
         if (agent) {
-          agent.status = ev.status === "failed" ? "failed" : "done";
-          agent.phase = ev.status === "failed" ? "error" : "done";
+          const failed = ev.status === "failed" || ev.status === "error" || !!ev.error;
+          agent.status = failed ? "failed" : "done";
+          agent.phase = failed ? "error" : "done";
           if (ev.preview || ev.summary) agent.preview = ev.preview || ev.summary;
           if (ev.elapsed) agent.elapsed = ev.elapsed;
           if (ev.tokens) agent.tokens = ev.tokens;

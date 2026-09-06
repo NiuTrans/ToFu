@@ -49,9 +49,37 @@ def validate_finite_json_numbers(value: Any) -> None:
             pending.extend(item)
 
 
+def _materialize_json_mappings(value: Any) -> Any:
+    """Copy ``Mapping`` views (e.g. ``MappingProxyType`` from shared caches)
+    into plain ``dict``; ``orjson`` rejects non-dict mappings. Clean
+    containers pass through unchanged (copy-on-write) so full-transcript
+    frames only pay the scan."""
+    if isinstance(value, dict):
+        rebuilt: dict[Any, Any] | None = None
+        for key, item in value.items():
+            converted = _materialize_json_mappings(item)
+            if converted is not item:
+                if rebuilt is None:
+                    rebuilt = dict(value)
+                rebuilt[key] = converted
+        return value if rebuilt is None else rebuilt
+    if isinstance(value, Mapping):
+        return {key: _materialize_json_mappings(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        rebuilt_list: list[Any] | None = None
+        for index, item in enumerate(value):
+            converted = _materialize_json_mappings(item)
+            if converted is not item:
+                if rebuilt_list is None:
+                    rebuilt_list = list(value)
+                rebuilt_list[index] = converted
+        return value if rebuilt_list is None else rebuilt_list
+    return value
+
+
 def canonical_json(value: Any) -> bytes:
     validate_finite_json_numbers(value)
-    return orjson.dumps(value, option=orjson.OPT_SORT_KEYS)
+    return orjson.dumps(_materialize_json_mappings(value), option=orjson.OPT_SORT_KEYS)
 
 
 def validate_operation(operation: Any) -> str:
@@ -65,8 +93,8 @@ def validate_operation(operation: Any) -> str:
 def encode_frame(message: Mapping[str, Any]) -> bytes:
     validate_finite_json_numbers(message)
     try:
-        body = orjson.dumps(message)
-    except (TypeError, orjson.JSONEncodeError) as exc:
+        body = orjson.dumps(_materialize_json_mappings(message))
+    except (TypeError, RecursionError, orjson.JSONEncodeError) as exc:
         raise StorageError(
             'database_protocol_error', 'Storage frame is not serializable') from exc
     if not body or len(body) > MAX_FRAME_BYTES:

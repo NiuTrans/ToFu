@@ -25,6 +25,27 @@ function _featureLoadError(name, error) {
   } catch (_) { /* the console error remains authoritative */ }
 }
 
+/* One bounded self-heal for a module graph that never became ready: a failed
+ * chunk fetch is cached by the browser module map for the document's whole
+ * lifetime, so only a reload can clear it. Guard interval and storage keys
+ * mirror frontend/src/core/feature-load-recovery.ts (parity pinned by
+ * tests/test_frontend_feature_load_recovery.py); this classic bridge cannot
+ * import that typed owner because the failed ESM graph is exactly what it
+ * must survive. */
+function _attemptModuleGraphRecovery(name) {
+  try {
+    var now = Date.now();
+    var last = Number(window.sessionStorage.getItem('tofu:feature-load-reload') || 0);
+    if (Number.isFinite(last) && last > 0 && now - last < 60000) return false;
+    window.sessionStorage.setItem('tofu:feature-load-reload', String(now));
+    window.sessionStorage.setItem('tofu:feature-load-pending', name);
+    window.location.reload();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function _invokeFeatureOwner(name, args, stub) {
   var bridge = window.TofuModules;
   if (!bridge || typeof bridge.invokeFeature !== 'function') return false;
@@ -51,6 +72,7 @@ function _installFeatureStub(name) {
       window.clearTimeout(timer);
       window.removeEventListener('tofu:modules-ready', finish);
       if (!_invokeFeatureOwner(name, args, stub)) {
+        if (_attemptModuleGraphRecovery(name)) return;
         _featureLoadError(name, new Error('Vite module graph did not become ready'));
       }
     };

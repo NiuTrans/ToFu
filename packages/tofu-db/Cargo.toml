@@ -1,0 +1,30 @@
+[package]
+name = "tofu-db"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Pre-authority storage engine for Tofu's personal workload"
+
+[dependencies]
+aes-gcm = "0.10"
+base64 = "0.22"
+blake3 = "1"
+crc32c = "0.6"
+fs2 = "0.4"
+flate2 = "1"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+subtle = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v5"] }
+zeroize = "1"
+zstd = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,22 @@
+{
+  "_rejected": {},
+  "agentId": "s",
+  "compactedFromChars": 1,
+  "compactedToChars": 1,
+  "compactionLayer": "s",
+  "emittedAt": 1.5,
+  "isError": true,
+  "llmRound": 1,
+  "rawToolTokens": 1,
+  "rejection": {},
+  "roundNum": 1,
+  "status": "s",
+  "tEnd": 1.5,
+  "tStart": 1.5,
+  "toolCallId": "s",
+  "toolContent": "s",
+  "toolName": "s",
+  "toolResultEvidence": {},
+  "toolTokens": 1,
+  "type": "tool_complete"
+}

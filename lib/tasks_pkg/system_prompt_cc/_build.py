@@ -2,8 +2,8 @@
 
 ``build_static_blocks`` is the single source of block order/identity;
 ``build_static_prompt`` joins the (optionally filtered) result into one
-cache-stable text block. ``build_user_context_reminder`` builds the
-prepended CLAUDE.md user-message body (ports prependUserContext).
+cache-stable text block. ``build_user_context_reminder`` builds the managed
+tail CLAUDE.md user-message body (derived from prependUserContext).
 """
 from __future__ import annotations
 
@@ -254,8 +254,9 @@ def build_user_context_reminder(claude_md: str | None,
                                  current_date: str | None = None) -> str | None:
     """Build the Claude-Code-style <system-reminder> user-message body.
 
-    Claude Code places CLAUDE.md in a prepended user message rather than
-    the system prompt (see ``utils/api.ts:prependUserContext``).  A/B
+    Tofu places CLAUDE.md in a managed tail user message rather than the
+    system prompt (Claude Code's source analogue is
+    ``utils/api.ts:prependUserContext``). A/B
     testing on Tofu confirmed this saves 18% cost / +49% cache hit
     (see ``.tofu/memories/claudemd-placement-ab-test-results.md``).
 

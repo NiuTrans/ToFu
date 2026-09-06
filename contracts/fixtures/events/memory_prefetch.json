@@ -1,0 +1,14 @@
+{
+  "auxiliaryLlmCalls": 1,
+  "candidate_target": 1,
+  "candidates": 1,
+  "memories": [],
+  "phase": "s",
+  "reason": "s",
+  "rejectedLowConfidence": 1,
+  "selected": 1,
+  "strategy": "s",
+  "total_memories": 1,
+  "total_ms": 1,
+  "type": "memory_prefetch"
+}

@@ -500,8 +500,11 @@ class TestRequestConversion:
         assert out['multi_agent'] == {
             'enabled': True, 'max_concurrent_subagents': 4}
         assert 'context_management' not in out
-        wire = json.dumps(out['input'], ensure_ascii=False)
-        assert 'Native subagents are read-only analysts' in wire
+        # Native projection must not append ephemeral body-only instructions;
+        # stable policy is supplied by the Context Composer carrier.
+        assert len(out['input']) == 1
+        assert out['input'][0]['role'] == 'user'
+        assert out['input'][0]['content'][0]['text'] == 'compare modules'
 
 
 # ──────────────────────────────────────────────────────────────

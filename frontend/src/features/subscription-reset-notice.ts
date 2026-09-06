@@ -14,6 +14,8 @@ export const CODEX_RESET_NOTICE_REFRESH_RETRY_MS = 2500;
 export const CODEX_RESET_NOTICE_PUSH_FALLBACK_MS = 15 * 1000;
 export const CODEX_RESET_NOTICE_MAX_REFRESH_RETRIES = 6;
 export const CODEX_RESET_NOTICE_MAX_SEEN_KEYS = 16;
+import { isContractedPushFrame } from '../core/frame-identity';
+
 export const CODEX_RESET_NOTICE_PUSH_CHANNEL = 'oauth';
 export const CODEX_RESET_NOTICE_PUSH_TASK_ID = 'codex-reset';
 export const CODEX_RESET_NOTICE_PUSH_EVENT_TYPE = 'codex.reset_offer.updated';
@@ -131,10 +133,10 @@ export function extractAuthenticatedCodexResetOffer(value: unknown): CodexResetO
 }
 
 export function extractCodexResetOfferPush(value: unknown): CodexResetOffer | null {
-  const frame = record(value);
-  if (frame?.type !== CODEX_RESET_NOTICE_PUSH_EVENT_TYPE
-      || frame.provider !== 'codex') return null;
-  const offer = normalizeCodexResetOffer(frame.reset_offer);
+  if (!isContractedPushFrame(value)
+      || value.type !== CODEX_RESET_NOTICE_PUSH_EVENT_TYPE
+      || value.provider !== 'codex') return null;
+  const offer = normalizeCodexResetOffer(value.reset_offer);
   // This event is a completion receipt. A busy projection is either from an
   // incompatible producer or malformed input and must not extend polling.
   return offer?.refreshing ? null : offer;

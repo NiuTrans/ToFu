@@ -324,14 +324,11 @@ async function _promoteNativeDecision(conv, turnId, projection) {
     const checkers = Array.isArray(catalog?.items)
       ? catalog.items.filter(item => item?.enabled) : [];
     if (!checkers.length) {
-      const saveForTriage = typeof showConfirm !== 'function' || await showConfirm(
-        'No checker is registered. Save this conclusion to Attention for later triage? You can also export the answer to docs.',
-      );
-      if (saveForTriage && api.brainAttentionAdd && sourceText) {
-        await api.brainAttentionAdd(projectPath, sourceText.slice(0, 4000));
-        if (typeof showToast === 'function') {
-          showToast('Saved to Attention; it will not enter the model prompt.', 'success');
-        }
+      if (typeof showToast === 'function') {
+        showToast(
+          'No checker is registered. Register one in Project Charter first, or export the answer to docs.',
+          'warning',
+        );
       }
       if (typeof runtimeScope.openProjectBrain === 'function') {
         runtimeScope.openProjectBrain({ tab: 'charter', path: projectPath });
@@ -714,6 +711,7 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
       taskId: block.source?.taskId,
       roundNum: block.source?.llmRound == null ? undefined : Number(block.source.llmRound) + 1,
       llmRound: block.source?.llmRound,
+      agentId: block.source?.agentId,
       toolCallId: block.toolCallId,
       toolName: block.name,
       toolArgs: block.input,
@@ -775,6 +773,7 @@ const _nativeTurnRenderers = createClassicConversationRenderers({
     const fieldByChannel = {
       inbox: '_inboxInjects', peer: '_peerInjects',
       'user-steer': '_userSteerInjects', 'stall-nudge': '_stallNudges',
+      'background-command': '_bgCommandInjects',
     };
     const field = fieldByChannel[block.channel];
     if (!field || typeof _rehydrateInjectRows !== 'function') return '';

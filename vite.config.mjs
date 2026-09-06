@@ -19,8 +19,19 @@ const TOOL_PRESENTATION_CHUNK_MODULES = new Set([
   'write-gate-refusal.ts',
 ]);
 
+const TASK_MODE_CHUNK_MARKER = '/frontend/src/features/orchestration/task-mode-';
+
 export function manualChunkName(moduleId) {
   const normalizedId = moduleId.replaceAll('\\', '/');
+  // The Task Mode owner family (task-mode-*.ts, ~180 KB of source) is a
+  // separable cache generation inside the lazy orchestration feature: a
+  // task-mode edit must not invalidate the Studio chunk and vice versa, and
+  // each chunk stays under the async-chunk delivery budget on its own. The
+  // tiny task-mode.ts barrel deliberately stays in the entry chunk — the
+  // marker's trailing dash matches only the family files.
+  if (normalizedId.includes(TASK_MODE_CHUNK_MARKER)) {
+    return 'orchestration-task-mode';
+  }
   const marker = '/frontend/src/conversation/presentation/';
   const markerIndex = normalizedId.lastIndexOf(marker);
   if (markerIndex < 0) return undefined;

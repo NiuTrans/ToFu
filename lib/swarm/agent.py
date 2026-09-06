@@ -14,6 +14,7 @@ Key design principles:
   • Graceful degradation: timeout/abort returns partial results, not empty
 """
 
+import hashlib
 import json
 import os
 import re
@@ -79,14 +80,42 @@ logger = get_logger(__name__)
 _REQUEST_SNAPSHOT_SEQ_LOCK = threading.Lock()
 
 
-def _nonretryable_failure_signatures(results) -> list[str]:
-    """Return stable codes only when every result is terminal and typed."""
+def _nonretryable_failure_signatures(
+    results,
+    tool_calls=None,
+) -> list[str]:
+    """Return operation-scoped codes when every result is terminal and typed.
+
+    A terminal error code alone is too broad: ``permission_required`` from a
+    different tool or path can represent a genuinely different recovery
+    attempt. Production callers therefore include the canonical operation in
+    each signature. The optional argument preserves the legacy pure helper
+    behavior for callers that have no operation evidence.
+    """
     codes = []
-    for result in results:
+    calls = list(tool_calls or ())
+    for index, result in enumerate(results):
         code = nonretryable_tool_error_code(result)
         if not code:
             return []
-        codes.append(code)
+        if index >= len(calls) or not isinstance(calls[index], dict):
+            codes.append(code)
+            continue
+        function = calls[index].get('function')
+        function = function if isinstance(function, dict) else calls[index]
+        arguments = function.get('arguments', calls[index].get('arguments', {}))
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (TypeError, ValueError):
+                pass
+        operation = json.dumps({
+            'name': str(function.get('name') or calls[index].get('name') or ''),
+            'arguments': arguments,
+        }, ensure_ascii=False, sort_keys=True, separators=(',', ':'), default=str)
+        operation_id = hashlib.sha256(
+            operation.encode('utf-8', 'replace')).hexdigest()[:16]
+        codes.append(f'{code}:{operation_id}')
     return sorted(set(codes))
 
 
@@ -136,7 +165,8 @@ def _emit_request_snapshot(agent, round_num: int) -> str:
         _wire = apply_wire_sanitize(
             [dict(m) for m in agent.messages],
             conv_id=(agent.parent_task or {}).get('convId', '') or '',
-            provider_id=(agent.parent_task or {}).get('provider_id') or '')
+            provider_id=(agent.parent_task or {}).get('provider_id') or '',
+            user_id=(agent.parent_task or {}).get('_userId') or None)
         snap = _strip_base64_for_snapshot(_wire)
         role = getattr(agent.spec, 'role', '') or ''
         event = build_event(
@@ -228,11 +258,20 @@ def _tool_timeline_text(value) -> str:
 #: localized progress card instead of the generic English receipt line.
 #: Heavy engine state (``todoState`` — full stack + history) is deliberately
 #: excluded: the card and the revision-collapser read only the flat keys.
+#: run_command contributes its settled command-card identity (command line,
+#: exit code, terminal badges) — without it a goal-mode shell round renders a
+#: bare ``$`` and an unknown-exit pill. ``output`` stays out: the prose
+#: preview already carries it and it is the heavy field the checkpoint budget
+#: reclaims first.
 _FLOW_STRUCTURED_META_KEYS = {
     'todo_write': (
         'todos', 'todoOperation', 'todoNoop', 'todoRejected',
         'todoAutoPopped', 'todoUpdateCount', 'todoBreadcrumbs',
         'checklistId', 'todoRevision', 'badge',
+    ),
+    'run_command': (
+        'command', 'exitCode', 'notRun', 'timedOut', 'interrupted',
+        'badge', 'reason', 'recovered', 'grepSearchIntercepted',
     ),
 }
 
@@ -1124,7 +1163,8 @@ class SubAgent:
                 model=self.model)
             _retry_phase_budget = RetryPhaseEventBudget()
 
-            def _on_dispatch_retry(attempt=0, reason='', status_code=0):
+            def _on_dispatch_retry(attempt=0, reason='', status_code=0,
+                                   **dispatch_context):
                 # Surface dispatch retries / cooldown waits as a transient
                 # 'retrying' phase on the worker bubble. Direct 429 callbacks
                 # arrive on every cycle, so keep liveness exact but sample the
@@ -1149,7 +1189,8 @@ class SubAgent:
                          int(status_code or 0))):
                     return
                 _d, _meta = _build_dispatch_retry_phase(
-                    attempt, reason, status_code, self.model)
+                    attempt, reason, status_code,
+                    dispatch_context.get('attempt_model') or self.model)
                 self._emit_stream_phase(Phase.RETRYING, _d, **_meta)
 
             try:
@@ -1173,16 +1214,12 @@ class SubAgent:
                 _flush_log()
                 # On LLM error, try to extract partial answer from previous rounds
                 self.result.error_message = f'LLM call failed at round {round_num}: {e}'
-                has_partial = self._extract_partial_answer(
-                    f'LLM error at round {round_num}')
-                if has_partial and round_num > 1:
-                    # Genuine partial results — mark completed with caveat.
-                    # A synthesized "no substantive answer" placeholder is
-                    # NOT a completion: it must stay a failure so the real
-                    # error_message reaches the transcript and the UI.
-                    self.result.status = SubAgentStatus.COMPLETED.value
-                else:
-                    self.result.status = SubAgentStatus.FAILED.value
+                # Keep any useful prefix for diagnosis/recovery, but never
+                # turn a transport/provider failure into task completion.
+                # Callers may inspect ``final_answer`` as partial output;
+                # lifecycle truth remains FAILED regardless of round number.
+                self._extract_partial_answer(f'LLM error at round {round_num}')
+                self.result.status = SubAgentStatus.FAILED.value
                 raise _LlmFailed
 
             # Round complete — flush the streaming log file in one shot.
@@ -1340,8 +1377,9 @@ class SubAgent:
                 before_round=_before_round,
                 # Wedged-loop breaker. On 2026-07-27 one sub-agent re-issued
                 # an identical tool call for 26.7M rounds (3.5h, 9.1 GB of
-                # app.log). The chassis halts on N consecutive rounds whose
-                # tool-call fingerprint is unchanged; empty CONTENT is NOT
+                # app.log). The chassis halts only after N consecutive
+                # completed rounds whose call, world, and exact model-visible
+                # result fingerprints are all unchanged; empty CONTENT is NOT
                 # the criterion (measured: 50.3% of legitimate rounds have
                 # content_len==0 — that is just a pure tool-calling turn).
                 max_consecutive_no_progress_rounds=(
@@ -1427,12 +1465,13 @@ class SubAgent:
             return
 
         if outcome.halted and outcome.exit_reason == 'no_progress':
-            # Wedged loop: the model re-issued an identical tool call for
-            # _MAX_CONSECUTIVE_NO_PROGRESS_ROUNDS rounds. Without its own
-            # branch it would be mislabelled, hiding the very defect it detects.
+            # Wedged loop: the model re-issued an identical tool call and got
+            # an identical model-visible result for the configured streak.
+            # Without its own branch it would be mislabelled, hiding the very
+            # defect it detects.
             logger.warning(
                 '[%s] No-progress breaker: %d consecutive identical '
-                'tool-call rounds at round %d — halting a wedged loop',
+                'call+world+result rounds at round %d — halting a wedged loop',
                 self.agent_id, outcome.consecutive_no_progress_rounds,
                 completed_rounds)
             # L3 feedback: a structured, greppable record so a wedged agent
@@ -1804,9 +1843,19 @@ class SubAgent:
             results.get(idx, '(no result)')
             for idx in range(len(tool_calls))
         ]
+        visible_results = [
+            model_text_from_tool_result(result) for result in ordered_results
+        ]
         return {
             'nonretryable_failure_signatures':
-                _nonretryable_failure_signatures(ordered_results),
+                _nonretryable_failure_signatures(
+                    ordered_results, tool_calls=tool_calls),
+            'progress_evidence_ids': [
+                hashlib.sha256(
+                    result.encode('utf-8', 'replace')).hexdigest()
+                for result in visible_results
+            ],
+            'result_evidence_complete': True,
         }
 
     def _known_tool_names(self) -> set[str]:
@@ -1911,6 +1960,10 @@ class SubAgent:
         tool_log_row = {
             'round': round_num,
             'tool': fn_name,
+            # Owning agent identity — the settled chat projection
+            # (project_flow_tool_rounds) re-derives the Request Inspector
+            # stream ``{parent}#agent:{agentId}`` from this field.
+            'agentId': self.agent_id,
             'args_brief': args_brief,
             'timestamp': time.time(),
             'tool_call_id': timeline_call_id,
@@ -1943,15 +1996,28 @@ class SubAgent:
                                 declared_chars, len(old_text))
                             historical[f'{field}_truncated'] = True
                             historical[field] = ''
-                    historical['args_brief'] = ''
-                    # Display-only structured payload (todo checklist state):
+                    # args_brief survives: bounded by format_tool_args_brief
+                    # (200 chars), it is the settled card's command line once
+                    # the output body above is reclaimed.
+                    # Structured display payload: keep the flat scalars the
+                    # settled cards read (badge / exitCode / counters), drop
+                    # only the heavy list bodies (todos stack, breadcrumbs) —
                     # same bounded-checkpoint rationale as the prose fields.
-                    historical.pop('result_meta', None)
+                    old_meta = historical.get('result_meta')
+                    if isinstance(old_meta, dict):
+                        historical['result_meta'] = {
+                            key: value
+                            for key, value in old_meta.items()
+                            if value is None
+                            or isinstance(value, (bool, int, float))
+                            or (isinstance(value, str) and len(value) <= 512)
+                        }
 
         self._emit_tool_event(build_event(
             EventType.TOOL_START,
             roundNum=round_num,
             llmRound=round_num,
+            agentId=self.agent_id,
             toolCallId=timeline_call_id,
             toolName=fn_name,
             toolArgs=dict(fn_args),
@@ -2013,6 +2079,7 @@ class SubAgent:
                 EventType.TOOL_RESULT,
                 roundNum=round_num,
                 llmRound=round_num,
+                agentId=self.agent_id,
                 toolCallId=timeline_call_id,
                 toolName=fn_name,
                 query=args_brief or fn_name,
@@ -2023,6 +2090,7 @@ class SubAgent:
             complete_fields = {
                 'roundNum': round_num,
                 'llmRound': round_num,
+                'agentId': self.agent_id,
                 'toolCallId': timeline_call_id,
                 'toolName': fn_name,
                 'toolContent': _error_sent or _sent,
@@ -2108,6 +2176,12 @@ class SubAgent:
             _edited = self._presence_edited_path(fn_name, fn_args)
             if _edited:
                 self._presence_record_file(_edited, action=_PRESENCE_EDIT_ACTIONS.get(fn_name, 'edited'))
+                with self._tool_log_lock:
+                    # Durable per-row edit marker — the flow chat adapter
+                    # derives the turn's modifiedFileList from these rows.
+                    tool_log_row['edited_path'] = _edited
+                    tool_log_row['edited_action'] = _PRESENCE_EDIT_ACTIONS.get(
+                        fn_name, 'edited')
             _emit_finish('done', preview=truncated)
             return truncated
         except Exception as e:

@@ -1,38 +1,40 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { build } from 'vite';
 import {
-  copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile,
+  copyFile, mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, utimes,
+  writeFile,
 } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { composeRuntime } from './compose_frontend_runtime.mjs';
 import { checkLazyRuntimeBindings } from './check_lazy_runtime_bindings.mjs';
+import { checkFiles as checkFrontendTdz, defaultRuntimePaths } from './check_frontend_tdz.mjs';
 import { composeStyles } from './compose_frontend_styles.mjs';
 import {
   generateI18nContract,
   readI18nCatalog,
 } from './gen_i18n_contract.mjs';
+import {
+  planRetentionDeletions,
+  retentionPolicyFromEnvironment,
+} from './vite_asset_retention.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const liveDir = join(root, 'static', 'vite');
 const assetsDir = join(liveDir, 'assets');
 const requiredEntries = ['frontend/src/main.ts', 'frontend/src/admin.ts'];
 const authoringDigestField = 'tofuAuthoringSha256';
-const authoringConfigPaths = [
-  'package.json',
-  'package-lock.json',
-  'tsconfig.json',
-  'tsconfig.vite.json',
-  'vite.config.mjs',
-  'scripts/build_frontend.mjs',
-  'scripts/compose_frontend_runtime.mjs',
-  'scripts/compose_frontend_styles.mjs',
-  'scripts/gen_i18n_contract.mjs',
-];
-const authoringSuffixes = new Set([
-  '.css', '.html', '.js', '.json', '.ts', '.ttf', '.woff', '.woff2',
-]);
+const authoringInputs = JSON.parse(await readFile(
+  join(root, 'frontend', 'authoring-inputs.json'), 'utf8',
+));
+if (!Array.isArray(authoringInputs.configPaths)
+    || !Array.isArray(authoringInputs.sourceSuffixes)) {
+  throw new Error('frontend/authoring-inputs.json has an invalid shape');
+}
+const authoringConfigPaths = authoringInputs.configPaths;
+const authoringSuffixes = new Set(authoringInputs.sourceSuffixes);
 
 function safeAsset(value) {
   if (typeof value !== 'string' || !value.startsWith('assets/') || value.includes('\\')) return '';
@@ -152,12 +154,32 @@ async function readViteAuthoringDigest() {
   return digest.digest('hex');
 }
 
+async function runBundleCanary(artifactDir) {
+  const python = process.env.TOFU_PYTHON || process.env.PYTHON || 'python3';
+  const script = join(root, 'scripts', 'frontend_bundle_canary.py');
+  await new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(
+      python, [script, '--artifact-dir', artifactDir],
+      { cwd: root, env: process.env, stdio: 'inherit' },
+    );
+    child.once('error', rejectPromise);
+    child.once('exit', (code, signal) => {
+      if (code === 0) resolvePromise();
+      else rejectPromise(new Error(
+        `frontend bundle canary rejected unpublished graph `
+        + `(exit=${String(code)}, signal=${String(signal)})`,
+      ));
+    });
+  });
+}
+
 async function main() {
   // The retained runtime is a delivery artifact. Compose it before Vite so a
   // clean checkout and every direct build entry point consume the section
   // manifest rather than depending on an accidentally fresh generated file.
   await composeRuntime();
   checkLazyRuntimeBindings();
+  checkFrontendTdz(defaultRuntimePaths());
   await composeStyles();
   const i18nCatalog = await generateI18nContract();
   const authoringDigest = await readViteAuthoringDigest();
@@ -195,6 +217,12 @@ async function main() {
     nextManifest[requiredEntries[0]][authoringDigestField] = authoringDigest;
     const nextAssets = await validateManifest(nextManifest, temporaryDir);
 
+    // Execute the exact minified graph before copying a single asset into the
+    // live publication. Syntax/type checks cannot observe module-evaluation
+    // TDZs or browser-only startup failures; the canary must reach app-ready
+    // and issue both catalog requests in real Chromium.
+    await runBundleCanary(temporaryDir);
+
     await mkdir(assetsDir, { recursive: true });
     for (const asset of nextAssets) {
       await atomicCopy(join(temporaryDir, asset), join(liveDir, asset));
@@ -209,12 +237,48 @@ async function main() {
     // The manifest is the commit point: every path it names is present first.
     await publishManifest(join(liveDir, 'manifest.json'), nextManifest);
 
+    // Re-stamp the live graph: atomicCopy short-circuits existing names, so
+    // without the touch a dropped file would keep its first-publication
+    // mtime and lose most of its retention grace exactly when long-lived
+    // tabs start being the only consumers of that generation.
+    const buildTime = new Date();
+    for (const asset of nextAssets) {
+      await utimes(join(liveDir, asset), buildTime, buildTime).catch(() => {});
+    }
+
+    // The current and previous graphs stay pinned unconditionally; older
+    // dropped generations survive within the bounded retention window so a
+    // tab open across several rebuilds can still fetch its lazy chunks.
     const retained = new Set([...nextAssets, ...previousAssets].map((path) => path.slice('assets/'.length)));
+    const retentionCandidates = [];
     for (const file of await listFiles(assetsDir)) {
-      if (!retained.has(file)) await rm(join(assetsDir, ...file.split('/')), { force: true });
+      if (retained.has(file)) continue;
+      try {
+        const info = await stat(join(assetsDir, ...file.split('/')));
+        retentionCandidates.push({
+          name: file,
+          size: info.size,
+          mtimeMs: info.mtimeMs,
+        });
+      } catch (error) {
+        // A concurrent build may prune between the listing and the stat;
+        // an already-gone candidate needs no deletion plan entry.
+        if (!error || error.code !== 'ENOENT') throw error;
+      }
+    }
+    const deletions = planRetentionDeletions(
+      retentionCandidates,
+      Date.now(),
+      retentionPolicyFromEnvironment(),
+    );
+    for (const name of deletions) {
+      await rm(join(assetsDir, ...name.split('/')), { force: true });
     }
     await validateManifest(await readJson(join(liveDir, 'manifest.json')), liveDir);
-    process.stdout.write(`Published ${nextAssets.size} Vite assets; retained ${previousAssets.size} from the previous graph.\n`);
+    process.stdout.write(
+      `Published ${nextAssets.size} Vite assets; retained ${previousAssets.size} from the previous graph; `
+      + `kept ${retentionCandidates.length - deletions.length} older-generation files, pruned ${deletions.length}.\n`,
+    );
   } finally {
     delete process.env.TOFU_VITE_OUT_DIR;
     await rm(temporaryDir, { recursive: true, force: true });

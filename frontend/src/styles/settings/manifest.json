@@ -21,5 +21,9 @@
     {
       "path": "06-model-routing-v2.css"
     }
+,
+    {
+      "path": "07-access-matrix.css"
+    }
   ]
 }

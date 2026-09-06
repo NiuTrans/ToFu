@@ -72,7 +72,7 @@ const _conversationCatalogRevisionGate = createConversationCatalogRevisionGate({
     );
   },
   refreshCatalog: () => loadConversationCatalog(),
-  isVisible: () => document.visibilityState === 'visible',
+  isVisible: () => !_effectiveHidden(),
   warn: (message) => debugLog(`[conversation-catalog] ${message}`, 'warn'),
 });
 retainedCompositionLifecycle.add(() => _conversationCatalogRevisionGate.destroy());
@@ -81,12 +81,11 @@ function _scheduleConvListRefresh(conversationId, revision) {
   _conversationCatalogRevisionGate.schedule(conversationId, revision);
 }
 
-function _onConvNotifyPush(frame) {
-  if (!frame || (frame.type !== 'conv_changed'
-      && frame.type !== 'conv_deleted')) return;
+function _onConvNotifyPush(rawFrame) {
+  const frame = narrowConvCatalogFrame(rawFrame);
+  if (!frame) return;
   if (!_frameIsOurs(frame.userId)) return;
   const conversationId = frame.convId;
-  if (!conversationId) return;
   if (frame.type === 'conv_deleted') {
     _applyRemoteConvDeleted(conversationId);
     return;
@@ -120,18 +119,26 @@ function _onConversationInvalidation(frame) {
 runtimeScope._onConversationInvalidation = _onConversationInvalidation;
 
 let _foldersRefreshTimer = 0;
+
+// The Android WebView reports visible while backgrounded; fold the shell's
+// bridge state in so reconcile/probe cadence suspends in a pocket too.
+function _effectiveHidden() {
+  return document.visibilityState !== 'visible'
+    || runtimeScope.nativeVisibility?.isHidden() === true;
+}
+
 function _scheduleFoldersRefresh() {
   clearTimeout(_foldersRefreshTimer);
   _foldersRefreshTimer = setTimeout(() => {
-    if (document.visibilityState !== 'visible'
-        || typeof loadFolders !== 'function') return;
+    if (_effectiveHidden() || typeof loadFolders !== 'function') return;
     void Promise.resolve(loadFolders()).catch((error) =>
       debugLog(`[folders] refresh failed: ${error?.message || error}`, 'warn'));
   }, 150);
 }
 
-function _onFoldersChangedPush(frame) {
-  if (!frame || frame.type !== 'folders_changed') return;
+function _onFoldersChangedPush(rawFrame) {
+  const frame = narrowFoldersChangedFrame(rawFrame);
+  if (!frame) return;
   if (!_frameIsOurs(frame.userId)) return;
   const deletedFolderId = frame.deletedFolderId;
   if (deletedFolderId) {
@@ -197,7 +204,7 @@ function _revalidateOnResume(trigger) {
 runtimeScope._revalidateOnResume = _revalidateOnResume;
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible') return;
+  if (_effectiveHidden()) return;
   _revalidateOnResume('visibilitychange');
 });
 
@@ -228,7 +235,7 @@ function _reconcileIntervalMs() {
     ? _RECONCILE_MS_PUSH_UP : _RECONCILE_MS_PUSH_DOWN;
 }
 function _crossDeviceReconcile() {
-  if (document.visibilityState !== 'visible') return false;
+  if (_effectiveHidden()) return false;
   return _revalidateOnResume('periodic');
 }
 

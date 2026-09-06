@@ -623,16 +623,17 @@ def _publish_codex_usage_reset_update(
     if not str(user_id or "").strip():
         return
     try:
+        from lib.agent_core.events import build_push_frame
         from lib.agent_core.push import push_event
 
         push_event(
             CODEX_USAGE_RESET_PUSH_CHANNEL,
             CODEX_USAGE_RESET_PUSH_TASK_ID,
-            {
-                "type": CODEX_USAGE_RESET_PUSH_EVENT_TYPE,
-                "provider": "codex",
-                "reset_offer": dict(reset_offer),
-            },
+            build_push_frame(
+                CODEX_USAGE_RESET_PUSH_EVENT_TYPE,
+                provider="codex",
+                reset_offer=dict(reset_offer),
+            ),
             user_id=user_id,
         )
     except Exception as error:

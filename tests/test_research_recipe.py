@@ -83,19 +83,20 @@ class _Seams:
                 'cache_hits': 0, 'errors': 0,
                 'results': [{'arxivId': a, 'status': 'parsed'} for a in self.harvest_ids]}
 
-    def build_survey(self, direction, arxiv_ids, *, lang, user_id, folder_id, abort=None):
+    def build_survey(self, direction, arxiv_ids, *, lang, user_id, folder_id,
+                     model=None, abort=None):
         self.survey_calls.append({'direction': direction, 'arxiv_ids': list(arxiv_ids),
-                                  'folder_id': folder_id})
+                                  'folder_id': folder_id, 'model': model})
         gm = dict(self.open_gaps)
         gm['library_folder_id'] = folder_id
         return {'ok': True, 'open_gaps': gm, 'survey_md': '# Survey\narXiv:2305.11111',
                 'inputs_used': len(arxiv_ids), 'citation_audit': None}
 
     def generate_ideas(self, direction, open_gaps, *, lang, n_ideas, user_id,
-                       abort=None):
+                       model=None, abort=None):
         self.ideate_calls.append({
             'direction': direction, 'open_gaps': open_gaps,
-            'user_id': user_id,
+            'user_id': user_id, 'model': model,
         })
         return {'ok': True, 'threshold': 4.0,
                 'accepted': [{'id': 'idea_1', 'title': 'Good', 'overall': 4.6}],
@@ -148,7 +149,8 @@ def _install(seams, *, fail_ideate=False):
     rc._persist_survey = seams.persist_survey
     rc._persist_ideate = seams.persist_ideate
     if fail_ideate:
-        def _boom(direction, open_gaps, *, lang, n_ideas, user_id, abort=None):
+        def _boom(direction, open_gaps, *, lang, n_ideas, user_id, model=None,
+                  abort=None):
             seams.ideate_calls.append({'direction': direction, 'open_gaps': open_gaps})
             raise RuntimeError('simulated crash inside ideate')
         rc._generate_ideas = _boom
@@ -165,8 +167,9 @@ def test_five_stage_graph_and_data_contract():
     restore = _install(seams)
     wd = tempfile.mkdtemp(prefix='research_test_')
     try:
-        res = rc.build_research_from_direction('long-context KV compression', wd,
-                                               lang='en', user_id=1, harvest_n=20)
+        res = rc.build_research_from_direction(
+            'long-context KV compression', wd, lang='en', user_id=1,
+            harvest_n=20, model='kimi-k3')
         # All five stages ran once; publish owns two repository rows.
         assert len(seams.harvest_calls) == 1, seams.harvest_calls
         assert len(seams.survey_calls) == 1
@@ -180,11 +183,15 @@ def test_five_stage_graph_and_data_contract():
             arxiv_id: f't{arxiv_id}' for arxiv_id in seams.harvest_ids}
         assert seams.survey_calls[0]['folder_id'] == folder, 'folder_id not threaded'
         assert seams.survey_calls[0]['arxiv_ids'] == seams.harvest_ids, 'id list not threaded'
+        assert seams.survey_calls[0]['model'] == 'kimi-k3', \
+            'the active model was not pinned for survey'
         # data contract: ideate got survey's open_gaps object
         assert seams.ideate_calls[0]['open_gaps']['library_folder_id'] == folder, \
             'ideate did not receive survey open_gaps'
         assert seams.ideate_calls[0]['user_id'] == 1, \
             'ideate artifact owner was not threaded'
+        assert seams.ideate_calls[0]['model'] == 'kimi-k3', \
+            'the active model was not pinned for ideate'
         # final result shape
         assert len(res['accepted']) == 1 and len(res['rejected']) == 1
         assert res['open_gaps']['open_gaps'][0]['id'] == 'gap_1'
@@ -413,6 +420,18 @@ def test_survey_gate_rejects_an_empty_comparison_matrix():
     artifact['open_gaps']['method_matrix'] = [
         {'paper': f'2301.0000{n}', 'method': 'm'} for n in range(1, 5)]
     assert rc._gate_survey({}, artifact) == []
+
+
+def test_survey_gate_rejects_gaps_without_cross_stage_handles():
+    import lib.research.recipe as rc
+
+    artifact = {'open_gaps': {
+        'open_gaps': [{'gap': 'grounded but missing its handle'}],
+        'surveyed_arxiv_ids': ['2301.00001'],
+        'method_matrix': [{'paper': '2301.00001', 'method': 'm'}],
+    }}
+    errors = rc._gate_survey({}, artifact)
+    assert errors and 'open-gap ids' in errors[0]
 
 
 def test_evaluation_failure_is_published_as_degraded_without_losing_ideas(monkeypatch):

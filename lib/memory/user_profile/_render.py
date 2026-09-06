@@ -20,7 +20,7 @@ def render_profile_block(body: str | None = None, scope: str = '') -> str | None
     injection-side idempotency probe can detect it. The body itself is the
     profile markdown verbatim — frozen at task start by the caller.
 
-    NOTE: this is placed on the prepended ``_isMeta`` user message (BP4 tail),
+    NOTE: this is placed on the appended ``_isMeta`` user message (BP4 tail),
     NEVER messages[0]. See module docstring + the injection site in
     ``lib.tasks_pkg.context_composer``.
     """

@@ -5,7 +5,7 @@ Covers the Claude-Code cloaking spec ported into lib/oauth/outbound.py:
     injected as system[0] — fingerprint algorithm frozen against CLIProxyAPI
     vectors (sha256(salt + text[4] + text[7] + text[20] + version)[:3]);
   * system rebuilt to [billing, identity, Claude Code static prompt] with the
-    user's own system text moved into the first user message;
+    user's own system text moved into a stable post-first-user carrier;
   * the full 9-flag anthropic-beta set + X-Stainless header suite;
   * OpenCode→Claude-Code tool-name remapping (request) + per-request reverse
     map restore (response, incl. the SSE translator);
@@ -20,6 +20,7 @@ does not exist; resolve_oauth_request mutates messages and ships 2 betas).
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import unittest
@@ -102,26 +103,28 @@ class TestSystemStructure(unittest.TestCase):
         # Static Claude Code prompt (verbatim port) occupies system[2].
         self.assertIn('interactive agent', system[2]['text'])
         self.assertIn('# Doing tasks', system[2]['text'])
-        # User's own system text no longer lives in system[] — it is prepended
-        # to the first user message inside a <system-reminder> wrapper.
+        # User's own system text no longer lives in system[]; it rides a new
+        # fixed-prefix user carrier inside a <system-reminder> wrapper.
         for blk in system:
             self.assertNotIn('You are Tofu', blk.get('text', ''))
-        first_user = body['messages'][0]
-        self.assertEqual(first_user['role'], 'user')
-        self.assertIn('<system-reminder>', first_user['content'][0]['text'])
+        self.assertEqual(body['messages'][0], _anthropic_body()['messages'][0])
+        reminder_user = body['messages'][1]
+        self.assertEqual(reminder_user['role'], 'user')
+        self.assertIn('<system-reminder>', reminder_user['content'][0]['text'])
         self.assertIn('You are Tofu, a self-hosted AI assistant.',
-                      first_user['content'][0]['text'])
-        self.assertIn('Extra operator rules.', first_user['content'][0]['text'])
+                      reminder_user['content'][0]['text'])
+        self.assertIn('Extra operator rules.', reminder_user['content'][0]['text'])
 
     def test_idempotent_second_application(self):
         body1, _ = apply_claude_cloak(_anthropic_body())
         body2, _ = apply_claude_cloak(body1)
         self.assertEqual(body1['system'], body2['system'])
         # The reminder block must not be duplicated either.
-        first_user_blocks = body2['messages'][0]['content']
-        n_reminders = sum(1 for b in first_user_blocks
-                          if isinstance(b, dict)
-                          and '<system-reminder>' in (b.get('text') or ''))
+        n_reminders = sum(
+            1 for message in body2['messages']
+            for b in (message.get('content') or [])
+            if isinstance(message, dict) and isinstance(b, dict)
+            and '<system-reminder>' in (b.get('text') or ''))
         self.assertEqual(n_reminders, 1)
 
     def test_string_system_shape_supported(self):
@@ -130,7 +133,21 @@ class TestSystemStructure(unittest.TestCase):
         out, _ = apply_claude_cloak(body)
         self.assertEqual(len(out['system']), 3)
         self.assertIn('Plain string system prompt.',
-                      out['messages'][0]['content'][0]['text'])
+                      out['messages'][1]['content'][0]['text'])
+
+    def test_system_carrier_position_is_stable_as_history_grows(self):
+        first_body = _anthropic_body()
+        first, _ = apply_claude_cloak(first_body)
+        stable_prefix = copy.deepcopy(first['messages'][:2])
+
+        later_body = _anthropic_body()
+        later_body['messages'].extend([
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': 'later'}]},
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'continue'}]},
+        ])
+        later, _ = apply_claude_cloak(later_body)
+
+        self.assertEqual(later['messages'][:2], stable_prefix)
 
     def test_tool_result_first_user_message_keeps_results_first(self):
         # Continuation round: first user message leads with tool_result —
@@ -142,9 +159,11 @@ class TestSystemStructure(unittest.TestCase):
                 {'type': 'tool_result', 'tool_use_id': 'tu1', 'content': 'ok'}]},
         ]
         out, _ = apply_claude_cloak(body)
-        content = out['messages'][0]['content']
-        self.assertEqual(content[0]['type'], 'tool_result')
-        self.assertIn('<system-reminder>', content[-1]['text'])
+        original_content = out['messages'][0]['content']
+        self.assertEqual(original_content, [
+            {'type': 'tool_result', 'tool_use_id': 'tu1', 'content': 'ok'}])
+        self.assertIn(
+            '<system-reminder>', out['messages'][-1]['content'][0]['text'])
 
 
 class TestToolRename(unittest.TestCase):
@@ -156,7 +175,9 @@ class TestToolRename(unittest.TestCase):
         self.assertIn('read_files', names)      # Tofu-own tool: untouched (O2)
         self.assertEqual(body['tool_choice']['name'], 'Bash')
         # tool_use block inside messages renamed too.
-        tu = body['messages'][1]['content'][0]
+        assistant = next(message for message in body['messages']
+                         if message.get('role') == 'assistant')
+        tu = assistant['content'][0]
         self.assertEqual(tu['name'], 'Bash')
         # Per-request reverse map: only what WE renamed.
         self.assertEqual(rev, {'Bash': 'bash'})

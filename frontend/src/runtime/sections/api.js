@@ -415,8 +415,7 @@
           { query: { ...(turn ? { turn } : {}), ...(kind ? { kind } : {}) },
             onError: 'null' }),
     getRawArchiveChunk: (taskId, archiveId, part, offset) =>
-      get(`/api/v1/tasks/${encodeURIComponent(taskId)}/raw-archives/` +
-          `${encodeURIComponent(archiveId)}/${encodeURIComponent(part)}`,
+      get(`/api/v1/tasks/${encodeURIComponent(taskId)}/raw-archives/${encodeURIComponent(archiveId)}/${encodeURIComponent(part)}`,
           { query: { offset: offset || 0, limit: 256 * 1024 },
             onError: 'null' }),
     // Turn Trace (docs/TURN_TRACE_CONTRACT.md): the server-folded timing
@@ -478,9 +477,9 @@
     scaffoldManuscript: (payload) =>
       post('/api/v1/research/manuscript/scaffold', payload),
     sourceArchiveUrl: (direction, lang) =>
-      '/api/v1/research/manuscript/source.zip?direction=' +
+      _resolve('/api/v1/research/manuscript/source.zip?direction=' +
         encodeURIComponent(direction || '') + '&lang=' +
-        encodeURIComponent(lang || 'en'),
+        encodeURIComponent(lang || 'en')),
   };
 
   // optimizer -------------------------------------------------------
@@ -994,6 +993,13 @@
         secret,
         expected_revision: expectedRevision,
       }),
+    revealCredentialSecret: (credentialId) => post(
+      `/api/v1/model-routing/credentials/${encodeURIComponent(credentialId)}/secret/reveal`,
+      {}, { onError: 'null' }),
+    probeCellsStart: (providerId, body) => post(
+      `/api/v1/providers/${encodeURIComponent(providerId)}/probe-cells/start`, body || {}),
+    probeCellsStatus: (providerId) => get(
+      `/api/v1/providers/${encodeURIComponent(providerId)}/probe-cells/status`),
   };
 
   // dispatch (model routing — observability + per-key overrides) ----
@@ -1001,8 +1007,7 @@
     endpointMetrics: () => get('/api/v1/dispatch/endpoint-metrics', { onError: 'null' }),
     keyStats:        () => get('/api/v1/dispatch/key-stats', { onError: 'null' }),
     modelHealth:     () => get('/api/v1/dispatch/model-health', { onError: 'null' }),
-    keyOverride:     (body) =>
-      post('/api/v1/dispatch/key-override', body, { onError: 'null', parse: 'none' }),
+    keyOverride:     (body) => post('/api/v1/dispatch/key-override', body, { onError: 'null' }),
   };
 
   // oauth (Claude / Codex login flows) ------------------------------
@@ -1307,11 +1312,6 @@
     brainSummary:  (path) =>
       get('/api/v1/project/brain/summary',
           { query: { path }, onError: 'null' }),
-    brainAttention: (path) =>
-      get('/api/v1/project/brain/attention',
-          { query: { path }, onError: 'null' }),
-    brainAttentionAdd: (path, text) =>
-      post('/api/v1/project/brain/attention/add', { path, text }),
     // Token-free Git integration control plane. These endpoints never ask an
     // agent to inspect or repair changes: immutable checkpoints are merged by
     // Git, and conflicts/gate failures are surfaced as quarantine records.

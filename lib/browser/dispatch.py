@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from collections import OrderedDict
 
 from lib.browser.handlers import (
     _handle_click,
@@ -28,6 +30,48 @@ from lib.tools.result_envelope import typed_tool_error
 logger = get_logger(__name__)
 
 __all__ = ['BROWSER_HANDLERS', 'execute_browser_tool', 'normalize_browser_args']
+
+
+# Per-owner sticky device for calls that arrive WITHOUT a cfg pin. Two Chrome
+# instances of the same owner poll every 1-2s, so 'most recent poll wins'
+# makes consecutive calls hop between machines — and a tab id learned on one
+# instance is meaningless (or worse, collides) on the other. Keep using the
+# owner's last device while it stays connected; re-pick only when it drops.
+_STICKY_LOCK = threading.Lock()
+_STICKY_CLIENTS: OrderedDict[str, str] = OrderedDict()
+
+
+def _sticky_capacity() -> int:
+    from lib.browser.queue._limits import client_registry_limits
+    process_limit, _owner_limit = client_registry_limits()
+    return process_limit
+
+
+def _pick_connected_client(owner_user_id, owned):
+    owned_ids = {str(row.get('client_id') or '') for row in owned}
+    with _STICKY_LOCK:
+        sticky = _STICKY_CLIENTS.get(owner_user_id)
+        if sticky and sticky in owned_ids:
+            _STICKY_CLIENTS.move_to_end(owner_user_id)
+            return sticky
+        _STICKY_CLIENTS.pop(owner_user_id, None)
+        chosen = str(max(
+            owned, key=lambda row: row.get('last_poll', 0)
+        ).get('client_id') or '')
+        if chosen:
+            _STICKY_CLIENTS[owner_user_id] = chosen
+            capacity = max(1, int(_sticky_capacity()))
+            while len(_STICKY_CLIENTS) > capacity:
+                _STICKY_CLIENTS.popitem(last=False)
+        return chosen
+
+
+def _clear_sticky_clients() -> int:
+    """Test/maintenance hook: drop all remembered device routes."""
+    with _STICKY_LOCK:
+        dropped = len(_STICKY_CLIENTS)
+        _STICKY_CLIENTS.clear()
+        return dropped
 
 
 # Tool schemas use snake_case; the extension wire uses camelCase. This is the
@@ -275,9 +319,7 @@ def execute_browser_tool(
     if client_id and str(client_id) not in owned_ids:
         return 'Error: Browser client is not connected for this user'
     if not client_id and owned:
-        client_id = str(max(
-            owned, key=lambda row: row.get('last_poll', 0)
-        ).get('client_id') or '')
+        client_id = _pick_connected_client(caller_owner, owned)
     if not client_id:
         return 'Error: No browser extension is connected for this user'
 

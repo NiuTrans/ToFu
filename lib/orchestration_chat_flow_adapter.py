@@ -53,6 +53,7 @@ from lib.orchestration._execution_projection import _PLANNER_ROLES
 from lib.orchestration_runner_result import normalize_orchestration_model_route
 from lib.orchestration_chat_flow_projection import (
     flow_emits_for_role,
+    project_flow_modified_files,
     project_flow_next_phase,
     project_flow_phase_event,
     project_flow_tool_rounds,
@@ -243,6 +244,15 @@ class FlowEventAdapter:
         tool_rounds = project_flow_tool_rounds(ev.get('tool_log'))
         if tool_rounds:
             round_fields['toolRounds'] = tool_rounds
+        # Durable file-change display: the edited-path markers the swarm
+        # substrate stamps per dispatch become the turn's modifiedFileList,
+        # so a goal-mode turn renders the settled file-changes block like a
+        # normal turn. Absent edits → keys omitted, byte-identical messages.
+        modified_files = project_flow_modified_files(ev.get('tool_log'))
+        file_fields = (
+            {'modifiedFileList': modified_files,
+             'modifiedFiles': len(modified_files)}
+            if modified_files else {})
         # A failed leaf (e.g. the worker's LLM call died) must surface its
         # real error on the durable message: finish_info renders msg.error
         # as the terminal error tag instead of a bare ✓ over placeholder
@@ -260,6 +270,7 @@ class FlowEventAdapter:
                 '_flowPlannerIteration': self._planner_iteration,
                 **route_fields,
                 **round_fields,
+                **file_fields,
                 **error_fields,
             })
             self._pending_replan = False
@@ -319,6 +330,7 @@ class FlowEventAdapter:
                 'timestamp': _now(),
                 **route_fields,
                 **round_fields,
+                **file_fields,
                 **error_fields,
             }
             self._mark_user_side(msg, role, next_phase=next_phase)
@@ -344,6 +356,7 @@ class FlowEventAdapter:
                 '_flowStateChangingCount': ev.get('state_changing', 0),
                 **route_fields,
                 **round_fields,
+                **file_fields,
                 **error_fields,
             })
 
@@ -409,9 +422,10 @@ class FlowEventAdapter:
             # persists such a duplicate row, so keep it off the transcript.
             return
         # Mirror the synthetic critic row so the UI shows the guard.
-        content = ('⚠️ Zero-deliverable guard: the worker produced no '
-                   'state-changing actions; injecting an execute-now '
-                   'directive.')
+        content = ('⚠️ Convergence hint: recent worker turns produced no '
+                   'durable deliverable. Move forward if the evidence is '
+                   'sufficient; otherwise name and investigate the specific '
+                   'remaining question. Read-only exploration is still valid.')
         # Open + finalize a synthetic critic bubble live (no deltas).
         self._stream({'type': 'flow_iteration',
                       'iteration': self._iteration, 'phase': 'reviewing'})

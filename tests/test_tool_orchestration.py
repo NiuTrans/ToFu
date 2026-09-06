@@ -71,10 +71,9 @@ def test_local_wire_composes_execute_tools_and_read_only_swarm():
     assert names.count('spawn_agents') == 1
     spawn = next(tool for tool in plan.body['tools']
                  if (tool.get('function') or {}).get('name') == 'spawn_agents')
-    assert 'LOCAL MULTI-AGENT FALLBACK IS ACTIVE' in (
-        spawn['function']['description'])
-    assert spawn['function']['parameters']['properties']['agents'][
-        'maxItems'] == 2
+    assert spawn == SPAWN_AGENTS_TOOL
+    assert plan.body['messages'] == [
+        {'role': 'user', 'content': 'compare modules'}]
     assert decision_sink == {
         'programmaticBackend': 'local',
         'multiAgentBackend': 'local_swarm',

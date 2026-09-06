@@ -20,6 +20,7 @@ from lib.llm._sse_core import (
     SSEAccumulator,
     activate_native_orchestration_fallback,
     activate_native_tool_search_fallback,
+    activate_subscription_transient_retry,
     classify_status_error,
     prepare_request,
 )
@@ -43,6 +44,7 @@ from lib.llm_errors import (
     AbortedError,
     ContentFilterError,
     EndpointUnreachableError,
+    LocalRequestPreparationError,
     ModelLimitError,
     PermissionError_,
     PromptTooLongError,
@@ -57,7 +59,7 @@ from lib.proxy import (
     proxies_for,
     report_outcome as _proxy_report_outcome,
 )
-from lib.subscription_quota import record_codex_quota
+from lib.subscription_quota import USAGE_QUOTA_KEY, record_codex_quota
 
 logger = get_logger(__name__)
 
@@ -175,11 +177,19 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
     """Single attempt at a streaming chat completion (sync transport)."""
     from lib.llm._transport import transport_owner_scope
     _owner_scope = transport_owner_scope(owner_user_id)
-    plan = prepare_request(
-        body, attempt=attempt, log_prefix=log_prefix,
-        api_key=api_key, base_url=base_url, extra_headers=extra_headers,
-        api_protocol=api_protocol, oauth=oauth,
-        owner_user_id=_owner_scope)
+    try:
+        plan = prepare_request(
+            body, attempt=attempt, log_prefix=log_prefix,
+            api_key=api_key, base_url=base_url, extra_headers=extra_headers,
+            api_protocol=api_protocol, oauth=oauth,
+            owner_user_id=_owner_scope)
+    except LocalRequestPreparationError:
+        raise
+    except Exception as error:
+        raise LocalRequestPreparationError(
+            f'local request preparation failed: {error}',
+            stage='wire_projection',
+        ) from error
 
     _network_route = {
         'routeId': 'unresolved',
@@ -502,11 +512,19 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                     status_code=resp.status_code)
                 raise _annotate_network_error(
                     error, 'provider_response')
+            if activate_subscription_transient_retry(
+                    resp.status_code, oauth=oauth, canonical_body=body):
+                error = RetryableAPIError(
+                    'subscription upstream transient 404; retrying',
+                    status_code=resp.status_code)
+                raise _annotate_network_error(
+                    error, 'provider_response')
             try:
                 classify_status_error(
                     resp.status_code, err_body, body=plan.body,
                     log_prefix=log_prefix, raw_dumper=plan.raw_dumper,
-                    credential_present=plan.credential_present)
+                    credential_present=plan.credential_present,
+                    route_limit_key=plan.route_output_limit_key)
             except Exception as error:
                 _annotate_network_error(error, 'provider_response')
                 raise
@@ -518,6 +536,7 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
             plan.t0, url=plan.url, log_prefix=log_prefix,
             on_thinking=on_thinking, on_content=on_content,
             on_tool_call_ready=on_tool_call_ready,
+            route_output_limit_key=plan.route_output_limit_key,
             progress=_progress)
 
         framer = SSEFramer()
@@ -604,6 +623,11 @@ def _stream_chat_once(body, *, on_thinking=None, on_content=None,
                          if isinstance(adapter, dict) and adapter else 'codex'))
         usage = record_codex_quota(
             resp.headers, usage, cache_key=_quota_scope)
+        if (isinstance(adapter, dict) and adapter
+                and isinstance(usage, dict) and USAGE_QUOTA_KEY in usage):
+            from lib.desktop import adapter as _adapter_service
+            _adapter_service.note_adapter_quota_observed(
+                adapter.get('agent_id'), user_id=_owner_scope)
         usage['_network_route'] = dict(_network_route)
         stream_state = stream_result.state
         if stream_state is ProviderStreamState.NO_ACTIONABLE_OUTPUT:
