@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-agent"
-version = "0.17.0"
+version = "0.17.2"
 description = "Embeddable and headless Tofu agent runtime with network and tool capabilities"
 readme = "README.md"
 requires-python = ">=3.12"
