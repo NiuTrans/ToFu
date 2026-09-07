@@ -1,0 +1,311 @@
+# HOT_PATH
+"""Human-facing ``ask_human`` and structured-checklist handlers.
+
+This module owns the handler dependency bindings used by tests and runtime.
+"""
+
+from __future__ import annotations
+
+from lib.log import get_logger
+from lib.tasks_pkg.executor import (
+    _build_simple_meta,
+    _finalize_tool_round,
+    tool_registry,
+)
+from lib.tasks_pkg.manager import append_event
+
+logger = get_logger(__name__)
+
+
+@tool_registry.handler('ask_human', category='human_guidance',
+                       description='Ask the user a question and wait for their response')
+def _handle_ask_human(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    """Handle ask_human tool — block indefinitely until user responds."""
+    from lib.ids import short_id
+    from lib.tasks_pkg.human_guidance import request_human_guidance
+
+    question = fn_args.get('question', '')
+    response_type = fn_args.get('response_type', 'free_text')
+    options = fn_args.get('options', [])
+    # Defensive: models sometimes return options as a JSON string, a dict,
+    #   or omit it entirely. Normalize to a list of dicts so the frontend's
+    #   options.map(…) call can never crash on a string/object.
+    if isinstance(options, str):
+        try:
+            import json as _json
+            options = _json.loads(options)
+        except (ValueError, TypeError) as _e:
+            logger.warning('[Executor] ask_human: options arrived as a '
+                           'non-JSON string, coercing to []: %s', _e)
+            options = []
+    if not isinstance(options, list):
+        logger.warning('[Executor] ask_human: options not a list '
+                       '(type=%s), coercing to []',
+                       type(options).__name__)
+        options = []
+    # Normalise each option to a dict so the frontend receives a
+    # uniform shape even if the model emitted bare strings.
+    _norm_opts = []
+    for _o in options:
+        if isinstance(_o, dict):
+            _norm_opts.append(_o)
+        elif isinstance(_o, str):
+            _norm_opts.append({'label': _o})
+        else:
+            logger.debug('[Executor] ask_human: dropping non-dict/str '
+                         'option of type=%s', type(_o).__name__)
+    options = _norm_opts
+
+    if not question:
+        logger.warning('[Executor] ask_human called with empty question, task=%s',
+                       task.get('id', '?')[:8])
+        tool_content = 'Error: question parameter is required.'
+        meta = _build_simple_meta(
+            fn_name, tool_content, source='HumanGuidance',
+            title='Missing question', snippet='No question provided',
+            badge='error',
+        )
+        _finalize_tool_round(task, rn, round_entry, [meta])
+        return tc_id, tool_content, False
+
+    guidance_id = short_id('hg_', 12)
+    logger.info('[Executor] ask_human: question=%.200s, type=%s, '
+                'options=%d, guidance_id=%s, task=%s',
+                question, response_type, len(options), guidance_id,
+                task.get('id', '?')[:8])
+
+    round_entry['status'] = 'awaiting_human'
+    round_entry['guidanceId'] = guidance_id
+    round_entry['guidanceQuestion'] = question
+    round_entry['guidanceType'] = response_type
+    round_entry['guidanceOptions'] = options
+    append_event(task, {
+        'type': 'human_guidance_request',
+        'roundNum': rn,
+        'toolCallId': tc_id,
+        'guidanceId': guidance_id,
+        'question': question,
+        'responseType': response_type,
+        'options': options,
+    })
+
+    # ── Autopilot: simulated user answers the question instead of blocking ──
+    # When autopilot is on, we don't want to wait for a real human; the VU
+    # answers using the conversation context.  We still emit the synthetic
+    # request → response pair so the frontend renders the autopilot bubble
+    # in place of a normal ask_human prompt.
+    from lib.tasks_pkg.autopilot import is_autopilot_enabled, run_virtual_user
+    if is_autopilot_enabled(task):
+        logger.info('[Executor] ask_human → routed to Autopilot VU '
+                    '(no human wait): guidance_id=%s, task=%s',
+                    guidance_id, task.get('id', '?')[:8])
+        # Build a minimal augmented messages list so the VU sees the
+        # exact question being asked, not just the last assistant turn.
+        _vu_task = task
+        try:
+            _orig_msgs = list(task.get('messages') or [])
+            _augmented = list(_orig_msgs)
+            _augmented.append({'role': 'assistant', 'content': question})
+            _vu_task = dict(task)
+            _vu_task['messages'] = _augmented
+        except Exception as _e:
+            logger.debug('[Executor] ask_human VU augmentation failed '
+                         '(falling back to raw history): %s', _e)
+        vu_reply = run_virtual_user(_vu_task)
+        if vu_reply is None:
+            user_response = None  # task aborted or VU stopped
+        else:
+            # run_virtual_user returns {'text', 'rounds', 'segments'} — the
+            # ANSWER is only ['text'].  Handing the whole dict to
+            # resolve_human_guidance stringified rounds/segments metadata
+            # into the tool result (and into the human_guidance_response SSE
+            # event), and the deliberately-kept [PROGRESS:] machine line in
+            # 'text' leaked into model context via this tool-result path
+            # (, sibling of ).  Strip machine tokens
+            # through the single agent_verdict predicate — unlike the budget
+            # guard, NO consumer on this path needs the raw PROGRESS line.
+            from lib.agent_verdict import strip_machine_tokens
+            user_response = strip_machine_tokens(
+                vu_reply.get('text') or '') or '(no further input)'
+            # No waiter is registered on the virtual-user path. The synthetic
+            # response event is the complete UI contract; attempting to
+            # resolve the live registry here always targeted a missing entry.
+            append_event(task, {
+                'type': 'human_guidance_response',
+                'roundNum': rn,
+                'guidanceId': guidance_id,
+                'response': user_response,
+                'isVirtualUser': True,
+            })
+    elif not task.get('_attended'):
+        # No interactive session can answer this. Only the three routes/chat.py
+        # entry points stamp task['_attended']=True; every headless/autonomous
+        # surface (/api/v1/agent/run, scheduler, compat OpenAI/Anthropic,
+        # swarm sub-agents) omits it — and autopilot was already handled above.
+        # Blocking here would wedge the task on the 120s abort-poll with nobody
+        # to resolve it (mirrors the attendance-aware write-approval gate in
+        # tool_dispatch.py). Return a clear sentinel so the model proceeds on
+        # its best assumption instead.
+        logger.warning('[Executor] ask_human in an unattended execution mode '
+                       '(no interactive session) — returning sentinel instead '
+                       'of blocking: guidance_id=%s, task=%s',
+                       guidance_id, task.get('id', '?')[:8])
+        user_response = None
+        tool_content = ('Cannot ask the user in this execution mode — no '
+                        'interactive session is available to answer. Proceed '
+                        'with your best assumption or use the tools available '
+                        'to you to find the answer yourself.')
+        # Mark the round resolved (not awaiting_human) so no UI/consumer waits.
+        round_entry['status'] = 'unanswerable'
+        meta = _build_simple_meta(
+            fn_name, tool_content, source='HumanGuidance',
+            title=question[:2000],
+            snippet='No interactive session — proceeding without an answer',
+            badge='unanswerable',
+            extra={
+                'guidanceId': guidance_id,
+                'question': question,
+                'responseType': response_type,
+                'unanswerable': True,
+            },
+        )
+        _finalize_tool_round(task, rn, round_entry, [meta])
+        return tc_id, tool_content, False
+    else:
+        logger.info('[Executor] ask_human blocking indefinitely for user '
+                    'response: guidance_id=%s, task=%s',
+                    guidance_id, task.get('id', '?')[:8])
+        user_response = request_human_guidance(guidance_id, task=task)
+
+    if task.get('aborted') or user_response is None:
+        logger.warning('[Executor] ask_human aborted/cancelled: '
+                       'guidance_id=%s, task=%s, aborted=%s — round left '
+                       'awaiting_human so the turn settlement keeps '
+                       'offering the answer_guidance late-answer resume',
+                       guidance_id, task.get('id', '?')[:8],
+                       task.get('aborted', False))
+        # Do NOT finalize this round with a placeholder result. Finalizing
+        # closes the replayable gap: the settlement then stops offering
+        # answer_guidance and the interactive question card collapses into
+        # a dead static receipt the moment the user presses Stop. The
+        # dangling-round sweep never touches awaiting_human rounds, and
+        # the settlement's missing_tool_result handling offers the
+        # late-answer resume for exactly this shape.
+        return tc_id, '[Task was aborted while waiting for human guidance]', False
+    else:
+        tool_content = f'Human response: {user_response}'
+        logger.info('[Executor] ask_human received response: '
+                    'guidance_id=%s, response_len=%d, task=%s',
+                    guidance_id, len(user_response), task.get('id', '?')[:8])
+
+    # No title/snippet truncation: the user specifically flagged that
+    #   "incomplete displays are not allowed" — the original 80-char title
+    #   and 120-char snippet caps were producing cut-off question text
+    #   ending mid-word (e.g. "…exercise t"). Pass the full strings; the
+    #   frontend renderer already word-wraps. We only need a soft upper
+    #   bound so a pathological 100 KB prompt doesn't bloat every SSE
+    #   event — cap at 2000 chars with an ellipsis for safety, which is
+    #   well above any legitimate ask_human question.
+    _FULL_LIMIT = 2000
+    def _clip(s):
+        if not s:
+            return s
+        return s if len(s) <= _FULL_LIMIT else s[:_FULL_LIMIT - 1] + '…'
+    meta = _build_simple_meta(
+        fn_name, tool_content, source='HumanGuidance',
+        title=_clip(question),
+        snippet=_clip(user_response or 'No response'),
+        badge='answered' if user_response else 'aborted',
+        extra={
+            'guidanceId': guidance_id,
+            'question': question,
+            'responseType': response_type,
+            'userResponse': user_response,
+        },
+    )
+    _finalize_tool_round(task, rn, round_entry, [meta])
+    return tc_id, tool_content, False
+
+
+@tool_registry.handler('todo_write', category='task',
+                       description='Maintain the structured task checklist')
+def _handle_todo_write(task, tc, fn_name, tc_id, fn_args, rn, round_entry, cfg, project_path, project_enabled, all_tools=None):
+    """Apply one revisioned checklist operation and finalize its receipt.
+
+    Note: NOT a state-changing tool (no file mutation) — so it correctly does
+    NOT reset the zero-deliverable streak; the two guards stay orthogonal.
+    """
+    from lib.tools.todo import apply_todo_write_to_task, public_todo_state
+
+    todos, tool_content, outcome = apply_todo_write_to_task(task, fn_args)
+    if project_enabled and project_path:
+        try:
+            from lib.conversations.project_brain import note_todo_signal
+            note_todo_signal(
+                task,
+                project_path,
+                todos,
+                accepted=not bool(outcome.get('rejected')),
+            )
+        except Exception as exc:
+            # Coordination derivation is fail-soft; a valid checklist must
+            # never be rolled back by an unavailable project projection.
+            logger.debug('[ProjectBrain] todo signal skipped: %s', exc)
+    state = public_todo_state(outcome['state'])
+    stack = state.get('stack') or []
+    active = stack[-1] if stack else {}
+
+    breadcrumbs = []
+    for idx, frame in enumerate(stack):
+        label = 'Root task'
+        if idx:
+            parent = stack[idx - 1]
+            parent_id = frame.get('parent_todo_id')
+            parent_item = next(
+                (item for item in parent.get('todos') or []
+                 if item.get('id') == parent_id), None)
+            label = ((parent_item or {}).get('content') or parent_id
+                     or f'Level {idx + 1}')
+        breadcrumbs.append({
+            'checklist_id': frame.get('checklist_id'),
+            'label': label,
+            'revision': frame.get('revision'),
+        })
+
+    total = len(todos)
+    done = sum(1 for t in todos if t.get('status') == 'completed')
+    in_prog = sum(1 for t in todos if t.get('status') == 'in_progress')
+    logger.info('[Executor] todo_write: op=%s %d item(s) — %d done, '
+                '%d in_progress depth=%d revision=%s noop=%s rejected=%s '
+                '(task=%s)', outcome.get('operation'), total, done, in_prog,
+                len(stack), active.get('revision'), outcome.get('no_op'),
+                outcome.get('rejected'), task.get('id', '?')[:8])
+
+    badge = ('rejected' if outcome.get('rejected') else
+             ('unchanged' if outcome.get('no_op') else
+              (f'{done}/{total}' if total else 'cleared')))
+    meta = _build_simple_meta(
+        fn_name, tool_content, source='Checklist',
+        title=f'Checklist · {done}/{total} done' if total else 'Checklist cleared',
+        snippet=tool_content[:200],
+        badge=badge,
+        # Structured payload so the frontend renders a live progress panel
+        # off engine data, not by re-parsing the result prose.
+        extra={
+            'todos': todos,
+            'todoState': state,
+            'todoOperation': outcome.get('operation'),
+            'todoNoop': bool(outcome.get('no_op')),
+            'todoRejected': bool(outcome.get('rejected')),
+            'todoRejectReason': outcome.get('reason') or '',
+            'todoAutoPopped': outcome.get('auto_popped') or [],
+            'todoUpdateCount': state.get('update_count', 0),
+            'todoDepth': len(stack),
+            'todoBreadcrumbs': breadcrumbs,
+            'checklistId': active.get('checklist_id'),
+            'todoRevision': active.get('revision'),
+            'rootCompleted': bool(state.get('root_completed')),
+        },
+    )
+    _finalize_tool_round(task, rn, round_entry, [meta])
+    return tc_id, tool_content, False

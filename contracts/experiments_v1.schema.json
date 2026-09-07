@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/experiments_v1.schema.json",
+  "title": "Tofu immutable experiment specification v1",
+  "description": "Resolved, fingerprinted experiment definition persisted before assignment. Allocation totals, unique identifiers, provider availability, and the canonical specDigest are also enforced by lib.experiments.contracts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "experimentId",
+    "assignmentUnit",
+    "assignmentAlgorithm",
+    "enrollmentBps",
+    "arms",
+    "metrics",
+    "primaryMetric",
+    "analyzer",
+    "analysis",
+    "specDigest"
+  ],
+  "properties": {
+    "contractVersion": {"const": "tofu.experiment/v1"},
+    "experimentId": {"$ref": "#/$defs/identifier"},
+    "assignmentUnit": {"enum": ["conversation", "task", "user"]},
+    "assignmentAlgorithm": {"const": "sha256-owner-unit-v1"},
+    "enrollmentBps": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "arms": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/arm"},
+      "$comment": "allocationBps must total exactly 10000 and arm IDs must be unique."
+    },
+    "metrics": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/resolvedMetric"}
+    },
+    "primaryMetric": {"$ref": "#/$defs/metricReference"},
+    "analyzer": {"$ref": "#/$defs/resolvedAnalyzer"},
+    "analysis": {"$ref": "#/$defs/analysis"},
+    "specDigest": {"$ref": "#/$defs/digest"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "resolvedProviderIdentity": {
+      "type": "object",
+      "required": ["pluginId", "pluginVersion", "implementationDigest"],
+      "properties": {
+        "pluginId": {"$ref": "#/$defs/identifier"},
+        "pluginVersion": {"$ref": "#/$defs/version"},
+        "implementationDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pluginId",
+        "strategyId",
+        "pluginVersion",
+        "implementationDigest",
+        "config"
+      ],
+      "properties": {
+        "pluginId": {"$ref": "#/$defs/identifier"},
+        "strategyId": {"$ref": "#/$defs/identifier"},
+        "pluginVersion": {"$ref": "#/$defs/version"},
+        "implementationDigest": {"$ref": "#/$defs/digest"},
+        "config": {"type": "object"}
+      }
+    },
+    "arm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "allocationBps", "strategy"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "allocationBps": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "strategy": {"$ref": "#/$defs/strategy"}
+      }
+    },
+    "metricReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pluginId", "metricId"],
+      "properties": {
+        "pluginId": {"$ref": "#/$defs/identifier"},
+        "metricId": {"$ref": "#/$defs/identifier"}
+      }
+    },
+    "resolvedMetric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pluginId",
+        "metricId",
+        "pluginVersion",
+        "implementationDigest",
+        "unit",
+        "direction"
+      ],
+      "properties": {
+        "pluginId": {"$ref": "#/$defs/identifier"},
+        "metricId": {"$ref": "#/$defs/identifier"},
+        "pluginVersion": {"$ref": "#/$defs/version"},
+        "implementationDigest": {"$ref": "#/$defs/digest"},
+        "unit": {"type": "string", "minLength": 1},
+        "direction": {"enum": ["increase", "decrease", "guardrail"]}
+      }
+    },
+    "resolvedAnalyzer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pluginId",
+        "analyzerId",
+        "pluginVersion",
+        "implementationDigest"
+      ],
+      "properties": {
+        "pluginId": {"$ref": "#/$defs/identifier"},
+        "analyzerId": {"$ref": "#/$defs/identifier"},
+        "pluginVersion": {"$ref": "#/$defs/version"},
+        "implementationDigest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimumSampleSizePerArm",
+        "maximumAssignmentUnits",
+        "minimumPricingCoverage",
+        "confidence",
+        "srmAlpha",
+        "qualityNoninferiorityMargin",
+        "maximumLatencyRegressionRatio",
+        "stoppingRule"
+      ],
+      "properties": {
+        "minimumSampleSizePerArm": {"type": "integer", "minimum": 2, "maximum": 100000},
+        "maximumAssignmentUnits": {"type": "integer", "minimum": 4, "maximum": 10000000},
+        "minimumPricingCoverage": {"type": "number", "minimum": 0.5, "maximum": 1.0},
+        "confidence": {"type": "number", "minimum": 0.8, "maximum": 0.999},
+        "srmAlpha": {"type": "number", "minimum": 0.000001, "maximum": 0.1},
+        "qualityNoninferiorityMargin": {"type": "number", "minimum": 0, "maximum": 0.5},
+        "maximumLatencyRegressionRatio": {"type": "number", "minimum": 1.0, "maximum": 10.0},
+        "stoppingRule": {"const": "fixed_horizon"}
+      }
+    }
+  }
+}

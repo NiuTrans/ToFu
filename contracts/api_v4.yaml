@@ -1,0 +1,161 @@
+openapi: 3.1.0
+info:
+  title: Tofu API v4 bootstrap contract
+  version: 4.0.0
+  description: >-
+    Canonical bootstrap surface for API-major negotiation. Product operations
+    are added here only when their v4 server route and all generated clients
+    ship together.
+x-tofu-contract: tofu.api/v4
+x-tofu-api-major: 4
+x-tofu-release-stage: bootstrap
+x-tofu-minimum-builds:
+  desktop: "0.16.0"
+  android: 17
+x-tofu-legacy-upgrade:
+  activeByDefault: false
+  prefixes:
+    - /api/v1
+    - /api/v3
+  status: 426
+  upgradeUrl: /api/v4/meta
+paths:
+  /api/v4/meta:
+    get:
+      operationId: getApiMeta
+      summary: Report the server and minimum compatible client builds
+      security: []
+      responses:
+        "200":
+          description: API-major and build compatibility metadata
+          headers:
+            X-Request-ID:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiMetaResponse"
+        "500":
+          $ref: "#/components/responses/ProblemResponse"
+  /api/v4/openapi.json:
+    get:
+      operationId: getApiV4OpenApi
+      summary: Return this canonical OpenAPI document
+      description: >-
+        This self-describing endpoint returns the raw OpenAPI document rather
+        than the normal data/meta success envelope.
+      security: []
+      responses:
+        "200":
+          description: Canonical OpenAPI 3.1 document
+          headers:
+            X-Request-ID:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - openapi
+                  - info
+                  - paths
+                additionalProperties: true
+        "500":
+          $ref: "#/components/responses/ProblemResponse"
+components:
+  responses:
+    ProblemResponse:
+      description: RFC 7807 problem details
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    ApiMeta:
+      type: object
+      additionalProperties: false
+      required:
+        - apiMajor
+        - schemaVersion
+        - serverBuild
+        - minDesktopBuild
+        - minAndroidBuild
+      properties:
+        apiMajor:
+          type: integer
+          const: 4
+        schemaVersion:
+          type: integer
+          minimum: 1
+        serverBuild:
+          type: string
+          minLength: 1
+        minDesktopBuild:
+          type: string
+          pattern: "^[0-9]+(?:\\.[0-9]+)*$"
+        minAndroidBuild:
+          type: integer
+          minimum: 1
+    ResponseMeta:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - serverTimeMs
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+        serverTimeMs:
+          type: integer
+          minimum: 0
+    ApiMetaResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - data
+        - meta
+      properties:
+        data:
+          $ref: "#/components/schemas/ApiMeta"
+        meta:
+          $ref: "#/components/schemas/ResponseMeta"
+    Problem:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - title
+        - status
+        - detail
+        - instance
+        - code
+        - requestId
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+          minLength: 1
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+          minLength: 1
+        instance:
+          type: string
+          format: uri-reference
+        code:
+          type: string
+          pattern: "^[a-z][a-z0-9_]*$"
+        requestId:
+          type: string
+          minLength: 1
+        upgradeUrl:
+          type: string
+          format: uri-reference

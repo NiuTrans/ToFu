@@ -1,0 +1,18 @@
+
+/* ══ BRAND-AREA SCALE · MOBILE ════════════════════════════════════════════════
+   品牌区移动阶梯。**必须放在文件尾部**:全局 `@media(max-width:768px){.welcome-icon
+   {52px}}` 与横屏那条同为 (0,1,0),写在基础层(约 470 行)会被它们按源序压成死代码
+   —— 实测在那里写 84px,浏览器解析出的仍是 52px。
+
+   桌面 100px 的品牌时刻在手机上按 84 → 68 收敛(与主标 42 → 20 → 18 同步),
+   而不是退回通用的 52/40px 图标——那正是 dark/light 此前的退化形态。
+   三主题共用,不带 [data-theme] 前缀。 */
+@media(max-width:768px){
+  .welcome-icon{width:84px;height:84px;margin-bottom:18px}
+}
+@media(max-width:480px){
+  .welcome-icon{width:68px;height:68px;margin-bottom:12px}
+}
+@media(orientation:landscape) and (max-height:600px) and (max-width:900px){
+  .welcome-icon{width:68px;height:68px;margin-bottom:12px}
+}

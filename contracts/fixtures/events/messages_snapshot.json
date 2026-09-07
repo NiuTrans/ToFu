@@ -1,0 +1,14 @@
+{
+  "agentId": "s",
+  "agentRole": "s",
+  "contextManifest": [],
+  "kind": "s",
+  "label": "s",
+  "messages": [],
+  "model": "s",
+  "params": {},
+  "roundNum": 1,
+  "tools": [],
+  "turn": "s",
+  "type": "messages_snapshot"
+}

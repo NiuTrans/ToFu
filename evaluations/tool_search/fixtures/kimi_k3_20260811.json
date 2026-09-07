@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "generator_model": "kimi-k3 (configured dispatch slot)",
+  "created_at": 1786442299183,
+  "simulated_users": [
+    {
+      "id": "code_references",
+      "utterances": ["Where is this symbol referenced?", "搜一下代码里谁用了这个函数。", "Show symbol usages.", "这个变量在代码里哪些地方被调用了？", "告诉我这段东西都出现在了代码的哪些地方。"]
+    },
+    {
+      "id": "find_configs",
+      "utterances": ["Locate all YAML configs.", "找一下所有配置文件。", "Find config files.", "找出所有设置文件。", "电脑里那些管设置的东西在哪儿？"]
+    },
+    {
+      "id": "edit_implementation",
+      "utterances": ["Change this implementation.", "把这段代码修一下。", "Modify the code.", "把这段代码改一下。", "这个功能需要调整一下，你来弄吧。"]
+    },
+    {
+      "id": "desktop_capture",
+      "utterances": ["Show me what is on my screen.", "看看我现在的桌面。", "Record my screen.", "截屏。", "把我电脑屏幕现在显示的内容给我拍下来。"]
+    },
+    {
+      "id": "stop_reminder",
+      "utterances": ["Stop the recurring reminder.", "不要再提醒我了。", "Disable this reminder.", "取消这个提醒。", "别再让我想起这件事了。"]
+    },
+    {
+      "id": "claim_work",
+      "utterances": ["I will take ownership of that task.", "这个活我来做。", "I'll take this task.", "这个任务我来接手。", "这个活儿我来扛了。"]
+    },
+    {
+      "id": "list_prs",
+      "utterances": ["Show open code reviews.", "看看仓库有哪些待合并改动。", "List open pull requests.", "看看有哪些待审的拉取请求。", "给我看看仓库里大家提交了哪些新代码，还没合并的。"]
+    },
+    {
+      "id": "notify_team",
+      "utterances": ["Notify the team in chat.", "在群里跟大家说一声。", "Broadcast to the team.", "在团队群里发个通知。", "在工作群里吼一声。"]
+    },
+    {
+      "id": "revise_wiki",
+      "utterances": ["Revise the wiki article.", "更新知识库里的那篇文章。", "Update the knowledge base.", "修改一下知识库。", "把公司内部的那个说明文档更新一下。"]
+    },
+    {
+      "id": "recall_decision",
+      "utterances": ["What did I decide last week?", "找回之前记住的决定。", "What did we decide?", "之前做了什么决定？", "咱们上次是怎么拍板的来着？"]
+    },
+    {
+      "id": "book_meeting",
+      "utterances": ["Book a meeting for tomorrow.", "把明天的会议加到日历。", "Schedule a meeting.", "安排一个会议。", "在我的日程表上把这个会定下来。"]
+    },
+    {
+      "id": "make_deck",
+      "utterances": ["Make a deck for the launch review.", "做一份项目评审演示文稿。", "Prepare a presentation.", "制作一份演示文稿。", "给我弄个PPT出来。"]
+    }
+  ],
+  "model_queries_by_case": {
+    "code_references": "find symbol references in code",
+    "find_configs": "locate configuration files",
+    "edit_implementation": "edit code implementation",
+    "desktop_capture": "capture desktop screen",
+    "stop_reminder": "cancel reminder",
+    "claim_work": "claim task ownership",
+    "list_prs": "list open pull requests",
+    "notify_team": "send chat notification to team",
+    "revise_wiki": "update wiki or knowledge base",
+    "recall_decision": "recall past decisions",
+    "book_meeting": "schedule calendar meeting",
+    "make_deck": "create presentation deck"
+  }
+}

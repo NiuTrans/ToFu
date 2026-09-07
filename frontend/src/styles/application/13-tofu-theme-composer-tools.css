@@ -1,0 +1,1520 @@
+/* ══════════════════════════════════════════════════════════
+   INPUT — Warm Reading Room composer
+   A calm paper box: soft border, diffuse shadow, quiet focus
+   ring. No controller frame, pet mascot, sparkles, D-pad or
+   speech-bubble tail — all decorative pseudo-elements retired.
+   ══════════════════════════════════════════════════════════ */
+[data-theme="tofu"] .input-area{
+  background:transparent;
+  border-top:none;
+  box-shadow:none;
+  position:relative;
+  padding-top:8px
+}
+[data-theme="tofu"] .input-box{
+  /* Item 1 — adopt the project bar's "gallery-hung frame" vocabulary: one slim
+     warm frame line + soft two-layer elevation (a tight contact shadow + a
+     feathered ambient halo), 14px radius. Kinship with .project-bar (styles.css
+     :11931), NOT a re-added game panel. STATIC — no animation on the box. */
+  border:1.5px solid rgba(140,116,80,0.34);
+  background:#FFFDF9;
+  border-radius:14px;
+  box-shadow:
+    0 1px 2px rgba(74,58,36,0.10),
+    0 8px 22px -8px rgba(96,76,48,0.22);
+  isolation:auto;
+  overflow:visible;
+  transition:border-color 0.2s ease,box-shadow 0.2s ease;
+  position:relative;
+  z-index:2
+}
+/* Decorative pseudo-elements retired (pet mascot / grip wings) */
+[data-theme="tofu"] .input-box::before,
+[data-theme="tofu"] .input-box::after{
+  content:none;
+  display:none
+}
+/* Decorative pseudo-elements retired (sparkles) */
+[data-theme="tofu"] .input-area::before,
+[data-theme="tofu"] .input-area::after{
+  content:none;
+  display:none
+}
+/* Decorative pseudo-elements retired (D-pad / button dots) */
+[data-theme="tofu"] .input-row::before,
+[data-theme="tofu"] .input-row::after{
+  content:none;
+  display:none
+}
+/* Decorative pseudo-element retired (speech-bubble tail) */
+[data-theme="tofu"] .input-inner::before{
+  content:none;
+  display:none
+}
+/* ── Focus state: quiet accent ring, no lift ── */
+[data-theme="tofu"] .input-box:focus-within{
+  /* Item 3 — warm focus echoing the bar's hover-warmth: deepen the warm frame,
+     widen the ambient shadow a touch, and add a soft warm-amber ring (the bar's
+     #C4956A family). NO lift, NO animation; the glow lives on the box FRAME
+     (box-shadow OUTSIDE the border) — never a layer behind the live text. */
+  border-color:rgba(140,116,80,0.62);
+  box-shadow:
+    0 1px 2px rgba(74,58,36,0.10),
+    0 10px 26px -8px rgba(96,76,48,0.28),
+    0 0 0 3px rgba(196,149,106,0.22);
+  transform:none
+}
+/* ══════════════════════════════════════════════════════════════
+   Item 4 — SCENE-TINTED WASH behind the input TOOLBAR TRAY ONLY.
+   The input box "follows suit" with the project bar by echoing the SAME scene
+   the bar shows: .project-bar carries [data-decor] (set by tofu-pet.js) and is
+   a SIBLING of .input-box inside .input-inner, so a pure-CSS general-sibling
+   selector reads the decor at runtime with NO JS / NO bundle change (it even
+   updates live when the scene is cycled).
+
+   HARD CONSTRAINTS (owner, non-negotiable):
+   • STATIC only — no canvas, no pet, no critter, no animation.
+   • Behind the TOOLBAR TRAY (.input-actions) ONLY — the wash is a `background`
+     on the tray element, a SEPARATE child from .input-row/textarea, so it can
+     NEVER sit behind the live typing surface.
+   • VERY low saturation (near-white scene tints, same family as the bar body
+     wash) so pill labels + placeholder contrast hold.
+   • NO new position/z-index (a background paints behind the tray's own children
+     automatically) → cannot trap #imagePreviews / overlays into flow.
+   • Desktop-only (min-width:769px) so the mobile compact toolbar stays byte-
+     identical (mobile strips decorations by design).
+   • Gated to a VISIBLE, scened bar: :not([style*="none"]) (the bar is
+     display:none when no project) and excludes [data-decor="off"].
+   ══════════════════════════════════════════════════════════════ */
+@media(min-width:801px){
+  /* Tray shape — hug the 14px gallery frame instead of a hard rectangle, and a
+     soft recessed "lip" (inset top highlight) so the toolbar reads as a panel
+     set INTO the box, not a solid block pasted under it. Static, no motion,
+     tray-only; desktop-only keeps the mobile compact toolbar byte-identical. */
+  [data-theme="tofu"] .input-box .input-actions{
+    border-radius:0 0 12.5px 12.5px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,0.55)
+  }
+  /* ATMOSPHERIC WATERCOLOR WASH — mirrors HOW the bar's <canvas> Impressionist
+     scene actually reads (tofu-scene.js PALETTES): a LIGHT top band (so the
+     frosted pill labels keep contrast — the bar keeps its upper band pale for
+     the same reason) with the scene's saturated colour POOLED LOW, plus two
+     LARGE, SOFT, NON-TILED complementary blooms (the bar's "broken colour"
+     flecks: poppy in the meadow greens, lavender-lily in the pool teals, peach
+     in the dawn sky). NON-tiled = full-cover soft gradients (no background-size
+     repeat) → watercolour atmosphere, NOT the polka-dot texture a tiled dab
+     field produced. STATIC — pure layered CSS gradients (no canvas/pet/critter/
+     animation). Blooms sit low + stay low-alpha, and the frosted pills blur
+     them further, so pill labels + placeholder contrast hold. Colours are drawn
+     straight from the bar's per-scene gradient + fleck palette so the input
+     genuinely echoes the SAME painting the bar shows. */
+  [data-theme="tofu"] .project-bar[data-decor="meadow"]:not([style*="none"]) ~ .input-box .input-actions{
+    background:
+      radial-gradient(135% 108% at 20% 138%, rgba(124,164,87,0.30) 0%, rgba(124,164,87,0) 64%),
+      radial-gradient(95% 90% at 86% 130%, rgba(224,114,138,0.13) 0%, rgba(224,114,138,0) 60%),
+      linear-gradient(180deg, rgba(238,243,226,0) 0%, rgba(224,237,208,0.5) 56%, rgba(188,210,140,0.56) 100%)
+  }
+  [data-theme="tofu"] .project-bar[data-decor="pool"]:not([style*="none"]) ~ .input-box .input-actions{
+    background:
+      radial-gradient(135% 108% at 24% 138%, rgba(94,148,142,0.29) 0%, rgba(94,148,142,0) 64%),
+      radial-gradient(92% 88% at 85% 128%, rgba(201,182,214,0.16) 0%, rgba(201,182,214,0) 60%),
+      linear-gradient(180deg, rgba(234,243,241,0) 0%, rgba(214,235,231,0.5) 56%, rgba(150,197,190,0.53) 100%)
+  }
+  [data-theme="tofu"] .project-bar[data-decor="sky"]:not([style*="none"]) ~ .input-box .input-actions{
+    background:
+      radial-gradient(130% 106% at 82% 136%, rgba(238,201,166,0.28) 0%, rgba(238,201,166,0) 64%),
+      radial-gradient(100% 90% at 16% 130%, rgba(222,210,230,0.20) 0%, rgba(222,210,230,0) 60%),
+      linear-gradient(180deg, rgba(243,240,248,0) 0%, rgba(241,236,243,0.46) 52%, rgba(246,231,218,0.55) 100%)
+  }
+}
+/* ── Textarea ── */
+[data-theme="tofu"] textarea{
+  min-height:64px;
+  max-height:260px;
+  padding:16px 20px 14px;
+  font-size:15px;
+  line-height:1.6
+}
+[data-theme="tofu"] textarea::placeholder{
+  font-family:var(--sans-body);
+  color:var(--text-tertiary);
+  font-size:14px;
+  font-weight:400;
+  letter-spacing:0
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Tofu Code Block — clean editorial code surface
+   (mono kept for actual code text; cartridge frame/scanline/bevel gone)
+   ══════════════════════════════════════════════════════════════ */
+
+/* --- Code card shell --- */
+[data-theme="tofu"] .md-content pre{
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--clay-sm);
+  overflow: hidden;
+  background: var(--bg-tertiary);
+  margin: 18px 0;
+  transition: box-shadow 0.2s ease;
+}
+[data-theme="tofu"] .md-content pre:hover{
+  transform: none;
+  box-shadow: var(--clay-md);
+}
+
+/* --- Header: quiet flat bar --- */
+[data-theme="tofu"] .code-header{
+  position: relative;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 6px 14px;
+  color: var(--text-tertiary);
+  font-family: var(--sans-body);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+/* (retired) pixel notch dots */
+[data-theme="tofu"] .code-header::before{
+  content: none;
+  display: none;
+}
+/* lang label — mono is fine (it names a code language) */
+[data-theme="tofu"] .code-header span{
+  margin-left: 0;
+  font-family:var(--sans-body);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+/* --- Code content: flat surface, mono code text (no scanline) --- */
+[data-theme="tofu"] .md-content pre code{
+  background: var(--bg-tertiary);
+  border-radius: 0 0 var(--radius) var(--radius);
+  padding: 16px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* --- Copy / collapse buttons — quiet ghost chips --- */
+[data-theme="tofu"] .code-header .copy-btn,
+[data-theme="tofu"] .code-header .code-collapse-btn{
+  font-family: var(--sans-body);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  padding: 2px 10px;
+  box-shadow: none;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+}
+[data-theme="tofu"] .code-header .copy-btn:hover,
+[data-theme="tofu"] .code-header .code-collapse-btn:hover{
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border);
+}
+[data-theme="tofu"] .code-header .copy-btn:active,
+[data-theme="tofu"] .code-header .code-collapse-btn:active{
+  transform: none;
+  box-shadow: var(--clay-pressed);
+}
+
+/* --- Collapsed fade --- */
+[data-theme="tofu"] pre.code-long[data-collapsed="true"]::after{
+  background: linear-gradient(to bottom, transparent, var(--bg-tertiary));
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
+/* --- Apply button — hidden in tofu theme --- */
+[data-theme="tofu"] .code-header .apply-btn{
+  display: none !important;
+}
+
+/* ── Table — pixel borders ── */
+[data-theme="tofu"] .md-table-wrapper{border-radius:0;border:1px solid #D8D1C0}
+[data-theme="tofu"] .table-header{background:#E6E1D4;border-bottom:1px solid #D8D1C0;border-radius:0;color:#8A7458}
+[data-theme="tofu"] .table-header .copy-btn{color:#8A7458}
+[data-theme="tofu"] .table-header .copy-btn:hover{color:#4A4233;background:rgba(196,149,106,0.12)}
+[data-theme="tofu"] .md-content table{
+  border-radius:0;overflow:hidden;
+  border:none;
+  box-shadow:none;
+  border-collapse:separate;border-spacing:0
+}
+[data-theme="tofu"] .md-content th{background:#E6E1D4}
+[data-theme="tofu"] .md-content td,[data-theme="tofu"] .md-content th{border-color:#D8D1C0}
+[data-theme="tofu"] .md-content tr:nth-child(even) td{background:rgba(196,149,106,0.03)}
+
+/* ── Text selection — warm amber highlight ── */
+[data-theme="tofu"] ::selection{
+  background:rgba(196,149,106,0.25);
+  color:#3A3428
+}
+[data-theme="tofu"] ::-moz-selection{
+  background:rgba(196,149,106,0.25);
+  color:#3A3428
+}
+
+/* ── Smooth scroll for reading flow ── */
+/* ★ SCROLL-JITTER FIX (2026-07-24): `scroll-behavior:smooth` on the chat
+ * container turns every programmatic `scrollTop=scrollHeight` into an
+ * animation. During streaming, `updateStreamingUI` writes scrollTop once
+ * per rAF while scrollHeight is still GROWING — the smooth animator
+ * perpetually chases a moving target, and interacts badly with the
+ * `overflow-anchor` primitives above, so the reader visibly drifts off
+ * the bottom then snaps back (the reported "generation makes the page
+ * scroll up and down on its own"). User-driven wheel / touch / keyboard
+ * scroll is always instant per the CSS spec regardless of this property,
+ * so dropping the smooth-scroll rule loses nothing perceptible for
+ * reading and removes the jitter. `scrollIntoView({behavior:'smooth'})`
+ * call sites (branch panel, turn nav) still animate — that behavior is
+ * per-call, not inherited from this rule. */
+[data-theme="tofu"] .chat-container{
+  scroll-behavior:auto
+}
+
+/* ── Thinking block — quiet disclosure matching the shared conversation
+   chrome: no card frame at all, tertiary label. Reasoning body keeps the
+   warm secondary ink only while expanded. ── */
+[data-theme="tofu"] .thinking-text{
+  font-size:13px;line-height:1.6;font-weight:430;
+  font-family:var(--sans-body);
+  color:var(--text-secondary)
+}
+[data-theme="tofu"] .thinking-block{
+  border:0;
+  border-radius:0;
+  box-shadow:none;
+  background:transparent
+}
+/* ── (retired) thought bubble pixel dots ── */
+[data-theme="tofu"] .thinking-block::after{
+  content:none;
+  display:none
+}
+[data-theme="tofu"] .thinking-header{
+  border-bottom:none
+}
+/* Interleaved per-round thinking under tofu: the clay card chrome (2px border,
+   shadow, radius) makes a stack of per-round boxes overwhelming, so strip it
+   here too — a quiet inline disclosure matching the base .seg-thinking. The
+   left-rule uses the tofu purple accent for the expanded text. */
+[data-theme="tofu"] .seg-timeline .seg-thinking{
+  border:none;
+  box-shadow:none;
+  background:none;
+  border-radius:0
+}
+[data-theme="tofu"] .seg-timeline .seg-thinking .thinking-text{
+  border-left:2px solid rgba(151,139,184,0.35)
+}
+[data-theme="tofu"] .thinking-label{
+  font-family:var(--sans-body);
+  color:var(--text-tertiary)
+}
+/* Bilingual original/translation tints are dark-theme navy fills that render
+   as a heavy gray pill on paper — flatten to the same quiet chrome. */
+[data-theme="tofu"] .bilingual-original,
+[data-theme="tofu"] .bilingual-translated{
+  border-color:var(--border);
+  background:transparent
+}
+
+/* ── (retired) sidebar footer glyph ── */
+[data-theme="tofu"] .sidebar::after{
+  content:none;
+  display:none
+}
+/* Conversations list padding */
+[data-theme="tofu"] .conversations-list{
+  padding:4px 4px 20px
+}
+
+/* ── Dropdown escape hatch ──
+   Root cause: .chat-wrapper has overflow:hidden which clips dropdowns
+   that pop upward from the toolbar. Fix: overflow:visible on chat-wrapper
+   for tofu theme (chat-container already has overflow-y:auto for scrolling).
+   Also ensure all inner ancestors allow overflow. */
+[data-theme="tofu"] .chat-wrapper{overflow:visible}
+
+[data-theme="tofu"] .input-area{overflow:visible;position:relative;z-index:10}
+[data-theme="tofu"] .input-inner{overflow:visible;position:relative}
+[data-theme="tofu"] .input-actions,
+[data-theme="tofu"] .input-actions-scroll,
+[data-theme="tofu"] .input-group,
+[data-theme="tofu"] .toolbar-submenu,
+[data-theme="tofu"] .preset-toggle-wrapper{overflow:visible}
+
+/* ══════════════════════════════════════════════════════
+   🕹️ TOOLBAR v5 — Pixel Console Buttons
+   Design principles:
+   1. SNES-style 3D borders (light top-left, dark bottom-right)
+   2. JetBrains Mono for crisp, cute monospace text
+   3. Clear dark text (#5C4A33) — no grayish/blurry fonts
+   4. Pixel press-down on :active (translateY + shadow collapse)
+   5. Unified warm ivory gradient backgrounds
+   6. 4px border-radius for retro pixel-friendly corners
+   ══════════════════════════════════════════════════════ */
+
+/* ── Toolbar tray ── */
+[data-theme="tofu"] .input-actions{
+  gap:6px;
+  padding:6px 10px 7px 12px;
+  position:relative;
+  z-index:2
+}
+[data-theme="tofu"] .input-actions::before{
+  background:none;
+  border-top:none;
+  height:0;
+  left:12px;right:12px
+}
+[data-theme="tofu"] .input-group{gap:5px}
+[data-theme="tofu"] #modelGroup{gap:6px}
+/* Dot separator between groups — small & centered */
+[data-theme="tofu"] .input-actions-scroll .input-group:not(:last-child)::after{
+  content:'';
+  display:block;
+  width:3px;height:3px;
+  background:rgba(196,149,106,0.28);
+  border-radius:50%;
+  margin:0 5px;
+  flex-shrink:0
+}
+
+/* ── Thinking depth bar — pixel inset capsule strip ── */
+[data-theme="tofu"] .thinking-depth-bar{
+  background:#E8E5DA;
+  border:1.5px solid #C2BCA4;
+  border-top-color:#A89878;
+  border-left-color:#A89878;
+  border-right-color:#FFFCF6;
+  border-bottom-color:#FFFCF6;
+  border-radius:4px;
+  box-shadow:inset 0 1px 3px rgba(74,63,47,0.08);
+  padding:2px 3px;
+  gap:2px
+}
+[data-theme="tofu"] .depth-btn{
+  font-family:var(--sans-body);
+  font-weight:600;
+  font-size:11px;
+  color:var(--text-secondary);
+  background:transparent;
+  border-radius:var(--radius-xs);
+  padding:2px 9px;
+  letter-spacing:0;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  transition:color 0.15s,background 0.15s,box-shadow 0.15s
+}
+[data-theme="tofu"] .depth-btn:hover{
+  color:#2A2018;
+  background:rgba(196,149,106,0.1)
+}
+[data-theme="tofu"] .depth-btn.active{
+  background:rgba(196,149,106,0.22);
+  color:#2A1E10;
+  box-shadow:inset 0 1px 2px rgba(0,0,0,0.1);
+  border-radius:3px;
+  font-weight:800
+}
+[data-theme="tofu"] .depth-btn[data-depth="off"].active{
+  background:rgba(196,149,106,0.08);
+  color:#5C4A33;
+  box-shadow:none
+}
+
+/* ── Model selector — quiet token pill ── */
+[data-theme="tofu"] .preset-toggle{
+  border-radius:var(--radius-xs);
+  /* Item 2 — frosted-glass kinship with the project bar's pills: translucent
+     tofu-cream fill + backdrop blur so the toolbar reads as the SAME surface as
+     the bar (the scene wash shows through between pills). */
+  background:linear-gradient(180deg, rgba(250,248,242,0.62) 0%, rgba(240,237,228,0.5) 100%);
+  -webkit-backdrop-filter:blur(6px) saturate(1.05);
+  backdrop-filter:blur(6px) saturate(1.05);
+  border:1px solid var(--border);
+  color:var(--text-secondary);
+  box-shadow:none;
+  clip-path:none;
+  image-rendering:auto;
+  transition:background 0.18s ease,color 0.18s ease,border-color 0.18s ease
+}
+[data-theme="tofu"] .preset-toggle:hover{
+  background:var(--bg-hover);
+  color:var(--text-primary);
+  box-shadow:none;
+  transform:none
+}
+[data-theme="tofu"] .preset-toggle:active{
+  transform:none;
+  box-shadow:var(--clay-pressed)
+}
+/* Brand color overrides — slim colored bottom accent */
+[data-theme="tofu"] .preset-toggle[data-brand="claude"]{color:#9A6520;box-shadow:inset 0 -2px 0 rgba(217,119,6,0.35)}
+[data-theme="tofu"] .preset-toggle[data-brand="openai"]{color:#2D7A4A;box-shadow:inset 0 -2px 0 rgba(16,163,127,0.3)}
+[data-theme="tofu"] .preset-toggle[data-brand="gemini"]{color:#3A6898;box-shadow:inset 0 -2px 0 rgba(66,133,244,0.3)}
+[data-theme="tofu"] .preset-toggle[data-brand="deepseek"]{color:#4A5A92;box-shadow:0 2px 0 rgba(154,144,122,0.4), inset 0 -2px 0 rgba(77,107,254,0.3)}
+[data-theme="tofu"] .preset-toggle .ps-label{
+  font-family:var(--sans-body);
+  font-weight:700;
+  font-size:11px;
+  letter-spacing:0.02em;
+  color:inherit;
+  -webkit-font-smoothing:antialiased
+}
+[data-theme="tofu"] .preset-toggle .ps-arrow{opacity:0.5;color:#8A7A5A}
+
+[data-theme="tofu"] .preset-dropdown{
+  border-radius:4px;
+  border:2px solid #C2BCA4;
+  border-top-color:#FFFCF6;
+  border-left-color:#FFFCF6;
+  border-right-color:#A89878;
+  border-bottom-color:#A89878;
+  box-shadow:var(--clay-sm);
+  background:#F4F2EB;
+  padding:4px;
+  overflow-y:auto;
+  z-index:9999
+}
+[data-theme="tofu"] .ps-dd-depth-wrap{background:#F4F2EB;border-top-color:#C2BCA4}
+[data-theme="tofu"] .ps-dd-hint{border-top-color:#C2BCA4;color:#8A7A5A}
+[data-theme="tofu"] .ps-dd-hint:hover{color:#5C4A33}
+[data-theme="tofu"] .preset-dropdown-item{
+  border-radius:2px;
+  font-family:var(--sans-body);
+  font-size:11px;
+  font-weight:500;
+  letter-spacing:0.02em;
+  color:#5C4A33
+}
+[data-theme="tofu"] .preset-dropdown-item:hover{background:rgba(196,149,106,0.12)}
+[data-theme="tofu"] .preset-dropdown-item.selected{background:rgba(196,149,106,0.15);color:#4A3820}
+[data-theme="tofu"] .img-preview{border-radius:8px;border:1px solid rgba(90,78,64,0.3);box-shadow:0 2px 8px rgba(0,0,0,0.1)}
+
+/* ── User bubble: a gently tinted note — hairline, one soft shadow ── */
+[data-theme="tofu"] .message.user-msg .message-content{
+  background:#F5F3ED;
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:10px 16px;
+  box-shadow:var(--clay-sm);
+  position:relative
+}
+/* ── No speech tails ── */
+[data-theme="tofu"] .message.user-msg .message-content::after{
+  display:none
+}
+[data-theme="tofu"] .message.user-msg .message-content::before{
+  display:none
+}
+
+/* ── Queued (pending, not-yet-dispatched) user message ──
+   A message sent from another device (or queued behind a running turn) has
+   landed in the transcript but its turn runs AFTER the current reply. Mute the
+   bubble and show a small "queued" clock chip so its state is legible, not an
+   indistinguishable sent bubble. When dispatch_next_queued reconciles the row
+   (clears _pendingQueued) the fingerprint fold re-renders it into the normal
+   bubble — the muted style simply drops. */
+.message.user-msg.pending-queued .message-content{
+  opacity:0.72;
+}
+.message.user-msg.pending-queued .message-content{
+  border-style:dashed !important;
+}
+.queued-indicator{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  margin-left:8px;
+  padding:1px 7px;
+  border-radius:10px;
+  font-size:11px;
+  font-weight:600;
+  line-height:1.4;
+  color:#8A7A55;
+  background:rgba(196,179,150,0.18);
+  border:1px solid rgba(196,179,150,0.4);
+  vertical-align:middle;
+}
+.queued-indicator > svg{display:block;flex-shrink:0}
+.queued-indicator-text{white-space:nowrap}
+
+/* ═══════════════════════════════════════════════════════════
+   ★ Kinako Stamp — Tofu tool blocks, badges & status indicators
+   Warm wagashi palette replaces jarring neon yellow→green
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Hanko stamp micro-animation: success badge presses down like a seal ── */
+@keyframes tofuStamp {
+  0%   { transform: scale(1.3); opacity: 0; }
+  40%  { transform: scale(0.92); opacity: 1; }
+  60%  { transform: scale(1.06); }
+  80%  { transform: scale(0.98); }
+  100% { transform: scale(1); }
+}
+@keyframes tofuStampGlow {
+  0%   { box-shadow: 0 0 0 0 rgba(122,158,106,0.4); }
+  70%  { box-shadow: 0 0 0 6px rgba(122,158,106,0); }
+  100% { box-shadow: 0 0 0 0 rgba(122,158,106,0); }
+}
+@keyframes tofuPendingBreath {
+  0%, 100% { border-color: rgba(184,136,74,0.25); box-shadow: none; }
+  50%      { border-color: rgba(184,136,74,0.45); box-shadow: 0 0 6px rgba(184,136,74,0.10); }
+}
+@keyframes tofuCmdSweep {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Tool badge — rounded chip ── */
+[data-theme="tofu"] .tool-badge{
+  background: rgba(196,149,106,0.1);
+  color: #A67B52;
+  border: 1px solid rgba(196,149,106,0.25);
+  border-radius: 10px;
+  box-shadow: none;
+  font-weight: 600;
+  font-family:var(--sans-body);
+  font-size: 10px;
+}
+
+/* ── Unified Tool Panel (ptool-panel): NO enclosing box ──
+   The megabox pixel-window was retired (2026-07-08): each round is now its
+   own discrete card (.ptool-turn), so the panel is a bare container. */
+[data-theme="tofu"] .ptool-panel{
+  border: none;
+  background: none;
+  box-shadow: none;
+  overflow: visible;
+  position: relative;
+}
+[data-theme="tofu"] .ptool-panel::after{
+  display: none;
+}
+/* Give the tofu round card a warm pixel-window frame so it keeps the
+   theme's tactile depth — now applied per ROUND instead of the whole panel. */
+[data-theme="tofu"] .ptool-turn{
+  border: 1px solid #D6CCB8;
+  border-radius:var(--radius-sm);
+  background: #FFFDF9;
+  /* Enclosing depth, not a right/bottom bevel: an even 1px ring wraps all
+     four sides equally (the "fully wrapped" feel), then two soft warm drops
+     ground the card and deepen the separation so a long panel reads calmly. */
+  box-shadow:
+    0 0 0 1px rgba(196,149,106,0.05),
+    0 2px 6px rgba(92,72,44,0.09),
+    0 5px 16px rgba(92,72,44,0.06);
+}
+
+/* ── Tool lines (individual tool call rows) ── */
+[data-theme="tofu"] .ptool-line{
+  color: #5C5040;
+  border-bottom: 1px solid rgba(196,149,106,0.06);
+}
+/* Card-model seam fix (2026-07-08): each .ptool-turn is now a bordered card,
+   so the LAST row's own bottom hairline would double against the card's
+   bottom border (a visible seam). Keep the separators BETWEEN rows in a
+   multi-call card (they group the parallel calls) but drop it on the final
+   row — the card edge already draws that line. Covers the solo card too
+   (its single row is the last row). The descendant `.ptool-line` reaches a
+   row nested in a `.ptool-results-block` header as well. */
+[data-theme="tofu"] .ptool-turn > [data-prn]:last-child .ptool-line{
+  border-bottom: none;
+}
+
+[data-theme="tofu"] .ptool-line:hover{
+  background: rgba(196,149,106,0.05);
+}
+[data-theme="tofu"] .ptool-line.ptool-active{
+  color: #4A3F2F;
+}
+
+/* Icons — warm kinako instead of neon amber */
+[data-theme="tofu"] .ptool-icon{
+  color: #C4956A;
+}
+[data-theme="tofu"] .ptool-line.ptool-active .ptool-icon{
+  color: #A67B52;
+}
+
+/* ── Status badges — the heart of the redesign ── */
+
+/* Running/info: pixel kinako chip */
+[data-theme="tofu"] .ptool-badge-info{
+  color: #A67B52;
+  background: rgba(196,149,106,0.1);
+  border: 1px solid rgba(196,149,106,0.2);
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm);
+}
+
+/* Success/OK: pixel matcha stamp */
+[data-theme="tofu"] .ptool-batch-done-edit.ptool-batch-ok .ptool-batch-status{ color: #5E8A50; }
+/* Operation pills: kinako for rewrite, matcha for pure insertion */
+[data-theme="tofu"] .ptool-op--replace{color:#A67B52;background:rgba(196,149,106,0.1);border-color:rgba(196,149,106,0.25)}
+[data-theme="tofu"] .ptool-op--insert{color:#5E8A50;background:rgba(106,138,94,0.1);border-color:rgba(106,138,94,0.25)}
+[data-theme="tofu"] .ptool-badge-ok{
+  color: #5E8A50;
+  background: rgba(106,138,94,0.1);
+  border: 1px solid rgba(106,138,94,0.25);
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm);
+  animation: tofuStamp 0.4s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+
+/* Error: pixel azuki chip */
+[data-theme="tofu"] .ptool-badge-err{
+  color: #A85A4A;
+  background: rgba(184,106,90,0.08);
+  border: 1px solid rgba(184,106,90,0.2);
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm);
+}
+
+/* Warning: pixel amber */
+[data-theme="tofu"] .ptool-badge-warn{
+  color: #A67B52;
+  background: rgba(196,149,106,0.1);
+  border: 1px solid rgba(196,149,106,0.25);
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm);
+  animation: none;
+}
+
+[data-theme="tofu"] .ptool-gate-note{border-color:rgba(196,149,106,0.3);background:rgba(196,149,106,0.07)}
+[data-theme="tofu"] .ptool-gate-note-icon,[data-theme="tofu"] .ptool-gate-note-title{color:#A67B52}
+[data-theme="tofu"] .ptool-gate-note-path{background:rgba(196,149,106,0.14)}
+
+/* Skip: pixel muted */
+[data-theme="tofu"] .ptool-badge-skip{
+  color: #9C9178;
+  background: rgba(196,149,106,0.05);
+  border: 1px solid rgba(196,149,106,0.12);
+  border-radius:var(--radius-sm);
+}
+
+/* ── Spinner — warm kinako ── */
+[data-theme="tofu"] .ptool-spinner{
+  border-color: rgba(196,149,106,0.2);
+  border-top-color: #C4956A;
+}
+
+/* ── Search orbit dots — warm palette ── */
+[data-theme="tofu"] .ptool-panel .search-orbit-center{ background: #C4956A; }
+[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(2){ background: #D4A878; }
+[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(3){ background: #C4956A; }
+[data-theme="tofu"] .ptool-panel .search-orbit-dot:nth-child(4){ background: #A67B52; }
+
+/* ── Truncated results — warm ── */
+[data-theme="tofu"] .ptool-truncated{
+  color: rgba(166,123,82,0.65);
+  background: rgba(196,149,106,0.04);
+  border-color: rgba(196,149,106,0.15);
+}
+[data-theme="tofu"] .ptool-truncated:hover{
+  color: #A67B52;
+  background: rgba(196,149,106,0.08);
+  border-color: rgba(196,149,106,0.3);
+}
+
+/* ── Expandable results blocks — pixel ── */
+[data-theme="tofu"] .ptool-results-block{
+  border-color: transparent;
+  background: none;
+  border-radius:var(--radius-sm);
+}
+[data-theme="tofu"] .ptool-results-block.expanded{
+  border-color: rgba(196,149,106,0.16);
+  background: rgba(196,149,106,0.03);
+}
+[data-theme="tofu"] .ptool-results-block.expanded .ptool-results-content{
+  border-top-color: rgba(196,149,106,0.12);
+}
+[data-theme="tofu"] .ptool-results-header:hover{
+  background: rgba(196,149,106,0.04);
+}
+[data-theme="tofu"] .ptool-results-content .search-result-item{
+  border-top-color: rgba(196,149,106,0.06);
+}
+[data-theme="tofu"] .ptool-results-content .search-result-item:hover{
+  background: rgba(196,149,106,0.03);
+}
+
+/* ── Search diagnostics ── */
+[data-theme="tofu"] .ptool-search-diag{
+  color: rgba(74,63,47,0.45);
+}
+
+[data-theme="tofu"] .ptool-tool-search-block{
+  border-color: rgba(137,116,180,0.24);
+  border-radius: var(--radius-sm);
+  background: rgba(137,116,180,0.035);
+}
+[data-theme="tofu"] .ptool-tool-search-header{
+  border-bottom-color: rgba(137,116,180,0.14);
+}
+[data-theme="tofu"] .ptool-tool-search-header .ptool-icon,
+[data-theme="tofu"] .ptool-tool-search-name{ color: #765B91; }
+[data-theme="tofu"] .ptool-tool-search-count{
+  color: #765B91;
+  background: rgba(137,116,180,0.12);
+  border-radius: var(--radius-sm);
+}
+[data-theme="tofu"] .ptool-tool-search-card{
+  border-color: rgba(196,149,106,0.16);
+  background: #FFFDF9;
+  box-shadow: var(--clay-sm);
+}
+[data-theme="tofu"] .ptool-tool-search-namespace,
+[data-theme="tofu"] .ptool-tool-arg{
+  background: rgba(196,149,106,0.07);
+  border-color: rgba(196,149,106,0.13);
+}
+
+/* ── Batch done rows — readable desc + path on cream bg ── */
+[data-theme="tofu"] .ptool-batch-done-summary .ptool-batch-desc{
+  color: #4A3F2F;
+}
+[data-theme="tofu"] .ptool-batch-done-summary .ptool-batch-path{
+  color: #6B4423;
+  opacity: 1;
+}
+
+/* ── Pending approval — pixel breathing border ── */
+[data-theme="tofu"] .ptool-pending-wrap{
+  border: 2px solid rgba(184,136,74,0.3);
+  background: rgba(196,149,106,0.03);
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm);
+  animation: tofuPendingBreath 2.5s ease-in-out infinite;
+}
+[data-theme="tofu"] .ptool-pending-wrap .ptool-line.ptool-pending{
+  color: #A67B52;
+  background: rgba(196,149,106,0.06);
+  border-bottom-color: rgba(196,149,106,0.1);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ★ Tofu "Washi Terminal" — run_command block v3
+   Inspired by: washi paper texture + retro warm CRT +
+   traffic-light header dots + blinking cursor + typewriter
+   feel. Desaturated to match refined tofu palette.
+   ═══════════════════════════════════════════════════════════ */
+
+/* Flat content inside the .ptool-turn cream card — NO nested card chrome
+ * (no own border/radius/shadow/parchment bg). The .ptool-turn shell is the
+ * one and only card; this block just supplies the terminal character (dot,
+ * recessed $ tray, dashed fold line). See docs: run_command double-box fix. */
+[data-theme="tofu"] .ptool-cmd-block{
+  --_rail: #B0936E;
+  --_rail-glow: transparent;
+  --_dot-color: #B0936E;
+  position: relative;
+  border: none;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+/* ── Header: traffic-light dots + label + status ── */
+[data-theme="tofu"] .ptool-cmd-header{
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: linear-gradient(180deg, rgba(0,0,0,0.015) 0%, transparent 100%);
+  border-bottom: 1px solid rgba(178,163,140,0.2);
+  z-index: 1;
+}
+/* traffic light dot — sits in the icon area, color changes with state */
+[data-theme="tofu"] .ptool-cmd-icon{
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px; height: 16px;
+  flex-shrink: 0;
+}
+[data-theme="tofu"] .ptool-cmd-icon::before{
+  content: "";
+  position: absolute;
+  left: 50%; top: 50%;
+  margin: -4px 0 0 -4px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--_dot-color);
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.5), 0 0 4px var(--_rail-glow);
+  transition: background 0.4s, box-shadow 0.4s;
+}
+[data-theme="tofu"] .ptool-cmd-icon svg{
+  opacity: 0;
+  width: 0; height: 0;
+}
+[data-theme="tofu"] .ptool-cmd-label{
+  color: #716A55;
+  font-family:var(--sans-body);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+[data-theme="tofu"] .ptool-cmd-status{
+  margin-left: auto;
+  font-family:var(--sans-body);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 20px;
+  letter-spacing: 0.03em;
+  transition: all 0.35s cubic-bezier(0.34,1.56,0.64,1);
+}
+/* Two-axis chips: the group owns the right-push in this theme too, and the
+ * neutral finish chip mirrors the pill shape without inheriting a verdict
+ * color (it states completion, not success). */
+[data-theme="tofu"] .ptool-cmd-chips{ margin-left: auto; }
+[data-theme="tofu"] .ptool-cmd-chips .ptool-cmd-status{ margin-left: 0; }
+[data-theme="tofu"] .ptool-cmd-finish{
+  font-family:var(--sans-body);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 20px;
+  letter-spacing: 0.03em;
+  color: #A07D5A;
+  background: rgba(160,125,90,0.12);
+}
+
+/* ═══ STATE: Running ═══ */
+[data-theme="tofu"] .ptool-cmd-running{
+  --_dot-color: #CCA858;
+  --_rail-glow: rgba(204,168,88,0.4);
+  border-color: rgba(204,168,88,0.3);
+}
+[data-theme="tofu"] .ptool-cmd-running .ptool-cmd-icon::before{
+  animation: tofuDotPulse 1.4s ease-in-out infinite;
+}
+[data-theme="tofu"] .ptool-cmd-running .ptool-cmd-label{
+  color: #A07D5A;
+  opacity: 1;
+}
+/* Subtle warm scanline across the whole block while running */
+[data-theme="tofu"] .ptool-cmd-running::after{
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(187,149,114,0.04) 40%,
+    rgba(187,149,114,0.07) 50%,
+    rgba(187,149,114,0.04) 60%,
+    transparent 100%);
+  background-size: 250% 100%;
+  animation: tofuCmdSweep 3s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ═══ STATE: OK / Success ═══ */
+[data-theme="tofu"] .ptool-cmd-ok{
+  --_dot-color: #6A9E5A;
+  --_rail-glow: rgba(106,158,90,0.35);
+  border-color: rgba(106,158,90,0.2);
+}
+[data-theme="tofu"] .ptool-cmd-ok .ptool-cmd-icon::before{
+  animation: tofuDotStamp 0.4s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+[data-theme="tofu"] .ptool-cmd-ok .ptool-cmd-label{
+  color: #5E8A50;
+  opacity: 0.85;
+}
+[data-theme="tofu"] .ptool-cmd-ok .ptool-cmd-status{
+  color: #F4F1EA;
+  background: linear-gradient(135deg, #6A9E5A 0%, #5C8A4E 100%);
+  border: none;
+  box-shadow: 0 1px 3px rgba(94,138,80,0.18);
+  animation: tofuStamp 0.45s cubic-bezier(0.34,1.56,0.64,1) both,
+             tofuStatusGlow 0.6s 0.3s ease-out both;
+}
+
+/* ═══ STATE: Error ═══ */
+[data-theme="tofu"] .ptool-cmd-err{
+  --_dot-color: #C0685A;
+  --_rail-glow: rgba(192,104,90,0.35);
+  border-color: rgba(192,104,90,0.25);
+}
+[data-theme="tofu"] .ptool-cmd-err .ptool-cmd-icon::before{
+  animation: tofuDotStamp 0.4s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+[data-theme="tofu"] .ptool-cmd-err .ptool-cmd-label{
+  color: #A85A4A;
+  opacity: 0.85;
+}
+[data-theme="tofu"] .ptool-cmd-err .ptool-cmd-status{
+  color: #F4F1EA;
+  background: linear-gradient(135deg, #C0685A 0%, #A85A4A 100%);
+  border: none;
+  box-shadow: 0 1px 3px rgba(184,106,90,0.18);
+  animation: tofuStamp 0.45s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+
+/* ═══ STATE: Timeout ═══ */
+[data-theme="tofu"] .ptool-cmd-timeout,
+[data-theme="tofu"] .ptool-cmd-notrun{
+  --_dot-color: #CCA858;
+  --_rail-glow: rgba(204,168,88,0.3);
+  border-color: rgba(204,168,88,0.2);
+}
+[data-theme="tofu"] .ptool-cmd-notrun .ptool-cmd-status{
+  color: #6B5E42;
+  background: rgba(204,168,88,0.12);
+}
+[data-theme="tofu"] .ptool-cmd-reason{
+  color: #7A6A4A;
+  background: rgba(204,168,88,0.07);
+  border-top: 1px dashed rgba(178,163,140,0.3);
+}
+[data-theme="tofu"] .ptool-cmd-timeout .ptool-cmd-label{
+  color: #A07D5A;
+  opacity: 0.85;
+}
+[data-theme="tofu"] .ptool-cmd-timeout .ptool-cmd-status{
+  color: #6B5E42;
+  background: rgba(204,168,88,0.12);
+  border: 1px solid rgba(204,168,88,0.22);
+}
+
+/* Inline description on the header title line — tofu palette */
+[data-theme="tofu"] .ptool-cmd-desc-inline{
+  color: #6B5E42;
+  font-family: var(--sans-body);
+  font-size: 11.5px;
+  opacity: 0.85;
+}
+/* ── Description: intent caption woven above the command (no detached band) ── */
+[data-theme="tofu"] .ptool-cmd-desc{
+  padding: 9px 16px 3px;
+  color: #6B5E42;
+  background: transparent;
+  border-bottom: none;
+  font-family:var(--sans-body);
+  font-size: 12px;
+  line-height: 1.55;
+  z-index: 1;
+}
+[data-theme="tofu"] .ptool-cmd-desc::before{
+  background: var(--_dot-color, #B0936E);
+  opacity: 0.6;
+}
+
+/* ── Code tray: recessed with prompt chevron & blinking cursor ── */
+[data-theme="tofu"] .ptool-cmd-code{
+  position: relative;
+  margin: 0;
+  padding: 10px 16px 10px 16px;
+  background: rgba(0,0,0,0.02);
+  border-radius:var(--radius-sm);
+  box-shadow:
+    inset 0 1px 3px rgba(138,122,86,0.06);
+  z-index: 1;
+}
+[data-theme="tofu"] .ptool-cmd-code code{
+  font-family: 'JetBrains Mono', 'Menlo', 'SF Mono', monospace;
+  color: #4A4233;
+  font-size: 12px;
+  letter-spacing: -0.01em;
+  line-height: 1.55;
+  word-break: break-all;
+}
+/* Blinking block cursor after command text when running */
+[data-theme="tofu"] .ptool-cmd-running .ptool-cmd-code code::after{
+  content: "█";
+  display: inline;
+  color: #A07D5A;
+  font-weight: 400;
+  animation: tofuCursorBlink 1s step-end infinite;
+  margin-left: 1px;
+}
+
+/* ── Output area — warm paper with top fold line ── */
+[data-theme="tofu"] .ptool-cmd-output-wrap{
+  border-top: 1px dashed rgba(178,163,140,0.3);
+  z-index: 1;
+  position: relative;
+}
+[data-theme="tofu"] .ptool-cmd-toggle{
+  color: #A07D5A;
+  opacity: 0.55;
+  font-family:var(--sans-body);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 5px 16px;
+  transition: opacity 0.2s, background 0.2s, color 0.2s;
+  cursor: pointer;
+  user-select: none;
+}
+[data-theme="tofu"] .ptool-cmd-toggle:hover{
+  opacity: 1;
+  color: #8A7458;
+  background: rgba(187,149,114,0.04);
+}
+[data-theme="tofu"] .ptool-cmd-output{
+  background: rgba(187,149,114,0.018);
+  border-top: 1px solid rgba(178,163,140,0.12);
+  padding: 8px 16px 10px 16px;
+}
+[data-theme="tofu"] .ptool-cmd-output code{
+  font-family: 'JetBrains Mono', 'Menlo', 'SF Mono', monospace;
+  color: #6B6252;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* ── Keyframes ── */
+@keyframes tofuDotPulse{
+  0%,100%{ transform: scale(1); box-shadow: 0 0 0 2px rgba(255,255,255,0.5), 0 0 4px var(--_rail-glow); }
+  50%    { transform: scale(1.15); box-shadow: 0 0 0 2px rgba(255,255,255,0.5), 0 0 8px var(--_rail-glow); }
+}
+@keyframes tofuDotStamp{
+  0%  { transform: scale(0.4); opacity: 0; }
+  50% { transform: scale(1.2); opacity: 1; }
+  100%{ transform: scale(1); opacity: 1; }
+}
+@keyframes tofuCursorBlink{
+  0%,100%{ opacity: 1; }
+  50%    { opacity: 0; }
+}
+@keyframes tofuRailPulse{
+  0%,100%{ opacity: 0.7; box-shadow: 2px 0 6px rgba(187,149,114,0.1); }
+  50%    { opacity: 1;   box-shadow: 3px 0 12px rgba(187,149,114,0.25); }
+}
+@keyframes tofuIconBreathe{
+  0%,100%{ transform: scale(1); }
+  50%    { transform: scale(1.08); }
+}
+@keyframes tofuStatusGlow{
+  0%  { box-shadow: 0 1px 3px rgba(94,138,80,0.18), 0 0 0 0 rgba(94,138,80,0.28); }
+  60% { box-shadow: 0 1px 3px rgba(94,138,80,0.18), 0 0 0 6px rgba(94,138,80,0); }
+  100%{ box-shadow: 0 1px 3px rgba(94,138,80,0.18), 0 0 0 0 rgba(94,138,80,0); }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ★ Tofu Code Execution Block — Washi Terminal (lavender)
+   ═══════════════════════════════════════════════════════════ */
+/* Flat content inside the .ptool-turn cream card — no nested card chrome
+ * (matches .ptool-cmd-block; the .ptool-turn shell is the only card). */
+[data-theme="tofu"] .code-exec-block{
+  --_dot-color: #978BB8;
+  --_rail-glow: transparent;
+  position: relative;
+  border: none;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  overflow: hidden;
+}
+[data-theme="tofu"] .code-exec-header{
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: linear-gradient(180deg, rgba(0,0,0,0.015) 0%, transparent 100%);
+  border-bottom: 1px solid rgba(151,139,184,0.15);
+  z-index: 1;
+}
+[data-theme="tofu"] .code-exec-icon{
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px; height: 16px;
+  flex-shrink: 0;
+}
+[data-theme="tofu"] .code-exec-icon::before{
+  content: "";
+  position: absolute;
+  left: 50%; top: 50%;
+  margin: -4px 0 0 -4px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--_dot-color);
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.5), 0 0 4px var(--_rail-glow);
+  transition: background 0.4s, box-shadow 0.4s;
+}
+[data-theme="tofu"] .code-exec-icon svg{
+  opacity: 0;
+  width: 0; height: 0;
+}
+[data-theme="tofu"] .code-exec-label{
+  color: #716A55;
+  font-family:var(--sans-body);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+[data-theme="tofu"] .code-exec-ok{
+  --_dot-color: #6A9E5A;
+  --_rail-glow: rgba(106,158,90,0.35);
+  border-color: rgba(106,158,90,0.2);
+}
+[data-theme="tofu"] .code-exec-ok .code-exec-icon::before{
+  animation: tofuDotStamp 0.4s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+[data-theme="tofu"] .code-exec-ok .code-exec-status{
+  color: #F4F1EA;
+  background: linear-gradient(135deg, #6A9E5A 0%, #5C8A4E 100%);
+  border: none;
+  border-radius: 20px;
+  box-shadow: 0 1px 3px rgba(94,138,80,0.18);
+  animation: tofuStamp 0.45s cubic-bezier(0.34,1.56,0.64,1) both,
+             tofuStatusGlow 0.6s 0.3s ease-out both;
+}
+[data-theme="tofu"] .code-exec-err{
+  --_dot-color: #C0685A;
+  --_rail-glow: rgba(192,104,90,0.35);
+  border-color: rgba(192,104,90,0.25);
+}
+[data-theme="tofu"] .code-exec-err .code-exec-icon::before{
+  animation: tofuDotStamp 0.4s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+[data-theme="tofu"] .code-exec-err .code-exec-status{
+  color: #F4F1EA;
+  background: linear-gradient(135deg, #C0685A 0%, #A85A4A 100%);
+  border: none;
+  border-radius: 20px;
+  box-shadow: 0 1px 3px rgba(184,106,90,0.18);
+  animation: tofuStamp 0.45s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+[data-theme="tofu"] .code-exec-timeout .code-exec-status{
+  color: #6B5E42;
+  background: rgba(204,168,88,0.12);
+  border: 1px solid rgba(204,168,88,0.22);
+  border-radius: 20px;
+}
+[data-theme="tofu"] .code-exec-running{
+  --_dot-color: #B098D0;
+  --_rail-glow: rgba(176,152,208,0.4);
+  border-color: rgba(151,139,184,0.35);
+}
+[data-theme="tofu"] .code-exec-running .code-exec-icon::before{
+  animation: tofuDotPulse 1.4s ease-in-out infinite;
+}
+[data-theme="tofu"] .code-exec-running .code-exec-label{
+  color: #7B6CA0;
+  opacity: 1;
+}
+[data-theme="tofu"] .code-exec-running::after{
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(151,139,184,0.04) 40%,
+    rgba(151,139,184,0.07) 50%,
+    rgba(151,139,184,0.04) 60%,
+    transparent 100%);
+  background-size: 250% 100%;
+  animation: tofuCmdSweep 3s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ═══════════════════════════════════════════
+   ★ Tofu Swarm status pills — harmonized
+   ═══════════════════════════════════════════ */
+[data-theme="tofu"] .sw-status-pill.sw-pill-done{
+  color: #5E8A50;
+  background: rgba(106,138,94,0.08);
+}
+[data-theme="tofu"] .sw-agent.sw-a-done,
+[data-theme="tofu"] .sw-agent.sw-a-completed{
+  border-color: rgba(106,138,94,0.2);
+  background: rgba(106,138,94,0.02);
+}
+[data-theme="tofu"] .sw-a-done .sw-a-phase-pill,
+[data-theme="tofu"] .sw-a-completed .sw-a-phase-pill{
+  color: #5E8A50;
+  background: rgba(106,138,94,0.08);
+}
+[data-theme="tofu"] .sw-dep-tag.sw-dep-done{
+  background: rgba(106,138,94,0.06);
+  border-color: rgba(106,138,94,0.15);
+  color: #5E8A50;
+}
+
+/* ── Tofu swarm: agent role tags / id chips / status text need darker
+      ink on the cream surface — the dark-theme mint/sky tints wash out. ── */
+[data-theme="tofu"] .sw-a-role-tag{
+  color:#8a6d1f;background:rgba(184,136,74,0.14);border-color:rgba(184,136,74,0.40);
+}
+[data-theme="tofu"] .sw-a-done .sw-a-role-tag,
+[data-theme="tofu"] .sw-a-completed .sw-a-role-tag{
+  color:#3f6b34;background:rgba(106,138,94,0.16);border-color:rgba(106,138,94,0.42);
+}
+[data-theme="tofu"] .sw-a-running .sw-a-role-tag{
+  color:#2b6cb0;background:rgba(43,108,176,0.12);border-color:rgba(43,108,176,0.38);
+}
+[data-theme="tofu"] .sw-a-failed .sw-a-role-tag,
+[data-theme="tofu"] .sw-a-error .sw-a-role-tag{
+  color:#b23b2e;background:rgba(192,57,43,0.12);border-color:rgba(192,57,43,0.38);
+}
+[data-theme="tofu"] .sw-a-id{
+  color:#6a6258;background:rgba(0,0,0,0.05);border-color:rgba(0,0,0,0.12);
+}
+[data-theme="tofu"] .sw-a-id:hover{
+  color:#403a32;background:rgba(0,0,0,0.08);border-color:rgba(0,0,0,0.20);
+}
+[data-theme="tofu"] .sw-a-num{color:#6a6258;}
+[data-theme="tofu"] .sw-a-running .sw-a-status-icon{color:#2b6cb0;}
+[data-theme="tofu"] .sw-a-done .sw-a-status-icon,
+[data-theme="tofu"] .sw-a-completed .sw-a-status-icon{color:#3f6b34;}
+[data-theme="tofu"] .sw-a-failed .sw-a-status-icon,
+[data-theme="tofu"] .sw-a-error .sw-a-status-icon{color:#b23b2e;}
+[data-theme="tofu"] .sw-status-pill.sw-pill-running{color:#2b6cb0;background:rgba(43,108,176,0.10);}
+[data-theme="tofu"] .sw-status-pill.sw-pill-error{color:#b23b2e;background:rgba(192,57,43,0.10);}
+[data-theme="tofu"] .sw-status-pill.sw-pill-planning{color:#8a6d1f;background:rgba(184,136,74,0.12);}
+[data-theme="tofu"] .sw-header-subtitle .sw-cnt-running{color:#2b6cb0;}
+[data-theme="tofu"] .sw-header-subtitle .sw-cnt-done{color:#3f6b34;}
+[data-theme="tofu"] .sw-header-subtitle .sw-cnt-failed{color:#b23b2e;}
+[data-theme="tofu"] .sw-a-running .sw-a-phase-pill{color:#2b6cb0;background:rgba(43,108,176,0.10);}
+[data-theme="tofu"] .sw-a-failed .sw-a-phase-pill,
+[data-theme="tofu"] .sw-a-error .sw-a-phase-pill{color:#b23b2e;background:rgba(192,57,43,0.10);}
+
+/* ═══════════════════════════════════════════
+   ★ Tofu swarm PANEL — un-box the dashboard inside its round card
+   Root cause of the "white frame around a beige slab": the ptool redesign
+   (2026-07-08) made each round ONE #FFFDF9 card, but the swarm dashboard
+   still drew itself as a SECOND, darker filled card inside it (bg-secondary
+   + border + shadow, inset by margin) — boxes-in-boxes. Tofu now treats
+   .sw-panel as chrome-less content of its .ptool-turn: the round card is
+   the only frame; status reads from title/pill/progress accents in the
+   wagashi palette (kinako active / matcha complete / azuki failed), and
+   the dark-theme neon + white-alpha fills (invisible on cream) become
+   warm ink steps. Dark/light themes are untouched.
+   ═══════════════════════════════════════════ */
+[data-theme="tofu"] .sw-panel{background:transparent;border:none;box-shadow:none}
+[data-theme="tofu"] .ptool-panel-body [data-prn] > .sw-panel{margin:2px 0}
+[data-theme="tofu"] .sw-panel.sw-active{border:none;box-shadow:none;animation:none}
+[data-theme="tofu"] .sw-header:hover{background:rgba(196,149,106,0.07)}
+[data-theme="tofu"] .sw-header-icon{color:#B8884A}
+[data-theme="tofu"] .sw-complete .sw-header-icon{color:#5E8A50}
+[data-theme="tofu"] .sw-header-title{color:#A67B52}
+[data-theme="tofu"] .sw-complete .sw-header-title{color:#5E8A50}
+[data-theme="tofu"] .sw-progress-track{background:rgba(92,72,44,0.10)}
+[data-theme="tofu"] .sw-progress-fill{background:linear-gradient(90deg,#C4956A,#A67B52)}
+[data-theme="tofu"] .sw-complete .sw-progress-fill{background:linear-gradient(90deg,#7A9E6A,#5E8A50)}
+[data-theme="tofu"] .sw-progress-fill.has-errors{background:linear-gradient(90deg,#7A9E6A 0%,#7A9E6A var(--ok-pct),#B05B48 var(--ok-pct),#B05B48 100%)}
+[data-theme="tofu"] .sw-agent{background:transparent;border-color:rgba(196,149,106,0.30)}
+[data-theme="tofu"] .sw-agent.sw-a-running{border-color:rgba(43,108,176,0.32);background:rgba(43,108,176,0.04)}
+[data-theme="tofu"] .sw-agent.sw-a-failed,
+[data-theme="tofu"] .sw-agent.sw-a-error{border-color:rgba(192,57,43,0.32);background:rgba(192,57,43,0.04)}
+[data-theme="tofu"] .sw-agent.sw-a-stalled{border-color:rgba(184,136,74,0.40);background:rgba(184,136,74,0.05)}
+[data-theme="tofu"] .sw-a-stalled .sw-a-status-icon{color:#B8884A}
+[data-theme="tofu"] .sw-a-stalled .sw-a-role-tag{color:#8a6d1f;background:rgba(184,136,74,0.12);border-color:rgba(184,136,74,0.36)}
+[data-theme="tofu"] .sw-agent.sw-a-has-edits{box-shadow:inset 2px 0 0 rgba(184,136,74,0.45)}
+[data-theme="tofu"] .sw-a-edited{color:#8a6d1f;background:rgba(184,136,74,0.10);border-color:rgba(184,136,74,0.30)}
+/* Inner surfaces: white-alpha fills (authored for the dark theme, near-
+   invisible or a dirty white wash on cream) → warm ink steps. */
+[data-theme="tofu"] .sw-a-objective{background:rgba(146,110,66,0.05);border-left-color:rgba(184,136,74,0.40)}
+[data-theme="tofu"] .sw-a-done .sw-a-objective,
+[data-theme="tofu"] .sw-a-completed .sw-a-objective{border-left-color:rgba(106,138,94,0.40)}
+[data-theme="tofu"] .sw-a-failed .sw-a-objective,
+[data-theme="tofu"] .sw-a-error .sw-a-objective{border-left-color:rgba(192,57,43,0.40)}
+[data-theme="tofu"] .sw-a-tool-tag{background:rgba(146,110,66,0.06);border-color:rgba(146,110,66,0.16);color:#8a7d63}
+[data-theme="tofu"] .sw-a-timeline{background:rgba(146,110,66,0.04);border-color:rgba(146,110,66,0.14)}
+[data-theme="tofu"] .sw-tl-expandable:hover .sw-tl-line{background:rgba(146,110,66,0.07)}
+[data-theme="tofu"] .sw-tl-running{background:rgba(184,136,74,0.55);box-shadow:0 0 0 2px rgba(184,136,74,0.15)}
+[data-theme="tofu"] .sw-tl-done{background:rgba(106,138,94,0.60)}
+[data-theme="tofu"] .sw-tl-failed{background:rgba(192,57,43,0.60)}
+[data-theme="tofu"] .sw-tl-detail{background:rgba(146,110,66,0.06);border-left-color:rgba(146,110,66,0.25)}
+[data-theme="tofu"] .sw-tl-detail-error{border-left-color:#b23b2e;color:#b23b2e}
+[data-theme="tofu"] .sw-a-preview{background:rgba(146,110,66,0.04);border-color:rgba(146,110,66,0.14)}
+[data-theme="tofu"] .sw-a-preview-live{border-color:rgba(184,136,74,0.32);background:rgba(184,136,74,0.05)}
+[data-theme="tofu"] .sw-a-err{color:#b23b2e;background:rgba(192,57,43,0.06)}
+[data-theme="tofu"] .sw-typing-cursor{color:#B8884A}
+[data-theme="tofu"] .sw-dep-tag{background:rgba(184,136,74,0.08);border-color:rgba(184,136,74,0.20);color:#8a6d1f}
+[data-theme="tofu"] .sw-footer{border-top-color:rgba(196,149,106,0.22)}
+[data-theme="tofu"] .sw-complete .sw-footer{border-top-color:rgba(106,138,94,0.22)}
+[data-theme="tofu"] .sw-spinner{border-color:rgba(184,136,74,0.25);border-top-color:#B8884A}
+[data-theme="tofu"] .sw-status-pill.sw-pill-async{color:#8a6d1f;background:rgba(184,136,74,0.10);border-color:rgba(184,136,74,0.28)}
+[data-theme="tofu"] .sw-status-pill.sw-pill-async .sw-async-dot{background:#B8884A}
+/* Pending phase pill: the last white-alpha fill left in the swarm base
+   section — warm ink wash on cream. */
+[data-theme="tofu"] .sw-a-pending .sw-a-phase-pill{background:rgba(146,110,66,0.07)}
+/* Inbox chip ("N swarm-update arrived" between messages): same swarm
+   vocabulary as the panel, so it gets the same wagashi treatment —
+   neon amber/green + neon flash shadow read jarring on the paper page. */
+@keyframes tofuSwInboxChipFlash{0%{box-shadow:0 0 0 0 rgba(184,136,74,0.30)}40%{box-shadow:0 0 14px 0 rgba(184,136,74,0.18)}100%{box-shadow:0 0 0 0 rgba(184,136,74,0)}}
+[data-theme="tofu"] .sw-inbox-chip{color:#8a6d1f;background:linear-gradient(135deg,rgba(184,136,74,0.07),rgba(106,138,94,0.05));border-color:rgba(184,136,74,0.28);animation-name:tofuSwInboxChipFlash}
+[data-theme="tofu"] .sw-inbox-chip-icon{color:#B8884A}
+[data-theme="tofu"] .sw-inbox-chip-count{color:#5E8A50}
+
+/* ── Human Guidance card — warm kinako palette ── */
+[data-theme="tofu"] .hg-card {
+  border-color: rgba(187, 149, 114, 0.35);
+  background: linear-gradient(135deg, rgba(187, 149, 114, 0.08) 0%, rgba(151, 139, 184, 0.06) 100%);
+}
+[data-theme="tofu"] .hg-header {
+  border-bottom-color: rgba(187, 149, 114, 0.18);
+  background: rgba(187, 149, 114, 0.08);
+}
+[data-theme="tofu"] .hg-title {
+  color: #6B5A42;
+}
+[data-theme="tofu"] .hg-badge {
+  color: #A07D5A;
+  background: rgba(187, 149, 114, 0.15);
+  border-color: rgba(187, 149, 114, 0.30);
+}
+[data-theme="tofu"] .hg-question {
+  color: #4A4233;
+}
+[data-theme="tofu"] .hg-question code {
+  background: rgba(138, 122, 86, 0.10);
+  color: #6B5A42;
+}
+[data-theme="tofu"] .hg-question strong { color: #3D3627; }
+[data-theme="tofu"] .hg-question h1, [data-theme="tofu"] .hg-question h2,
+[data-theme="tofu"] .hg-question h3, [data-theme="tofu"] .hg-question h4,
+[data-theme="tofu"] .hg-question h5, [data-theme="tofu"] .hg-question h6 {
+  color: #3D3627;
+}
+[data-theme="tofu"] .hg-question blockquote {
+  border-left-color: rgba(187, 149, 114, 0.45);
+  color: #6B5A42;
+}
+[data-theme="tofu"] .hg-question a { color: #8B6914; }
+[data-theme="tofu"] .hg-opt-desc code {
+  background: rgba(138, 122, 86, 0.10);
+  color: #6B5A42;
+}
+[data-theme="tofu"] .hg-option-card {
+  border-color: rgba(187, 149, 114, 0.30);
+  background: rgba(187, 149, 114, 0.07);
+  color: #4A4233;
+}
+[data-theme="tofu"] .hg-option-card:hover {
+  border-color: rgba(187, 149, 114, 0.55);
+  background: rgba(187, 149, 114, 0.15);
+  box-shadow: 0 2px 10px -3px rgba(187, 149, 114, 0.20);
+}
+[data-theme="tofu"] .hg-option-card.hg-selected {
+  border-color: rgba(106, 168, 152, 0.6);
+  background: rgba(106, 168, 152, 0.12);
+  box-shadow: 0 0 14px -4px rgba(106, 168, 152, 0.25);
+}
+[data-theme="tofu"] .hg-option-card.hg-selected .hg-opt-label::before {
+  color: #5E8A50;
+}
+[data-theme="tofu"] .hg-opt-label {
+  color: #5C5340;
+}
+[data-theme="tofu"] .hg-opt-desc {
+  color: #716A55;
+}
+[data-theme="tofu"] .hg-textarea {
+  background: #F5F3ED;
+  color: #4A4233;
+  border-color: rgba(187, 149, 114, 0.30);
+}
+[data-theme="tofu"] .hg-textarea:focus {
+  border-color: #BB9572;
+}
+[data-theme="tofu"] .hg-submit-btn {
+  background: #BB9572;
+  color: #FFFCF6;
+}
+[data-theme="tofu"] .hg-submit-btn:hover {
+  background: #A8845E;
+}
+/* Also fix for light theme */
+[data-theme="light"] .hg-card {
+  border-color: rgba(99, 102, 241, 0.30);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.06) 0%, rgba(139, 92, 246, 0.04) 100%);
+}
+[data-theme="light"] .hg-header {
+  border-bottom-color: rgba(99, 102, 241, 0.15);
+  background: rgba(99, 102, 241, 0.06);
+}
+[data-theme="light"] .hg-title {
+  color: #4338ca;
+}
+[data-theme="light"] .hg-badge {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.25);
+}
+[data-theme="light"] .hg-question {
+  color: #1e293b;
+}
+[data-theme="light"] .hg-option-card {
+  border-color: rgba(99, 102, 241, 0.25);
+  background: rgba(99, 102, 241, 0.05);
+  color: #1e293b;
+}
+[data-theme="light"] .hg-option-card:hover {
+  border-color: rgba(99, 102, 241, 0.50);
+  background: rgba(99, 102, 241, 0.12);
+}
+[data-theme="light"] .hg-opt-label {
+  color: #312e81;
+}
+[data-theme="light"] .hg-opt-desc {
+  color: #475569;
+}
+[data-theme="light"] .hg-question strong { color: #0f172a; }
+[data-theme="light"] .hg-question h1, [data-theme="light"] .hg-question h2,
+[data-theme="light"] .hg-question h3, [data-theme="light"] .hg-question h4,
+[data-theme="light"] .hg-question h5, [data-theme="light"] .hg-question h6 {
+  color: #0f172a;
+}
+[data-theme="light"] .hg-question blockquote {
+  border-left-color: rgba(99, 102, 241, 0.35);
+  color: #475569;
+}
+[data-theme="light"] .hg-question code {
+  background: rgba(99, 102, 241, 0.08);
+  color: #4338ca;
+}
+[data-theme="light"] .hg-opt-desc code {
+  background: rgba(99, 102, 241, 0.08);
+  color: #4338ca;
+}
+
+/* ── Tofu responsive ── */
+@media (max-width:768px){
+  /* .welcome-icon 的移动阶梅已上提到基础层 BRAND-AREA SCALE(三主题共用) */
+    [data-theme="tofu"] .md-content{font-size:14.5px}
+}
+@media (max-width:480px){
+    [data-theme="tofu"] .md-content{font-size:13.5px}
+}
+
+/* `.sidebar-tofu-icon{image-rendering:pixelated}` 已删除,不是移动。
+   前提是错的:该规则的原注释写「Pixel art crisp rendering」,但侧栏吉祥物早已在
+   logo 重设计轮换成 static/icons/tofu-welcome.svg —— 实测该文件是 VTracer 矢量
+   输出(46 条 bezier path、0 个 rect、0 个 gradient),不是像素画。对矢量施加
+   pixelated 会关掉抗锯齿、把曲线边缘硬化,22px 处最明显。欢迎屏同一份资产从未
+   设过它,故删除即是三主题 × 两处的同源。渲染保真度属品牌形态,见基础层锁定块。 */
+

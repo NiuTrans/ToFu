@@ -1,0 +1,3707 @@
+/* ══════════════════════════════════════════════════════
+   settings.css — styles specific to the Settings modal panels.
+
+   Extracted from static/styles.css (2026-07-18) so a settings PAGE's
+   structure (static/settings_panels/<tab>.html), logic
+   (static/js/settings/*.js) and styles (here) live together and are easy to
+   locate. Served hashed + minified by lib/css_bundler.py alongside styles.css;
+   the <link> is injected by routes/common.py right after the styles.css link.
+
+   Migration is incremental — rules move here per settings page. Shared
+   settings chrome (.settings-tab, .settings-field, .stg-*) stays in styles.css
+   until a later batch.
+   ══════════════════════════════════════════════════════ */
+
+/* ── Translation tab: Machine Translation provider selector ── */
+.mt-provider-select {
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--s-ink);
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: 6px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color .15s;
+}
+.mt-provider-select:focus { border-color: var(--accent-color, #d4a853); }
+
+/* ── Translation tab: Machine Translation provider card ── */
+.mt-provider-card {
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  overflow: hidden;
+  margin-bottom: 14px;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.mt-provider-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--s-shadow-sm);
+}
+.mt-provider-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(26,24,20,0.08);
+  background: rgba(26,24,20,0.02);
+}
+.mt-provider-logo {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(212,168,83,0.10), rgba(212,168,83,0.04));
+  border: 1px solid rgba(212,168,83,0.2);
+}
+.mt-provider-info { flex: 1; min-width: 0; }
+.mt-provider-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--s-ink);
+  line-height: 1.3;
+}
+.mt-provider-desc {
+  font-size: 11.5px;
+  color: var(--s-ink-soft);
+  margin-top: 2px;
+}
+.mt-apply-link {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--s-white);
+  background: var(--accent-color, #d4a853);
+  border: 2px solid var(--s-ink);
+  border-radius: 8px;
+  box-shadow: 2px 2px 0 var(--s-ink);
+  text-decoration: none;
+  transition: transform 0.1s, box-shadow 0.1s;
+  white-space: nowrap;
+}
+.mt-apply-link:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+}
+.mt-apply-link:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.mt-provider-card-body {
+  padding: 14px 16px;
+}
+.mt-provider-card-body .settings-row { margin-bottom: 8px; }
+.mt-provider-card-body .settings-field label {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+
+/* ══ oauth / preferences / feishu settings pages (moved from styles.css 2026-07-18) ══ */
+.feishu-status-dot { font-size: 16px; flex-shrink: 0; cursor: default; }
+/* ══════════════════════════════════════════════════════
+   OAuth Subscription Login Tab
+   ══════════════════════════════════════════════════════ */
+/* The only ownership decision a normal user needs: approve the account;
+   Tofu handles infrastructure and recovery behind the page. */
+.oauth-responsibility {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+.oauth-responsibility-item {
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+.oauth-responsibility-item.is-user { border-left: 4px solid var(--s-ink); }
+.oauth-responsibility-item.is-system {
+  border-left: 4px solid var(--s-gold);
+  background: rgba(201, 153, 63, .08);
+}
+.oauth-responsibility-label {
+  color: var(--s-muted);
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+.oauth-responsibility-item strong {
+  color: var(--s-ink);
+  font-size: 12px;
+  line-height: 1.55;
+}
+@media (max-width: 620px) {
+  .oauth-responsibility { grid-template-columns: 1fr; }
+}
+
+/* ── OAuth tab: 3-step flow strip (the whole flow in one glance) ── */
+.oauth-steps {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+.oauth-step {
+  flex: 1;
+  min-width: 150px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+}
+.oauth-step-num {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--s-ink);
+  color: var(--s-white);
+  font-weight: 800;
+  font-size: 12px;
+  border-radius: 50%;
+}
+.oauth-step-title { font-size: 12.5px; font-weight: 800; color: var(--s-ink); }
+.oauth-step-sub { font-size: 11.5px; color: var(--s-muted); margin-top: 1px; line-height: 1.4; }
+.oauth-step-arrow { align-self: center; color: var(--s-muted); font-weight: 800; }
+
+/* China-access banner — same amber language as .stg-oauth-note */
+.oauth-china-note {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8a5a00;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1.5px solid rgba(245, 158, 11, 0.4);
+  border-radius: var(--s-radius);
+}
+
+.oauth-provider-card {
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  padding: 16px;
+  margin-bottom: 12px;
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-sm);
+}
+.oauth-provider-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.oauth-provider-name {
+  font-weight: 800;
+  font-size: 14px;
+  color: var(--s-ink);
+  flex: 1;
+}
+.oauth-status-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--s-cream);
+  color: var(--s-muted);
+  border: 1px solid var(--s-border-color, #ccc);
+}
+.oauth-status-badge.authenticated {
+  background: #d4edda;
+  color: #155724;
+  border-color: #28a745;
+}
+.oauth-status-badge.pending {
+  background: #fff3cd;
+  color: #856404;
+  border-color: #ffc107;
+}
+.oauth-status-badge.error {
+  background: #f8d7da;
+  color: #721c24;
+  border-color: #dc3545;
+}
+.oauth-provider-desc {
+  font-size: 12px;
+  color: var(--s-muted);
+  margin: 4px 0 10px;
+  line-height: 1.5;
+}
+.oauth-provider-desc {
+  font-size: 12px;
+  color: var(--s-muted);
+  margin: 4px 0 10px;
+  line-height: 1.5;
+}
+.oauth-provider-info {
+  font-size: 12px;
+  color: var(--s-ink);
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background: var(--s-cream);
+  border-radius: var(--s-radius);
+}
+.oauth-email {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.oauth-egress-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--s-border-color, #ccc);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  color: var(--s-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.oauth-egress-line::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #8b8b8b;
+}
+.oauth-egress-line.is-ok::before { background: #28a745; }
+.oauth-egress-line.is-checking::before { background: #d39e00; }
+.oauth-egress-line.is-warning::before { background: #e07a1f; }
+.oauth-egress-line.is-error::before { background: #dc3545; }
+
+/* Subscription-quota meter card (Codex). The renderer
+   (_renderOAuthQuota in app-runtime.js) emits these classes; without them
+   the block renders as bare text and the level track is invisible. Styled
+   like the tofu-bar convention: white track + 1.5px ink border, gold fill
+   (same as [data-theme="tofu"] .upd-restart-bar in styles.css). */
+.oauth-quota {
+  margin-bottom: 10px;
+  padding: 8px 12px 10px;
+  background: var(--s-cream);
+  border: var(--s-border-sm);
+  box-shadow: var(--s-shadow-xs);
+  font-size: 12px;
+  color: var(--s-ink);
+}
+.oauth-quota-title {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--s-ink-soft);
+  margin-bottom: 6px;
+}
+.oauth-quota-pending {
+  color: var(--s-muted);
+  line-height: 1.5;
+}
+.oauth-quota-row {
+  margin-top: 6px;
+}
+.oauth-quota-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.oauth-quota-row-head > span:last-child {
+  font-weight: 700;
+}
+
+.oauth-quota-window {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.oauth-quota-reset {
+  color: var(--s-muted);
+  font-family: var(--font-sans, sans-serif);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.oauth-quota-track {
+  height: 8px;
+  background: var(--s-white);
+  border: var(--s-border-sm);
+  overflow: hidden;
+}
+.oauth-quota-track > span {
+  display: block;
+  height: 100%;
+  background: var(--s-gold);
+  transition: width 0.3s ease;
+}
+.oauth-quota-source {
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--s-muted);
+}
+.oauth-reset-offer {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1.5px solid var(--s-gold-dim);
+  background: rgba(201, 153, 63, .1);
+  box-shadow: var(--s-shadow-xs);
+  color: var(--s-ink);
+}
+.oauth-reset-offer.is-stale {
+  border-color: var(--s-border-color, #aaa);
+  background: var(--s-cream);
+}
+.oauth-reset-offer.is-checking {
+  border-style: dashed;
+  color: var(--s-muted);
+}
+.oauth-reset-offer-title {
+  font-size: 12px;
+  font-weight: 850;
+  margin-bottom: 4px;
+}
+.oauth-reset-offer-copy,
+.oauth-reset-offer-hint {
+  font-size: 11px;
+  line-height: 1.5;
+}
+.oauth-reset-offer-meta {
+  margin-top: 4px;
+  color: var(--s-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+}
+.oauth-reset-offer-hint {
+  margin-top: 5px;
+  color: var(--s-ink-soft);
+}
+.oauth-provider-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.oauth-provider-actions .btn-small,
+.oauth-manual-fallback .btn-small {
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.oauth-provider-actions .btn-small:hover,
+.oauth-manual-fallback .btn-small:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+}
+.oauth-provider-actions .btn-primary,
+.oauth-manual-fallback .btn-primary {
+  background: var(--s-ink);
+  color: var(--s-white);
+}
+.oauth-provider-actions .btn-danger,
+.oauth-manual-fallback .btn-danger {
+  background: #dc3545;
+  color: #fff;
+  border-color: #dc3545;
+}
+.oauth-manual-fallback .btn-small:not(.btn-primary):not(.btn-danger) {
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.oauth-manual-fallback {
+  margin-top: 10px;
+  padding: 10px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 8px;
+  border: 1px dashed var(--s-border);
+}
+.oauth-manual-hint {
+  font-size: 12px;
+  color: var(--s-muted);
+  margin: 0 0 8px;
+}
+.oauth-manual-input {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--s-border);
+  background: var(--bg-input);
+  color: var(--fg);
+  font-size: 12px;
+  font-family: monospace;
+}
+/* "Noted: you prefer X" — the learn/confirm moment (layer 3). A calm card
+   with one row per learned/staged preference; pending rows carry the
+   Confirm/Dismiss propose-then-confirm buttons. */
+.pref-learned-box{
+  display:flex;flex-direction:column;gap:6px;margin:0 0 8px 0;
+}
+.pref-learned-box .pl-row{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:7px 10px;border-radius:6px;
+  background:rgba(148,163,184,0.04);
+  border:1px solid rgba(148,163,184,0.16);
+  font-size:12px;line-height:1.45;color:var(--text-secondary);
+}
+/* Pending rows (with Confirm/Dismiss) keep a faint indigo accent so the
+   actionable card stands out from the informational ones. */
+.pref-learned-box .pl-row.pl-pending{
+  background:rgba(99,102,241,0.05);
+  border-color:rgba(99,102,241,0.22);
+}
+.pref-learned-box .pl-lead{flex-shrink:0;display:flex;align-items:center;color:rgba(45,212,191,0.85)}
+.pref-learned-box .pl-pending .pl-lead{color:rgba(129,140,248,0.95)}
+.pref-learned-box .pl-text{flex:1;min-width:0;color:var(--text-primary,#e4e4e7)}
+.pref-learned-box .pl-text b{font-weight:600}
+.pref-learned-box .pl-hint{
+  display:block;font-size:10.5px;opacity:0.65;margin-top:2px;
+}
+.pref-learned-box .pl-actions{display:flex;gap:6px;flex-shrink:0}
+.pref-learned-box .pl-btn{
+  font:inherit;font-size:11px;font-weight:600;cursor:pointer;
+  padding:4px 12px;border-radius:6px;border:1px solid transparent;
+  transition:background .15s ease,border-color .15s ease;
+}
+.pref-learned-box .pl-confirm{
+  background:rgba(99,102,241,0.85);border-color:rgba(99,102,241,0.95);
+  color:#ffffff;
+}
+.pref-learned-box .pl-confirm:hover{background:rgba(99,102,241,1)}
+.pref-learned-box .pl-dismiss{
+  background:transparent;border-color:rgba(148,163,184,0.3);
+  color:var(--text-secondary);
+}
+.pref-learned-box .pl-dismiss:hover{background:rgba(148,163,184,0.12)}
+.pref-learned-box .pl-resolved{opacity:0.75}
+/* ── Preferences settings tab — pending-proposal rows ── */
+.prefs-pending-list{display:flex;flex-direction:column;gap:8px;margin:6px 0 4px 0}
+.prefs-pending-row{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:8px 12px;border-radius:8px;
+  background:rgba(99,102,241,0.06);border:1px solid rgba(99,102,241,0.18);
+}
+.prefs-pending-text{flex:1;min-width:0;color:var(--text-primary,#e4e4e7);font-size:12.5px}
+.prefs-pending-text b{font-weight:600}
+.prefs-pending-evidence{font-size:10.5px;opacity:0.65;margin-top:2px}
+.prefs-pending-actions{display:flex;gap:6px;flex-shrink:0}
+/* ══════════════════════════════════════════════════════
+   My Context settings tab — "paper dossier" (2026-08 redesign)
+   Index-card archive metaphor on the tofu block system: mono eyebrow
+   stamps, highlighter titles, punched-ticket WHEN→DO rules, ledger
+   capacity meter, hard-shadow card physics. No indigo glass.
+   ══════════════════════════════════════════════════════ */
+
+/* ── Hero: the dossier cover ── */
+.ctx-hero{
+  position:relative;display:flex;align-items:flex-start;justify-content:space-between;gap:24px;
+  margin:0 0 20px;padding:26px 26px 22px;
+  border:var(--s-border);background:var(--s-white);
+  box-shadow:var(--s-shadow-sm);overflow:hidden;
+}
+/* gold file-tab stitched along the top edge */
+.ctx-hero::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:5px;
+  background:repeating-linear-gradient(90deg,var(--s-gold) 0 22px,rgba(201,153,63,.3) 22px 26px);
+}
+/* faint archive watermark */
+.ctx-hero::after{
+  content:'DOSSIER';position:absolute;right:14px;bottom:8px;pointer-events:none;
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:.42em;
+  color:rgba(26,24,20,.15);transform:rotate(-3deg);
+}
+.ctx-hero-copy{max-width:640px;min-width:0}
+.ctx-eyebrow{
+  display:flex;align-items:center;gap:8px;margin-bottom:9px;
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;
+  letter-spacing:.2em;color:var(--s-gold-dim);
+}
+.ctx-eyebrow::before{content:'';width:8px;height:8px;flex:none;background:var(--s-gold);box-shadow:1px 1px 0 var(--s-ink)}
+.ctx-title{
+  align-self:flex-start;display:inline-flex;margin:0 0 8px!important;padding:0 2px;
+  font-size:22px!important;font-weight:900;letter-spacing:.01em;line-height:1.3;
+  color:var(--s-ink);text-transform:none;
+  background:linear-gradient(transparent 58%,var(--s-gold-glow) 58% 94%,transparent 94%);
+}
+.ctx-intro{margin:0;color:var(--s-ink-soft);font-size:13px;line-height:1.8;font-weight:500}
+/* always-on: rubber stamp */
+.ctx-always-on{
+  flex:none;display:flex;align-items:center;gap:7px;margin-top:4px;padding:6px 10px;white-space:nowrap;
+  border:1.5px solid var(--s-gold-dim);outline:1px solid rgba(168,125,46,.45);outline-offset:2px;
+  background:rgba(201,153,63,.07);color:var(--s-gold-dim);
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:.08em;
+  transform:rotate(-2deg);
+}
+.ctx-live-dot{width:7px;height:7px;flex:none;background:var(--s-gold);border:1px solid var(--s-gold-dim);animation:ctxStampPulse 2.4s ease-in-out infinite}
+@keyframes ctxStampPulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── Toolbar: ledger capacity meter + tofu buttons ── */
+.ctx-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:10px;padding:0 2px}
+.ctx-toolbar-actions,.ctx-capacity{display:flex;align-items:center;gap:9px}
+.ctx-capacity{font-size:11px;font-weight:600;color:var(--s-ink-soft)}
+.ctx-capacity-count{font-family:'JetBrains Mono',monospace;font-weight:700;font-variant-numeric:tabular-nums;color:var(--s-ink)}
+.ctx-capacity-count.is-over{color:#b3261e}
+.ctx-capacity-track{width:92px;height:9px;border:1.5px solid var(--s-ink);background:var(--s-white);overflow:hidden}
+.ctx-capacity-track span{display:block;width:0;height:100%;background:var(--s-gold);transition:width .2s ease}
+.ctx-capacity-track span.is-over{background:#b3261e}
+.ctx-dirty-state{min-height:16px;font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;color:var(--s-gold-dim)}
+.ctx-status{min-height:20px;margin:4px 2px 12px;font-size:11.5px;font-weight:600;color:var(--s-ink-soft)}
+.ctx-status.is-error{color:#b3261e}
+.ctx-status.is-success{color:#147a3e}
+
+/* ── Section cards: filing-cabinet drawers ── */
+/* Masonry (CSS columns), not grid: sections have wildly unequal heights
+   (e.g. 8 identity facts vs 1 preference). A 2-col grid + full-span rule
+   section left a gaping void under the short column; columns flow each
+   drawer into the next free space with zero holes. DOM order is preserved
+   down-then-across.
+
+   Width contract: the dossier cards are designed for ≥ ~380px columns.
+   The default 860px panel only offers ~305px (860 − 178 sidebar − content
+   padding), where English facts shattered into 3-word lines and long
+   tokens broke mid-word ("ModuleNotFoundErr/or"). Two layered fixes:
+   1. While My Context is active, the panel itself widens with no JS hook. */
+@media (min-width:769px){
+  .settings-panel:has(#settingsTab_preferences.active){width:min(1180px,96vw)}
+}
+/* 2. When even that width is unavailable (96vw binds on narrower windows,
+   or :has() is unsupported), the tab's own container drops the masonry to
+   one comfortable column (the @container rule lives AFTER the base rule
+   below — equal specificity falls back to source order). This is keyed off
+   the CONTENT width, not the viewport — the panel is fixed-width, so a
+   viewport breakpoint can never see the real constraint. Scoped to the
+   preferences tab so no other tab pays the containment cost. */
+#settingsTab_preferences{container-type:inline-size}
+.ctx-groups{columns:2;column-gap:14px}
+@container (max-width:779px){
+  .ctx-groups{columns:1}
+}
+.ctx-groups[aria-busy="true"]{opacity:.55}
+.ctx-group{
+  min-width:0;margin:0 0 14px;padding:16px;break-inside:avoid;
+  border:var(--s-border);background:var(--s-white);box-shadow:var(--s-shadow-xs);
+  transition:transform .12s ease,box-shadow .12s ease;
+}
+.ctx-group:hover{transform:translate(-1px,-1px);box-shadow:var(--s-shadow-sm)}
+.ctx-group-head{display:flex;align-items:flex-start;gap:11px;margin-bottom:13px}
+.ctx-group-icon{
+  display:flex;align-items:center;justify-content:center;width:34px;height:34px;flex:0 0 34px;
+  border:var(--s-border-sm);background:var(--s-cream);color:var(--s-ink);
+  box-shadow:2px 2px 0 var(--s-ink);
+}
+.ctx-group-icon svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.ctx-group-work_rule .ctx-group-icon{background:rgba(201,153,63,.16)}
+.ctx-group-copy{min-width:0;flex:1}
+.ctx-group-title-row{display:flex;align-items:center;gap:8px}
+.ctx-group-title-row h3{margin:0;font-size:13.5px;font-weight:800;letter-spacing:.01em;color:var(--s-ink)}
+.ctx-group-title-row span{
+  min-width:20px;padding:1px 7px;text-align:center;
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;
+  background:var(--s-gold);color:var(--s-ink);border:1.5px solid var(--s-ink);
+}
+.ctx-group-copy p{margin:5px 0 0;font-size:11.5px;line-height:1.6;color:var(--s-ink-soft);opacity:.85}
+.ctx-add-btn{
+  display:flex;align-items:center;gap:5px;flex:none;padding:5px 10px;
+  border:1.5px dashed rgba(26,24,20,.4);border-radius:0;background:transparent;color:var(--s-ink-soft);
+  font:inherit;font-size:11px;font-weight:700;cursor:pointer;transition:all .12s ease;
+}
+.ctx-add-btn:hover{border-style:solid;border-color:var(--s-ink);color:var(--s-ink);background:var(--s-cream);box-shadow:2px 2px 0 var(--s-ink);transform:translate(-1px,-1px)}
+.ctx-add-btn svg{width:12px;height:12px}
+
+/* ── Fact/rule cards: numbered index cards ── */
+.ctx-items{display:flex;flex-direction:column;gap:8px;counter-reset:ctxcard}
+.ctx-empty{
+  width:100%;padding:16px 12px;border:1.5px dashed rgba(26,24,20,.3);border-radius:0;background:transparent;
+  color:rgba(61,54,44,.55);font:inherit;font-size:11.5px;font-weight:600;cursor:pointer;transition:all .12s ease;
+}
+.ctx-empty:hover{border-color:var(--s-gold-dim);color:var(--s-gold-dim);background:rgba(201,153,63,.05)}
+.ctx-item{
+  counter-increment:ctxcard;position:relative;overflow:hidden;
+  border:1.5px solid var(--s-ink);background:var(--s-white);
+  box-shadow:2px 2px 0 rgba(26,24,20,.12);
+  transition:transform .12s ease,box-shadow .12s ease;
+}
+.ctx-item:hover{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--s-ink)}
+.ctx-item.is-editing{transform:translate(-1px,-1px);box-shadow:3px 3px 0 var(--s-gold)}
+.ctx-item-view{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;cursor:pointer}
+/* archive counter: 01 / 02 / 03 … */
+.ctx-item-view::before{
+  content:counter(ctxcard,decimal-leading-zero);flex:none;margin-top:2px;
+  font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:800;letter-spacing:.05em;
+  color:rgba(26,24,20,.38);
+}
+.ctx-item:hover .ctx-item-view::before,.ctx-item.is-editing .ctx-item-view::before{color:var(--s-gold-dim)}
+.ctx-item-content{min-width:0;flex:1}
+.ctx-item-text{margin:0;color:var(--s-ink);font-size:12.5px;line-height:1.65;overflow-wrap:break-word}
+.ctx-item-meta{margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.04em;color:rgba(61,54,44,.5)}
+.ctx-item-actions{display:flex;gap:2px;opacity:0;transition:opacity .15s ease}
+.ctx-item:hover .ctx-item-actions,.ctx-item:focus-within .ctx-item-actions{opacity:1}
+.ctx-item-actions button{
+  display:flex;align-items:center;justify-content:center;width:24px;height:24px;
+  border:1.5px solid transparent;border-radius:0;background:transparent;color:rgba(61,54,44,.6);
+  cursor:pointer;transition:all .1s ease;
+}
+.ctx-item-actions button:hover{border-color:var(--s-ink);background:var(--s-cream);color:var(--s-ink)}
+.ctx-item-actions button.is-danger:hover{border-color:#b3261e;background:rgba(179,38,30,.08);color:#b3261e}
+.ctx-item-actions button svg{width:12px;height:12px}
+
+/* ── WHEN→DO: punched-ticket rule rows, stitched by a dashed link ── */
+.ctx-rule-line{display:grid;grid-template-columns:26px minmax(0,1fr);align-items:start;gap:8px}
+.ctx-rule-line+.ctx-rule-line{margin-top:7px}
+.ctx-rule-line>span{
+  position:relative;display:flex;align-items:center;justify-content:center;height:19px;
+  background:var(--s-ink);color:var(--s-white);
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;
+}
+.ctx-rule-line.is-action>span{background:var(--s-gold);color:var(--s-ink)}
+.ctx-rule-line:not(.is-action)>span::after{
+  content:'';position:absolute;left:50%;top:100%;height:8px;
+  border-left:1.5px dashed rgba(26,24,20,.35);
+}
+.ctx-rule-line p{margin:1px 0 0;color:var(--s-ink);font-size:12.5px;line-height:1.6;overflow-wrap:break-word}
+
+/* ── Inline editor ── */
+.ctx-item-editor{padding:2px 12px 12px;border-top:1.5px dashed rgba(26,24,20,.18)}
+.ctx-item-editor label{display:block;margin-top:10px}
+.ctx-item-editor label span{
+  display:block;margin-bottom:5px;
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:800;letter-spacing:.06em;color:var(--s-ink-soft);
+}
+.ctx-item-editor textarea{
+  box-sizing:border-box;width:100%;resize:vertical;min-height:56px;padding:8px 10px;
+  border:1.5px solid var(--s-ink);border-radius:0;background:var(--s-white);
+  color:var(--s-ink);font:inherit;font-size:12.5px;line-height:1.6;outline:none;
+  transition:border-color .12s ease,box-shadow .12s ease;
+}
+.ctx-item-editor textarea:focus{border-color:var(--s-gold-dim);box-shadow:2px 2px 0 var(--s-gold-glow)}
+.ctx-editor-done{
+  display:block;margin:9px 0 0 auto;padding:5px 14px;
+  border:var(--s-border-sm);border-radius:0;background:var(--s-ink);color:var(--s-white);
+  font:inherit;font-size:11px;font-weight:800;letter-spacing:.04em;cursor:pointer;
+  box-shadow:2px 2px 0 rgba(26,24,20,.25);
+  transition:transform .1s ease,box-shadow .1s ease,background .1s ease,color .1s ease;
+}
+.ctx-editor-done:hover{background:var(--s-gold);color:var(--s-ink);transform:translate(1px,1px);box-shadow:1px 1px 0 rgba(26,24,20,.25)}
+
+/* ── Experience-memory zone: perforated tear-off ledger ── */
+.ctx-memory-zone{position:relative;margin-top:30px;padding-top:26px}
+.ctx-memory-zone::before{content:'';position:absolute;top:0;left:0;right:0;border-top:2px dashed rgba(26,24,20,.25)}
+.ctx-memory-zone::after{
+  content:'✂';position:absolute;top:0;left:22px;transform:translateY(-56%);
+  padding-right:8px;background:var(--s-white);font-size:13px;color:rgba(26,24,20,.4);
+}
+.ctx-memory-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:12px}
+.ctx-memory-title{
+  align-self:flex-start;display:inline-flex;margin:0 0 6px!important;padding:0 2px;
+  font-size:16px!important;font-weight:900;letter-spacing:.02em;color:var(--s-ink);text-transform:none;
+  background:linear-gradient(transparent 58%,rgba(201,153,63,.12) 58% 94%,transparent 94%);
+}
+.ctx-memory-intro{max-width:680px;margin:0;color:var(--s-ink-soft);font-size:12px;line-height:1.7;font-weight:500}
+.ctx-memory-actions{display:flex;gap:7px;flex:none}
+/* embedded memory list reads as an inset paper tray */
+#prefsMemoryList{border:1.5px solid var(--s-ink)}
+
+@media(max-width:760px){
+  .ctx-hero,.ctx-toolbar,.ctx-memory-head{flex-direction:column}
+  .ctx-hero{padding:22px 18px 18px}
+  .ctx-always-on{align-self:flex-start;transform:rotate(-1deg)}
+  .ctx-toolbar{align-items:stretch}
+  .ctx-toolbar-actions{justify-content:flex-end}
+  .ctx-groups{columns:1}
+  .ctx-memory-actions{width:100%;flex-wrap:wrap}
+  .ctx-item-actions{opacity:1}
+}
+
+
+/* ══ mcp / skills settings pages (moved from styles.css 2026-07-18) ══ */
+/* ══════════════════════════════════════
+   MCP Apps Tab — App Store (brutalist tofu)
+   ══════════════════════════════════════ */
+
+/* ── Header row: title · tool count · connect-all · search ── */
+.mcp-store-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.mcp-store-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.mcp-store-header-title .settings-section-title { margin: 0; }
+.mcp-store-header-spacer { flex: 1; min-width: 12px; }
+.mcp-search {
+  flex: 1;
+  min-width: 180px;
+  max-width: 320px;
+  padding: 7px 12px 7px 30px;
+  font-size: 12px;
+  font-weight: 600;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 16 16' fill='none' stroke='%233d362c' stroke-width='2'><circle cx='7' cy='7' r='5'/><path d='M11 11l3 3' stroke-linecap='round'/></svg>") no-repeat 10px center;
+  color: var(--s-ink);
+  font-family: inherit;
+  box-shadow: var(--s-shadow-xs);
+  transition: box-shadow 0.1s, transform 0.1s;
+}
+.mcp-search:focus {
+  outline: none;
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--s-ink);
+}
+.mcp-search::placeholder { color: var(--s-ink-soft); opacity: 0.7; }
+/* ── Category pills ── */
+.mcp-category-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.mcp-cat-pill {
+  padding: 5px 11px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink-soft);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, transform 0.08s, box-shadow 0.08s;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mcp-cat-pill:hover {
+  background: var(--s-cream);
+  color: var(--s-ink);
+  transform: translate(-1px, -1px);
+  box-shadow: 2px 2px 0 var(--s-ink);
+}
+.mcp-cat-pill.active {
+  background: var(--s-ink);
+  color: var(--s-white);
+  border-color: var(--s-ink);
+  box-shadow: 2px 2px 0 var(--s-gold);
+}
+.mcp-cat-pill.active .mcp-cat-count { color: var(--s-gold); opacity: 1; }
+.mcp-cat-count {
+  font-weight: 700;
+  font-size: 10px;
+  opacity: 0.6;
+  font-family: 'JetBrains Mono', monospace;
+}
+/* ── Catalog: 2-col responsive grid ──
+ * Height alignment (owner directive): cards STRETCH to the row's tallest
+ * card so bottom edges sit flush. The stretch slack is quantized inside
+ * the card (desc reserves 2 lines; note/warn/compat chips clamp to 1 line)
+ * and whatever remains is spread evenly across row gaps by the card's
+ * align-content:space-between — no single pooled void. grid-auto-flow:dense
+ * still backfills the single cell an expanded (full-span) card vacates. */
+.mcp-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-flow: dense;
+  align-items: stretch;
+  gap: 10px;
+  max-height: 460px;
+  overflow-y: auto;
+  padding: 2px 6px 2px 2px;
+}
+/* A card with an open tools drawer takes the whole row: the drawer gets
+ * room for a multi-column tool layout and no sibling sits beside it. */
+.mcp-app-card.tools-open { grid-column: 1 / -1; }
+@media (max-width: 820px) {
+  .mcp-catalog-grid { grid-template-columns: 1fr; }
+}
+/* ── Skills pagination ── */
+.skills-pagination {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 2px 2px;
+  border-top: 1px dashed rgba(26, 24, 20, 0.18);
+  font-size: 11px;
+  color: var(--s-ink-soft);
+}
+.skills-page-info { opacity: .75; font-weight: 600; }
+.skills-page-ctrls { display: flex; align-items: center; gap: 3px; }
+.skills-page-btn {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1.5px solid rgba(26, 24, 20, 0.25);
+  background: var(--s-white);
+  color: var(--s-ink-soft);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  font-family: inherit;
+  transition: transform 0.1s, box-shadow 0.1s, border-color 0.1s, color 0.1s;
+}
+.skills-page-btn:hover:not([disabled]):not(.is-active) {
+  border-color: var(--s-ink);
+  color: var(--s-ink);
+  transform: translate(-1px, -1px);
+  box-shadow: 2px 2px 0 var(--s-ink);
+}
+.skills-page-btn.is-active {
+  background: var(--s-ink);
+  color: var(--s-gold);
+  border-color: var(--s-ink);
+  cursor: default;
+}
+.skills-page-btn[disabled] { opacity: .35; cursor: not-allowed; }
+.skills-page-ellipsis { opacity: .5; padding: 0 2px; }
+/* ── App card ── */
+.mcp-app-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  /* No grid-template-rows: rows hug content. When the grid stretches a
+   * shorter card to match its row-mate, space-between spreads the slack
+   * EVENLY across the row gaps instead of pooling one void between the
+   * description and the footer. */
+  align-content: space-between;
+  column-gap: 12px;
+  row-gap: 4px;
+  padding: 12px 14px 10px;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.mcp-app-card:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 var(--s-ink);
+}
+.mcp-app-card.connected {
+  background: linear-gradient(180deg, rgba(201, 153, 63, 0.05) 0%, var(--s-white) 60%);
+  box-shadow: 2px 2px 0 var(--s-gold), var(--s-shadow-xs);
+}
+.mcp-app-card.connected:hover {
+  box-shadow: 3px 3px 0 var(--s-gold), 4px 4px 0 var(--s-ink);
+}
+.mcp-app-card.installed { background: var(--s-cream); }
+/* Icon tile */
+.mcp-app-icon {
+  grid-row: 1 / span 2;
+  font-size: 24px;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  box-shadow: 2px 2px 0 var(--s-ink);
+  line-height: 1;
+}
+.mcp-app-card.connected .mcp-app-icon {
+  background: var(--s-white);
+  box-shadow: 2px 2px 0 var(--s-gold);
+}
+.mcp-app-icon img,
+.mcp-app-icon svg {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+/* Name + status dot */
+.mcp-app-name {
+  grid-column: 2;
+  font-size: 13px;
+  font-weight: 900;
+  color: var(--s-ink);
+  line-height: 1.25;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.mcp-app-name-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-app-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: var(--s-radius);
+  font-family: 'JetBrains Mono', monospace;
+  flex-shrink: 0;
+}
+.mcp-app-status .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.6);
+}
+.mcp-app-status.on {
+  background: var(--s-ink); color: var(--s-gold);
+}
+.mcp-app-status.off {
+  background: var(--s-cream); color: var(--s-ink-soft);
+  border: 1px solid var(--s-ink-soft);
+}
+.mcp-app-status.reconnecting {
+  background: #7c2d12; color: #fdba74;
+  animation: mcp-reconnect-pulse 1.6s ease-in-out infinite;
+}
+/* A subtle amber edge on a card whose server is failing to reconnect. */
+.mcp-app-card.reconnecting {
+  border-color: #b45309;
+}
+/* Credential-expired badge: the server is connected (live subprocess) but its
+   stored cookie/token no longer authenticates. Amber-warning tone, distinct
+   from the green "ON" so it reads as "attention needed, not offline". */
+.mcp-app-status.cred-expired {
+  background: #7c2d12; color: #fdba74;
+  display: inline-flex; align-items: center; gap: 3px;
+}
+.mcp-app-status.cred-expired > svg { display: block; }
+/* Amber edge on a connected-but-stale-credentials card. */
+.mcp-app-card.cred-expired {
+  border-color: #b45309;
+}
+.mcp-app-reconnecting-note {
+  font-size: 10px;
+  font-weight: 700;
+  color: #b45309;
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+}
+/* Description — clamped at 2 lines AND reserved at 2 lines (2 × 1.45em):
+ * a one-line description keeps the same body height as a two-line one, so
+ * it contributes zero variance to the row's height alignment. */
+.mcp-app-desc {
+  grid-column: 2;
+  font-size: 11.5px;
+  color: var(--s-ink-soft);
+  line-height: 1.45;
+  min-height: 2.9em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Getting-started note (catalog `install_note`): how to obtain a key, what
+ * the server can/cannot do. ONE line on the card face — multi-line notes
+ * were the biggest row-height outlier; the full text renders in the install
+ * modal (app-runtime.js _mcpOpenInstallModal), so nothing is lost to the
+ * ellipsis. MUST declare grid-column like its sibling (card is a grid). */
+.mcp-app-note {
+  grid-column: 2;
+  margin-top: 4px;
+  padding: 5px 7px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--s-ink-soft);
+  background: var(--s-bg-soft, rgba(0, 0, 0, .03));
+  border-left: 2px solid var(--s-border-strong, rgba(0, 0, 0, .12));
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mcp-app-compat-notice {
+  grid-column: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 5px;
+  margin-top: 3px;
+  padding: 3px 7px;
+  border: 1px solid rgba(180, 83, 9, .35);
+  border-radius: var(--s-radius);
+  background: rgba(245, 158, 11, .08);
+  color: #92400e;
+  font-size: 10px;
+  line-height: 1.35;
+  font-weight: 700;
+}
+.mcp-app-compat-notice { max-width: 100%; }
+.mcp-app-compat-notice > svg { flex: 0 0 auto; }
+.mcp-app-compat-notice > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-install-modal-note {
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--s-ink-soft);
+  background: var(--s-bg-soft, rgba(0, 0, 0, .03));
+  border-left: 2px solid var(--s-border-strong, rgba(0, 0, 0, .12));
+  border-radius: 3px;
+}
+/* "Where do I get this key" — a real link + optional ordered steps, rendered
+ * ABOVE the credential input. Replaces cramming a console breadcrumb into the
+ * placeholder (uncklickable, truncated, and gone as soon as the user types). */
+.mcp-obtain {
+  margin: 2px 0 5px;
+}
+.mcp-obtain-link {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent, #2563eb);
+  text-decoration: none;
+}
+.mcp-obtain-link:hover { text-decoration: underline; }
+.mcp-obtain-steps {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--s-ink-soft);
+}
+.mcp-env-saved-note,
+.mcp-env-shared-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.mcp-env-shared-note { color: var(--accent, #2563eb); }
+/* Empty-state suggestion strip: shown when nothing is installed yet. Only
+ * lists servers the user can finish installing unaided, so a chip never leads
+ * to a dead end. */
+.mcp-suggest {
+  margin: 10px auto 0;
+  max-width: 560px;
+  text-align: center;
+}
+.mcp-suggest-title {
+  font-size: 11.5px;
+  color: var(--s-ink-soft);
+  margin-bottom: 8px;
+}
+.mcp-suggest-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+}
+.mcp-suggest-chip {
+  padding: 5px 10px;
+  font-size: 11.5px;
+  color: var(--s-ink);
+  background: var(--s-white);
+  border: var(--s-border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.mcp-suggest-chip:hover {
+  border-color: var(--accent, #2563eb);
+  background: var(--s-bg-soft, rgba(0, 0, 0, .03));
+}
+/* Card footer: repo link + action
+ * Use min-height matching the .btn-xs height so the left-side text
+ * (Repo) and the right-side buttons (卸载/连接/…) share a common
+ * vertical axis regardless of whether the right side is rendered as
+ * plain text only (no button), plain buttons, or text + button. */
+.mcp-app-footer {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  min-height: 26px;   /* = compact card .btn-xs height (see action rule below) */
+  border-top: 1px dashed rgba(26, 24, 20, 0.18);
+}
+.mcp-app-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+  text-decoration: none;
+  opacity: 0.7;
+  transition: opacity 0.1s, color 0.1s;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+.mcp-app-repo svg { flex-shrink: 0; }
+.mcp-app-repo:hover { opacity: 1; color: var(--s-ink); text-decoration: underline; }
+.mcp-app-tools-count {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+  opacity: 0.7;
+  line-height: 1;
+}
+/* Per-tool toggle (pt_53065dbe86bb4286): the tools badge is a BUTTON that
+ * expands the per-tool checkbox panel — reset button chrome, keep the badge
+ * look, signal clickability on hover. */
+.mcp-tools-toggle {
+  border: 1px solid transparent;
+  background: none;
+  padding: 2px 4px;
+  border-radius: var(--s-radius);
+  cursor: pointer;
+}
+.mcp-tools-toggle:hover {
+  opacity: 1;
+  border-color: rgba(26, 24, 20, 0.18);
+  background: rgba(201, 153, 63, 0.08);
+}
+/* Recessed paper tray: pinned toolbar on top (live count + bulk actions),
+ * multi-column switch grid below — only the grid scrolls, so the toolbar
+ * stays put on long lists. */
+.mcp-tool-panel {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  box-shadow: inset 0 2px 4px rgba(74, 63, 47, 0.07);
+  padding: 7px 10px 9px;
+}
+.mcp-tool-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px 7px;
+  margin-bottom: 7px;
+  border-bottom: 1px dashed rgba(26, 24, 20, 0.18);
+}
+.mcp-tool-panel-count {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+}
+.mcp-tool-bulk { display: inline-flex; gap: 2px; flex-shrink: 0; }
+.mcp-tool-bulk-btn {
+  border: 1px solid transparent;
+  background: none;
+  padding: 2px 7px;
+  border-radius: var(--s-radius);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.1s, background 0.1s, border-color 0.1s;
+}
+.mcp-tool-bulk-btn:hover {
+  color: var(--s-ink);
+  background: rgba(201, 153, 63, 0.12);
+  border-color: rgba(26, 24, 20, 0.18);
+}
+.mcp-tool-loading { font-size: 11px; color: var(--s-ink-soft); padding: 6px 2px; }
+.mcp-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+  gap: 1px 10px;
+  max-height: 216px;
+  overflow-y: auto;
+  padding: 1px 2px;
+}
+/* Must out-specificy the ambient `.modal label` / `.settings-panel label`
+ * resets (0,1,1 — display:block + margin-bottom + uppercase text), which
+ * otherwise flatten this flex row and push the switch off the text axis. */
+.mcp-tool-grid .mcp-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.mcp-tool-row:hover { background: rgba(201, 153, 63, 0.10); }
+/* The switch is the house .stg-toggle component (styles.css): its real
+ * input is visually hidden, so the ambient modal/panel input resets
+ * (.modal input padding, [data-theme] .modal:not(...) input:not(...)
+ * background/border) paint a 1px invisible box and cannot deform the
+ * visible track/thumb spans. Do NOT restyle the input here — a previous
+ * appearance:none reskin lost that fight (0,4,1 ambient specificity)
+ * and rendered as an inflated, misaligned, never-gold pill. */
+.mcp-tool-row .stg-toggle { margin-left: auto; }
+.mcp-tool-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: var(--s-ink);
+}
+.mcp-tool-row:has(input:not(:checked)) .mcp-tool-name { opacity: 0.45; }
+/* Version badge: server-reported upstream version (InitializeResult.serverInfo.version) */
+.mcp-app-version {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  padding: 2px 5px;
+  border: 1px solid rgba(26, 24, 20, 0.18);
+  border-radius: var(--s-radius);
+  background: rgba(201, 153, 63, 0.08);
+  line-height: 1;
+  white-space: nowrap;
+}
+/* Action buttons cluster — share the button baseline with left-side text */
+.mcp-app-action {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: center;
+}
+/* Card actions are btn-xs, but the tofu pixel skin
+ * ([data-theme="tofu"] .btn-primary/.btn-secondary — padding:9px 20px,
+ * font-size:13px at 0,2,0) inflates them into slabs that swallow the
+ * footer. This (0,3,0) scope re-asserts the compact btn-xs metrics so
+ * every card action is a small chip level with the version/tools badges.
+ * Scoped to the WHOLE card, not just .mcp-app-action: the Skills tab
+ * reuses .mcp-app-card but parks its buttons in .skill-card-actions and
+ * the per-skill env rows/editor — same inflation root, same fix. The
+ * install modal is NOT inside a card, so its buttons keep modal scale. */
+.settings-panel .mcp-app-card .btn-xs {
+  padding: 4px 11px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+/* In-flight card (connecting/installing/uninstalling): the status pill and
+ * the footer note had NO rule at all and rendered as bare text. Give them
+ * the same quiet outlined-chip look as .mcp-app-status.off, with a pulse
+ * so the card reads as busy, not broken. */
+.mcp-app-status.pending {
+  background: var(--s-cream);
+  color: var(--s-ink-soft);
+  border: 1px solid var(--s-ink-soft);
+  animation: mcp-reconnect-pulse 1.6s ease-in-out infinite;
+}
+.mcp-app-pending-note {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+  animation: mcp-reconnect-pulse 1.6s ease-in-out infinite;
+}
+/* ── Header quick action ──
+ * Lock both children of .mcp-store-header to the same explicit
+ * 36px height with the same vertical metrics so they sit on a
+ * shared baseline regardless of the later tofu-theme overrides
+ * (`[data-theme="tofu"] .btn-primary` at line ~8014 forces
+ * padding:9px 20px / font-size:13px). The button uses inline-flex
+ * to vertically center its text; the <input> uses traditional
+ * top/bottom padding so the native browser baseline algorithm
+ * keeps the placeholder centered. */
+.mcp-store-header .mcp-search {
+  height: 36px !important;
+  box-sizing: border-box !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  line-height: 32px !important;  /* 36 - 2*2 border */
+  margin: 0 !important;
+  vertical-align: middle !important;
+}
+.mcp-store-header .mcp-connect-all-btn {
+  height: 36px !important;
+  box-sizing: border-box !important;
+  padding: 0 14px !important;
+  margin: 0 !important;
+  font-size: 12px !important;
+  line-height: 1 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  vertical-align: middle !important;
+  flex-shrink: 0;
+  border: var(--s-border) !important;
+  border-radius: var(--s-radius) !important;
+  box-shadow: var(--s-shadow-xs) !important;
+  transform: none !important;
+}
+/* Advanced toggle */
+.mcp-advanced-toggle {
+  margin-top: 4px;
+}
+.mcp-advanced-toggle summary { list-style: none; }
+.mcp-advanced-toggle summary::-webkit-details-marker { display: none; }
+.mcp-add-form {
+  padding: 14px;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+}
+.mcp-add-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+/* Install Modal */
+.mcp-install-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.mcp-install-modal {
+  background: var(--s-white);
+  border: 3px solid var(--s-ink);
+  border-radius: var(--s-radius);
+  box-shadow: 8px 8px 0 var(--s-ink);
+  width: 420px;
+  max-width: 90vw;
+  max-height: 90vh;
+  max-height: calc(var(--vh100,100vh)*0.9);
+  overflow-y: auto;
+  padding: 24px;
+}
+.mcp-install-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.mcp-install-modal-icon {
+  font-size: 36px;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  flex-shrink: 0;
+}
+.mcp-install-modal-icon img,
+.mcp-install-modal-icon svg {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+.mcp-install-modal-title {
+  font-size: 18px;
+  font-weight: 900;
+  color: var(--s-ink);
+}
+.mcp-install-modal-desc {
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  margin-top: 2px;
+}
+.mcp-install-noenv {
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  padding: 8px;
+  text-align: center;
+  background: var(--s-cream);
+  border-radius: var(--s-radius);
+}
+.mcp-install-modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+.mcp-install-status {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: var(--s-radius);
+  font-size: 12px;
+  font-weight: 700;
+}
+.mcp-install-status.info {
+  background: rgba(99, 102, 241, 0.08);
+  color: #6366f1;
+}
+.mcp-install-status.success {
+  background: rgba(34, 197, 94, 0.1);
+  color: #16a34a;
+}
+.mcp-install-status.error {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+.mcp-env-input {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.mcp-env-input:focus { outline: 2px solid var(--s-ink); outline-offset: -1px; }
+.mcp-env-select {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.mcp-env-select:focus { outline: 2px solid var(--s-ink); outline-offset: -1px; }
+/* ── Skills Settings tab ── App-Store layout (brutalist tofu) ── */
+/* Header count badges — tofu stamp chips. Same markup lives in the MCP tab
+ * header, so both store tabs get the same chip language here. (The shared
+ * .stg-badge indigo/green pair in styles.css is for provider cards; the
+ * store header overrides it — settings.css loads after styles.css.) */
+.mcp-store-header-title .stg-badge{border:var(--s-border-sm);background:var(--s-white);color:var(--s-ink-soft);box-shadow:none;border-radius:var(--s-radius);text-transform:none;letter-spacing:.02em}
+/* Scope segmented control — cream track + ink active block with the gold
+ * offset shadow, echoing .mcp-cat-pill.active (one 'active' language per
+ * panel). Shared with the MCP tab's scope control (same classes). */
+.skills-scope-tabs{display:inline-flex;gap:3px;padding:3px;background:var(--s-cream);border:var(--s-border-sm);border-radius:var(--s-radius);box-shadow:var(--s-shadow-xs);align-items:center}
+.skills-scope-tab{padding:5px 14px;border:1.5px solid transparent;background:transparent;color:var(--s-ink-soft);font-size:11px;font-weight:800;letter-spacing:.03em;border-radius:var(--s-radius);cursor:pointer;transition:background .1s,color .1s,box-shadow .1s;font-family:inherit;line-height:1.2}
+.skills-scope-tab:hover{color:var(--s-ink);background:var(--s-skin)}
+.skills-scope-tab.active{background:var(--s-ink);color:var(--s-white);border-color:var(--s-ink);box-shadow:2px 2px 0 var(--s-gold)}
+/* Cross-link to memory creation — a quiet secondary action, visually
+ * separated from the scope control it used to masquerade as. */
+.skills-intro{margin:2px 0 10px}
+/* Local .zip install drop zone — dashed ink hairline on white, cream hover
+ * lift, gold fill while a file is held over it. */
+.skills-drop-zone{display:flex;align-items:center;justify-content:center;gap:10px;padding:13px 18px;margin:2px 0 14px;border:1.5px dashed rgba(26,24,20,.35);border-radius:var(--s-radius);color:var(--s-ink-soft);font-size:12.5px;font-weight:600;cursor:pointer;transition:all .15s ease;background:var(--s-white)}
+.skills-drop-zone svg{color:var(--s-gold-dim);flex-shrink:0}
+.skills-drop-zone:hover{border-color:var(--s-ink);color:var(--s-ink);background:var(--s-cream);transform:translate(-1px,-1px);box-shadow:var(--s-shadow-xs)}
+.skills-drop-zone.is-dragging{border-style:solid;border-color:var(--s-gold-dim);background:var(--s-gold-glow);color:var(--s-ink);transform:none;box-shadow:var(--s-shadow-xs)}
+.skills-drop-zone-text{pointer-events:none}
+/* Skill card uses mcp-app-card as base; add skill-specific accents.
+ * The base .mcp-app-card is a 2-col grid (44px icon | 1fr content). The
+ * skill-only children (author line, requirement warning, footer) MUST be
+ * pinned to the content column / full width — otherwise the grid
+ * auto-places them in column 1 under the icon and the card looks broken. */
+.mcp-app-card.skill-card .mcp-app-icon{filter:saturate(1.1)}
+/* Featured tag — the catalog sorts featured entries first; the solid gold
+ * stamp makes that ranking visible instead of silent. */
+.mcp-app-card .skill-badge-featured{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid var(--s-gold-dim);border-radius:var(--s-radius);background:var(--s-gold);color:var(--s-ink);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+.mcp-app-card .skill-badge-official{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border:1px solid rgba(168,125,46,.55);border-radius:var(--s-radius);background:rgba(201,153,63,.1);color:var(--s-gold-dim);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;flex-shrink:0}
+/* One line, ellipsized: requirement warnings can list several bins/env
+ * names and were a row-height outlier. Content is a single text node
+ * (⚠ + text), so block display makes the ellipsis actually render —
+ * text-overflow on a flex container does nothing. */
+.mcp-app-card .skill-badge-warn{grid-column:2;justify-self:start;display:block;padding:2px 7px;margin-top:4px;border:1px solid rgba(168,125,46,.45);border-radius:var(--s-radius);background:rgba(201,153,63,.12);color:var(--s-gold-dim);font-size:10px;font-weight:700;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mcp-app-card .skill-author{grid-column:2;font-size:10.5px;color:var(--s-ink-soft);opacity:.8;margin-top:1px}
+.mcp-app-card .skill-card-footer{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px;padding-top:6px;min-height:26px;border-top:1px dashed rgba(26,24,20,.18)}
+.mcp-app-card .skill-card-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+/* Per-skill env/key bindings (credential-vault backed). One row per variable:
+ * name chip + state + actions; the editor unfolds under the row. */
+.skill-env-section{grid-column:1 / -1;display:flex;flex-direction:column;gap:4px;margin-top:6px;padding-top:6px;border-top:1px dashed rgba(26,24,20,.18)}
+.skill-env-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.skill-env-name{font-size:10.5px;font-weight:700;padding:1px 7px;border:1px solid rgba(26,24,20,.25);border-radius:var(--s-radius);background:var(--s-cream);color:var(--s-ink)}
+.skill-env-state{font-size:10px;font-weight:700;letter-spacing:.02em}
+.skill-env-state.is-ok{color:var(--s-gold-dim)}
+.skill-env-state.is-missing{color:#b3462e}
+.skill-env-editor{display:flex;gap:6px;align-items:center;padding:4px 0 2px}
+.skill-env-input{flex:1;min-width:0;padding:5px 8px;font-size:11px;border:var(--s-border-sm);border-radius:var(--s-radius);background:var(--s-white);color:var(--s-ink)}
+.skill-env-input:focus{outline:2px solid var(--s-ink);outline-offset:-1px}
+/* Installed state — same gold language as .mcp-app-card.connected: the
+ * card reads 'already yours' without the old green wash. */
+.mcp-app-card.is-installed{background:linear-gradient(180deg,rgba(201,153,63,.06) 0%,var(--s-white) 60%);box-shadow:2px 2px 0 var(--s-gold),var(--s-shadow-xs)}
+.mcp-app-card.is-installed:hover{box-shadow:3px 3px 0 var(--s-gold),4px 4px 0 var(--s-ink)}
+.mcp-app-card .skill-installed-tag{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:var(--s-radius);background:var(--s-ink);color:var(--s-gold);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;align-self:center;font-family:'JetBrains Mono',monospace}
+/* Skills file browser list */
+.skills-files-modal{max-width:640px;max-height:80vh;max-height:calc(var(--vh100,100vh)*0.8);display:flex;flex-direction:column}
+.skills-files-list{flex:1;overflow-y:auto;margin:12px 0;padding:6px 0;border:var(--s-border-sm);border-radius:var(--s-radius);background:var(--s-white);max-height:50vh;max-height:calc(var(--vh100,100vh)*0.5)}
+.skills-file-row{display:flex;align-items:center;gap:10px;padding:6px 12px;font-size:12.5px;color:var(--s-ink);border-bottom:1px solid rgba(26,24,20,.07)}
+.skills-file-row:last-child{border-bottom:none}
+.skills-file-row:hover{background:var(--s-cream)}
+.skills-file-kind{flex:0 0 16px;font-size:14px;text-align:center;color:var(--s-ink-soft)}
+.skills-file-kind svg{width:14px;height:14px;vertical-align:middle}
+.skills-file-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono,monospace);font-size:11.5px;color:var(--s-ink)}
+.skills-file-size{flex:0 0 auto;font-size:10px;color:var(--s-ink-soft);opacity:.7;font-variant-numeric:tabular-nums}
+.skills-file-row.is-skill{background:rgba(201,153,63,.12);font-weight:600}
+/* Toast used by catalog install */
+.skills-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:10px 18px;background:var(--s-white);color:var(--s-ink);border:var(--s-border);border-radius:var(--s-radius);font-size:12.5px;font-weight:700;box-shadow:var(--s-shadow-sm);z-index:10020;animation:skillsToastIn .25s cubic-bezier(.2,1,.3,1)}
+.skills-toast.is-error{border-color:var(--s-blocked);background:rgba(248,113,113,.1);color:#b91c1c}
+.skills-toast.is-success{border-color:var(--s-gold-dim);background:rgba(201,153,63,.08)}
+
+
+/* ══ api(access-matrix) / general(system-prompt) / preset(visibility) settings pages (moved from styles.css 2026-07-18) ══ */
+/* ── System-prompt mode row: dropdown + edit button, aligned ── */
+.sysprompt-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--s-ink);
+  margin-bottom: 6px;
+}
+.sysprompt-control-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.sysprompt-control-row select {
+  flex: 1;
+  min-width: 0;
+}
+.sysprompt-control-row .stg-btn-balance {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* ── System-prompt compact summary row (editor lives in a modal) ── */
+.sysprompt-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.sysprompt-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sysprompt-summary.has-value {
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+}
+/* ── Per-block system-prompt editor ── */
+.sysprompt-blocks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sysprompt-blocks-mode {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sysprompt-preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.sysprompt-blocks-mode-label {
+  opacity: 0.65;
+}
+.sysprompt-blocks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sysprompt-block {
+  position: relative;
+  border: 1px solid var(--border-color, rgba(128,128,128,0.2));
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-elevated, var(--bg-secondary, rgba(128,128,128,0.03)));
+  transition: border-color .12s, background .12s;
+}
+/* Accent edge bar shows on/off at a glance without reading the toggle. */
+.sysprompt-block::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--accent, #4caf50);
+  transition: background .12s;
+}
+.sysprompt-block.is-off { background: transparent; }
+.sysprompt-block.is-off::before { background: var(--border-color, rgba(128,128,128,0.25)); }
+.sysprompt-block-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px 9px 14px;
+  cursor: pointer;
+}
+.sysprompt-block-head:hover { background: rgba(128,128,128,0.06); }
+.sysprompt-block-chevron {
+  flex: 0 0 auto;
+  width: 14px; height: 14px;
+  color: var(--text-tertiary);
+  transition: transform .15s;
+}
+.sysprompt-block.is-open .sysprompt-block-chevron { transform: rotate(90deg); }
+.sysprompt-block-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 0;
+  flex: 1;
+}
+.sysprompt-block-title > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sysprompt-block.is-off .sysprompt-block-title { color: var(--text-tertiary); }
+.sysprompt-block-badge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft, rgba(120,120,200,0.16));
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+/* Project-affected blocks: blocks whose text differs in code/project mode.
+   Distinct amber badge + a thicker, amber accent edge so the user can see at
+   a glance which sections "code/project mode" actually rewrites. */
+.sysprompt-block-badge.is-project-badge {
+  background: var(--accent-amber-soft, rgba(212, 160, 23, 0.18));
+  color: var(--accent-amber, #c79100);
+  cursor: help;
+}
+.sysprompt-block.is-project:not(.is-off)::before {
+  width: 4px;
+  background: var(--accent-amber, #d4a017);
+}
+.sysprompt-block.is-project:not(.is-off) {
+  border-color: var(--accent-amber-soft, rgba(212, 160, 23, 0.35));
+}
+.sysprompt-block-toggle {
+  flex: 0 0 auto;
+}
+.sysprompt-block-text {
+  margin: 0;
+  padding: 2px 14px 12px 14px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-color, rgba(128,128,128,0.12));
+}
+.sysprompt-block:not(.is-open) .sysprompt-block-text { display: none; }
+/* ══════════════════════════════════════
+   Dropdown Visibility — tofu list
+   ══════════════════════════════════════ */
+.stg-dropdown-visibility {
+  max-height: 360px;
+  overflow-y: auto;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  padding: 6px;
+  background: #fff;
+}
+/* ══════════════════════════════════════
+   Batch D — search / network / advanced pages
+   (chip input + authenticated sources + two-col row layout;
+    moved from styles.css — guard: _SETTINGS_ONLY_CSS_PREFIXES)
+   ══════════════════════════════════════ */
+.settings-row.two-col > .settings-field { flex: 1; min-width: 0; }
+@media (max-width: 768px) {
+  .settings-row.two-col { flex-direction: column; gap: 4px; }
+}
+
+/* ── Advanced: executable/search/wire separation ─────────────────────── */
+.tool-discovery-card {
+  margin: 12px 0 16px;
+  padding: 15px;
+  border: 1.5px solid color-mix(in srgb, var(--s-gold, #b98a2f) 55%, var(--s-ink, #2a2a2a));
+  border-radius: var(--s-radius, 10px);
+  background:
+    radial-gradient(circle at 100% 0, color-mix(in srgb, var(--s-gold, #b98a2f) 16%, transparent), transparent 42%),
+    var(--s-white, #fff);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--s-ink, #2a2a2a) 88%, transparent);
+}
+.tool-discovery-head { display: flex; align-items: center; gap: 11px; }
+.tool-discovery-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border: 1.5px solid var(--s-ink, #2a2a2a);
+  border-radius: 9px;
+  background: var(--s-ink, #2a2a2a);
+  color: var(--s-gold, #f0c66b);
+  font: 800 16px/1 'JetBrains Mono', ui-monospace, monospace;
+  box-shadow: 2px 2px 0 var(--s-gold, #b98a2f);
+}
+.tool-discovery-title { color: var(--s-ink, #2a2a2a); font-size: 14px; font-weight: 900; }
+.tool-discovery-sub { margin-top: 2px; color: var(--s-ink-soft, #6b6250); font-size: 11.5px; line-height: 1.45; }
+.tool-discovery-flow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0;
+}
+.tool-discovery-flow > span {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--s-ink, #2a2a2a) 20%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--s-gold, #b98a2f) 8%, var(--s-white, #fff));
+}
+.tool-discovery-flow b,
+.tool-discovery-flow small { display: block; }
+.tool-discovery-flow b { color: var(--s-ink, #2a2a2a); font-size: 11.5px; font-weight: 850; }
+.tool-discovery-flow small { margin-top: 2px; color: var(--s-ink-soft, #6b6250); font-size: 9.5px; line-height: 1.35; }
+.tool-discovery-flow i { color: var(--s-gold, #b98a2f); font-style: normal; font-weight: 900; }
+.tool-discovery-controls { margin: 0 !important; }
+.settings-field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--s-ink-soft, #6b6250);
+  font-size: 11px;
+  font-weight: 800;
+}
+.tool-execution-policy {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--s-ink, #2a2a2a) 22%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, #16a34a 5%, var(--s-white, #fff));
+  color: var(--s-ink, #2a2a2a);
+  font-size: 11px;
+}
+.tool-execution-policy strong { min-width: 0; flex: 1; font-weight: 800; }
+.tool-execution-policy em {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(22, 163, 74, .11);
+  color: #15803d;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 850;
+  white-space: nowrap;
+}
+.tool-discovery-note {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  margin-top: 11px;
+  padding-top: 10px;
+  border-top: 1px dashed color-mix(in srgb, var(--s-ink, #2a2a2a) 22%, transparent);
+  color: var(--s-ink-soft, #6b6250);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+.tool-state-dot { width: 7px; height: 7px; border-radius: 999px; }
+.tool-state-dot.is-visible { background: #16a34a; box-shadow: 0 0 0 2px rgba(22, 163, 74, .15); }
+.tool-state-dot.is-searchable { background: #d49b27; box-shadow: 0 0 0 2px rgba(212, 155, 39, .16); }
+.tool-state-dot.is-blocked { background: #94a3b8; box-shadow: 0 0 0 2px rgba(148, 163, 184, .16); }
+
+@media (max-width: 620px) {
+  .tool-discovery-card { padding: 13px; box-shadow: 2px 2px 0 var(--s-ink, #2a2a2a); }
+  .tool-discovery-flow { grid-template-columns: 1fr; gap: 5px; }
+  .tool-discovery-flow > i { transform: rotate(90deg); justify-self: center; line-height: 1; }
+}
+
+/* ── Cost optimization A/B channel (Settings › Advanced) ── */
+.cost-exp-controls { gap: 12px; }
+.cost-exp-controls.is-off .cost-exp-fields { opacity: .46; }
+.cost-exp-arms {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+  margin: 4px 0 14px;
+}
+.cost-exp-arm {
+  display: flex; flex-direction: column; gap: 4px; padding: 10px 12px;
+  border: 1.5px solid var(--s-ink); background: var(--s-white);
+  box-shadow: var(--s-shadow-xs); font-size: 11px; color: var(--s-ink-soft);
+}
+.cost-exp-arm strong { color: var(--s-ink); font: 800 12px 'JetBrains Mono', monospace; }
+.cost-exp-arm.optimized { border-color: var(--s-gold-dim); }
+.cost-exp-report-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px; margin: 10px 0;
+}
+.cost-exp-report-head strong { color: var(--s-ink); font-size: 13px; }
+.cost-exp-report { min-height: 76px; }
+.cost-exp-empty, .cost-exp-warning {
+  padding: 12px; border: 1.5px dashed var(--s-ink-soft); color: var(--s-ink-soft);
+  font-size: 11px; font-weight: 700;
+}
+.cost-exp-warning { border-style: solid; border-color: var(--s-gold); margin-bottom: 8px; }
+.cost-exp-summary {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px; align-items: stretch;
+}
+.cost-exp-result, .cost-exp-delta {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; padding: 10px; border: 1.5px solid var(--s-ink); background: var(--s-white);
+  text-align: center;
+}
+.cost-exp-result strong, .cost-exp-delta span { font: 800 11px 'JetBrains Mono', monospace; }
+.cost-exp-result b, .cost-exp-delta strong { color: var(--s-ink); font: 900 18px 'JetBrains Mono', monospace; }
+.cost-exp-result span, .cost-exp-result small, .cost-exp-delta small { color: var(--s-ink-soft); font-size: 10px; }
+.cost-exp-result.optimized { border-color: var(--s-gold-dim); }
+.cost-exp-delta { min-width: 116px; border-style: dashed; }
+.cost-exp-table-wrap { overflow-x: auto; margin-top: 8px; }
+.cost-exp-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+.cost-exp-table th, .cost-exp-table td { padding: 6px 8px; border-bottom: 1px solid rgba(30,30,30,.14); text-align: right; }
+.cost-exp-table th:first-child, .cost-exp-table td:first-child { text-align: left; }
+@media (max-width: 640px) {
+  .cost-exp-arms, .cost-exp-summary { grid-template-columns: 1fr; }
+  .cost-exp-delta { min-width: 0; }
+}
+
+/* ── Chip / tag input (domain lists) — replaces cramped scrolling textareas ── */
+.chip-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid var(--border, rgba(255,255,255,0.15));
+  border-radius: 9px;
+  background: var(--bg-tertiary, rgba(255,255,255,0.03));
+  cursor: text;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.chip-input:focus-within {
+  border-color: var(--accent, #6c8cff);
+  box-shadow: 0 0 0 3px var(--accent-subtle, rgba(108,140,255,0.14));
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 5px 3px 11px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  border-radius: 999px;
+  background: var(--accent-subtle, rgba(108,140,255,0.14));
+  color: var(--text-primary);
+  border: 1px solid var(--accent, #6c8cff);
+  border-color: color-mix(in srgb, var(--accent, #6c8cff) 32%, transparent);
+  max-width: 100%;
+  transition: border-color .12s ease, background .12s ease;
+}
+.chip:hover { border-color: var(--accent, #6c8cff); }
+.chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 50%;
+  transition: color .12s ease, background .12s ease;
+}
+.chip-x:hover {
+  color: var(--error-text, #e06c6c);
+  background: color-mix(in srgb, var(--error-text, #e06c6c) 16%, transparent);
+}
+.chip-add {
+  flex: 1 1 120px;
+  min-width: 100px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 4px 2px;
+}
+.chip-add::placeholder { color: var(--text-tertiary); }
+
+/* ── Authenticated Sources (login-walled fetch: Xiaohongshu, …) ── */
+.auth-sources-list { display: flex; flex-direction: column; gap: 14px; }
+.auth-sources-list:empty { display: none; }  /* pre-render blank collapses */
+.auth-src-loading, .auth-src-empty {
+  color: var(--s-ink-soft);
+  font-size: 13px;
+  padding: 10px 2px;
+}
+
+/* Browser-access rows (adapters / denied domains / write grants) rendered by
+   _renderSearchBrowserAccess into #browserAccessList. This class existed in
+   markup WITHOUT any rule — rows rendered as raw text with the status badge
+   overlapping the name (the "broken ModelPlaza/小红书 rows"). */
+.auth-source-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+}
+.auth-source-card > strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--s-ink);
+}
+.auth-source-card > span:not(.search-status-badge) {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--s-ink-soft);
+}
+.auth-source-card .search-status-badge,
+.auth-source-card .stg-btn-secondary { flex: none; }
+.browser-adapter-row {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.browser-adapter-row.needs-upgrade {
+  background: color-mix(in srgb, var(--s-gold) 10%, var(--s-white));
+}
+.browser-adapter-copy {
+  display: flex;
+  flex: 1 1 280px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.browser-adapter-name {
+  color: var(--s-ink);
+  font-size: 13px;
+  font-weight: 800;
+}
+.browser-adapter-detail {
+  color: var(--s-ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.browser-adapter-upgrade-button { white-space: nowrap; }
+@media (max-width: 620px) {
+  .browser-adapter-row .search-status-badge { order: 2; }
+  .browser-adapter-upgrade-button { order: 3; }
+}
+
+/* ── Card — neo-brutalist tofu block ── */
+.auth-src-card {
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  padding: 14px 16px;
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-sm);
+  transition: box-shadow .12s ease, transform .12s ease;
+}
+.auth-src-card.on  { border-left: 6px solid var(--s-done); padding-left: 12px; }
+.auth-src-card.paused { border-left: 6px solid var(--s-gold); padding-left: 12px; }
+.auth-src-row { display: flex; align-items: center; gap: 12px; }
+.auth-src-state-dot {
+  flex: none;
+  width: 12px; height: 12px;
+  border: 2px solid var(--s-ink);
+  background: var(--s-skin);
+}
+.auth-src-state-dot.on     { background: var(--s-done); }
+.auth-src-state-dot.paused { background: var(--s-gold); }
+.auth-src-state-dot.off    { background: var(--s-skin); }
+.auth-src-meta { flex: 1 1 auto; min-width: 0; }
+.auth-src-name { font-weight: 800; font-size: 14px; color: var(--s-ink); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.auth-src-domain { color: var(--s-ink-soft); font-size: 12px; font-weight: 600; }
+.auth-src-state-text { color: var(--s-ink-soft); font-size: 12px; margin-top: 3px; font-weight: 600; }
+/* Per-site account-risk note (e.g. XHS 风控提醒) — shown on the card and
+   atop the connect panel. Gold tint matches the neo-brutalist palette's
+   warning register (same role as the paused state). */
+.auth-src-risk-note {
+  margin-top: 6px;
+  padding: 7px 10px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: color-mix(in srgb, var(--s-gold) 18%, var(--s-white));
+  color: var(--s-ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.auth-src-panel .auth-src-risk-note { margin: 0 0 10px; }
+.auth-src-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+
+.auth-src-btn {
+  padding: 7px 16px;
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1;
+  border-radius: var(--s-radius);
+  border: var(--s-border-sm);
+  background: var(--s-white);
+  color: var(--s-ink);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform .1s ease, box-shadow .1s ease, background .1s ease;
+}
+.auth-src-btn:hover  { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--s-ink); }
+.auth-src-btn:active { transform: translate(1px,1px); box-shadow: none; }
+.auth-src-btn.primary {
+  background: var(--s-gold);
+  color: var(--s-ink);
+}
+.auth-src-btn.ghost  { background: var(--s-cream); }
+.auth-src-btn.sm     { padding: 5px 11px; font-size: 11.5px; }
+.auth-src-btn.danger { background: var(--s-white); color: var(--s-blocked); }
+.auth-src-btn.danger:hover { background: var(--s-blocked); color: var(--s-white); }
+
+/* ── Proxy settings: one-link mental model + directly editable bypass ── */
+.proxy-pool-group { gap: 0; }
+#proxyPoolList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.proxy-pool-row {
+  min-width: 0;
+  overflow: hidden;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+.proxy-pool-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--s-ink) 16%, transparent);
+  background: color-mix(in srgb, var(--s-cream) 54%, var(--s-white));
+}
+.proxy-pool-identity {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.pp-order {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--s-ink) 36%, transparent);
+  background: var(--s-cream);
+  color: var(--s-ink-soft);
+  font: 800 9.5px 'JetBrains Mono', monospace;
+}
+.pp-identity-copy { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; }
+.pp-display-name,
+.pp-display-host {
+  display: block;
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pp-display-name { color: var(--s-ink); font-size: 12.5px; line-height: 1.35; }
+.pp-display-host { color: var(--s-ink-soft); font: 500 10px/1.4 'JetBrains Mono', monospace; }
+
+#settingsTab_network .pp-enabled-control {
+  display: inline-flex;
+  flex: 0 0 76px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 76px;
+  color: var(--s-ink-soft);
+  font-size: 11.5px;
+  font-weight: 800;
+  margin: 0;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.pp-enabled-control input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+.pp-switch-track {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  width: 32px;
+  height: 18px;
+  padding: 2px;
+  border: 1.5px solid var(--s-ink);
+  background: var(--s-skin);
+  transition: background .15s ease;
+}
+.pp-switch-track > span {
+  width: 11px;
+  height: 11px;
+  border: 1px solid var(--s-ink);
+  background: var(--s-white);
+  transition: transform .15s ease;
+}
+.pp-enabled-control input:checked + .pp-switch-track { background: var(--s-gold); }
+.pp-enabled-control input:checked + .pp-switch-track > span { transform: translateX(13px); }
+.pp-enabled-control input:focus-visible + .pp-switch-track { outline: 2px solid var(--s-accent); outline-offset: 2px; }
+
+.proxy-pool-body { padding: 12px; }
+#settingsTab_network .pp-url-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  color: var(--s-ink-soft);
+  font-size: inherit;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.pp-url-label { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.pp-url-label strong { color: var(--s-ink); font-size: 11.5px; }
+.pp-url-state { overflow: hidden; color: var(--s-ink-soft); font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.pp-url-input { display: flex; position: relative; min-width: 0; }
+.pp-url-input .pp-url {
+  box-sizing: border-box;
+  width: 100%;
+  height: 38px;
+  min-width: 0;
+  padding: 0 42px 0 11px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  outline: none;
+  background: var(--s-white);
+  color: var(--s-ink);
+  font: 600 12px 'JetBrains Mono', monospace;
+}
+.pp-url-input .pp-url:focus { background: #fffef5; box-shadow: 0 0 0 2px color-mix(in srgb, var(--s-gold) 45%, transparent); }
+.pp-url-visibility {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--s-ink-soft);
+  cursor: pointer;
+}
+.pp-url-visibility:hover { background: var(--s-gold); color: var(--s-ink); }
+.pp-url-visibility:disabled { opacity: .45; cursor: wait; }
+.pp-url-help { min-height: 15px; color: var(--s-ink-soft); font-size: 10.5px; line-height: 1.45; }
+
+.pp-more { margin-top: 10px; border-top: 1px dashed color-mix(in srgb, var(--s-ink) 25%, transparent); }
+.pp-more > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  padding: 9px 1px 0;
+  color: var(--s-ink);
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+  list-style: none;
+}
+.pp-more > summary::-webkit-details-marker { display: none; }
+.pp-more > summary::before { content: '+'; flex: none; margin-right: -7px; color: var(--s-gold-dim); font: 900 14px/1 'JetBrains Mono', monospace; }
+.pp-more[open] > summary::before { content: '−'; }
+.pp-more > summary > span:first-of-type { flex: none; white-space: nowrap; }
+.pp-more-summary { flex: 1 1 auto; overflow: hidden; min-width: 0; color: var(--s-ink-soft); font-size: 10.5px; font-weight: 600; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.pp-more-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(170px, .85fr); gap: 10px; padding-top: 10px; }
+#settingsTab_network .pp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  margin: 0;
+  color: var(--s-ink-soft);
+  font-size: inherit;
+  font-weight: inherit;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.pp-field > span:first-child { color: var(--s-ink-soft); font-size: 10.5px; font-weight: 800; }
+.pp-field input,
+.pp-field select {
+  box-sizing: border-box;
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  outline: none;
+  background: var(--s-white);
+  color: var(--s-ink);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+.pp-field input:focus,
+.pp-field select:focus { background: #fffef5; box-shadow: 0 0 0 2px color-mix(in srgb, var(--s-gold) 45%, transparent); }
+
+.proxy-pool-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--s-ink) 16%, transparent);
+  background: color-mix(in srgb, var(--s-cream) 54%, var(--s-white));
+}
+.pp-reorder,
+.pp-card-actions { display: flex; align-items: center; gap: 6px; }
+.pp-reorder > span { color: var(--s-ink-soft); font-size: 10px; font-weight: 700; }
+.pp-move { width: 30px; min-width: 30px; height: 28px; padding: 0 !important; }
+.pp-move-up svg { transform: rotate(180deg); }
+.pp-move:disabled { opacity: .35; cursor: not-allowed; box-shadow: none; transform: none; }
+.pp-delete-btn { display: inline-flex; align-items: center; gap: 5px; }
+.pp-result {
+  margin: 10px 12px 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--s-gold);
+  background: var(--s-cream);
+  color: var(--s-ink-soft);
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.pp-result.ok { border-left-color: var(--s-done); color: var(--s-ink); }
+.pp-result.err { border-left-color: var(--s-blocked); color: var(--s-blocked); }
+.proxy-pool-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--s-ink-soft);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+.proxy-pool-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 18px;
+  border: 1px dashed color-mix(in srgb, var(--s-ink) 32%, transparent);
+  background: color-mix(in srgb, var(--s-cream) 62%, var(--s-white));
+  color: var(--s-ink-soft);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.proxy-pool-empty strong { color: var(--s-ink); font-size: 12.5px; }
+
+.proxy-bypass-card {
+  display: block;
+  padding: 11px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+.proxy-bypass-list { display: flex; flex-direction: column; gap: 8px; }
+.proxy-bypass-row { display: grid; grid-template-columns: 30px minmax(0, 1fr) 32px; gap: 8px; align-items: center; min-width: 0; }
+.pb-order {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--s-ink) 36%, transparent);
+  background: var(--s-cream);
+  color: var(--s-ink-soft);
+  font: 800 9.5px 'JetBrains Mono', monospace;
+}
+.pb-value {
+  box-sizing: border-box;
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  outline: none;
+  background: var(--s-white);
+  color: var(--s-ink);
+  font: 600 11px 'JetBrains Mono', monospace;
+}
+.pb-value:focus { background: #fffef5; box-shadow: 0 0 0 2px color-mix(in srgb, var(--s-gold) 45%, transparent); }
+.pb-delete-btn { width: 32px; min-width: 32px; height: 32px; padding: 0 !important; }
+.proxy-bypass-footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed color-mix(in srgb, var(--s-ink) 24%, transparent);
+}
+.proxy-bypass-rules-help { flex: 0 1 470px; color: var(--s-ink-soft); font-size: 10.5px; }
+.proxy-bypass-rules-help > summary { cursor: pointer; font-weight: 800; text-align: right; }
+.proxy-bypass-rules-help > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--s-ink) 20%, transparent);
+  background: var(--s-cream);
+}
+.proxy-bypass-rules-help p { display: flex; flex-direction: column; gap: 2px; margin: 0; line-height: 1.45; }
+.proxy-bypass-rules-help p:last-child { grid-column: 1 / -1; }
+.proxy-bypass-rules-help code { color: var(--s-ink); font: 600 10px 'JetBrains Mono', monospace; word-break: break-all; }
+
+@media (max-width: 620px) {
+  .proxy-pool-head { flex-direction: row; align-items: center; gap: 8px; }
+  .pp-enabled-control { flex-basis: 70px; min-width: 70px; }
+  .pp-more-fields { grid-template-columns: 1fr; }
+  .proxy-pool-card-footer { align-items: flex-start; flex-wrap: wrap; }
+  .pp-card-actions { margin-left: auto; }
+  .proxy-bypass-footer { flex-direction: column; }
+  .proxy-bypass-rules-help { flex-basis: auto; width: 100%; }
+  .proxy-bypass-rules-help > summary { text-align: left; }
+}
+@media (max-width: 420px) {
+  .proxy-pool-footer { align-items: flex-start; flex-direction: column; }
+  .pp-reorder > span { display: none; }
+  .pp-delete-btn span { display: none; }
+  .proxy-bypass-rules-help > div { grid-template-columns: 1fr; }
+  .proxy-bypass-rules-help p:last-child { grid-column: auto; }
+}
+
+/* ── Proxy editor v3: compact list, one deliberate edit surface ── */
+#settingsTab_network .proxy-pool-group { gap: 0; }
+.proxy-pool-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.proxy-pool-count {
+  color: var(--s-ink);
+  font-size: 12px;
+  font-weight: 800;
+}
+.proxy-pool-meta {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 5px;
+}
+.proxy-pool-meta-sep {
+  color: rgba(26, 24, 20, .28);
+  font-size: 11px;
+}
+.proxy-pool-toolbar .auth-src-btn {
+  border-width: 1px;
+  border-radius: 6px;
+  background: var(--s-gold);
+  box-shadow: none;
+}
+#proxyPoolList { gap: 7px; margin-bottom: 0; }
+.proxy-pool-order-hint {
+  color: var(--s-ink-soft);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+#settingsTab_network .proxy-pool-row {
+  overflow: hidden;
+  border: 1px solid rgba(26, 24, 20, .22);
+  border-radius: 7px;
+  background: var(--s-white);
+  box-shadow: none;
+}
+#settingsTab_network .proxy-pool-row.is-editing {
+  border-color: rgba(26, 24, 20, .72);
+  box-shadow: 0 2px 0 rgba(26, 24, 20, .12);
+}
+#settingsTab_network .proxy-pool-head {
+  display: flex;
+  min-height: 54px;
+  padding: 7px 9px;
+  border: 0;
+  background: var(--s-white);
+}
+#settingsTab_network .proxy-pool-row.is-editing .proxy-pool-head {
+  border-bottom: 1px solid rgba(26, 24, 20, .14);
+  background: color-mix(in srgb, var(--s-cream) 58%, var(--s-white));
+}
+#settingsTab_network .proxy-pool-identity {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+#settingsTab_network .pp-order {
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(26, 24, 20, .18);
+  border-radius: 6px;
+  background: var(--s-cream);
+  color: var(--s-ink-soft);
+  font-size: 9px;
+}
+#settingsTab_network .pp-display-name { font-size: 12.5px; font-weight: 800; }
+#settingsTab_network .pp-display-host { margin-top: 1px; font-size: 9.5px; }
+.pp-scope-badge {
+  overflow: hidden;
+  max-width: 116px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(201, 153, 63, .14);
+  color: var(--s-gold-dim);
+  font-size: 9.5px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#settingsTab_network .pp-enabled-control {
+  flex-basis: 70px;
+  min-width: 70px;
+  gap: 6px;
+  margin-left: 8px;
+  font-size: 10.5px;
+}
+#settingsTab_network .pp-switch-track {
+  width: 30px;
+  height: 18px;
+  border-width: 1px;
+  border-radius: 999px;
+}
+#settingsTab_network .pp-switch-track > span {
+  border: 0;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(26, 24, 20, .25);
+}
+.pp-edit-toggle {
+  display: inline-flex;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-left: 3px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--s-ink-soft);
+  cursor: pointer;
+}
+.pp-edit-toggle:hover,
+.proxy-pool-row.is-editing .pp-edit-toggle { background: var(--s-gold); color: var(--s-ink); }
+.pp-edit-toggle:focus-visible { outline: 2px solid var(--s-accent); outline-offset: 1px; }
+
+.proxy-pool-detail {
+  padding: 12px 12px 0;
+  background: var(--s-white);
+}
+.pp-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(165px, .72fr);
+  gap: 10px;
+  margin-bottom: 10px;
+}
+#settingsTab_network .pp-field input,
+#settingsTab_network .pp-field select,
+#settingsTab_network .pp-url-input .pp-url,
+#settingsTab_network .pb-value {
+  margin: 0;
+  border: 1px solid rgba(26, 24, 20, .28);
+  border-radius: 7px;
+  box-shadow: none;
+  transform: none;
+}
+#settingsTab_network .pp-field input:focus,
+#settingsTab_network .pp-field select:focus,
+#settingsTab_network .pp-url-input .pp-url:focus,
+#settingsTab_network .pb-value:focus {
+  border-color: var(--s-gold-dim);
+  box-shadow: 0 0 0 2px rgba(201, 153, 63, .18);
+  transform: none;
+}
+#settingsTab_network .proxy-pool-card-footer {
+  margin: 12px -12px 0;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(26, 24, 20, .12);
+  background: color-mix(in srgb, var(--s-cream) 52%, var(--s-white));
+}
+#settingsTab_network .pp-result { margin: 10px 0 12px; border-radius: 5px; }
+
+.proxy-bypass-section {
+  overflow: hidden;
+  border: 1px solid rgba(26, 24, 20, .22);
+  border-radius: 7px;
+  background: var(--s-white);
+}
+.proxy-bypass-section > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 9px 12px;
+  color: var(--s-ink);
+  cursor: pointer;
+  list-style: none;
+}
+.proxy-bypass-section > summary::-webkit-details-marker { display: none; }
+.proxy-bypass-section > summary::before {
+  content: '›';
+  flex: none;
+  color: var(--s-ink-soft);
+  font: 800 18px/1 system-ui, sans-serif;
+  transition: transform .15s ease;
+}
+.proxy-bypass-section[open] > summary::before { transform: rotate(90deg); }
+.proxy-bypass-section[open] > summary {
+  border-bottom: 1px solid rgba(26, 24, 20, .12);
+  background: color-mix(in srgb, var(--s-cream) 52%, var(--s-white));
+}
+.proxy-bypass-summary-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.proxy-bypass-summary-copy strong { font-size: 12px; }
+.proxy-bypass-summary-copy small {
+  overflow: hidden;
+  color: var(--s-ink-soft);
+  font-size: 10.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proxy-bypass-count {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--s-cream);
+  color: var(--s-ink-soft);
+  font-size: 10px;
+  font-weight: 800;
+}
+#settingsTab_network .proxy-bypass-card {
+  padding: 11px 12px 12px;
+  border: 0;
+  border-radius: 0;
+  background: var(--s-white);
+  box-shadow: none;
+}
+#settingsTab_network .pb-order {
+  width: 26px;
+  border: 0;
+  background: transparent;
+  color: var(--s-ink-soft);
+}
+#settingsTab_network .proxy-bypass-row { grid-template-columns: 26px minmax(0, 1fr) 32px; gap: 7px; }
+#settingsTab_network .pb-delete-btn { border-radius: 6px; box-shadow: none; }
+#settingsTab_network .pb-value:not(:focus) { text-overflow: ellipsis; }
+#settingsTab_network .proxy-bypass-footer { border-top-color: rgba(26, 24, 20, .12); }
+
+@media (max-width: 620px) {
+  .pp-scope-badge { display: none; }
+  #settingsTab_network .proxy-pool-identity { grid-template-columns: 30px minmax(0, 1fr); gap: 8px; }
+  #settingsTab_network .pp-enabled-control { flex-basis: 62px; min-width: 62px; margin-left: 3px; }
+  .pp-detail-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 420px) {
+  .proxy-pool-toolbar { margin-bottom: 7px; }
+  .proxy-pool-order-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #settingsTab_network .proxy-pool-head { padding: 7px; }
+  #settingsTab_network .pp-enabled-control { flex-basis: 32px; min-width: 32px; }
+  #settingsTab_network .pp-enabled-text { display: none; }
+  .pp-edit-toggle { margin-left: 1px; }
+  #settingsTab_network .proxy-pool-card-footer { align-items: center; }
+}
+
+/* ── Internal-host allowlist (SSRF exemption — reachability, NOT credentials) ──
+   Deliberately flatter than .auth-src-card: an entry here is one hostname with
+   two verbs, not a multi-step connect flow, so it reads as a list row rather
+   than a card. Shares the same tokens so the two sections look related. */
+.private-hosts-list { display: flex; flex-direction: column; gap: 10px; }
+.priv-host-loading, .priv-host-empty {
+  color: var(--s-ink-soft);
+  font-size: 13px;
+  padding: 10px 2px;
+}
+.priv-host-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  padding: 10px 14px;
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+.priv-host-main { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; }
+.priv-host-dot {
+  flex: none;
+  width: 12px; height: 12px;
+  border: 2px solid var(--s-ink);
+  background: var(--s-skin);
+}
+.priv-host-dot.on  { background: var(--s-done); }
+.priv-host-dot.off { background: var(--s-skin); }
+.priv-host-name {
+  font-weight: 800;
+  font-size: 13.5px;
+  color: var(--s-ink);
+  word-break: break-all;
+}
+.priv-host-state { font-size: 12px; font-weight: 600; color: var(--s-ink-soft); }
+.priv-host-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.priv-host-btn {
+  padding: 5px 12px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1;
+  border-radius: var(--s-radius);
+  border: var(--s-border-sm);
+  background: var(--s-white);
+  color: var(--s-ink);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform .1s ease, box-shadow .1s ease, background .1s ease;
+}
+.priv-host-btn:hover  { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--s-ink); }
+.priv-host-btn:active { transform: translate(1px,1px); box-shadow: none; }
+.priv-host-btn.primary { background: var(--s-gold); color: var(--s-ink); }
+.priv-host-btn.danger  { background: var(--s-white); color: var(--s-blocked); }
+.priv-host-btn.danger:hover { background: var(--s-blocked); color: var(--s-white); }
+.priv-host-add { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+.priv-host-input {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 7px 12px;
+  font-size: 13px;
+  border-radius: var(--s-radius);
+  border: var(--s-border-sm);
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.priv-host-msg { flex: 1 1 100%; font-size: 12px; font-weight: 600; color: var(--s-ink-soft); }
+.priv-host-msg.err { color: var(--s-blocked); }
+
+/* ── Credential vault (「凭证保管库」) — reuses the priv-host row/btn/input
+   chrome; only the hint/note/revealed-value pieces are new. Same tofu
+   cream/gold tokens, same flat list-row language. The row body is a
+   two-line stack: identity line (name + hint, name NEVER wraps mid-token —
+   it ellipsizes) above an optional note line; timestamp + actions pin
+   right. ── */
+.cred-vault-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cred-vault-idline {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.cred-vault-name {
+  font-weight: 800;
+  font-size: 13.5px;
+  color: var(--s-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+.cred-vault-hint {
+  flex: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+}
+.cred-vault-note {
+  font-size: 12px;
+  color: var(--s-muted);
+  overflow-wrap: anywhere;
+}
+.cred-vault-time {
+  flex: none;
+  margin-left: auto;  /* stay right even when a long note wraps the row */
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--s-ink-soft);
+  white-space: nowrap;
+}
+.cred-vault-value {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--s-cream);
+  border: 1px dashed var(--s-gold);
+  border-radius: var(--s-radius);
+}
+.cred-vault-secret {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--s-ink);
+}
+
+/* ── Search tab: backend status strip + pipeline preview ──
+   The strip answers "what will the backend actually do" (live badges);
+   the card says it in one sentence with the current knob values plugged in. */
+.search-status-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0 14px;
+}
+.search-status-label { font-size: 12px; font-weight: 800; color: var(--s-ink-soft); }
+.search-status-badge {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+  box-shadow: var(--s-shadow-xs);
+}
+.search-status-badge.on {
+  background: color-mix(in srgb, var(--s-done) 22%, var(--s-white));
+}
+.search-status-badge.warn {
+  background: color-mix(in srgb, var(--s-gold) 28%, var(--s-white));
+  color: var(--s-ink);
+}
+.search-status-badge.off {
+  background: var(--s-cream);
+  color: var(--s-ink-soft);
+  border-style: dashed;
+}
+.search-pipeline-card {
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-sm);
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+.search-pipeline-title { font-weight: 800; font-size: 13px; color: var(--s-ink); }
+.search-pipeline-flow {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--s-ink);
+  line-height: 1.6;
+}
+.search-pipeline-flow.filter-off { color: var(--s-ink-soft); }
+.search-pipeline-hint { margin-top: 6px; font-size: 11.5px; color: var(--s-ink-soft); font-weight: 600; }
+.settings-field-hint { font-size: 11.5px; color: var(--s-ink-soft); font-weight: 600; }
+.search-advanced-sub { font-size: 11.5px; font-weight: 600; color: var(--s-ink-soft); }
+
+/* ── Search tab: labelled knob groups inside 高级参数 ──
+   档位覆盖 (override-gated — dims while following the profile) vs
+   传输与内容上限 (profile-independent). Titles pair with a small `why`. */
+.search-knob-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed rgba(26, 24, 20, 0.14);
+}
+.search-knob-group:first-child { margin-top: 2px; padding-top: 0; border-top: 0; }
+.search-knob-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-weight: 800;
+  font-size: 12.5px;
+  color: var(--s-ink);
+}
+.search-knob-group-title small { font-size: 11.5px; font-weight: 600; color: var(--s-ink-soft); }
+.search-knob-group.search-override-control { transition: opacity .15s ease; }
+.search-knob-group.search-override-control:has(input:disabled) { opacity: .5; }
+
+/* 访问边界 sub-section heads (屏蔽域名 / 内网放行 / 浏览器读取授权) */
+.search-boundary-head { margin: 14px 0 2px; }
+.search-boundary-head:first-child { margin-top: 2px; }
+
+/* Button rows on the search cards (测试连接 / 安装扩展) */
+.stg-btn-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* Deny-domain row (访问边界 → 浏览器读取授权): input stretches, button never wraps */
+.search-deny-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.search-deny-row input { flex: 1 1 auto; min-width: 0; }
+.search-deny-row .stg-btn-secondary { flex: none; white-space: nowrap; }
+
+/* ── Toggle switch — brutalist hard-edged ── */
+.auth-src-switch { flex: none; position: relative; display: inline-block; cursor: pointer; }
+.auth-src-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.auth-src-switch-track {
+  display: block; width: 42px; height: 24px;
+  background: var(--s-skin);
+  border: 2px solid var(--s-ink);
+  border-radius: 0;
+  transition: background .15s ease;
+}
+.auth-src-switch-thumb {
+  position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px;
+  background: var(--s-ink);
+  transition: transform .15s ease;
+}
+.auth-src-switch input:checked + .auth-src-switch-track { background: var(--s-done); }
+.auth-src-switch input:checked + .auth-src-switch-track .auth-src-switch-thumb { transform: translateX(18px); }
+.auth-src-switch input:disabled + .auth-src-switch-track { opacity: .45; cursor: not-allowed; }
+
+/* ── Connect panel ── */
+.auth-src-panel {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: var(--s-border-sm);
+  display: flex; flex-direction: column; gap: 11px;
+}
+.auth-src-steps {
+  margin: 0; padding-left: 20px;
+  color: var(--s-ink-soft); font-size: 12.5px; line-height: 1.8; font-weight: 600;
+}
+.auth-src-steps li { margin-bottom: 3px; }
+.auth-src-step-txt { margin-right: 8px; }
+.auth-src-steps code,
+.auth-src-field-label code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  background: var(--s-gold-glow);
+  border: 1.5px solid var(--s-gold-dim);
+  padding: 0 5px;
+  font-weight: 700;
+  color: var(--s-ink);
+}
+/* ── One labelled input per cookie ── */
+.auth-src-fields { display: flex; flex-direction: column; gap: 10px; }
+.auth-src-field { display: flex; flex-direction: column; gap: 5px; }
+.auth-src-field-label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 700; color: var(--s-ink);
+}
+.auth-src-field-badge {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .3px;
+  padding: 1px 6px;
+  border: 1.5px solid var(--s-ink);
+  background: var(--s-skin);
+  color: var(--s-ink);
+}
+/* ── Registry badges (Site Knowledge Layer P2): strategy + knowledge ── */
+.auth-src-badges { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.auth-src-meta-badge {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .3px;
+  padding: 1px 6px;
+  border: 1.5px solid var(--s-ink-soft);
+  background: var(--s-white);
+  color: var(--s-ink-soft);
+}
+.auth-src-meta-badge.strategy  { border-color: var(--s-ink); color: var(--s-ink); background: var(--s-cream); }
+.auth-src-meta-badge.knowledge { border-color: var(--s-ink); color: var(--s-ink); background: var(--s-gold); }
+.auth-src-meta-badge.live.on   { border-color: var(--s-ink); color: var(--s-ink); background: var(--s-cream); }
+.auth-src-meta-badge.live.off  { border-style: dashed; }
+.auth-src-live-hint {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--s-ink);
+  line-height: 1.55;
+}
+.auth-src-field-badge.required    { background: var(--s-gold); }
+.auth-src-field-badge.recommended { background: var(--s-cream); }
+.auth-src-field-badge.optional    { background: var(--s-white); color: var(--s-ink-soft); border-color: var(--s-ink-soft); }
+.auth-src-field-input, .auth-src-proxy {
+  width: 100%;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  color: var(--s-ink);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  padding: 9px 11px;
+  box-sizing: border-box;
+}
+.auth-src-field-input:focus, .auth-src-proxy:focus {
+  outline: none;
+  border-color: var(--s-gold);
+  box-shadow: var(--s-shadow-xs);
+}
+.auth-src-field-input::placeholder, .auth-src-proxy::placeholder { color: var(--s-ink-soft); opacity: .55; }
+.auth-src-panel-actions { display: flex; gap: 10px; }
+.auth-src-msg { font-size: 12px; margin-top: 8px; min-height: 1em; color: var(--s-ink-soft); font-weight: 600; }
+.auth-src-msg.ok  { color: var(--s-gold-dim); }
+.auth-src-msg.err { color: var(--s-blocked); }
+
+
+/* ══════════════════════════════════════════════════════
+   Remote-device picker (project folder browser)
+
+   The SAME feature's second surface: #remoteDevicesSection in index.html,
+   painted by project.js::_renderRemoteDevicesSection. Its classes were
+   unstyled for the same reason as the settings tab, so styling only the tab
+   would have left half the feature raw — the half a user meets while
+   attaching a remote worktree.
+   ══════════════════════════════════════════════════════ */
+
+.remote-devices-section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(26, 24, 20, 0.18);
+}
+.remote-devices-title {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--s-ink-soft);
+  margin-bottom: 6px;
+}
+.remote-agent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  margin-bottom: 6px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+/* An offline agent's roots CANNOT be added (project.js omits the + button), so
+ * the row must look inert — otherwise the user waits for a click to work. */
+.remote-agent-row.remote-agent-offline {
+  background: var(--s-cream);
+  box-shadow: none;
+  color: var(--s-ink-soft);
+}
+.remote-agent-name {
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--s-ink);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.remote-agent-offline .remote-agent-name { color: var(--s-ink-soft); }
+.remote-root-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0 3px 14px;
+  font-size: 11.5px;
+  color: var(--s-ink);
+}
+.remote-root-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.remote-root-add {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+  color: var(--s-ink);
+  background: var(--s-gold);
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.remote-root-add:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--s-ink);
+}
+.remote-root-add:active { transform: translate(1px, 1px); box-shadow: none; }
+/* Model-routing v2 settings: Models are identities; Providers are suppliers. */
+.stg-v2-intro{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin:0 0 12px;padding:10px 0;border-bottom:1px solid var(--border,#ddd)}
+.stg-v2-intro strong{font-size:13px}
+.stg-v2-intro span,.stg-v2-manager-brand span{color:var(--text-muted,#777);font-size:12px}
+
+/* The v2 card reuses the legacy .stg-provider-card chrome (hard border, offset
+   shadow, cream head hover) from the application shell; the rules below only
+   reset <summary>, rotate the chevron, and tint the v2 chips. */
+summary.stg-provider-head-v2{list-style:none}
+summary.stg-provider-head-v2::-webkit-details-marker{display:none}
+summary.stg-provider-head-v2:focus-visible{outline:3px solid var(--s-gold,#c9993f);outline-offset:-3px}
+.stg-provider-card-v2 .stg-chevron{flex:0 0 auto;transition:transform .18s ease;color:var(--s-ink-soft,#3d362c)}
+.stg-provider-card-v2[open] .stg-chevron{transform:rotate(180deg)}
+.stg-provider-card-v2 .stg-provider-badges .stg-badge{background:rgba(99,102,241,.12);color:#4f46e5}
+.stg-provider-card-v2 .stg-provider-badges .stg-badge-models{background:rgba(22,163,74,.12);color:#15803d}
+.stg-provider-card-v2 .stg-provider-badges .stg-badge.off{background:rgba(220,38,38,.1);color:#b91c1c}
+.stg-provider-v2-foot{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:9px 13px;border-top:1px solid var(--s-line,rgba(26,24,20,.08));background:var(--s-cream,#f2ecda)}
+
+/* Expanded body — v0.15.0 layout: name/Base URL fields, one row per
+   credential, and full-width model cards. All rules are card-scoped so the
+   ported legacy classes cannot leak into other settings surfaces. */
+/* display:block must be explicit: the legacy class-toggle accordion hides
+   .stg-provider-body globally (06-file-changes-settings-shell.css) and the v2
+   card expands via native <details open>, never the .expanded class. Closed
+   details still suppress rendering via UA behavior. */
+.stg-provider-card-v2 .stg-provider-body{display:block;padding:14px 16px 6px;border-top:1px solid var(--s-line,rgba(26,24,20,.08));background:var(--s-white,#faf8f3)}
+.stg-provider-card-v2 .stg-field-grid{margin-bottom:2px}
+.stg-provider-card-v2 .stg-models-section{margin-top:14px;padding-top:14px;border-top:1px solid var(--s-line,rgba(26,24,20,.08))}
+.stg-provider-card-v2 .stg-models-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.stg-provider-card-v2 .stg-models-title{color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}
+.stg-provider-card-v2 .stg-model-list{display:flex;flex-direction:column;gap:8px}
+.stg-provider-card-v2 .stg-empty-sm{margin:0;padding:10px 0;color:var(--s-ink-soft,#3d362c);font-size:11px;font-weight:600;text-align:center}
+.stg-provider-card-v2 .stg-mcard{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--s-line,rgba(26,24,20,.08));border-radius:10px;background:#fff;box-shadow:var(--s-shadow-xs,0 1px 2px rgba(26,24,20,.05));transition:border-color .14s,box-shadow .14s}
+.stg-provider-card-v2 .stg-mcard:hover{border-color:var(--s-line-strong,rgba(26,24,20,.15));box-shadow:var(--s-shadow-sm,0 1px 2px rgba(26,24,20,.04),0 3px 8px rgba(26,24,20,.06))}
+.stg-provider-card-v2 .stg-mcard.disabled{opacity:.55;background:rgba(26,24,20,.02)}
+.stg-provider-card-v2 .stg-mcard.disabled .stg-mcard-id{text-decoration:line-through;text-decoration-thickness:1.5px}
+.stg-provider-card-v2 .stg-mcard-icon{display:flex;align-items:center;justify-content:center;flex-shrink:0;width:24px;height:24px;margin-top:1px}
+.stg-provider-card-v2 .stg-mcard-body{flex:1;min-width:0}
+.stg-provider-card-v2 .stg-mcard-main{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.stg-provider-card-v2 .stg-mcard-id{overflow:hidden;color:var(--s-ink,#1a1814);font:800 12px/1.35 'JetBrains Mono',ui-monospace,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
+.stg-provider-card-v2 .stg-mcard-caps{display:flex;align-items:center;gap:4px;margin-top:5px;flex-wrap:wrap}
+.stg-provider-card-v2 .stg-cap,.stg-v2-manager .stg-cap{padding:2px 8px;border:0;border-radius:999px;background:rgba(26,24,20,.06);color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:700;letter-spacing:.03em;text-transform:uppercase}
+.stg-provider-card-v2 .stg-cap.text,.stg-v2-manager .stg-cap.text{color:#2563eb;background:rgba(96,165,250,.14)}
+.stg-provider-card-v2 .stg-cap.vision,.stg-v2-manager .stg-cap.vision{color:#7c3aed;background:rgba(167,139,250,.14)}
+.stg-provider-card-v2 .stg-cap.cheap,.stg-v2-manager .stg-cap.cheap{color:#15803d;background:rgba(74,222,128,.14)}
+.stg-provider-card-v2 .stg-cap.image_gen,.stg-v2-manager .stg-cap.image_gen{color:#db2777;background:rgba(244,114,182,.14)}
+.stg-provider-card-v2 .stg-cap.embedding,.stg-v2-manager .stg-cap.embedding{color:#0d9488;background:rgba(45,212,191,.14)}
+.stg-provider-card-v2 .stg-cap.thinking,.stg-v2-manager .stg-cap.thinking{color:#c2410c;background:rgba(251,146,60,.15)}
+.stg-provider-card-v2 .stg-mcard-stat{overflow:hidden;color:var(--s-ink-soft,#3d362c);font-size:10px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.stg-provider-card-v2 .stg-mcard-pricing{margin-top:5px;color:var(--s-ink-soft,#3d362c);font:10px/1.45 'JetBrains Mono',ui-monospace,Menlo,monospace}
+.stg-provider-card-v2 .stg-mcard-aliases{margin-top:5px;font:600 10px/1.45 'JetBrains Mono',ui-monospace,Menlo,monospace}
+.stg-provider-card-v2 .stg-cap-toggle{cursor:default}
+.stg-provider-card-v2 .stg-cap-toggle.thinking.off{border:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 30%,transparent);opacity:.75;color:var(--s-ink-soft,#3d362c);background:transparent}
+.stg-provider-card-v2 .stg-price-label{color:var(--s-ink-soft,#3d362c)}
+.stg-provider-card-v2 .stg-price-val{padding:0 3px;border:1px solid;border-radius:3px;font-weight:800}
+.stg-provider-card-v2 .stg-price-val.in{color:#2563eb;background:rgba(96,165,250,.12);border-color:#2563eb}
+.stg-provider-card-v2 .stg-price-val.out{color:#c2410c;background:rgba(251,146,60,.12);border-color:#c2410c}
+.stg-provider-card-v2 .stg-price-sep{padding:0 4px;color:var(--s-ink-soft,#3d362c)}
+.stg-provider-card-v2 .stg-price-unit{padding-left:6px;color:var(--s-ink-soft,#3d362c);font-size:9px}
+.stg-provider-card-v2 .stg-price-na{color:var(--s-ink-soft,#3d362c);opacity:.7}
+.stg-provider-card-v2 .stg-price-free{color:#16a34a;font-weight:800}
+.stg-provider-card-v2 .stg-aliases-label,.stg-v2-manager .stg-aliases-label{color:var(--s-ink-soft,#3d362c)}
+.stg-provider-card-v2 .stg-alias-chip,.stg-v2-manager .stg-alias-chip{display:inline-flex;align-items:center;gap:3px;margin:1px 4px 1px 0;padding:1px 6px;border:1px solid var(--s-line,rgba(26,24,20,.08));border-radius:6px;background:var(--s-cream,#f2ecda);color:var(--s-gold-dim,#a87d2e)}
+.stg-provider-card-v2 .stg-alias-chip.pending,.stg-v2-manager .stg-alias-chip.pending{border-style:dashed;opacity:.7}
+.stg-provider-card-v2 .stg-alias-x,.stg-v2-manager .stg-alias-x{padding:0 2px;color:var(--s-ink-soft,#3d362c);cursor:pointer;font-weight:800}
+.stg-provider-card-v2 .stg-alias-x:hover,.stg-v2-manager .stg-alias-x:hover{color:#b04c4c}
+.stg-provider-card-v2 .stg-alias-add,.stg-v2-manager .stg-alias-add{margin:1px 0;padding:1px 7px;border:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 30%,transparent);border-radius:6px;background:transparent;color:var(--s-ink-soft,#3d362c);font:inherit;cursor:pointer}
+.stg-provider-card-v2 .stg-alias-add:hover,.stg-v2-manager .stg-alias-add:hover{border-style:solid;border-color:var(--s-gold-dim,#a87d2e);color:var(--s-gold-dim,#a87d2e)}
+.stg-provider-card-v2 .stg-mcard-toggle{margin:0}
+.stg-provider-card-v2 .stg-mcard-actions{display:flex;align-items:center;align-self:center;flex-direction:column;flex-shrink:0;gap:4px}
+.stg-provider-card-v2 .stg-v2-cred-secret{width:100%;min-height:32px;margin-top:6px;padding:6px 9px;border:1px solid var(--s-line-strong,rgba(26,24,20,.15));border-radius:8px;background:#fff;color:var(--s-ink,#1a1814);font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;transition:border-color .12s,box-shadow .12s}
+.stg-provider-card-v2 .stg-v2-cred-secret:focus{border-color:var(--s-gold,#c9993f);box-shadow:0 0 0 3px var(--s-gold-glow,rgba(201,153,63,.18));outline:none}
+.stg-v2-foot-spacer{flex:1}
+.stg-provider-model-alias,.stg-tpl-wizard-alias{color:var(--s-gold-dim,#a87d2e)!important}
+.stg-provider-cross-candidate{flex:0 0 auto;padding:4px 8px;border:0;border-radius:999px;background:rgba(201,153,63,.16);color:var(--s-gold-dim,#a87d2e);font-size:9px;font-weight:900;white-space:nowrap}
+.stg-provider-model-more{width:100%;min-height:34px;border:0;border-top:1px solid var(--s-line,rgba(26,24,20,.08));background:var(--s-cream,#f2ecda);color:var(--s-ink-soft,#3d362c);font:800 10px/1.2 inherit;cursor:pointer}
+.stg-provider-model-more:hover{background:color-mix(in srgb,var(--s-gold,#c9993f) 20%,var(--s-cream,#f2ecda))}
+.stg-provider-model-more:focus-visible{outline:3px solid var(--s-gold,#c9993f);outline-offset:-3px}
+
+.stg-v2-close,.stg-v2-more{border:1px solid var(--border,#ddd);background:var(--bg-primary,#fff);color:var(--text-primary,#222);font:600 12px/1.2 inherit;cursor:pointer}
+.stg-v2-more:hover{background:var(--bg-hover,#f3f3f3)}
+.stg-v2-close:focus-visible,.stg-v2-more:focus-visible{outline:2px solid var(--accent,#6d5dfc);outline-offset:2px}
+/* Card-foot 管理 button — dashed tofu action chip, same family as the legacy
+   provider-card action buttons. */
+.stg-v2-manage{padding:7px 12px;border:1px dashed color-mix(in srgb,var(--s-ink,#1a1814) 30%,transparent);border-radius:8px;background:var(--s-white,#faf8f3);color:var(--s-ink,#1a1814);font:800 11px/1.2 inherit;cursor:pointer;white-space:nowrap;transition:border-color .14s,color .14s,background .14s}
+.stg-v2-manage:hover{border-color:var(--s-gold-dim,#a87d2e);color:var(--s-gold-dim,#a87d2e);background:rgba(201,153,63,.07)}
+.stg-v2-manage:focus-visible{outline:3px solid var(--s-gold,#c9993f);outline-offset:2px}
+.stg-v2-switch,.stg-v2-inline-check{display:inline-flex!important;align-items:center;gap:6px;margin:0!important;color:var(--text-secondary,#555);font-size:12px;white-space:nowrap}
+.stg-v2-switch input,.stg-v2-inline-check input{inline-size:auto!important}
+
+.stg-v2-manager-overlay{position:fixed;inset:0;z-index:12000;display:grid;place-items:center;padding:24px;background:rgba(10,12,14,.42);backdrop-filter:blur(2px)}
+.stg-v2-manager{display:grid;grid-template-rows:auto auto minmax(0,1fr);width:min(860px,94vw);max-height:min(760px,88vh);overflow:hidden;border:1px solid rgba(26,24,20,.18);border-radius:var(--s-radius-lg,14px);background:var(--s-white,#faf8f3);box-shadow:0 24px 70px rgba(26,24,20,.3),0 6px 22px rgba(26,24,20,.14)}
+.stg-v2-manager-head{display:flex;align-items:center;justify-content:space-between;padding:15px 18px;border-bottom:1px solid var(--s-line,rgba(26,24,20,.08));background:var(--s-cream,#f2ecda)}
+.stg-v2-manager-brand{display:flex;align-items:center;gap:10px}
+.stg-v2-manager-brand div{display:grid;gap:2px}
+.stg-v2-manager-brand strong{font-size:14px}
+.stg-v2-close{width:32px;height:32px;border:0;border-radius:6px;background:transparent;font-size:22px}
+.stg-v2-manager-body{min-height:300px;overflow:auto;padding:16px 18px 20px}
+
+.stg-v2-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.stg-v2-toolbar input,#stgModelCatalogSearch{width:min(420px,100%);min-height:38px}
+.stg-v2-toolbar>span{color:var(--text-muted,#777);font-size:11px}
+.stg-v2-list,.stg-v2-catalog-list{border-top:1px solid var(--border,#ddd)}
+.stg-v2-model-row,.stg-v2-catalog-row{display:grid;align-items:center;gap:12px;min-width:0;padding:11px 4px;border-bottom:1px solid var(--border,#ddd)}
+.stg-v2-model-row{grid-template-columns:minmax(170px,1fr) minmax(0,1.8fr) auto}
+.stg-v2-model-row.is-pending{background:color-mix(in srgb,#f59f00 6%,transparent)}
+.stg-v2-model-row.is-disabled{opacity:.55}
+.stg-v2-model-row.is-disabled .stg-v2-model-identity strong{text-decoration:line-through;text-decoration-thickness:1.5px}
+.stg-v2-model-detail{display:grid;min-width:0;gap:5px}
+.stg-v2-model-stat{white-space:nowrap}
+.stg-v2-model-aliases{display:flex;flex-wrap:wrap;align-items:center;font:600 10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+.stg-v2-model-actions{display:flex;align-items:center;gap:10px}
+.stg-v2-model-identity,.stg-v2-catalog-identity{display:grid;min-width:0;gap:3px}
+.stg-v2-model-identity strong,.stg-v2-catalog-identity strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+.stg-v2-model-identity span,.stg-v2-catalog-identity span,.stg-v2-model-price{overflow:hidden;color:var(--text-muted,#777);font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
+.stg-v2-model-meta{display:flex;flex-wrap:wrap;gap:4px 8px;color:var(--text-secondary,#555);font-size:11px}
+
+.stg-v2-pending{margin:0 0 12px;padding:10px 12px;border:1px solid var(--border,#ddd);border-radius:7px;background:var(--bg-secondary,#f7f7f7);color:var(--text-secondary,#555);font-size:12px}
+.stg-v2-more{width:100%;margin-top:10px;padding:9px;border-radius:6px}
+.stg-v2-catalog-tools{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:0 0 12px}
+.stg-v2-catalog-count{margin:0 0 8px;color:var(--text-muted,#777);font-size:11px}
+.stg-v2-catalog-row{grid-template-columns:28px minmax(190px,1fr) minmax(180px,1.4fr) auto}
+.stg-v2-catalog-icon{display:grid;place-items:center}
+.stg-v2-pending{margin-top:12px}
+.stg-v2-pending summary{cursor:pointer;font-weight:650}
+.stg-v2-pending p{margin:8px 0 0;color:var(--text-muted,#777)}
+
+.stg-tpl-wizard{width:min(720px,94vw)}
+.stg-tpl-wizard .stg-modal-body{display:grid;gap:12px}
+.stg-tpl-wizard-keylabel{display:grid;gap:6px;color:var(--s-ink,#1a1814);font-size:12px;font-weight:800}
+.stg-tpl-wizard-key{width:100%;min-height:38px;padding:8px 10px;border:var(--s-border,1px solid rgba(26,24,20,.15));border-radius:8px;background:#fff;color:var(--s-ink,#1a1814);font:12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace}
+.stg-tpl-wizard-key:focus,.stg-tpl-wizard-search:focus{outline:none;border-color:var(--s-gold,#c9993f);box-shadow:0 0 0 3px var(--s-gold-glow,rgba(201,153,63,.18))}
+.stg-tpl-wizard-keyhint{color:var(--s-ink-soft,#3d362c);font-size:11px;font-weight:500}
+.stg-tpl-wizard-toolbar{display:flex;align-items:center;gap:8px}
+.stg-tpl-wizard-search{flex:1;min-width:0;min-height:36px;padding:7px 10px;border:var(--s-border,1px solid rgba(26,24,20,.15));border-radius:8px;background:#fff;color:var(--s-ink,#1a1814);font-size:12px}
+.stg-tpl-wizard-count{color:var(--s-ink-soft,#3d362c);font-size:11px;font-weight:700;white-space:nowrap}
+.stg-tpl-wizard-link{padding:2px 4px;border:0;background:transparent;color:var(--s-gold-dim,#a87d2e);font-size:11px;font-weight:800;cursor:pointer;white-space:nowrap}
+.stg-tpl-wizard-link:hover{color:var(--s-gold,#c9993f)}
+.stg-tpl-wizard-link:focus-visible{outline:2px solid var(--s-gold,#c9993f);outline-offset:2px}
+.stg-tpl-wizard-list{display:grid;max-height:min(470px,55vh);overflow:auto;border:var(--s-border,1px solid rgba(26,24,20,.15));border-radius:10px;background:#fff}
+.stg-tpl-wizard-row{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(120px,.65fr);align-items:center;gap:10px;min-height:52px;padding:8px 10px;border-bottom:1px solid color-mix(in srgb,var(--s-ink,#1a1814) 18%,transparent);cursor:pointer}
+.stg-tpl-wizard-row:last-child{border-bottom:0}
+.stg-tpl-wizard-row:hover{background:var(--s-cream,#f2ecda)}
+.stg-tpl-wizard-identity{display:grid;min-width:0;gap:3px}
+.stg-tpl-wizard-mid{overflow:hidden;color:var(--s-ink,#1a1814);font:800 12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
+.stg-tpl-wizard-alias{overflow:hidden;font:10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;text-overflow:ellipsis;white-space:nowrap}
+.stg-tpl-wizard-meta{color:var(--s-ink-soft,#3d362c);font-size:10px;text-align:right}
+.stg-local-endpoints-input{width:100%;min-height:96px;padding:8px 10px;border:var(--s-border,1px solid rgba(26,24,20,.15));border-radius:8px;background:#fff;color:var(--s-ink,#1a1814);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical}
+.stg-local-endpoints-input:focus{outline:none;border-color:var(--s-gold,#c9993f);box-shadow:0 0 0 3px var(--s-gold-glow,rgba(201,153,63,.18))}
+.stg-local-endpoint-results{display:grid;gap:6px}
+.stg-local-endpoint-row{padding:6px 8px;border-radius:8px;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+.stg-local-endpoint-row.is-ok{background:rgba(22,163,74,.08);color:#16a34a;border:1px solid rgba(22,163,74,.22)}
+.stg-local-endpoint-row.is-fail{background:rgba(239,68,68,.08);color:var(--s-blocked,#b42318);border:1px solid rgba(239,68,68,.22)}
+
+@media (max-width:760px){
+  .stg-section-actions{width:100%;flex-wrap:wrap}
+  .stg-template-menu{right:0;left:auto;width:min(100%,calc(100vw - 36px));min-width:0;max-width:none}
+  .stg-template-section{align-items:flex-start;flex-wrap:wrap}
+  .stg-template-section-desc{width:100%;margin-left:0}
+  .stg-template-grid{grid-template-columns:minmax(0,1fr)}
+  .stg-template-item,.stg-template-info,.stg-template-name{min-width:0}
+  .stg-template-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .stg-v2-intro{align-items:flex-start;flex-direction:column;gap:4px}
+  .stg-provider-head-v2{align-items:flex-start;flex-wrap:wrap}
+  .stg-provider-head-v2 .stg-provider-info{flex:1}
+  .stg-provider-head-v2 .stg-provider-badges{order:3;width:100%;justify-content:flex-start;padding-left:42px}
+  .stg-provider-card-v2 .stg-field-grid{grid-template-columns:1fr}
+  .stg-provider-card-v2 .stg-mcard{flex-wrap:wrap;gap:6px}
+  .stg-provider-card-v2 .stg-mcard-actions{align-self:flex-end;flex-direction:row}
+  .stg-v2-manager-overlay{align-items:end;padding:0}
+  .stg-v2-manager{width:100%;max-height:92dvh;border-radius:10px 10px 0 0}
+  .stg-v2-manager-body{min-height:240px;padding:14px}
+  .stg-v2-model-row{grid-template-columns:minmax(0,1fr) auto}
+  .stg-v2-model-detail{grid-column:1/-1}
+  .stg-v2-catalog-row{grid-template-columns:24px minmax(0,1fr)}
+  .stg-v2-catalog-tools{align-items:stretch;flex-direction:column}
+  #stgModelCatalogSearch{width:100%}
+  .stg-tpl-wizard-row{grid-template-columns:auto minmax(0,1fr)}
+  .stg-tpl-wizard-meta{grid-column:2;text-align:left}
+  .stg-tpl-wizard-toolbar{align-items:stretch;flex-wrap:wrap}
+  .stg-tpl-wizard-search{flex-basis:100%}
+}
+
+@media (prefers-reduced-motion:reduce){.stg-v2-manager-overlay{backdrop-filter:none}}
+/* ── Access matrix (per-credential × per-model grant grid) ──
+   Restored from the pre-v2 settings design; dead rules from that era
+   (inline key-name inputs, cell override editor, badge chips) are not
+   carried over. Column headers are static credential labels now. */
+
+/* Active state for the card-toolbar "访问矩阵" toggle button. */
+.stg-matrix-toggle.active {
+  background: var(--s-ink);
+  color: var(--s-white);
+  border-color: var(--s-ink);
+}
+
+.stg-matrix { margin-top: 10px; }
+.stg-matrix-toolbar {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.stg-matrix-tools {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+/* Probe status / error line: its own full-width row under the toolbar so a
+   long message (contract errors, counts) never squeezes the tool buttons. */
+.stg-mx-status {
+  margin: -2px 0 8px;
+  font-size: 11px; font-weight: 700; color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.stg-mx-status.running { color: #b45309; }
+.stg-mx-status.error { color: #b91c1c; }
+.stg-mx-probe.running { animation: stg-mx-spin 0.7s linear infinite; }
+.stg-mx-apply {
+  background: rgba(74, 222, 128, 0.14) !important;
+  border-color: #16a34a !important;
+  color: #15803d !important;
+}
+.stg-matrix-legend {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 10px; color: var(--s-ink-soft); font-weight: 700;
+}
+.stg-mx-leg { display: inline-flex; align-items: center; gap: 4px; }
+.stg-mx-leg .stg-mx-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid var(--s-ink);
+}
+.stg-mx-leg.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; }
+.stg-mx-leg.off .stg-mx-dot { background: var(--s-white); }
+.stg-matrix-scroll {
+  overflow-x: auto;
+  border: 2px solid var(--s-ink);
+  border-radius: var(--s-radius);
+  /* A shadow CANNOT overflow its own element's border-radius, so both fade
+     masks live on the single scroll wrapper: the ::before block is
+     position:sticky so it paints the right-edge fade and stays pinned to
+     the visible corner while content scrolls underneath. */
+  position: relative;
+}
+/* Right-edge fade: a sticky zero-size block with the shadow drawn by its
+   ::before. The block is sticky right:0 so it tracks the visible right
+   edge while content scrolls left. */
+.stg-matrix-scroll::before {
+  content: '';
+  display: block;
+  position: sticky;
+  float: right;
+  right: 0;
+  width: 0; height: 0;
+  margin-right: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+/* The fade itself, hung off the zero-size anchor. Right/bottom inset 2px
+   so it starts inside the border, not on top of it. */
+.stg-matrix-scroll::after {
+  content: '';
+  position: absolute;
+  top: 0; right: 2px; bottom: 2px;
+  width: 56px;
+  background: linear-gradient(to right, transparent, rgba(28,25,23,0.13));
+  pointer-events: none;
+  z-index: 3;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.stg-matrix-scroll.can-scroll-right::after { opacity: 1; }
+/* Left-edge fade sits over the sticky first column when content is
+   scrolled: implemented via a ::before on the table wrapper is not
+   possible (sticky columns), so a class toggled from scroll events
+   lights a shadow on the first column's right border instead. */
+.stg-matrix-table {
+  border-collapse: collapse;
+  font-size: 11px;
+  width: max-content;
+  min-width: 100%;
+}
+/* Wide-screen relief: when an OPEN matrix would overflow the settings
+   panel, widen the panel itself instead of forcing horizontal scrolling.
+   Applied/removed by _fitMatrixPanelWidth() on render, poll and resize.
+   The 6vw cap keeps the panel from blowing past the viewport when a
+   provider has many credentials; the matrix's own scroller takes over
+   beyond that. */
+@media (min-width: 1100px) {
+  .modal.settings-panel.stg-matrix-wide {
+    width: min(1160px, 94vw);
+    max-width: 94vw;
+    /* The widen must not be instant: on settings pages with several
+       matrices (long page, inner overlay scroll) each matrix re-fit lands
+       in the SAME frame, and a 180ms width transition re-fires
+       ResizeObserver on every step — with all observers mutating panel
+       width that's a loop. A short transition still reads as a smooth
+       grow. */
+    transition: width 0.18s ease, max-width 0.18s ease;
+  }
+}
+.stg-matrix-table th, .stg-matrix-table td {
+  border-bottom: 1px solid var(--s-border);
+  border-right: 1px solid var(--s-border);
+  padding: 4px 6px;
+}
+.stg-matrix-table thead th {
+  background: var(--s-cream);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--s-ink-soft);
+  border-bottom: 2px solid var(--s-ink);
+  position: sticky; top: 0; z-index: 2;
+}
+.stg-mx-corner {
+  text-align: left;
+  position: sticky; left: 0; z-index: 4 !important;
+  background: var(--s-cream);
+  min-width: 170px;
+  max-width: 260px;
+}
+/* Credential column headers: a static label (序号 + kind) with a reserved
+   right lane for the column probe trigger. */
+.stg-mx-keyhead {
+  position: relative;
+  min-width: 92px;
+  padding-right: 28px !important;
+  text-align: center;
+}
+.stg-mx-credname {
+  display: block;
+  font-size: 10.5px; font-weight: 800;
+  color: var(--s-ink);
+  text-transform: none; letter-spacing: normal;
+}
+.stg-mx-credkind {
+  display: block;
+  font-size: 8.5px; font-weight: 700;
+  color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: none; letter-spacing: normal;
+  margin-top: 1px;
+}
+/* Model label cells: sticky first column, brand icon + id. */
+.stg-mx-model {
+  position: sticky; left: 0;
+  background: var(--s-white);
+  text-align: left;
+  min-width: 170px;
+  max-width: 260px;
+  z-index: 1;
+  /* Reserve a right lane for the row probe button so it never overlaps id text. */
+  padding-right: 28px !important;
+}
+/* A model whose offering is disabled keeps its column clickable but is
+   clearly dimmed. */
+.stg-mx-model.model-off .stg-mx-mid,
+.stg-mx-model.model-off .stg-mx-brand { opacity: 0.45; }
+.stg-mx-gtoggle {
+  margin-right: 5px;
+  vertical-align: -4px;
+  transform: scale(0.8);
+  transform-origin: left center;
+}
+.stg-mx-brand {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  margin-right: 5px;
+  vertical-align: -3px;
+  flex-shrink: 0;
+}
+.stg-mx-mid {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 700;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-block;
+  max-width: 150px;
+  vertical-align: middle;
+}
+.stg-mx-aliascount {
+  margin-left: 5px;
+  font-size: 8.5px; font-weight: 800; line-height: 1;
+  padding: 1.5px 5px; border-radius: 4px;
+  border: 1.5px solid var(--s-ink); color: var(--s-ink-soft);
+  background: var(--s-white);
+  vertical-align: 2px;
+  white-space: nowrap;
+}
+/* The trailing border of the sticky label column doubles as the row-group
+   separator; rows of one offering read as a unit. */
+.stg-mx-row { border-bottom: none; }
+.stg-mx-row td { border-bottom: 1px dashed rgba(0,0,0,0.08); }
+.stg-mx-row.group-end td { border-bottom: 2px solid var(--s-ink); }
+.stg-mx-row:not(.grouped):not(.is-alias) td { border-bottom: 1.5px solid var(--s-ink); }
+/* ── Logical root row: the canonical model id of an offering whose every
+   deployment routes to a DIFFERENT upstream id. It is not sent on the
+   wire, so it renders as a header strip (global toggle + count, no
+   per-credential cells). ── */
+.stg-mx-model.logical { background: var(--s-cream); }
+.stg-mx-cell.logical {
+  background: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(0,0,0,0.05) 6px, rgba(0,0,0,0.05) 12px);
+}
+.stg-mx-preset {
+  margin-left: 6px;
+  font-size: 8px; font-weight: 800; line-height: 1;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 5px; border-radius: 3px;
+  border: 1.5px dashed var(--s-ink-soft); color: var(--s-ink-soft);
+  background: none;
+  vertical-align: 1px;
+}
+/* ── Wire-id rows: a concrete id mapping under an offering ── */
+.stg-mx-row.is-alias .stg-mx-model.alias {
+  padding-left: 14px !important;
+  background: linear-gradient(90deg,
+    hsla(var(--alias-hue, 265), 70%, 55%, 0.10), transparent 55%);
+}
+.stg-mx-tree {
+  display: inline-block; width: 14px;
+  color: var(--s-ink-soft); font-weight: 700;
+  font-family: 'JetBrains Mono', monospace; margin-right: 2px;
+}
+.stg-mx-aliasidx {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 16px; padding: 0 4px; margin-right: 6px;
+  font-size: 9px; font-weight: 900; line-height: 1;
+  font-family: 'JetBrains Mono', monospace;
+  border-radius: 4px;
+  color: hsl(var(--alias-hue, 265), 65%, 40%);
+  background: hsla(var(--alias-hue, 265), 70%, 55%, 0.16);
+  border: 1.5px solid hsl(var(--alias-hue, 265), 60%, 55%);
+}
+.stg-mx-mid.alias-id { font-weight: 600; font-size: 10.5px; }
+.stg-mx-row.is-alias .stg-mx-brand { opacity: 0.85; }
+/* ── Attempts selector (false-429 filter) ── */
+/* Specificity must beat the global form resets `.modal label` / `.modal
+   select` (0,1,1): they otherwise flip the label to display:block with
+   uppercase text and stretch the select to width:100%, which overflows the
+   label's dashed border and covers the probe button beside it. */
+.stg-matrix-toolbar .stg-mx-attempts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px; font-weight: 700; color: var(--s-ink-soft);
+  line-height: 1;
+  text-transform: none;
+  letter-spacing: normal;
+  height: 30px;
+  margin: 0;
+  padding: 0 8px;
+  border: 2px dashed var(--s-ink-soft);
+  border-radius: var(--s-radius);
+  background: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+.stg-matrix-toolbar .stg-mx-attempts select {
+  width: auto;
+  flex: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 800;
+  height: 22px;
+  margin: 0;
+  padding: 0 4px;
+  border: 1.5px solid var(--s-ink);
+  border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  cursor: pointer;
+  box-sizing: border-box;
+  vertical-align: middle;
+  line-height: 1;
+  box-shadow: none;
+}
+.stg-matrix-toolbar .stg-mx-attempts select:focus {
+  box-shadow: none;
+  transform: none;
+}
+/* ── Cells ── */
+.stg-mx-cell {
+  position: relative;
+  text-align: center;
+  vertical-align: middle;
+  height: 44px;
+  min-width: 92px;
+  transition: background 0.12s;
+}
+.stg-mx-cell.on { background: rgba(74, 222, 128, 0.10); }
+.stg-mx-cell.off { background: repeating-linear-gradient(45deg, var(--s-cream), var(--s-cream) 5px, rgba(0,0,0,0.04) 5px, rgba(0,0,0,0.04) 10px); }
+.stg-mx-toggle {
+  border: none; background: none; cursor: pointer;
+  padding: 4px; display: inline-flex; align-items: center; justify-content: center;
+}
+.stg-mx-cell .stg-mx-dot {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 1.5px solid var(--s-ink);
+  transition: transform 0.1s, background 0.12s;
+}
+.stg-mx-cell.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; box-shadow: 0 0 0 3px rgba(74,222,128,0.25); }
+.stg-mx-cell.off .stg-mx-dot { background: var(--s-white); }
+.stg-mx-toggle:hover .stg-mx-dot { transform: scale(1.18); }
+/* Probe-status health pip (top-right of a cell) */
+.stg-mx-probe-pip {
+  position: absolute; top: 2px; right: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  font-size: 9px; font-weight: 900; line-height: 1;
+  border-radius: 4px;
+  border: 1.5px solid currentColor;
+  font-family: 'JetBrains Mono', monospace;
+  pointer-events: auto;
+}
+.stg-mx-probe-pip.ok     { color: #16a34a; background: rgba(74,222,128,0.18); }
+.stg-mx-probe-pip.rate   { color: #c2410c; background: rgba(251,146,60,0.20); }
+.stg-mx-probe-pip.unauth { color: #b91c1c; background: rgba(248,113,113,0.20); }
+.stg-mx-probe-pip.nf     { color: #6b7280; background: rgba(156,163,175,0.20); }
+.stg-mx-probe-pip.skip   { color: #6b7280; background: rgba(156,163,175,0.20); }
+.stg-mx-probe-pip.down   { color: #a16207; background: rgba(250,204,21,0.20); }
+.stg-mx-probe-pip.err    { color: #b91c1c; background: rgba(248,113,113,0.20); }
+/* When a cell is flagged (non-ok pip) but still enabled, nudge attention. */
+.stg-mx-cell:has(.stg-mx-probe-pip.rate) .stg-mx-dot,
+.stg-mx-cell:has(.stg-mx-probe-pip.unauth) .stg-mx-dot,
+.stg-mx-cell:has(.stg-mx-probe-pip.down) .stg-mx-dot { box-shadow: 0 0 0 2px rgba(194,65,12,0.25); }
+
+/* ── Scoped probe triggers (row / column / cell) — one shared mini bolt
+   button in the matrix's hover-reveal language ── */
+.stg-mx-zap {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0;
+  border: 1.5px solid var(--s-ink); border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.1s, background 0.12s;
+  box-sizing: border-box;
+}
+.stg-mx-zap svg { width: 10px; height: 10px; display: block; }
+.stg-mx-zap:hover { background: var(--s-gold); transform: scale(1.12); }
+.stg-mx-zap:disabled { opacity: 0.3; cursor: default; transform: none; background: var(--s-cream); }
+.stg-mx-zap.probing { pointer-events: none; opacity: 1; background: var(--s-gold); }
+.stg-mx-zap.probing svg { animation: stg-mx-spin 0.7s linear infinite; }
+/* Column scope: vertically centered in the header's reserved right lane. */
+.stg-mx-zap.col { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0.4; }
+.stg-mx-keyhead:hover .stg-mx-zap.col { opacity: 1; }
+/* Row scope: right edge of the (sticky) model label cell, hover-revealed. */
+.stg-mx-zap.row { position: absolute; top: 50%; right: 4px; margin-top: -9px; opacity: 0; }
+.stg-mx-model:hover .stg-mx-zap.row { opacity: 0.9; }
+.stg-mx-zap.row.probing { opacity: 1; }
+/* Cell scope: bottom-left corner, hover-revealed (only when no pip yet —
+   once a verdict exists the pip itself is the re-probe trigger). */
+.stg-mx-zap.cell { position: absolute; bottom: 2px; left: 3px; opacity: 0; }
+.stg-mx-cell:hover .stg-mx-zap.cell { opacity: 0.9; }
+.stg-mx-zap.cell.probing { opacity: 1; }
+/* The verdict pip doubles as the re-probe trigger for its own cell. */
+.stg-mx-probe-pip.clickable { cursor: pointer; transition: transform 0.1s; }
+.stg-mx-probe-pip.clickable:hover { transform: scale(1.2); }
+
+@keyframes stg-mx-spin {
+  to { transform: rotate(360deg); }
+}
+
+.stg-matrix-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  border: 1.5px dashed var(--s-ink);
+  border-radius: var(--s-radius);
+  margin-top: 8px;
+}
+
+@media (max-width: 640px) {
+  .stg-mx-keyhead, .stg-mx-cell { min-width: 76px; }
+}

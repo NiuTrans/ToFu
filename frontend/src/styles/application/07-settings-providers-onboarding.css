@@ -1,0 +1,588 @@
+/* ══════════════════════════════════════
+   Relay-Admin tables
+   (.relay-admin-tab — rendered by static/js/relay-admin.js).
+   These panels were authored with a class vocabulary
+   (.settings-input / .settings-label / .settings-checkbox-list /
+   .settings-table) that had no rules, so they rendered with raw
+   browser defaults. Bring them into the brutalist house style.
+   ══════════════════════════════════════ */
+.settings-panel input.settings-input,
+.settings-panel select.settings-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 12.5px;
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-cream);
+  color: var(--s-ink);
+  box-shadow: var(--s-shadow-xs);
+  outline: none;
+  transition: background 0.1s, border-color 0.1s, box-shadow 0.1s;
+}
+.settings-panel input.settings-input:focus,
+.settings-panel select.settings-input:focus {
+  background: var(--s-white);
+  border-color: var(--s-gold);
+  box-shadow: inset 2px 2px 0 var(--s-gold-glow);
+}
+
+/* Scope checkboxes — wrap as flowing chips */
+
+/* Issued-keys table can be wider than the panel; let it scroll
+   horizontally rather than clipping the action buttons. */
+
+/* Issued-keys / relay-admin tables */
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  border: var(--s-border-sm);
+  background: var(--s-white);
+  box-shadow: var(--s-shadow-xs);
+}
+.settings-table thead th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--s-ink-soft);
+  background: var(--s-cream);
+  border-bottom: var(--s-border-sm);
+  white-space: nowrap;
+}
+.settings-table tbody td {
+  padding: 8px 10px;
+  border-bottom: 1.5px dashed rgba(26, 24, 20, 0.18);
+  vertical-align: middle;
+  color: var(--s-ink);
+}
+.settings-table tbody tr:last-child td { border-bottom: none; }
+.settings-table tbody tr:hover { background: var(--s-cream); }
+
+/* Revoke button — .btn-danger has no global rule; give it one inside
+   the settings panel so destructive actions read as red. */
+.settings-panel .btn-danger {
+  background: var(--s-blocked);
+  color: var(--s-white);
+  border: var(--s-border-sm);
+}
+.settings-panel .btn-danger:hover { background: #dc2626; }
+
+/* ── Add / discover buttons ── */
+.stg-btn-add {
+  background: none;
+  border: 1px dashed rgba(26, 24, 20, 0.3);
+  color: var(--s-ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.stg-btn-add:hover {
+  color: var(--s-gold-dim);
+  border-color: var(--s-gold-dim);
+  background: rgba(201, 153, 63, 0.07);
+}
+.stg-btn-add:disabled { opacity: 0.4; cursor: wait; }
+.stg-btn-ico {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.stg-btn-ico svg { flex: none; }
+.stg-models-actions { display: flex; gap: 6px; align-items: center; }
+
+/* ══════════════════════════════════════
+   Auto Setup Modal
+   ══════════════════════════════════════ */
+.stg-modal-overlay {
+  /* ── Design tokens (duplicated from .settings-panel so the modal,
+       which is appended to <body>, inherits them correctly) ── */
+  --s-white:     #faf8f3;
+  --s-cream:     #f2ecda;
+  --s-skin:      #e4d6bf;
+  --s-board:     #35302a;
+  --s-board-lit: #443c32;
+  --s-gold:      #c9993f;
+  --s-gold-dim:  #a87d2e;
+  --s-gold-glow: rgba(201,153,63,0.18);
+  --s-ink:       #1a1814;
+  --s-ink-soft:  #3d362c;
+  --s-done:      #4ade80;
+  --s-blocked:   #f87171;
+  --s-accent:    #6366f1;
+  --s-danger:    #dc2626;
+  --s-line:        rgba(26, 24, 20, 0.08);
+  --s-line-strong: rgba(26, 24, 20, 0.15);
+  --s-shadow:    0 4px 10px rgba(26, 24, 20, 0.06), 0 18px 44px rgba(26, 24, 20, 0.14);
+  --s-shadow-md: 0 2px 4px rgba(26, 24, 20, 0.05), 0 8px 22px rgba(26, 24, 20, 0.10);
+  --s-shadow-sm: 0 1px 2px rgba(26, 24, 20, 0.04), 0 3px 8px rgba(26, 24, 20, 0.06);
+  --s-shadow-xs: 0 1px 2px rgba(26, 24, 20, 0.05);
+  --s-border:    1px solid var(--s-line-strong);
+  --s-border-sm: 1px solid var(--s-line);
+  --s-radius:    9px;
+  --s-radius-sm: 6px;
+  --s-radius-lg: 14px;
+
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: stgFadeIn 0.15s ease;
+  font-family: 'Inter', 'SF Pro', -apple-system, system-ui, sans-serif;
+}
+@keyframes stgFadeIn { from { opacity: 0; } to { opacity: 1; } }
+.stg-modal {
+  background: var(--s-white);
+  border: 1px solid rgba(26, 24, 20, 0.18);
+  box-shadow: 0 24px 70px rgba(26, 24, 20, 0.3), 0 6px 22px rgba(26, 24, 20, 0.14);
+  border-radius: var(--s-radius-lg);
+  color: var(--s-ink);
+  width: 520px;
+  max-width: 95vw;
+  max-height: 90vh;
+  max-height: calc(var(--vh100,100vh)*0.9);
+  overflow: auto;
+  animation: stgSlideUp 0.2s ease;
+}
+@keyframes stgSlideUp { from { transform: translateY(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+.stg-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px 12px;
+  border-bottom: 2px solid var(--s-ink);
+}
+.stg-modal-title {
+  font-size: 15px;
+  font-weight: 900;
+  color: var(--s-ink);
+}
+.stg-modal-close {
+  background: none; border: none; cursor: pointer;
+  font-size: 18px; color: var(--s-ink-soft);
+  padding: 0 4px; line-height: 1;
+}
+.stg-modal-close:hover { color: var(--s-blocked); }
+.stg-modal-body {
+  padding: 18px;
+}
+.stg-modal-desc {
+  font-size: 12px;
+  color: var(--s-ink-soft);
+  line-height: 1.6;
+  margin-bottom: 16px;
+}
+.stg-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--s-cream);
+}
+.stg-required { color: var(--s-blocked); font-weight: 900; }
+
+/* Auto-setup status messages */
+.stg-auto-status {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--s-radius);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.stg-auto-loading {
+  background: rgba(99, 102, 241, 0.08);
+  color: #6366f1;
+  border: 1.5px solid rgba(99, 102, 241, 0.25);
+  animation: stgPulse 1.5s ease infinite;
+}
+@keyframes stgPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.stg-auto-success {
+  background: rgba(22, 163, 74, 0.08);
+  color: #16a34a;
+  border: 1.5px solid rgba(22, 163, 74, 0.25);
+}
+.stg-auto-error {
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--s-blocked);
+  border: 1.5px solid rgba(239, 68, 68, 0.25);
+}
+
+/* ══════════════════════════════════════
+   Onboarding wizard (first-run)
+   ── The overlay element is .modal-overlay (the e2e dismiss contract —
+      tests/conftest.py strips `.open` from exactly that selector), NOT
+      .stg-modal-overlay, so the .stg-* design tokens are re-declared on
+      .ob-modal itself: var(--s-*) would otherwise resolve to nothing and
+      the reused .stg-modal shell would render unstyled. ──
+   ══════════════════════════════════════ */
+.ob-modal {
+  --s-white:     #faf8f3;
+  --s-cream:     #f2ecda;
+  --s-skin:      #e4d6bf;
+  --s-board:     #35302a;
+  --s-board-lit: #443c32;
+  --s-gold:      #c9993f;
+  --s-gold-dim:  #a87d2e;
+  --s-gold-glow: rgba(201,153,63,0.18);
+  --s-ink:       #1a1814;
+  --s-ink-soft:  #3d362c;
+  --s-done:      #4ade80;
+  --s-blocked:   #f87171;
+  --s-accent:    #6366f1;
+  --s-danger:    #dc2626;
+  --s-line:        rgba(26, 24, 20, 0.08);
+  --s-line-strong: rgba(26, 24, 20, 0.15);
+  --s-shadow:    0 4px 10px rgba(26, 24, 20, 0.06), 0 18px 44px rgba(26, 24, 20, 0.14);
+  --s-shadow-md: 0 2px 4px rgba(26, 24, 20, 0.05), 0 8px 22px rgba(26, 24, 20, 0.10);
+  --s-shadow-sm: 0 1px 2px rgba(26, 24, 20, 0.04), 0 3px 8px rgba(26, 24, 20, 0.06);
+  --s-shadow-xs: 0 1px 2px rgba(26, 24, 20, 0.05);
+  --s-border:    1px solid var(--s-line-strong);
+  --s-border-sm: 1px solid var(--s-line);
+  --s-radius:    9px;
+  --s-radius-sm: 6px;
+  --s-radius-lg: 14px;
+  width: 560px;
+  font-family: 'Inter', 'SF Pro', -apple-system, system-ui, sans-serif;
+}
+.ob-step-line {
+  display: block;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--s-gold-dim);
+  margin-bottom: 8px;
+}
+.ob-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0 4px; }
+.ob-card {
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  background: var(--s-white);
+  padding: 14px 14px 12px;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+}
+.ob-card:hover, .ob-card:focus-visible {
+  border-color: var(--s-gold);
+  box-shadow: var(--s-shadow-sm);
+  transform: translate(-2px, -2px);
+  outline: none;
+}
+.ob-card-icon { color: var(--s-gold-dim); margin-bottom: 8px; }
+.ob-card-icon > svg { display: block; }
+.ob-card-title { font-size: 13.5px; font-weight: 800; color: var(--s-ink); margin-bottom: 4px; }
+.ob-card-desc { font-size: 11.5px; line-height: 1.55; color: var(--s-ink-soft); }
+.ob-note {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--s-gold-dim);
+}
+.ob-done { text-align: center; padding: 18px 6px 8px; }
+.ob-done-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px; height: 52px;
+  border: var(--s-border);
+  border-radius: 50%;
+  color: #16a34a;
+  margin-bottom: 12px;
+}
+.ob-done-title { font-size: 16px; font-weight: 900; color: var(--s-ink); margin-bottom: 6px; }
+@media (max-width: 560px) {
+  .ob-cards { grid-template-columns: 1fr; }
+}
+
+/* ── Icon / secondary / primary buttons ── */
+.stg-btn-icon {
+  background: none;
+  border: 1.5px solid transparent;
+  color: var(--s-ink-soft);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--s-radius);
+  font-size: 13px;
+  transition: color 0.1s, background 0.1s, border-color 0.1s;
+}
+.stg-btn-icon:hover {
+  color: var(--s-ink);
+  background: var(--s-cream);
+  border-color: var(--s-ink);
+}
+.stg-btn-icon.danger:hover {
+  color: var(--s-blocked);
+  background: rgba(248, 113, 113, 0.1);
+  border-color: var(--s-blocked);
+}
+.stg-btn-secondary {
+  background: var(--s-white);
+  border: var(--s-border-sm);
+  color: var(--s-ink);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.stg-btn-secondary:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+  background: var(--s-cream);
+}
+.stg-btn-primary {
+  background: var(--s-gold);
+  border: var(--s-border-sm);
+  color: var(--s-ink);
+  font-size: 11px;
+  font-weight: 800;
+  padding: 5px 14px;
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-xs);
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+.stg-btn-primary:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--s-ink);
+  background: var(--s-gold-dim);
+}
+
+.stg-empty, .stg-loading {
+  text-align: center;
+  padding: 20px 0;
+  color: var(--s-ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+.stg-empty-sm {
+  text-align: center;
+  padding: 10px 0;
+  color: var(--s-ink-soft);
+  font-size: 11px;
+  margin: 0;
+  font-weight: 600;
+}
+
+/* ══════════════════════════════════════
+   Preset Mapping Table — tofu grid
+   ══════════════════════════════════════ */
+
+/* ── Server Info — tofu info rows ── */
+.stg-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  font-size: 12px;
+  border-bottom: 1px dashed rgba(26, 24, 20, 0.1);
+}
+.stg-info-row:last-child { border-bottom: none; }
+.stg-info-label { color: var(--s-ink-soft); font-weight: 700; }
+.stg-info-value {
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+/* API keys stats */
+
+/* Server info */
+.settings-server-info { display: flex; flex-direction: column; gap: 0; }
+.settings-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  font-size: 12px;
+  border-bottom: 1px dashed rgba(26, 24, 20, 0.1);
+}
+.settings-info-row:last-child { border-bottom: none; }
+.settings-info-label { color: var(--s-ink-soft); font-weight: 700; }
+.settings-info-value {
+  color: var(--s-ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+@keyframes mcp-reconnect-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* ══════════════════════════════════════
+   Footer — thick top border like stats bar
+   ══════════════════════════════════════ */
+.settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  border-top: 3px solid var(--s-ink);
+  background: var(--s-cream);
+  flex-shrink: 0;
+  gap: 12px;
+  position: relative;
+}
+/* Gold kintsugi line above footer */
+.settings-footer::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: 20px;
+  right: 20px;
+  height: 2px;
+  background: var(--s-gold);
+  opacity: 0.4;
+}
+.settings-footer-hint {
+  font-size: 11px;
+  color: var(--s-ink-soft);
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-footer-actions { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+.settings-version { font-size: 10px; color: var(--s-ink-soft); opacity: 0.5; margin-right: 4px; font-family: 'SF Mono', 'Consolas', monospace; letter-spacing: 0.02em; }
+
+.settings-footer-actions .btn { min-width: 88px; box-sizing: border-box; text-align: center; }
+
+/* ── Footer buttons — tofu blocks ── */
+.settings-footer .btn {
+  flex: 1;
+  padding: 10px 22px;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  cursor: pointer;
+  box-shadow: var(--s-shadow-sm);
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  font-family: inherit;
+}
+.settings-footer .btn:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 var(--s-ink);
+}
+.settings-footer .btn:active {
+  transform: translate(3px, 3px);
+  box-shadow: 0 0 0 var(--s-ink);
+}
+.settings-footer .btn-secondary {
+  background: var(--s-white);
+  color: var(--s-ink);
+}
+.settings-footer .btn-primary {
+  background: var(--s-gold);
+  color: var(--s-ink);
+}
+.settings-footer .btn-primary:hover {
+  background: var(--s-gold-dim);
+}
+.settings-footer .btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+  transform: none;
+  box-shadow: var(--s-shadow-sm);
+}
+
+/* ── Override modal base styles inside settings panel ── */
+.settings-panel.modal {
+  background: var(--s-white);
+  border: 3px solid var(--s-ink);
+  border-radius: 0;
+  box-shadow: 8px 8px 0 var(--s-ink);
+}
+.settings-panel label {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--s-ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.settings-panel input,
+.settings-panel select {
+  background: #fff;
+  border: 1px solid var(--s-line-strong, rgba(26, 24, 20, 0.18));
+  border-radius: 8px;
+  color: var(--s-ink);
+  box-shadow: 0 1px 2px rgba(26, 24, 20, 0.05);
+  outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
+}
+.settings-panel input:focus,
+.settings-panel select:focus {
+  background: #fff;
+  border-color: var(--s-gold);
+  box-shadow: 0 0 0 3px var(--s-gold-glow);
+}
+.settings-panel input[type="range"] {
+  box-shadow: none;
+  background: var(--s-skin);
+  border: 1px solid var(--s-line-strong, rgba(26, 24, 20, 0.18));
+  height: 8px;
+  border-radius: 999px;
+  padding: 0;
+  margin: 0;
+}
+.settings-panel input[type="range"]:focus {
+  transform: none;
+  box-shadow: none;
+}
+.settings-panel input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--s-gold);
+  border: 1px solid rgba(26, 24, 20, 0.28);
+  box-shadow: 0 1px 3px rgba(26, 24, 20, 0.28);
+  cursor: pointer;
+}
+.settings-panel .range-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.settings-panel .range-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--s-ink);
+  min-width: 48px;
+  text-align: right;
+}
+.settings-panel h3 {
+  color: var(--s-ink);
+}
+.settings-panel a {
+  color: var(--s-gold-dim);
+  font-weight: 700;
+}
+.settings-panel a:hover {
+  color: var(--s-gold);
+}
+.btn-sm{padding:5px 12px!important;font-size:11px!important}.cost-tag{font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;padding:2px 8px;border-radius:10px;line-height:1.4;white-space:nowrap;color:#f59e0b;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);cursor:default;position:relative}.cost-tag-detail .cost-breakdown{font-size:8.5px;font-weight:500;opacity:0.7;margin-left:4px}

@@ -1,0 +1,46 @@
+/* Turn Trace (耗时分析): Request Inspector entry and flame graph.
+ * Kept beside the feature instead of extending the retained application
+ * stylesheet. Wire semantics: docs/TURN_TRACE_CONTRACT.md. */
+.ri-trace-entry{margin:6px 10px;padding:7px 10px;border:1px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:baseline;gap:8px;border-left:2px solid transparent}
+.ri-trace-entry:hover{background:rgba(128,128,160,0.07)}
+.ri-trace-entry.ri-sel{background:rgba(110,86,207,0.12);border-left-color:var(--accent)}
+.ri-trace-label{font-size:11px;font-weight:600;color:var(--text-secondary)}
+.ri-trace-hint{margin-left:auto;font-size:9px;color:var(--text-muted)}
+.tr-wrap{display:flex;flex-direction:column;gap:8px;font-size:11px}
+.tr-chips{display:flex;flex-wrap:wrap;gap:6px}
+.tr-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border:1px solid var(--border);border-radius:10px;font-size:10px;color:var(--text-tertiary)}
+.tr-chip b{color:var(--text-secondary);font-weight:600}
+.tr-chip i{font-style:normal;color:var(--text-muted)}
+.tr-chip-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+.tr-c-total .tr-chip-dot{background:var(--text-secondary)}
+.tr-c-llm .tr-chip-dot{background:#5b8def}
+.tr-c-tool .tr-chip-dot{background:#4caf7d}
+.tr-c-wait .tr-chip-dot{background:#ef9f4c}
+.tr-c-compact .tr-chip-dot{background:#a78bfa}
+.tr-c-approval .tr-chip-dot{background:#e5c558}
+.tr-c-gap .tr-chip-dot{background:#777}
+.tr-note{font-size:10px;color:var(--text-muted)}
+.tr-note-warn{color:#ffb74d}
+.tr-note-over{color:#ef7d7d}
+.tr-flame{display:flex;flex-direction:column;gap:3px;margin-top:2px}
+.tr-row{display:flex;align-items:center;gap:6px;height:20px}
+.tr-row-label{width:44px;flex-shrink:0;font-size:9px;color:var(--text-muted);text-align:right;overflow:hidden}
+.tr-track{position:relative;flex:1;height:18px;background:rgba(128,128,160,0.05);border-radius:3px}
+.tr-bar{position:absolute;top:1px;bottom:1px;border-radius:3px;overflow:hidden;white-space:nowrap;cursor:default;min-width:1px}
+.tr-bar-txt{display:block;font-size:9px;line-height:16px;padding:0 4px;color:rgba(255,255,255,0.92);overflow:hidden;text-overflow:ellipsis}
+.tr-k-turn{background:rgba(128,128,160,0.25);border:1px solid var(--border)}
+.tr-k-round{background:rgba(110,86,207,0.28);border:1px solid rgba(110,86,207,0.45)}
+.tr-k-llm{background:rgba(91,141,239,0.55)}
+.tr-k-llm_ttft{background:rgba(91,200,239,0.55)}
+.tr-k-tool{background:rgba(76,175,125,0.55)}
+.tr-k-retry_wait{background:rgba(239,159,76,0.6)}
+.tr-k-compaction{background:rgba(167,139,250,0.55)}
+.tr-k-approval_wait{background:rgba(229,197,88,0.6)}
+.tr-k-spawn_wait{background:rgba(239,190,120,0.5)}
+.tr-k-gap{background:repeating-linear-gradient(45deg,rgba(120,120,130,0.25) 0 4px,rgba(120,120,130,0.08) 4px 8px)}
+.tr-k-unknown{background:rgba(140,140,150,0.4);border:1px dashed rgba(140,140,150,0.6)}
+.tr-err{outline:1px solid rgba(239,83,80,0.8);background:rgba(239,83,80,0.4)}
+.tr-over{outline:2px dashed rgba(239,83,80,0.9);outline-offset:-1px}
+.tr-live{background-image:repeating-linear-gradient(45deg,rgba(255,255,255,0.12) 0 6px,transparent 6px 12px)}
+.tr-trunc{border-right:2px dashed rgba(239,83,80,0.8)}
+.tr-axis{display:flex;justify-content:space-between;margin-left:50px;font-size:9px;color:var(--text-muted)}

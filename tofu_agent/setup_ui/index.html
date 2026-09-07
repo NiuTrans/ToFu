@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tofu Agent · 接入配置</title>
+  <link rel="stylesheet" href="/setup/assets/setup.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/setup" aria-label="Tofu Agent 接入配置">
+      <span class="brand-mark">豆</span>
+      <span><strong>Tofu Agent</strong><small>模型路由 v2</small></span>
+    </a>
+    <span id="statusBadge" class="status-badge">正在连接</span>
+  </header>
+  <main>
+    <section class="hero">
+      <p class="eyebrow">TOFU.MODEL-ROUTING/V2</p>
+      <h1>统一管理服务商、接入点、凭证、模型供给与部署路由</h1>
+      <p>粘贴完整 v2 接入契约。凭证正文只进入本机加密文件，读取接口不会返回正文。</p>
+    </section>
+    <section class="provider-card">
+      <header class="provider-card-header">
+        <div class="provider-mark">v2</div>
+        <div><p class="eyebrow">接入配置</p><h2>完整契约</h2></div>
+        <span id="configState" class="provider-state">尚未配置</span>
+      </header>
+      <form id="routingForm">
+        <div class="provider-card-body">
+          <label class="field wide-field">
+            <span>JSON 接入信封</span>
+            <textarea id="routingJson" rows="22" spellcheck="false" required></textarea>
+            <small>字段：model_routing、model、routing、credential_secrets。已保存 secret 不会回显；编辑时需重新填写。</small>
+          </label>
+        </div>
+        <footer class="provider-card-footer">
+          <p id="message" role="status" aria-live="polite"></p>
+          <div class="button-row">
+            <button id="deleteButton" class="ghost-button is-hidden" type="button">删除</button>
+            <button id="testButton" class="secondary-button" type="button">探测实际路由</button>
+            <button id="saveButton" class="primary-button" type="submit">保存接入配置</button>
+          </div>
+        </footer>
+      </form>
+    </section>
+  </main>
+  <script src="/setup/assets/setup.js" defer></script>
+</body>
+</html>

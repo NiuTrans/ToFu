@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#E87A7A">
+  <!-- ShuBiaoBiao (数标标) — narutomaki swirl icon inspired by New API 🍥 -->
+  <circle cx="12" cy="12" r="11" fill="#E87A7A" opacity=".15"/>
+  <circle cx="12" cy="12" r="11" fill="none" stroke="#E87A7A" stroke-width="2"/>
+  <path d="M12 5a7 7 0 100 14" fill="none" stroke="#E87A7A" stroke-width="2" stroke-linecap="round"/>
+  <path d="M12 9a3 3 0 110 6" fill="none" stroke="#E87A7A" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="12" cy="12" r="1" fill="#E87A7A"/>
+</svg>

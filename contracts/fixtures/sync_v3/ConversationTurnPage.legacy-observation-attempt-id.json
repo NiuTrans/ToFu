@@ -1,0 +1,811 @@
+{
+  "attempts": [
+    {
+      "attemptId": "s",
+      "baseProjectionRevision": 1,
+      "commandId": "s",
+      "conversationId": "s",
+      "createdAt": 1,
+      "operation": "generate",
+      "queueBinding": {
+        "queueId": "s",
+        "state": "pending"
+      },
+      "resumeAnchor": {},
+      "settledAt": 1,
+      "startedAt": 1,
+      "status": "pending",
+      "taskId": "s",
+      "turnId": "s"
+    }
+  ],
+  "beforeOrdinal": 1,
+  "contract": "tofu.conversation-sync.turn-page/v1",
+  "conversationId": "s",
+  "conversationRevision": 1,
+  "cursor": "s",
+  "hasMore": true,
+  "laneId": "s",
+  "nextBeforeOrdinal": 1,
+  "ok": true,
+  "sharedToolDocuments": {
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {}
+  },
+  "snapshotProjectionRefs": {
+    "k": {
+      "content": "s",
+      "roundThinking": {
+        "k": "s"
+      }
+    }
+  },
+  "syncSeq": 1,
+  "totalTurns": 1,
+  "turns": [
+    {
+      "actor": "human",
+      "conversationId": "s",
+      "createdAt": 1,
+      "currentAttemptId": "s",
+      "kind": "s",
+      "laneId": "s",
+      "ordinal": 1,
+      "parentTurnId": "s",
+      "presentationId": "s",
+      "projection": {
+        "_autopilotRunId": "s",
+        "_boardTaskId": "s",
+        "_brainDispatch": true,
+        "_brainEpic": {},
+        "_branchLanes": [
+          {
+            "anchorText": "s",
+            "icon": "s",
+            "kind": "s",
+            "label": "s",
+            "laneId": "s",
+            "parentSelection": "s",
+            "title": "s"
+          }
+        ],
+        "_compactionArchiveId": "s",
+        "_compactions": [
+          {}
+        ],
+        "_ctx": {},
+        "_estimatedPromptTokens": 1,
+        "_flowApproved": true,
+        "_flowIteration": 1,
+        "_flowNextPhase": "s",
+        "_flowNodeId": "s",
+        "_flowPlannerIteration": 1,
+        "_flowRunId": "s",
+        "_foldedToolRounds": 1,
+        "_fromConv": "s",
+        "_inboxInjects": [
+          {
+            "agentIds": [
+              "s"
+            ],
+            "blockId": "s",
+            "count": 1,
+            "previews": [
+              {
+                "agentId": "s",
+                "fromConv": "s",
+                "text": "s"
+              }
+            ],
+            "round": 1
+          }
+        ],
+        "_initiator": "s",
+        "_isCompactionSummary": true,
+        "_isFlowPlanner": true,
+        "_isFlowReview": true,
+        "_isStuck": true,
+        "_isVirtualUser": true,
+        "_peerHuman": true,
+        "_peerInjects": [
+          {
+            "agentIds": [
+              "s"
+            ],
+            "blockId": "s",
+            "count": 1,
+            "previews": [
+              {
+                "agentId": "s",
+                "fromConv": "s",
+                "text": "s"
+              }
+            ],
+            "round": 1
+          }
+        ],
+        "_peerMessage": true,
+        "_proactive": true,
+        "_proactiveTaskId": "s",
+        "_showingTranslation": true,
+        "_stallNudges": [
+          {
+            "badge": "s",
+            "blockId": "s",
+            "failedRound": 1,
+            "max": 1,
+            "prompt": "s",
+            "round": 1,
+            "tool": "s"
+          }
+        ],
+        "_swarmAutoContinue": true,
+        "_timer": true,
+        "_translateDone": true,
+        "_translateError": {},
+        "_translateFailed": {},
+        "_translateModel": "s",
+        "_translatePartial": "s",
+        "_translatePartialByRound": {},
+        "_translateSkippedReason": "s",
+        "_translateStatus": "s",
+        "_translateStatusKind": "s",
+        "_translateTaskId": "s",
+        "_userSteerInjects": [
+          {
+            "agentIds": [
+              "s"
+            ],
+            "blockId": "s",
+            "count": 1,
+            "previews": [
+              {
+                "agentId": "s",
+                "fromConv": "s",
+                "text": "s"
+              }
+            ],
+            "round": 1
+          }
+        ],
+        "activityTimeline": {
+          "blockId": "activity-timeline",
+          "droppedCount": 1,
+          "entries": [
+            {
+              "action": "s",
+              "archiveId": "s",
+              "count": 1,
+              "detail": "s",
+              "detailArgs": {},
+              "detailKey": "s",
+              "durationMs": 1,
+              "endedAt": 1,
+              "failureStage": "s",
+              "fromModel": "s",
+              "id": "s",
+              "kind": "model",
+              "llmRound": 1,
+              "messagesAfter": 1,
+              "messagesBefore": 1,
+              "model": "s",
+              "occurredAt": 1,
+              "parentSpanId": "s",
+              "phase": "s",
+              "providerId": "s",
+              "reasonCode": "s",
+              "reductionPercent": 1,
+              "requestTag": "s",
+              "roundNum": 1,
+              "routeDecision": "s",
+              "routeId": "s",
+              "routeMode": "s",
+              "seq": 1,
+              "severity": "info",
+              "spanId": "s",
+              "startedAt": 1,
+              "status": "started",
+              "statusCode": 1,
+              "summary": "s",
+              "summaryArgs": {},
+              "summaryKey": "s",
+              "timingMode": "s",
+              "toModel": "s",
+              "tokenCountKind": "s",
+              "tokensAfter": 1,
+              "tokensBefore": 1,
+              "toolCallId": "s",
+              "toolName": "s",
+              "trigger": "s"
+            }
+          ],
+          "version": 1
+        },
+        "apiRounds": [
+          {}
+        ],
+        "attachments": [
+          {
+            "attachmentId": "s",
+            "avgFrameBytes": 1,
+            "durationSeconds": 1.5,
+            "error": "s",
+            "frameCount": 1,
+            "height": 1,
+            "kind": "document",
+            "method": "s",
+            "mimeType": "s",
+            "name": "s",
+            "pages": 1,
+            "previewUrl": "s",
+            "sizeBytes": 1,
+            "sourceUrl": "s",
+            "status": "processing",
+            "textChars": 1,
+            "transcriptStatus": "s",
+            "width": 1
+          }
+        ],
+        "boardTaskId": "s",
+        "compaction": {
+          "archiveId": "s",
+          "blockId": "s",
+          "conversationId": "s",
+          "estimatedPromptTokens": 1,
+          "foldedToolRounds": 1,
+          "messagesAfter": 1,
+          "messagesBefore": 1,
+          "reductionPercent": 1,
+          "timestamp": 1,
+          "tokensAfter": 1,
+          "tokensBefore": 1,
+          "trigger": "s"
+        },
+        "content": "s",
+        "contextSnapshot": {
+          "blockId": "s",
+          "snapshot": {}
+        },
+        "convRefs": [
+          {
+            "id": "s",
+            "title": "s"
+          }
+        ],
+        "cost": {},
+        "error": {},
+        "fallbackFrom": "s",
+        "fallbackKind": "s",
+        "fallbackModel": "s",
+        "fallbackReason": "s",
+        "fileChanges": {
+          "blockId": "s",
+          "commandId": "s",
+          "count": 1,
+          "effect": {},
+          "error": {},
+          "files": [
+            {
+              "action": "s",
+              "count": 1,
+              "ok": true,
+              "path": "s",
+              "pending": true,
+              "root": "s"
+            }
+          ],
+          "state": "applied",
+          "taskId": "s"
+        },
+        "imageGeneration": {
+          "blockId": "s",
+          "error": {},
+          "mode": "generate",
+          "results": [
+            {
+              "aspectRatio": "s",
+              "elapsedSeconds": 1.5,
+              "error": "s",
+              "errorType": "s",
+              "fileSize": 1,
+              "imageUrl": "s",
+              "model": "s",
+              "ok": true,
+              "prompt": "s",
+              "providerId": "s",
+              "remoteImageUrl": "s",
+              "resolution": "s",
+              "responseText": "s"
+            }
+          ],
+          "status": "running"
+        },
+        "images": [
+          {
+            "attachmentId": "s",
+            "caption": "s",
+            "mimeType": "s",
+            "name": "s",
+            "pdfImageSource": "s",
+            "pdfName": "s",
+            "pdfPage": 1,
+            "pdfTotal": 1,
+            "preview": "s",
+            "sizeKB": 1.5,
+            "sourceTool": "s",
+            "toolCallId": "s"
+          }
+        ],
+        "lastRoundUsage": {
+          "keyName": "s",
+          "keyTail": "s",
+          "model": "s",
+          "providerId": "s",
+          "resolvedModel": "s",
+          "round": 1,
+          "tag": "s",
+          "tokensIn": 1,
+          "tokensOut": 1
+        },
+        "model": "s",
+        "modifiedFileList": [
+          {
+            "action": "s",
+            "count": 1,
+            "ok": true,
+            "path": "s",
+            "pending": true,
+            "root": "s"
+          }
+        ],
+        "modifiedFiles": 1,
+        "orchestration": {
+          "approved": true,
+          "flowNodeId": "s",
+          "flowRunId": "s",
+          "iteration": 1,
+          "modelRoute": {
+            "kind": "selected",
+            "resolvedModel": "s",
+            "role": "s",
+            "selectedModel": "s",
+            "tier": "light"
+          },
+          "nextPhase": "s",
+          "stuck": true
+        },
+        "origin": {
+          "autopilotRunId": "s",
+          "blockId": "s",
+          "boardTaskId": "s",
+          "brain": {
+            "answered": true,
+            "epicId": "s",
+            "epicTitle": "s",
+            "method": "s",
+            "originatorConv": "s",
+            "originatorTitle": "s",
+            "route": "s"
+          },
+          "initiator": "human",
+          "peerHuman": true,
+          "scheduledTaskId": "s",
+          "sourceConversationId": "s"
+        },
+        "originalContent": "s",
+        "pdfTexts": [
+          {
+            "isScanned": true,
+            "method": "s",
+            "name": "s",
+            "pages": 1,
+            "text": "s",
+            "textLength": 1
+          }
+        ],
+        "planExecution": {
+          "blockId": "plan-execution",
+          "contextMode": "current",
+          "planId": "plan_aaaaaaaaaaaaaaaaaaaaaaaa",
+          "planText": "s",
+          "sourceProjectionRevision": 1,
+          "sourceTurnId": "s"
+        },
+        "preset": "s",
+        "proposedPlan": {
+          "blockId": "proposed-plan",
+          "format": "markdown",
+          "planId": "plan_aaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": 1,
+          "text": "s"
+        },
+        "provenance": {
+          "blockId": "s",
+          "mcpLoginHint": {},
+          "mcpToolsDelta": {},
+          "memoryPrefetch": {},
+          "preferencesApplied": {},
+          "preferencesLearned": [
+            {}
+          ],
+          "projectPathChange": {},
+          "relatedConversations": {}
+        },
+        "providerId": "s",
+        "provider_id": "s",
+        "replyQuotes": [
+          "s"
+        ],
+        "rolledBack": [
+          {
+            "at": 1,
+            "attemptId": "s",
+            "blockId": "s",
+            "content": "s",
+            "thinking": "s"
+          }
+        ],
+        "routeSnapshot": {
+          "actual_model": {
+            "creator_id": "s",
+            "model_id": "s"
+          },
+          "connection_id": "s",
+          "contract_version": "tofu.route-snapshot/v2",
+          "credential": {
+            "credential_id": "s",
+            "key_hint": "s",
+            "kind": "s"
+          },
+          "degradation_reasons": [
+            "s"
+          ],
+          "deployment_id": "s",
+          "legacy": true,
+          "offering_id": "s",
+          "preferred_provider_id": "s",
+          "provider_id": "s",
+          "provider_scoped_selection": {
+            "offering_id": "s",
+            "provider_id": "s"
+          },
+          "recorded_at": 1.5,
+          "selected_model": {
+            "creator_id": "s",
+            "model_id": "s"
+          },
+          "transitions": [
+            {
+              "from": {
+                "deployment_id": "s",
+                "offering_id": "s",
+                "provider_id": "s"
+              },
+              "kind": "initial",
+              "reason": "s",
+              "to": {
+                "deployment_id": "s",
+                "offering_id": "s",
+                "provider_id": "s"
+              }
+            }
+          ],
+          "wire_model_id": "s"
+        },
+        "segments": [
+          {
+            "attemptId": "s",
+            "blockId": "s",
+            "deliverable": true,
+            "llmRound": 1,
+            "resumable": true,
+            "taskId": "s",
+            "terminal": true,
+            "text": "s",
+            "translatedText": "s",
+            "type": "text"
+          }
+        ],
+        "thinking": "s",
+        "thinkingDepth": "s",
+        "timestamp": 1.5,
+        "timingTrace": {
+          "clientObservationDroppedCount": 1,
+          "clientObservations": [
+            {
+              "clientDroppedBefore": 1,
+              "clientId": "s",
+              "clockSkewSuspected": true,
+              "detailKey": "s",
+              "durationMs": 1,
+              "generation": 1,
+              "healthState": "idle",
+              "kind": "phase_painted",
+              "observationId": "s",
+              "observedAt": 1,
+              "paintedAt": 1,
+              "phase": "s",
+              "projectionRevision": 1,
+              "reason": "s",
+              "receivedAt": 1,
+              "recordedAt": 1,
+              "renderMs": 1,
+              "retryCount": 1,
+              "serverEmittedAt": 1,
+              "taskId": "s",
+              "transportMs": 1,
+              "visibility": "visible"
+            }
+          ],
+          "compacted": true,
+          "coverage": "full",
+          "coverageReason": "s",
+          "detailCompacted": true,
+          "droppedGaps": 1,
+          "droppedSpans": 1,
+          "eventLogAvailable": true,
+          "eventsAvailable": true,
+          "gaps": [
+            {
+              "tEnd": 1,
+              "tStart": 1
+            }
+          ],
+          "overBudgetDroppedCount": 1,
+          "running": true,
+          "source": "event-log",
+          "spans": [
+            {
+              "attrs": {},
+              "budgetMs": 1,
+              "depth": 1,
+              "kind": "s",
+              "name": "s",
+              "overBudget": true,
+              "parent": "s",
+              "spanId": "s",
+              "status": "running",
+              "tEnd": 1,
+              "tStart": 1,
+              "truncated": true
+            }
+          ],
+          "status": "running",
+          "statusDroppedCount": 1,
+          "statusHistory": [
+            {
+              "active": 1.5,
+              "attempt": 1.5,
+              "attention": "progress",
+              "bucket": "s",
+              "capacity": 1.5,
+              "count": 1,
+              "detail": "s",
+              "detailArgs": {},
+              "detailKey": "s",
+              "id": "s",
+              "lastObservedAt": 1,
+              "model": "s",
+              "phase": "s",
+              "queuePosition": 1.5,
+              "queued": 1.5,
+              "reason": "s",
+              "roundNum": 1.5,
+              "statusCode": 1.5,
+              "tEnd": 1,
+              "tStart": 1,
+              "terminalBoundary": true,
+              "waitSeconds": 1.5
+            }
+          ],
+          "summary": {
+            "approvalWaitMs": 1,
+            "compactionMs": 1,
+            "llmMs": 1,
+            "overBudget": [
+              {
+                "budgetMs": 1,
+                "elapsedMs": 1,
+                "kind": "s",
+                "name": "s",
+                "spanId": "s"
+              }
+            ],
+            "toolMs": 1,
+            "totalMs": 1,
+            "ttftMs": 1,
+            "unattributedMs": 1,
+            "waitMs": 1
+          },
+          "tEnd": 1,
+          "tStart": 1,
+          "taskId": "s",
+          "totalMs": 1,
+          "version": 1
+        },
+        "todoState": {},
+        "toolRounds": [
+          {
+            "_programCallId": "s",
+            "_programSynthetic": true,
+            "_rejected": {
+              "attempted": "s",
+              "kind": "s",
+              "reason": "s",
+              "retryable": true,
+              "suggestions": [
+                "s"
+              ],
+              "tool": "s"
+            },
+            "_snapshotDocumentRefs": {
+              "results": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "toolContent": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "agentId": "s",
+            "assistantContent": "s",
+            "attemptId": "s",
+            "attentionKind": "routine",
+            "childCallIds": [
+              "s"
+            ],
+            "childToolNames": [
+              "s"
+            ],
+            "deadlineTs": 1.5,
+            "execStartTs": 1.5,
+            "llmRound": 1,
+            "parentToolCallId": "s",
+            "programBackend": "s",
+            "programCode": "s",
+            "programFingerprint": "s",
+            "programLimits": {},
+            "programResult": {},
+            "programSource": "s",
+            "programStatus": "s",
+            "query": "s",
+            "rejection": {
+              "attempted": "s",
+              "kind": "s",
+              "reason": "s",
+              "retryable": true,
+              "suggestions": [
+                "s"
+              ],
+              "tool": "s"
+            },
+            "result": {
+              "_rejected": {
+                "attempted": "s",
+                "kind": "s",
+                "reason": "s",
+                "retryable": true,
+                "suggestions": [
+                  "s"
+                ],
+                "tool": "s"
+              },
+              "content": {},
+              "rejected": {
+                "attempted": "s",
+                "kind": "s",
+                "reason": "s",
+                "retryable": true,
+                "suggestions": [
+                  "s"
+                ],
+                "tool": "s"
+              },
+              "rejection": {
+                "attempted": "s",
+                "kind": "s",
+                "reason": "s",
+                "retryable": true,
+                "suggestions": [
+                  "s"
+                ],
+                "tool": "s"
+              },
+              "status": "s"
+            },
+            "results": [
+              {}
+            ],
+            "roundNum": 1,
+            "status": "s",
+            "tEnd": 1.5,
+            "tStart": 1.5,
+            "taskId": "s",
+            "thinking": "s",
+            "thinkingSignature": "s",
+            "toolArgs": {},
+            "toolCallId": "s",
+            "toolContent": {},
+            "toolName": "s",
+            "toolResultEvidence": {
+              "artifactRef": "s",
+              "contractVersion": "tofu.tool-result-evidence/v1",
+              "cursor": "s",
+              "envelopeBytes": 1,
+              "error": {
+                "code": "s",
+                "message": "s",
+                "next_action": "s",
+                "retryable": true
+              },
+              "evidenceId": "s",
+              "freshness": {
+                "observedAtMs": 1,
+                "worldVersion": "s"
+              },
+              "projectionKind": "text",
+              "rawBytes": 1,
+              "resultContractVersion": "tofu.tool-result/v2",
+              "status": "ok",
+              "truncated": true,
+              "visibleBytes": 1
+            }
+          }
+        ],
+        "translatedContent": "s",
+        "translation": {
+          "error": {},
+          "model": "s",
+          "partial": "s",
+          "partialByRound": {},
+          "sendFailure": {},
+          "skippedReason": "s",
+          "status": "pending",
+          "statusKind": "s",
+          "statusMessage": "s",
+          "taskId": "s"
+        },
+        "usage": {},
+        "videos": [
+          {
+            "avg_frame_bytes": 1.5,
+            "duration_s": 1.5,
+            "frame_count": 1,
+            "frames": [
+              {}
+            ],
+            "height": 1,
+            "name": "s",
+            "poster": "s",
+            "storyboard": "s",
+            "storyboard_model": "s",
+            "transcript": "s",
+            "transcript_model": "s",
+            "transcript_status": "s",
+            "video_id": "s",
+            "video_url": "s",
+            "width": 1
+          }
+        ],
+        "waitingOn": {}
+      },
+      "projectionRevision": 1,
+      "runId": "s",
+      "settlement": {
+        "cause": "s",
+        "continuation": {
+          "attemptId": "s",
+          "turnId": "s"
+        },
+        "error": {},
+        "evidence": "provider_finish",
+        "outcome": "completed",
+        "providerFinishReason": "s",
+        "resumeOptions": [
+          {
+            "anchor": {},
+            "operation": "continue"
+          }
+        ],
+        "streamState": "provider_finished"
+      },
+      "status": "pending",
+      "turnId": "s",
+      "updatedAt": 1
+    }
+  ]
+}

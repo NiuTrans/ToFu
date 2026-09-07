@@ -1,0 +1,14 @@
+{
+  "agentId": "s",
+  "content": "s",
+  "elapsed": 1.5,
+  "error": "s",
+  "model": "s",
+  "modifiedFiles": 1,
+  "objective": "s",
+  "role": "s",
+  "status": "s",
+  "summary": "s",
+  "tokens": 1,
+  "type": "swarm_agent_complete"
+}

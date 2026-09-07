@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bBody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FDF4E0"/>
+      <stop offset="1" stop-color="#F3DDB8"/>
+    </linearGradient>
+  </defs>
+  <rect x="9" y="10" width="46" height="45" rx="11" fill="url(#bBody)"/>
+  <!-- Top cut line: tofu "lid" hint -->
+  <path d="M14.5 24.5 Q32 18.5 49.5 24.5" fill="none" stroke="#E3C79C" stroke-width="2.2" stroke-linecap="round" opacity="0.9"/>
+  <rect x="9" y="10" width="46" height="45" rx="11" fill="none" stroke="#221E2A" stroke-width="2.6"/>
+  <!-- Sheen -->
+  <path d="M16.5 17 Q20.5 14.2 26.5 13.8" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" opacity="0.6"/>
+  <!-- Face -->
+  <rect x="18.5" y="29" width="6.2" height="9" rx="3.1" fill="#221E2A"/>
+  <rect x="39.3" y="29" width="6.2" height="9" rx="3.1" fill="#221E2A"/>
+  <circle cx="22.4" cy="31.6" r="1.4" fill="#FFFFFF"/>
+  <circle cx="43.2" cy="31.6" r="1.4" fill="#FFFFFF"/>
+  <path d="M28.6 41.5 Q30.5 43.8 32 41.2 Q33.5 43.8 35.4 41.5"
+        fill="none" stroke="#221E2A" stroke-width="1.4" stroke-linecap="round"/>
+  <ellipse cx="14.8" cy="40.8" rx="2.9" ry="1.7" fill="#FB9E96" opacity="0.8"/>
+  <ellipse cx="49.2" cy="40.8" rx="2.9" ry="1.7" fill="#FB9E96" opacity="0.8"/>
+</svg>

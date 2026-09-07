@@ -1,0 +1,310 @@
+/* ═══════════════════════════════════════════════════════════
+   trading/theme-bridge.css — the trading page's theme palette
+
+   WHY THIS FILE EXISTS (v2, self-sufficient)
+   ------------------------------------------
+   trading.css declares its own dark-only palette ("FundPro v8"). The P2
+   bridge mapped those private tokens onto the HOST's token NAMES
+   (var(--bg-primary) etc.) — but the trading page loads NO host stylesheet,
+   so every one of those references resolved to nothing and the bridge was
+   inert in production (invisible to jsdom, which does not resolve var()).
+
+   v2 therefore carries the host's actual VALUES for each of its three
+   themes, taken verbatim from the host's styles.css:
+     * dark  — host :root defaults (--accent #6e56cf)
+     * light — host [data-theme="light"]  (--accent #6366f1)
+     * tofu  — host [data-theme="tofu"]   (paper, --accent #C1794B; host default)
+
+   trading.html sets data-theme from localStorage('claude_ui_theme') — the
+   same key the host writes — before any stylesheet paints.
+
+   Anything a trading.css RULE needs that is theme-dependent lives here as a
+   token; rules reference tokens, never literals. Semantic P&L hues
+   (green/red/amber) are NOT mapped to the host accent — they carry meaning
+   and only get per-theme contrast adjustment.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Dark (host :root defaults) ─────────────────────────────── */
+:root, [data-theme="dark"] {
+  --bg:        #0a0a0c;
+  --bg1:       #0a0a0c;
+  --bg2:       #111115;
+  --bg3:       #1a1a21;
+  --bg4:       #22222b;
+  --surface:   #111115;
+  --glass:     color-mix(in srgb, var(--bg2) 88%, transparent);
+  --glass-h:   color-mix(in srgb, var(--bg2) 96%, transparent);
+
+  --border:    #2a2a35;
+  --border-h:  #33333f;
+  --border-a:  color-mix(in srgb, var(--accent) 35%, transparent);
+  --border-glow: color-mix(in srgb, var(--accent) 18%, transparent);
+
+  --t1:        #e8e8ed;
+  --t2:        #a4a4b2;   /* AA: 7.03 on --bg3 (worst surface) */
+  --t3:        #848493;   /* AA: 4.52 on --bg3 — small text lives here */
+  /* --t4 was color-mix(var(--t2) 45%, var(--bg2)) = 2.10 on --bg3: it FAILED
+     WCAG on every theme, dark included, because it blends toward the
+     background. There is no room for a fourth readable tier between --t3 and
+     the surface, so --t4 is now an alias of --t3 rather than a dimmer value.
+     Kept as a token (not deleted) because 122 rules reference it. */
+  --t4:        var(--t3);
+  --text:      var(--t1);
+  --muted:     var(--t2);
+  --text-secondary: var(--t2);
+  --text-muted: var(--t3);
+  --text-dim:  var(--t3);
+
+  /* Two roles, two tokens. --accent is a FILL (chips, buttons, bars) with
+     --on-accent text on top, so it must stay dark enough for that white to
+     clear AA. --accent-text is the same hue rendered AS TEXT on a surface,
+     so it must be light enough to clear AA the other way. One token cannot
+     satisfy both: lightening --accent to 4.50 against --bg3 pushed
+     white-on-accent from 5.39 down to 3.84. */
+  --accent:    #6e56cf;   /* fill — --on-accent #fff reads 5.39 on it */
+  --accent-text: #8a77d8; /* AA 4.50 on --bg3 — link/active text */
+  --accent-2:  #7c66d4;
+  --accent-d:  var(--accent-2);
+  --accent-l:  color-mix(in srgb, var(--accent) 65%, #ffffff);
+  --primary:   var(--accent);
+
+  --success:   #00e59b;
+  --danger:    #ff4d6a;
+  --warning:   #ffb547;
+  --green:     var(--success);
+  --red:       var(--danger);
+  --amber:     var(--warning);
+  --purple:    #b07fff;
+  --cyan:      #00d4e5;
+  --teal:      #00c9a7;
+  --orange:    #ff8a50;
+  --yellow:    #f5d547;
+  --blue:      #5b9cf5;
+
+  --ink:       #000000;
+  --on-accent: #ffffff;
+  --on-bright: #0a0d14;
+  /* Foreground for a SOLID --green fill. Not the same as --on-accent: the
+     green is a bright mint here, so white on it reads 1.66 while ink reads
+     11.74. Which one wins FLIPS per theme (light/tofu darken the green, so
+     white wins there) — that is exactly why it must be its own per-theme
+     token rather than a global constant. */
+  --on-green:  #0a0d14;   /* 11.74 on dark --green */
+
+  --type-stock: #ffb74d;
+  --type-etf:   #64b5f6;
+  --type-fund:  #bb69c9;  /* 4.50 vs its own 15% tint (was #ba68c8 = 4.45) */
+
+  --shadow-color: #000;
+}
+
+/* ── Light (host [data-theme="light"]) ──────────────────────── */
+[data-theme="light"] {
+  --bg:        #f4f2ed;
+  --bg1:       #f4f2ed;
+  --bg2:       #eceae4;
+  --bg3:       #e3e1da;
+  --bg4:       #d9d7cf;
+  --surface:   #eceae4;
+
+  --border:    #c2beb3;
+  --border-h:  #ada89c;
+
+  --t1:        #272732;
+  --t2:        #474651;   /* AA: 7.09 on --bg3 */
+  --t3:        #63616c;   /* AA: 4.50 on --bg3 */
+  --t4:        var(--t3);  /* see the dark block: --t4 failed AA everywhere */
+
+  --accent:    #4f46e5;   /* fill — --on-accent #fff reads 6.29 on it */
+  --accent-text: #3b3eee; /* AA 4.50 — link/active text */
+  --accent-2:  #4f46e5;
+
+  /* Semantic hues. Bar depends on USE, measured from trading.css:
+     rendered as TEXT → 4.5 (--success/--danger via --profit/--loss,
+     --purple/--yellow/--blue); background/border/icon only → 3.0.
+     --success and --danger additionally hold >=1.45 against EACH OTHER:
+     equal-luminance red/green is invisible to a red-green colourblind
+     reader even when both clear AA against the surface. */
+  --success:   #095128;   /* 6.56 vs --bg3; 1.46 vs --danger */
+  --danger:    #b71a1f;   /* 4.51 vs --bg3 */
+  --warning:   #8b4c04;   /* 3.01 — background/border only */
+  --purple:    #7150b8;   /* 4.53 — text */
+  --cyan:      #188ca4;   /* 3.01 — background only */
+  --teal:      #28857a;   /* 3.40 — unused, kept for parity */
+  --orange:    #cc6125;   /* 3.03 — background/border only */
+  --yellow:    #6d5c11;   /* 4.52 — text (risk/strategy tags) */
+  --blue:      #3d62ae;   /* 4.51 — text (status tag) */
+  --on-green:  #ffffff;   /* 8.59 on light --green (flips vs dark) */
+
+  /* Asset-type badges. These render the token AS TEXT over a 15% tint of
+     ITSELF (.sr-type-* in trading.css), so the pair is self-referential and
+     a light pastel washes out completely: the dark-theme values measured
+     1.35 / 1.68 / 2.54 here — the worst readability figures on the page.
+     They were the only CONTENT colours with no per-theme override, so the
+     dark palette was being reused verbatim on a near-white surface. */
+  --type-stock: #854f00;  /* 4.55 vs its own tint */
+  --type-etf:   #095da0;  /* 4.55 */
+  --type-fund:  #8a3899;  /* 4.51 */
+}
+
+/* ── Tofu paper (host [data-theme="tofu"], the host default) ── */
+[data-theme="tofu"] {
+  --bg:        #faf7f0;
+  --bg1:       #faf7f0;
+  --bg2:       #f4efe5;
+  --bg3:       #ece6d9;
+  --bg4:       #e5dece;
+  --surface:   #f4efe5;
+
+  --border:    #e2dac8;
+  --border-h:  #dbd2bf;
+
+  --t1:        #2e2822;
+  --t2:        #514a3d;   /* AA: 7.05 on --bg3 */
+  --t3:        #6d6552;   /* AA: 4.51 on --bg3 — was 2.17, the worst of the three */
+  --t4:        var(--t3);  /* see the dark block: --t4 failed AA everywhere */
+
+  --accent:    #945933;   /* fill — --on-accent #fff reads 5.62 on it */
+  --accent-text: #89532f; /* AA 4.52 — link/active text */
+  --accent-2:  #a96536;
+
+  /* Host tofu's own error/thinking hues; green muted to sit on paper.
+     Same split as the light block: text tiers at 4.5, decoration at 3.0,
+     and success/danger >=1.45 apart so the two are not the same grey. */
+  --success:   #203f2c;   /* 4.51 vs --bg3 */
+  --danger:    #7a3f32;   /* 6.53 vs --bg3; 1.45 vs --success */
+  --warning:   #895732;   /* 4.04 — background/border only */
+  --purple:    #7b4fc2;   /* 4.52 — text */
+  --cyan:      #2f8a99;   /* 3.24 — background only */
+  --teal:      #3d8a6f;   /* 3.34 — unused, kept for parity */
+  --orange:    #c96a2e;   /* 3.02 — background/border only */
+  --yellow:    #786217;   /* 4.53 — text (risk/strategy tags) */
+  --blue:      #4467a8;   /* 4.50 — text (status tag) */
+  --on-green:  #ffffff;   /* 5.66 on tofu --green (flips vs dark) */
+
+  /* See the light block: text over a 15% tint of itself. Dark-theme pastels
+     measured 1.42 / 1.75 / 2.67 on paper. */
+  --type-stock: #8a5200;  /* 4.50 vs its own tint */
+  --type-etf:   #0a61a7;  /* 4.50 */
+  --type-fund:  #8f399e;  /* 4.55 */
+}
+
+/* ── Derived token families (all themes, computed from the above) ── */
+:root {
+  --accent-bg:     color-mix(in srgb, var(--accent) 8%, transparent);
+  --accent-border: color-mix(in srgb, var(--accent) 20%, transparent);
+  --accent-glow:   0 0 20px color-mix(in srgb, var(--accent) 15%, transparent),
+                   0 0 60px color-mix(in srgb, var(--accent) 5%, transparent);
+  --shadow-glow:   0 4px 24px color-mix(in srgb, var(--accent) 8%, transparent);
+
+  --green-bg:   color-mix(in srgb, var(--green) 6%, transparent);
+  --green-glow: color-mix(in srgb, var(--green) 15%, transparent);
+  --red-bg:     color-mix(in srgb, var(--red) 6%, transparent);
+  --red-glow:   color-mix(in srgb, var(--red) 15%, transparent);
+  --amber-bg:   color-mix(in srgb, var(--amber) 6%, transparent);
+  --purple-bg:  color-mix(in srgb, var(--purple) 6%, transparent);
+  --blue-bg:    color-mix(in srgb, var(--blue) 6%, transparent);
+
+  --grad-accent:  linear-gradient(135deg, var(--accent) 0%, var(--cyan) 100%);
+  --grad-green:   linear-gradient(135deg, var(--success) 0%, var(--cyan) 100%);
+  --grad-red:     linear-gradient(135deg, var(--danger) 0%, var(--orange) 100%);
+  --grad-purple:  linear-gradient(135deg, var(--purple) 0%, var(--accent) 100%);
+  --grad-warm:    linear-gradient(135deg, var(--warning) 0%, var(--orange) 100%);
+  --grad-surface: linear-gradient(180deg,
+                    color-mix(in srgb, var(--accent) 3%, transparent) 0%,
+                    transparent 100%);
+  --grad-shine:   linear-gradient(135deg,
+                    color-mix(in srgb, var(--t1) 5%, transparent) 0%,
+                    transparent 50%,
+                    color-mix(in srgb, var(--t1) 2%, transparent) 100%);
+
+  --shadow-sm: 0 2px 8px color-mix(in srgb, var(--shadow-color) 30%, transparent),
+               0 1px 2px color-mix(in srgb, var(--shadow-color) 20%, transparent);
+  --shadow-md: 0 8px 24px color-mix(in srgb, var(--shadow-color) 35%, transparent),
+               0 2px 6px color-mix(in srgb, var(--shadow-color) 20%, transparent);
+  --shadow-lg: 0 16px 48px color-mix(in srgb, var(--shadow-color) 45%, transparent),
+               0 4px 12px color-mix(in srgb, var(--shadow-color) 25%, transparent);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Mobile: the two views the user opens EVERY DAY
+   ═══════════════════════════════════════════════════════════
+   Measured problems this fixes:
+     * .data-table is 10 columns wrapped only in overflow-x:auto
+       (trading.css:478). The existing mobile block (css:693-706) shrinks KPI
+       cards but never touches the table, so a phone gets a horizontally
+       scrolling grid with 10px uppercase headers.
+     * .brain-status-row is repeat(4,1fr) (trading.css:929) with NO mobile
+       override anywhere — four cards, one containing an SVG ring, crushed
+       into ~90px each on a 375px screen.
+   ═══════════════════════════════════════════════════════════ */
+
+@media (max-width: 720px) {
+  /* ── Holdings table → stacked cards ──
+     Each row becomes a card; each cell gets its column name from
+     data-label. This is why the JS renderer must emit data-label on every
+     <td> — without it the card shows values with no idea what they mean. */
+  .data-table thead { display: none; }
+  .data-table,
+  .data-table tbody,
+  .data-table tr,
+  .data-table td { display: block; width: 100%; }
+
+  .data-table tr {
+    margin-bottom: 10px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg2);
+  }
+
+  .data-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 5px 0;
+    border: none;
+    text-align: right;
+  }
+
+  .data-table td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--t2);
+    text-align: left;
+  }
+
+  /* The symbol cell reads as the card title, not as a labelled field. */
+  .data-table td[data-label="标的"],
+  .data-table td.cell-primary {
+    justify-content: flex-start;
+    font-size: 15px;
+    font-weight: 600;
+    padding-bottom: 8px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .data-table td[data-label="标的"]::before,
+  .data-table td.cell-primary::before { content: none; }
+
+  .table-wrap { overflow-x: visible; }
+
+  /* ── Brain stat cards: 4-up → 2-up ──
+     2 rather than 1 because these are short numeric readouts; a single
+     column would push the confidence ring below the fold. */
+  .brain-status-row { grid-template-columns: repeat(2, 1fr) !important; }
+
+  /* ── Reconcile cards ── */
+  .rec-action { flex-direction: column; align-items: stretch; gap: 10px; }
+  .rec-action-actions { width: 100%; }
+  .rec-action-actions button { flex: 1; }
+}
+
+@media (max-width: 420px) {
+  /* Below ~420px even two stat cards are cramped. */
+  .brain-status-row { grid-template-columns: 1fr !important; }
+}

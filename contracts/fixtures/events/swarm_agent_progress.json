@@ -1,0 +1,11 @@
+{
+  "agentId": "s",
+  "content": "s",
+  "phase": "s",
+  "preview": "s",
+  "role": "s",
+  "roundNum": 1,
+  "status": "s",
+  "toolNames": [],
+  "type": "swarm_agent_progress"
+}

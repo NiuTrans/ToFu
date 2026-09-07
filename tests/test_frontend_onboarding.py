@@ -1,0 +1,370 @@
+"""tests/test_frontend_onboarding.py — the first-run wizard.
+
+WHY
+---
+A fresh Tofu install boots into a working chat UI with zero models
+configured. The previous first-run behaviour opened the Settings panel on
+the providers tab — a screen full of concepts (providers / presets /
+matrix) that all presume the user already knows what an API key is for.
+The wizard asks the ONE question a new user can answer ("API key or
+subscription?") and drives the existing surfaces from there.
+
+WHAT IS PINNED
+--------------
+Behavioural (drives the REAL static/js/onboarding.js in jsdom):
+  1. first call renders the chooser as `.modal-overlay open` — the exact
+     selector tests/conftest.py::_dismiss_onboarding_modals strips on
+     keyless test servers (the 12-failure e2e class lives behind this pin);
+  2. the dismissal flag suppresses re-nags, and `force` (?setup=1) bypasses it;
+  3. API path: validation → probe → owner-scoped ProviderAccess CAS create →
+     done step + dropdown refresh;
+  4. API path failure surfaces the error and persists NOTHING;
+  5. OAuth path: one click closes the wizard, marks it done, and hands off
+     to Settings → 订阅登录 with the login auto-kicked;
+  6. skip closes + marks done.
+
+Static ratchets:
+  R1 main_toolbar_ui.js delegates to maybeShowOnboarding with
+     `force: fromBootstrap` and keeps the legacy openSettings fallback
+     (stale-bundle path);
+  R2 every onboard.* / settings.egressGetAgent* key used by the two JS
+     surfaces exists in i18n.js;
+  R3 onboarding.js is registered in lib/js_bundler.py:_BUNDLE_FILES and is
+     absent from the raw page shell.
+
+NEUTER: cutting the ProviderAccess create turns pin 3 red; cutting the
+oauth handoff delegation turns pin 5 red.
+"""
+
+from __future__ import annotations
+
+import functools
+import json
+import re
+import shutil
+import subprocess
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from tests._runtime_sections import runtime_section_names, runtime_section_path
+
+pytestmark = pytest.mark.unit
+
+ROOT = Path(__file__).resolve().parent.parent
+ONBOARD_JS = Path(runtime_section_path('onboarding.js'))
+TOOLBAR_JS = Path(runtime_section_path('main/main_toolbar_ui.js'))
+LOCALE_DIR = ROOT / 'frontend/src/i18n/locales'
+OAUTH_JS = Path(runtime_section_path('settings/oauth.js'))
+INDEX_HTML = ROOT / "index.html"
+
+
+def _node() -> str:
+    exe = shutil.which("node")
+    if not exe:
+        pytest.skip("node not available")
+    return exe
+
+
+@functools.lru_cache(maxsize=1)
+def _has_jsdom() -> bool:
+    try:
+        subprocess.run([_node(), "-e", "require('jsdom')"], cwd=ROOT,
+                       capture_output=True, check=True)
+        return True
+    except Exception:
+        return False
+
+
+HARNESS = textwrap.dedent("""
+    const {{ JSDOM }} = require('jsdom');
+    const dom = new JSDOM(`<!DOCTYPE html><body></body>`,
+                          {{ url: 'http://localhost/' }});
+    global.document = dom.window.document;
+    global.window = dom.window;
+    global.localStorage = dom.window.localStorage;
+    global.t = (k, vars) => vars ? k + '|' + JSON.stringify(vars) : k;
+    global.escapeHtml = (s) => String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
+    global.Icon = () => '';
+    global.debugLog = () => {{}};
+    global._rec = {{
+      probeArgs: null, createPayload: null, routingGets: 0,
+      openSettings: 0, switchTab: null, oauthLogin: null, repopulate: 0,
+    }};
+    global.Api = {{
+      providers: {{
+        probe: (url, key, mp) => {{
+          global._rec.probeArgs = {{ url, key, mp }};
+          return Promise.resolve(global._probeResult);
+        }},
+      }},
+      modelRouting: {{
+        get: () => {{ global._rec.routingGets++;
+          return Promise.resolve({{ revision: 7, model_routing: {{}} }}); }},
+        createProvider: (bundle, revision) => {{
+          global._rec.createPayload = {{ bundle, revision }};
+          return Promise.resolve({{ ok: true, revision: 8 }});
+        }},
+      }},
+    }};
+    window.openSettings = () => {{ global._rec.openSettings++; }};
+    window.switchSettingsTab = (tab) => {{ global._rec.switchTab = tab; }};
+    window._oauthLogin = (p) => {{ global._rec.oauthLogin = p; }};
+    global._loadServerConfigAndPopulate = () => {{ global._rec.repopulate++; }};
+
+    {shipped}
+
+    (async () => {{
+      const out = {{}};
+
+      // (1) first call → chooser, overlay carries the e2e dismiss contract.
+      out.tookOver = maybeShowOnboarding({{}});
+      const m0 = document.getElementById('onboardingModal');
+      out.overlayContract = !!(m0 && m0.classList.contains('modal-overlay')
+                               && m0.classList.contains('open'));
+      out.chooserCards = !!document.getElementById('obCardApi')
+                      && !!document.getElementById('obCardOauth');
+      // second call while open → no duplicate modal
+      maybeShowOnboarding({{}});
+      out.noDuplicate = document.querySelectorAll('#onboardingModal').length === 1;
+
+      // (2) dismissal flag suppresses; force bypasses.
+      document.getElementById('obSkip').onclick();
+      out.skipClosed = !document.getElementById('onboardingModal');
+      out.skipMarked = localStorage.getItem('tofu_onboarding_v1_done') === '1';
+      out.suppressed = maybeShowOnboarding({{}}) === false
+                    && !document.getElementById('onboardingModal');
+      out.forced = maybeShowOnboarding({{ force: true }}) === true
+                && !!document.getElementById('onboardingModal');
+
+      // (3) API path — validation, then probe → v2 CAS create → done.
+      document.getElementById('obCardApi').onclick();
+      out.apiStepRendered = !!document.getElementById('obApiUrl')
+                         && !!document.getElementById('obApiKey');
+      // empty submit → error, no probe
+      document.getElementById('obApiGo').onclick();
+      await new Promise(r => setTimeout(r, 0));
+      out.emptyBlocked = global._rec.probeArgs === null
+        && document.getElementById('obApiStatus').style.display !== 'none';
+      // filled submit
+      document.getElementById('obApiUrl').value = 'api.deepseek.com';
+      document.getElementById('obApiKey').value = 'sk-test';
+      global._probeResult = {{
+        ok: true,
+        model_count: 2,
+        credential_id: 'deepseek-credential',
+        provider_bundle: {{
+          provider: {{ provider_id: 'deepseek', name: 'DeepSeek', scope: 'owner' }},
+          provider_access: {{ provider_access_id: 'deepseek-access', provider_id: 'deepseek' }},
+          connections: [{{ connection_id: 'deepseek-connection' }}],
+          credentials: [{{ credential_id: 'deepseek-credential' }}],
+          offerings: [{{ offering_id: 'chat' }}, {{ offering_id: 'reasoner' }}],
+          deployments: [], creators: [], models: [],
+        }},
+      }};
+      await document.getElementById('obApiGo').onclick();
+      await new Promise(r => setTimeout(r, 0));
+      out.schemeNormalized = global._rec.probeArgs
+        && global._rec.probeArgs.url === 'https://api.deepseek.com';
+      const create = global._rec.createPayload;
+      out.v2Created = !!(create && create.revision === 7
+        && create.bundle.provider.provider_id === 'deepseek'
+        && create.bundle.credential_secrets['deepseek-credential'] === 'sk-test'
+        && create.bundle.offerings.length === 2);
+      out.doneStep = !!document.getElementById('obStart');
+      out.repopulated = global._rec.repopulate === 1;
+      /* NEUTER tolerance: with the persist call cut, the done step never
+       * renders — that IS the guard biting, so the click must not crash
+       * the harness before it can be reported. */
+      if (document.getElementById('obStart')) {{
+        document.getElementById('obStart').onclick();
+      }}
+
+      // (4) API path failure → error shown, NOTHING persisted.
+      // NEUTER tolerance: block (3) may have ended without a done step
+      // (persist cut), leaving the wizard open — close before re-entering.
+      if (document.getElementById('obCloseX')) {{
+        document.getElementById('obCloseX').onclick();
+      }}
+      maybeShowOnboarding({{ force: true }});
+      if (!document.getElementById('obCardApi')) {{
+        throw new Error('wizard did not reopen for block (4)');
+      }}
+      document.getElementById('obCardApi').onclick();
+      document.getElementById('obApiUrl').value = 'https://bad.example.com';
+      document.getElementById('obApiKey').value = 'sk-x';
+      global._probeResult = {{ ok: false, error: 'unauthorized' }};
+      global._rec.createPayload = null;
+      await document.getElementById('obApiGo').onclick();
+      await new Promise(r => setTimeout(r, 0));
+      out.failureShown = document.getElementById('obApiStatus')
+        .textContent.includes('onboard.apiProbeFailed');
+      out.nothingPersisted = global._rec.createPayload === null;
+      document.getElementById('obCloseX').onclick();
+
+      // (5) OAuth path — one click = close + mark + handoff + auto-kick.
+      maybeShowOnboarding({{ force: true }});
+      document.getElementById('obCardOauth').onclick();
+      out.oauthStepRendered = !!document.getElementById('obCardClaude')
+                           && !!document.getElementById('obCardCodex');
+      localStorage.removeItem('tofu_onboarding_v1_done');
+      document.getElementById('obCardClaude').onclick();
+      out.handoffClosed = !document.getElementById('onboardingModal');
+      out.handoffMarked = localStorage.getItem('tofu_onboarding_v1_done') === '1';
+      out.handoffOpenedSettings = global._rec.openSettings === 1;
+      out.handoffTab = global._rec.switchTab;
+      out.handoffLogin = global._rec.oauthLogin;
+
+      console.log(JSON.stringify(out));
+    }})().catch(e => {{ console.error(e); process.exit(1); }});
+""")
+
+
+def _run(neuter=None) -> dict:
+    body = ONBOARD_JS.read_text(encoding="utf-8")
+    if neuter:
+        rewritten = neuter(body)
+        assert rewritten != body, (
+            "NEUTER substitution did not apply — the anchor text is gone, so "
+            "this run proves nothing about whether the guard bites")
+        body = rewritten
+    script = HARNESS.format(shipped=body)
+    proc = subprocess.run([_node(), "-e", script], cwd=ROOT,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, f"node failed: {proc.stderr[:1500]}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Behavioural
+# ══════════════════════════════════════════════════════════════════
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_first_call_renders_the_chooser_with_the_e2e_contract():
+    out = _run()
+    assert out["tookOver"] is True
+    assert out["overlayContract"], (
+        "the wizard overlay must be `.modal-overlay open` — "
+        "tests/conftest.py::_dismiss_onboarding_modals strips exactly that "
+        "selector on keyless test servers; any other class resurrects the "
+        "12-failure click-interception class")
+    assert out["chooserCards"], "the chooser must offer both paths"
+    assert out["noDuplicate"], "a second entry duplicated the modal"
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_dismissal_flag_suppresses_and_force_bypasses():
+    out = _run()
+    assert out["skipClosed"] and out["skipMarked"], (
+        "skipping must close the wizard AND remember it — otherwise a "
+        "keyless server re-nags on every reload")
+    assert out["suppressed"], "the dismissal flag did not suppress a re-show"
+    assert out["forced"], (
+        "?setup=1 from bootstrap must bypass the flag — that redirect is an "
+        "explicit setup intent")
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_api_path_probes_creates_v2_access_and_finishes():
+    out = _run()
+    assert out["apiStepRendered"]
+    assert out["emptyBlocked"], (
+        "an empty submit reached the probe — validation must block first")
+    assert out["schemeNormalized"], (
+        "a scheme-less Base URL was not normalized to https://")
+    assert out["v2Created"], (
+        "the probe draft and credential must cross the owner-scoped v2 "
+        "ProviderAccess CAS boundary")
+    assert out["doneStep"], "the success step never rendered"
+    assert out["repopulated"], (
+        "the toolbar dropdown was not refreshed — the new models stay "
+        "invisible until a manual reload")
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_api_path_failure_persists_nothing():
+    out = _run()
+    assert out["failureShown"], "a failed probe surfaced no error"
+    assert out["nothingPersisted"], (
+        "a FAILED probe still created ProviderAccess state")
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_oauth_path_hands_off_to_the_existing_surface():
+    out = _run()
+    assert out["oauthStepRendered"]
+    assert out["handoffClosed"] and out["handoffMarked"], (
+        "the handoff must close the wizard and count as engagement")
+    assert out["handoffOpenedSettings"], "Settings never opened"
+    assert out["handoffTab"] == "oauth", (
+        f"handoff landed on tab {out['handoffTab']!r}, expected 'oauth'")
+    assert out["handoffLogin"] == "claude", (
+        "the login was not auto-kicked — the wizard's one click must be "
+        "the only click before the provider's own auth page")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Static ratchets
+# ══════════════════════════════════════════════════════════════════
+
+def test_R1_boot_trigger_delegates_to_the_wizard_with_fallback():
+    src = TOOLBAR_JS.read_text(encoding="utf-8")
+    assert "maybeShowOnboarding({ force: fromBootstrap })" in src, (
+        "_maybeAutoOpenSettings no longer enters the wizard on a keyless / "
+        "bootstrap boot — the wizard would never show")
+    assert re.search(r"typeof maybeShowOnboarding === 'function'", src), (
+        "the delegation must be typeof-guarded (stale-bundle tolerance)")
+    assert "openSettings()" in src, (
+        "the legacy open-Settings fallback was removed — a stale bundle "
+        "would leave a fresh install with NO guidance at all")
+
+
+def test_R2_every_wizard_string_is_translated():
+    locales = [json.loads((LOCALE_DIR / f'{lang}.json').read_text())
+               for lang in ('zh', 'en')]
+    keys = set(re.findall(r"onboard\.[A-Za-z]+",
+                          ONBOARD_JS.read_text(encoding="utf-8")))
+    assert len(keys) >= 20, f"suspiciously few keys found: {sorted(keys)}"
+    for key in sorted(keys):
+        assert all(key in locale for locale in locales), (
+            f"{key!r} is not defined in both locales — it would render as the "
+            f"literal key")
+
+
+def test_R3_wizard_is_bundled_and_not_raw_in_the_shell():
+    assert runtime_section_names().count('onboarding.js') == 1
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert 'static/js/onboarding.js' not in html
+    assert '<!-- TOFU_APP_ASSETS -->' in html
+
+
+# ══════════════════════════════════════════════════════════════════
+#  NEUTER
+# ══════════════════════════════════════════════════════════════════
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_NEUTER_provider_access_create_removed():
+    """Cut the persist call → the done step must collapse AND pin 3 goes red."""
+    out = _run(lambda s: s.replace(
+        "    var created = await Api.modelRouting.createProvider(bundle, revision);\n",
+        "    var created = null; /* NEUTERED */\n"))
+    assert not out["v2Created"], "NEUTER did not cut the persist"
+    assert out["chooserCards"], "unrelated pins must stay green"
+
+
+@pytest.mark.skipif(not _has_jsdom(), reason="jsdom not installed")
+def test_NEUTER_oauth_handoff_delegation_removed():
+    """Cut the tab switch + login kick → the handoff must go dead."""
+    out = _run(lambda s: s.replace(
+        "  if (typeof runtimeScope.switchSettingsTab === 'function') runtimeScope.switchSettingsTab('oauth');\n",
+        "  /* NEUTERED */\n"))
+    assert out["handoffTab"] != "oauth", "NEUTER did not cut the tab switch"
+    assert out["handoffOpenedSettings"], "the Settings open must survive"
+
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(pytest.main([__file__, '-v']))

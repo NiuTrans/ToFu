@@ -1,0 +1,13 @@
+{
+  "brand": "grok",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "xai",
+  "category": "official",
+  "name": "xAI (Grok)",
+  "base_url": "https://api.x.ai/v1",
+  "offering_recipes": [
+    {"model_id": "grok-4.6",      "capabilities": ["text", "vision", "thinking", "cheap"]},
+    {"model_id": "grok-4.20",     "capabilities": ["text", "vision", "thinking", "cheap"]},
+    {"model_id": "grok-4.1-fast", "capabilities": ["text", "vision", "cheap"]}
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "durationMs": 1,
+  "emittedAt": 1.5,
+  "errorDetail": "s",
+  "errorKind": "s",
+  "errorUrl": "s",
+  "failureStage": "s",
+  "finishReason": "s",
+  "model": "s",
+  "observerIsolation": {},
+  "providerId": "s",
+  "requestTag": "s",
+  "roundNum": 1,
+  "routeDecision": "s",
+  "routeId": "s",
+  "routeMode": "s",
+  "spanId": "s",
+  "status": "s",
+  "statusCode": 1,
+  "streamState": "s",
+  "type": "model_request_complete"
+}

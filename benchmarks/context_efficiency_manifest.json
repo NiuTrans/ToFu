@@ -1,0 +1,1182 @@
+{
+  "contractVersion": "tofu-context-efficiency-splits/v1",
+  "dataset": "SWE-bench/SWE-bench_Multilingual",
+  "datasetRevision": "78aa2877b9f56271239c29d440d26e337414fc39",
+  "datasetSha256": "0a3ee2cac501424b566e107dfff6f90c91e200218630040d5ecb0776f2a515e6",
+  "seed": 20260810,
+  "selection": "each disjoint split independently greedily balances language, difficulty, then repo; deterministic seeded tie-break",
+  "difficultyDefinition": "dataset-wide terciles of non-test gold-patch changed lines; used only for sampling, following the benchmark difficulty proxy",
+  "taskCount": 300,
+  "repoCount": 41,
+  "languageCount": 9,
+  "splits": {
+    "calibration": [
+      {
+        "taskId": "apache__lucene-12022",
+        "repo": "apache/lucene",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "11f2bc205652f1f2b2f61ba286cbfd2d77fd2d1b",
+        "image": "swebench/sweb.eval.x86_64.apache_1776_lucene-12022:latest"
+      },
+      {
+        "taskId": "gin-gonic__gin-1957",
+        "repo": "gin-gonic/gin",
+        "language": "Go",
+        "difficulty": "hard",
+        "baseCommit": "09a3650c97ca7ef3a542d428a9fb2c8da8c18002",
+        "image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-1957:latest"
+      },
+      {
+        "taskId": "sharkdp__bat-562",
+        "repo": "sharkdp/bat",
+        "language": "Rust",
+        "difficulty": "easy",
+        "baseCommit": "2b9d25df052e50c60531b1000703b79bf9b6065a",
+        "image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-562:latest"
+      },
+      {
+        "taskId": "briannesbitt__carbon-3098",
+        "repo": "briannesbitt/carbon",
+        "language": "PHP",
+        "difficulty": "medium",
+        "baseCommit": "cb0fd285ae34041ef2a0f62dc409bece61ff2bc4",
+        "image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-3098:latest"
+      },
+      {
+        "taskId": "babel__babel-15445",
+        "repo": "babel/babel",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "49e4855c10d8f76faf477f2ceb5ecbdbe2c849a3",
+        "image": "swebench/sweb.eval.x86_64.babel_1776_babel-15445:latest"
+      }
+    ],
+    "ablation": [
+      {
+        "taskId": "php-cs-fixer__php-cs-fixer-8075",
+        "repo": "php-cs-fixer/php-cs-fixer",
+        "language": "PHP",
+        "difficulty": "medium",
+        "baseCommit": "f0a95a77782538eafca6c4d2f2f2792be3dbbfcf",
+        "image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-8075:latest"
+      },
+      {
+        "taskId": "nlohmann__json-4237",
+        "repo": "nlohmann/json",
+        "language": "C++",
+        "difficulty": "easy",
+        "baseCommit": "3780b41dd070436f3f55327b0a88f27a52e2dfa8",
+        "image": "swebench/sweb.eval.x86_64.nlohmann_1776_json-4237:latest"
+      },
+      {
+        "taskId": "astral-sh__ruff-15394",
+        "repo": "astral-sh/ruff",
+        "language": "Rust",
+        "difficulty": "hard",
+        "baseCommit": "73d424ee5e6963d577e196d71c3b19c82e84e612",
+        "image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15394:latest"
+      },
+      {
+        "taskId": "apache__druid-13704",
+        "repo": "apache/druid",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "51dfde02840017092486fb75be2b16566aff6a19",
+        "image": "swebench/sweb.eval.x86_64.apache_1776_druid-13704:latest"
+      },
+      {
+        "taskId": "fluent__fluentd-3640",
+        "repo": "fluent/fluentd",
+        "language": "Ruby",
+        "difficulty": "easy",
+        "baseCommit": "8ced42ce86edf5a5c73e009cfd093e6c3fcc7e2d",
+        "image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3640:latest"
+      },
+      {
+        "taskId": "hashicorp__terraform-34900",
+        "repo": "hashicorp/terraform",
+        "language": "Go",
+        "difficulty": "hard",
+        "baseCommit": "f2e4cb411ed6dfd36fd4f9960a74d8f29c7b8882",
+        "image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-34900:latest"
+      },
+      {
+        "taskId": "facebook__docusaurus-10130",
+        "repo": "facebook/docusaurus",
+        "language": "TypeScript",
+        "difficulty": "medium",
+        "baseCommit": "02e38d8ccf7811af27a9c15ddbadf4d26cfc0eab",
+        "image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-10130:latest"
+      },
+      {
+        "taskId": "redis__redis-10095",
+        "repo": "redis/redis",
+        "language": "C",
+        "difficulty": "easy",
+        "baseCommit": "1e25bdf7808bb400f2dc552ec0d6690d1b340d23",
+        "image": "swebench/sweb.eval.x86_64.redis_1776_redis-10095:latest"
+      },
+      {
+        "taskId": "preactjs__preact-4436",
+        "repo": "preactjs/preact",
+        "language": "JavaScript",
+        "difficulty": "hard",
+        "baseCommit": "db0f4f2e7a2338ea40050f623f05505a798fc1a4",
+        "image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-4436:latest"
+      },
+      {
+        "taskId": "nushell__nushell-12950",
+        "repo": "nushell/nushell",
+        "language": "Rust",
+        "difficulty": "medium",
+        "baseCommit": "0c5a67f4e5bf17a2fffbe3cbb54792a6464b3237",
+        "image": "swebench/sweb.eval.x86_64.nushell_1776_nushell-12950:latest"
+      }
+    ],
+    "pilot": [
+      {
+        "taskId": "preactjs__preact-4245",
+        "repo": "preactjs/preact",
+        "language": "JavaScript",
+        "difficulty": "medium",
+        "baseCommit": "13b0afb7a28adb3149d7125fb2b9c16edbcf8e94",
+        "image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-4245:latest"
+      },
+      {
+        "taskId": "briannesbitt__carbon-2813",
+        "repo": "briannesbitt/carbon",
+        "language": "PHP",
+        "difficulty": "hard",
+        "baseCommit": "8c019924327fe0251294adb61543981e3d27652c",
+        "image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-2813:latest"
+      },
+      {
+        "taskId": "jqlang__jq-2728",
+        "repo": "jqlang/jq",
+        "language": "C",
+        "difficulty": "easy",
+        "baseCommit": "87e3dfddb80015bd71259a4a295ca73bed398bd2",
+        "image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2728:latest"
+      },
+      {
+        "taskId": "prometheus__prometheus-9248",
+        "repo": "prometheus/prometheus",
+        "language": "Go",
+        "difficulty": "hard",
+        "baseCommit": "1fb3c1b5980d2ae3f844b6b9ae2ad38117710aa0",
+        "image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-9248:latest"
+      },
+      {
+        "taskId": "rubocop__rubocop-13393",
+        "repo": "rubocop/rubocop",
+        "language": "Ruby",
+        "difficulty": "medium",
+        "baseCommit": "8454d9332297e82b50239fcaaae74cc2e7c4a399",
+        "image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13393:latest"
+      },
+      {
+        "taskId": "facebook__docusaurus-9897",
+        "repo": "facebook/docusaurus",
+        "language": "TypeScript",
+        "difficulty": "easy",
+        "baseCommit": "0589b1475d56b0b541348aa56f201ec7c56c56d5",
+        "image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-9897:latest"
+      },
+      {
+        "taskId": "apache__druid-14092",
+        "repo": "apache/druid",
+        "language": "Java",
+        "difficulty": "hard",
+        "baseCommit": "4fffee17761286996a8c43154b72db4bcaafb16d",
+        "image": "swebench/sweb.eval.x86_64.apache_1776_druid-14092:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-3729",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "medium",
+        "baseCommit": "5cfd28d476c6859617878f951931b8ce7d36b9df",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3729:latest"
+      },
+      {
+        "taskId": "astral-sh__ruff-15356",
+        "repo": "astral-sh/ruff",
+        "language": "Rust",
+        "difficulty": "easy",
+        "baseCommit": "ee9a912f47e64de13cad0b525a714b46c5e29293",
+        "image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15356:latest"
+      },
+      {
+        "taskId": "redis__redis-10068",
+        "repo": "redis/redis",
+        "language": "C",
+        "difficulty": "medium",
+        "baseCommit": "e88f6acb94c77c9a5b81f0b2a8bd132b2a5c3d3c",
+        "image": "swebench/sweb.eval.x86_64.redis_1776_redis-10068:latest"
+      },
+      {
+        "taskId": "vuejs__core-11899",
+        "repo": "vuejs/core",
+        "language": "TypeScript",
+        "difficulty": "hard",
+        "baseCommit": "706d4ac1d0210b2d9134b3228280187fe02fc971",
+        "image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11899:latest"
+      },
+      {
+        "taskId": "gin-gonic__gin-1805",
+        "repo": "gin-gonic/gin",
+        "language": "Go",
+        "difficulty": "easy",
+        "baseCommit": "70a0aba3e423246be37462cfdaedd510c26c566e",
+        "image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-1805:latest"
+      },
+      {
+        "taskId": "phpoffice__phpspreadsheet-4114",
+        "repo": "phpoffice/phpspreadsheet",
+        "language": "PHP",
+        "difficulty": "medium",
+        "baseCommit": "b40636742533721d55a434838830e30d57889aef",
+        "image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-4114:latest"
+      },
+      {
+        "taskId": "axios__axios-5892",
+        "repo": "axios/axios",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "ae003913a39f3bdf9bbbd8f71a1ed681fd044d8b",
+        "image": "swebench/sweb.eval.x86_64.axios_1776_axios-5892:latest"
+      },
+      {
+        "taskId": "tokio-rs__axum-734",
+        "repo": "tokio-rs/axum",
+        "language": "Rust",
+        "difficulty": "hard",
+        "baseCommit": "84df7eaa38aa38b3a4b4153678316c0700fc4fa8",
+        "image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-734:latest"
+      },
+      {
+        "taskId": "fastlane__fastlane-19304",
+        "repo": "fastlane/fastlane",
+        "language": "Ruby",
+        "difficulty": "easy",
+        "baseCommit": "9b6d47e74da8cf05a8993ec8b4c2c66a466ce358",
+        "image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-19304:latest"
+      },
+      {
+        "taskId": "projectlombok__lombok-3326",
+        "repo": "projectlombok/lombok",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "9e6f66c557205bff3c87eefb4c7a7631d0b89ff0",
+        "image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3326:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-3863",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "hard",
+        "baseCommit": "dfe5b12c08dfa803fe5a275b380991df25f4b52d",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3863:latest"
+      },
+      {
+        "taskId": "caddyserver__caddy-4774",
+        "repo": "caddyserver/caddy",
+        "language": "Go",
+        "difficulty": "hard",
+        "baseCommit": "f7be0ee10131f25620a2f64af7e3ded43eae2049",
+        "image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-4774:latest"
+      },
+      {
+        "taskId": "php-cs-fixer__php-cs-fixer-8367",
+        "repo": "php-cs-fixer/php-cs-fixer",
+        "language": "PHP",
+        "difficulty": "easy",
+        "baseCommit": "50594cc3bca17298f81b5d4c3bd993275f7a6b55",
+        "image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-8367:latest"
+      },
+      {
+        "taskId": "fluent__fluentd-3608",
+        "repo": "fluent/fluentd",
+        "language": "Ruby",
+        "difficulty": "medium",
+        "baseCommit": "a60603346483da721799ccb3faebcbdd757c5f16",
+        "image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3608:latest"
+      },
+      {
+        "taskId": "uutils__coreutils-6575",
+        "repo": "uutils/coreutils",
+        "language": "Rust",
+        "difficulty": "hard",
+        "baseCommit": "bc0b4880e000b881a1cabc733b2d261f3526d15e",
+        "image": "swebench/sweb.eval.x86_64.uutils_1776_coreutils-6575:latest"
+      },
+      {
+        "taskId": "micropython__micropython-13039",
+        "repo": "micropython/micropython",
+        "language": "C",
+        "difficulty": "easy",
+        "baseCommit": "fce8d9fd55409ab1027beee5671bc653fb5beb97",
+        "image": "swebench/sweb.eval.x86_64.micropython_1776_micropython-13039:latest"
+      },
+      {
+        "taskId": "google__gson-2311",
+        "repo": "google/gson",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "9f26679e7a96f0bb9952c326b2d9f79ef03ea9f5",
+        "image": "swebench/sweb.eval.x86_64.google_1776_gson-2311:latest"
+      },
+      {
+        "taskId": "babel__babel-13928",
+        "repo": "babel/babel",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "5134505bf93013c5fa7df66704df8d04becb7f7d",
+        "image": "swebench/sweb.eval.x86_64.babel_1776_babel-13928:latest"
+      },
+      {
+        "taskId": "immutable-js__immutable-js-2005",
+        "repo": "immutable-js/immutable-js",
+        "language": "TypeScript",
+        "difficulty": "medium",
+        "baseCommit": "77434b3cbbc8ee21206f4cc6965e1c9b09cc92b6",
+        "image": "swebench/sweb.eval.x86_64.immutable-js_1776_immutable-js-2005:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-3750",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "hard",
+        "baseCommit": "5471a2426c432503bdadeab0c03df387bea97463",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3750:latest"
+      },
+      {
+        "taskId": "hashicorp__terraform-35543",
+        "repo": "hashicorp/terraform",
+        "language": "Go",
+        "difficulty": "hard",
+        "baseCommit": "24833a2b062126a71ef30a86a6d1fc3823afdfdb",
+        "image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-35543:latest"
+      },
+      {
+        "taskId": "laravel__framework-51890",
+        "repo": "laravel/framework",
+        "language": "PHP",
+        "difficulty": "medium",
+        "baseCommit": "5ed0ce8bbbc50843f4a63b47ed7004326e546697",
+        "image": "swebench/sweb.eval.x86_64.laravel_1776_framework-51890:latest"
+      },
+      {
+        "taskId": "apache__lucene-13170",
+        "repo": "apache/lucene",
+        "language": "Java",
+        "difficulty": "easy",
+        "baseCommit": "3f4413567d2d41ecee16fcfe2c91a4b84bec0df8",
+        "image": "swebench/sweb.eval.x86_64.apache_1776_lucene-13170:latest"
+      }
+    ],
+    "confirmation": [
+      {
+        "taskId": "projectlombok__lombok-3215",
+        "repo": "projectlombok/lombok",
+        "language": "Java",
+        "difficulty": "hard",
+        "baseCommit": "f090e50d0d5d75c121b6170927b1e776160eb37d",
+        "image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3215:latest"
+      },
+      {
+        "taskId": "tokio-rs__tokio-4384",
+        "repo": "tokio-rs/tokio",
+        "language": "Rust",
+        "difficulty": "easy",
+        "baseCommit": "553cc3b194df875cac8736473e1f01cf3e40a660",
+        "image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-4384:latest"
+      },
+      {
+        "taskId": "php-cs-fixer__php-cs-fixer-8256",
+        "repo": "php-cs-fixer/php-cs-fixer",
+        "language": "PHP",
+        "difficulty": "medium",
+        "baseCommit": "27dde9afa3d4db851f8aaffc820f697a5dbe747f",
+        "image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-8256:latest"
+      },
+      {
+        "taskId": "mrdoob__three.js-26589",
+        "repo": "mrdoob/three.js",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "8d9f8d50b923d5f8a673590ae138bc5d86a3a256",
+        "image": "swebench/sweb.eval.x86_64.mrdoob_1776_three.js-26589:latest"
+      },
+      {
+        "taskId": "rubocop__rubocop-13479",
+        "repo": "rubocop/rubocop",
+        "language": "Ruby",
+        "difficulty": "medium",
+        "baseCommit": "04dd02e71a444fb36019d892fde6948a88aac637",
+        "image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13479:latest"
+      },
+      {
+        "taskId": "jqlang__jq-2650",
+        "repo": "jqlang/jq",
+        "language": "C",
+        "difficulty": "hard",
+        "baseCommit": "d8072564c28d38d29aa0a7c416621f02c19f7f44",
+        "image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2650:latest"
+      },
+      {
+        "taskId": "gohugoio__hugo-12579",
+        "repo": "gohugoio/hugo",
+        "language": "Go",
+        "difficulty": "easy",
+        "baseCommit": "9c4e14eb4f890d2a3caad2dcd9209609b7274914",
+        "image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12579:latest"
+      },
+      {
+        "taskId": "facebook__docusaurus-10309",
+        "repo": "facebook/docusaurus",
+        "language": "TypeScript",
+        "difficulty": "hard",
+        "baseCommit": "5e9e1d051b2217b95498ecbc10f7e33f64e7a4d3",
+        "image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-10309:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-2317",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "medium",
+        "baseCommit": "ece4b4b33a96db77beccca3957505e689cbc4279",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-2317:latest"
+      },
+      {
+        "taskId": "preactjs__preact-4152",
+        "repo": "preactjs/preact",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "9c5a82efcc3dcbd0035c694817a3022d81264687",
+        "image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-4152:latest"
+      },
+      {
+        "taskId": "javaparser__javaparser-4561",
+        "repo": "javaparser/javaparser",
+        "language": "Java",
+        "difficulty": "hard",
+        "baseCommit": "5be2e76b62e43b3c524b94463afe2294ac419fc8",
+        "image": "swebench/sweb.eval.x86_64.javaparser_1776_javaparser-4561:latest"
+      },
+      {
+        "taskId": "laravel__framework-52684",
+        "repo": "laravel/framework",
+        "language": "PHP",
+        "difficulty": "medium",
+        "baseCommit": "455598c577fab3898e1d84ddbaa142780c8b192d",
+        "image": "swebench/sweb.eval.x86_64.laravel_1776_framework-52684:latest"
+      },
+      {
+        "taskId": "gin-gonic__gin-2121",
+        "repo": "gin-gonic/gin",
+        "language": "Go",
+        "difficulty": "easy",
+        "baseCommit": "2ee0e963942d91be7944dfcc07dc8c02a4a78566",
+        "image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-2121:latest"
+      },
+      {
+        "taskId": "valkey-io__valkey-790",
+        "repo": "valkey-io/valkey",
+        "language": "C",
+        "difficulty": "hard",
+        "baseCommit": "35a188833335332980a16239ac2efebf241c8a6a",
+        "image": "swebench/sweb.eval.x86_64.valkey-io_1776_valkey-790:latest"
+      },
+      {
+        "taskId": "fastlane__fastlane-21857",
+        "repo": "fastlane/fastlane",
+        "language": "Ruby",
+        "difficulty": "medium",
+        "baseCommit": "c18d01c03cf22b82ff5e2e03f01e59f956684708",
+        "image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-21857:latest"
+      },
+      {
+        "taskId": "sharkdp__bat-3108",
+        "repo": "sharkdp/bat",
+        "language": "Rust",
+        "difficulty": "hard",
+        "baseCommit": "2be3a14a7e2c74360765a5fa213750f727f2c5bb",
+        "image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-3108:latest"
+      },
+      {
+        "taskId": "immutable-js__immutable-js-2006",
+        "repo": "immutable-js/immutable-js",
+        "language": "TypeScript",
+        "difficulty": "medium",
+        "baseCommit": "493afba6ec17d9c999dc5a15ac80c71c6bdba1c3",
+        "image": "swebench/sweb.eval.x86_64.immutable-js_1776_immutable-js-2006:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-3272",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "easy",
+        "baseCommit": "0f42c17d85f26bbbd6a30d71ce8306d371426bfc",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3272:latest"
+      },
+      {
+        "taskId": "phpoffice__phpspreadsheet-3940",
+        "repo": "phpoffice/phpspreadsheet",
+        "language": "PHP",
+        "difficulty": "hard",
+        "baseCommit": "9b3f2055288f3166374e02f2636071a959b1bf37",
+        "image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-3940:latest"
+      },
+      {
+        "taskId": "google__gson-1100",
+        "repo": "google/gson",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "f0aa1118e9ef66ed324f9a63cdfb551cb4e9eca5",
+        "image": "swebench/sweb.eval.x86_64.google_1776_gson-1100:latest"
+      },
+      {
+        "taskId": "uutils__coreutils-6690",
+        "repo": "uutils/coreutils",
+        "language": "Rust",
+        "difficulty": "easy",
+        "baseCommit": "af86aee6b86a99736ca304ff656d0e4c6d547333",
+        "image": "swebench/sweb.eval.x86_64.uutils_1776_coreutils-6690:latest"
+      },
+      {
+        "taskId": "prometheus__prometheus-10720",
+        "repo": "prometheus/prometheus",
+        "language": "Go",
+        "difficulty": "hard",
+        "baseCommit": "89de30a0b754f4eb54fb543037683f3db6cda109",
+        "image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-10720:latest"
+      },
+      {
+        "taskId": "jordansissel__fpm-1850",
+        "repo": "jordansissel/fpm",
+        "language": "Ruby",
+        "difficulty": "medium",
+        "baseCommit": "809c7269442f6b6e4be7c3d480bb4489caa281c5",
+        "image": "swebench/sweb.eval.x86_64.jordansissel_1776_fpm-1850:latest"
+      },
+      {
+        "taskId": "micropython__micropython-15898",
+        "repo": "micropython/micropython",
+        "language": "C",
+        "difficulty": "easy",
+        "baseCommit": "b0ba151102a6c1b2e0e4c419c6482a64677c9b40",
+        "image": "swebench/sweb.eval.x86_64.micropython_1776_micropython-15898:latest"
+      },
+      {
+        "taskId": "axios__axios-6539",
+        "repo": "axios/axios",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "c6cce43cd94489f655f4488c5a50ecaf781c94f2",
+        "image": "swebench/sweb.eval.x86_64.axios_1776_axios-6539:latest"
+      },
+      {
+        "taskId": "vuejs__core-11739",
+        "repo": "vuejs/core",
+        "language": "TypeScript",
+        "difficulty": "hard",
+        "baseCommit": "cb843e0be31f9e563ccfc30eca0c06f2a224b505",
+        "image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11739:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-2310",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "medium",
+        "baseCommit": "7612f18dc8e0112e64e0845a1ebe9da6cfb8a123",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-2310:latest"
+      },
+      {
+        "taskId": "redis__redis-11734",
+        "repo": "redis/redis",
+        "language": "C",
+        "difficulty": "hard",
+        "baseCommit": "45d3310694406fb0f338f7c639cda9754edb88f8",
+        "image": "swebench/sweb.eval.x86_64.redis_1776_redis-11734:latest"
+      },
+      {
+        "taskId": "apache__lucene-12212",
+        "repo": "apache/lucene",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "b84b360f588c60e2ebdcaa2ce2e6d49f99dd9deb",
+        "image": "swebench/sweb.eval.x86_64.apache_1776_lucene-12212:latest"
+      },
+      {
+        "taskId": "faker-ruby__faker-2970",
+        "repo": "faker-ruby/faker",
+        "language": "Ruby",
+        "difficulty": "easy",
+        "baseCommit": "37a7ea2cdceae530d79197d887a347a877cd3dd4",
+        "image": "swebench/sweb.eval.x86_64.faker-ruby_1776_faker-2970:latest"
+      },
+      {
+        "taskId": "briannesbitt__carbon-3041",
+        "repo": "briannesbitt/carbon",
+        "language": "PHP",
+        "difficulty": "hard",
+        "baseCommit": "b3d0d94a1aab70d5580742659ae45177cec5ebcb",
+        "image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-3041:latest"
+      },
+      {
+        "taskId": "caddyserver__caddy-6115",
+        "repo": "caddyserver/caddy",
+        "language": "Go",
+        "difficulty": "medium",
+        "baseCommit": "4512be49a9fa55270e9afa632be9ff6c9560c455",
+        "image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-6115:latest"
+      },
+      {
+        "taskId": "nushell__nushell-12901",
+        "repo": "nushell/nushell",
+        "language": "Rust",
+        "difficulty": "easy",
+        "baseCommit": "cc9f41e553333b1ad0aa4185a912f7a52355a238",
+        "image": "swebench/sweb.eval.x86_64.nushell_1776_nushell-12901:latest"
+      },
+      {
+        "taskId": "babel__babel-16130",
+        "repo": "babel/babel",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "4e6e3cf1395cafd27f28f113918034232c6c1db5",
+        "image": "swebench/sweb.eval.x86_64.babel_1776_babel-16130:latest"
+      },
+      {
+        "taskId": "facebook__docusaurus-9183",
+        "repo": "facebook/docusaurus",
+        "language": "TypeScript",
+        "difficulty": "hard",
+        "baseCommit": "b96004e77ebfb23e7349fa495d2177008186bd42",
+        "image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-9183:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-3901",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "medium",
+        "baseCommit": "365c3fbd258fb3df69007fc7a22c0472dd31dcbb",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3901:latest"
+      },
+      {
+        "taskId": "reactivex__rxjava-7597",
+        "repo": "reactivex/rxjava",
+        "language": "Java",
+        "difficulty": "easy",
+        "baseCommit": "13a8d83656940dce0c18e8e0a2a17ac157dd1ddb",
+        "image": "swebench/sweb.eval.x86_64.reactivex_1776_rxjava-7597:latest"
+      },
+      {
+        "taskId": "fluent__fluentd-3631",
+        "repo": "fluent/fluentd",
+        "language": "Ruby",
+        "difficulty": "hard",
+        "baseCommit": "e890533484dfb7d4546f68a84fdff9a98fb459bd",
+        "image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3631:latest"
+      },
+      {
+        "taskId": "astral-sh__ruff-15626",
+        "repo": "astral-sh/ruff",
+        "language": "Rust",
+        "difficulty": "medium",
+        "baseCommit": "13a6b5600b47489ca6af0b5a13d916bda8e50662",
+        "image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15626:latest"
+      },
+      {
+        "taskId": "hashicorp__terraform-34814",
+        "repo": "hashicorp/terraform",
+        "language": "Go",
+        "difficulty": "medium",
+        "baseCommit": "310331bdc6b747b68b2e2dd6be257dfc78677973",
+        "image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-34814:latest"
+      },
+      {
+        "taskId": "preactjs__preact-3062",
+        "repo": "preactjs/preact",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "7556b61bd0d9f72bbd906c3abaebf2b1c9aeacbf",
+        "image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3062:latest"
+      },
+      {
+        "taskId": "jqlang__jq-2598",
+        "repo": "jqlang/jq",
+        "language": "C",
+        "difficulty": "hard",
+        "baseCommit": "4dc2a2fb9df94ec45d107b798173c7db9c695a7f",
+        "image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2598:latest"
+      },
+      {
+        "taskId": "laravel__framework-52680",
+        "repo": "laravel/framework",
+        "language": "PHP",
+        "difficulty": "easy",
+        "baseCommit": "bb670ae486579b6121dc21f3dee35a1b50825746",
+        "image": "swebench/sweb.eval.x86_64.laravel_1776_framework-52680:latest"
+      },
+      {
+        "taskId": "vuejs__core-11589",
+        "repo": "vuejs/core",
+        "language": "TypeScript",
+        "difficulty": "medium",
+        "baseCommit": "3653bc0f45d6fedf84e29b64ca52584359c383c0",
+        "image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11589:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-2457",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "hard",
+        "baseCommit": "4b8bda25c05d9f959ffed9a0580f0ded623177e5",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-2457:latest"
+      },
+      {
+        "taskId": "apache__druid-15402",
+        "repo": "apache/druid",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "1df53d6eb30a019fff69a5ff7533ebbd998a438d",
+        "image": "swebench/sweb.eval.x86_64.apache_1776_druid-15402:latest"
+      },
+      {
+        "taskId": "tokio-rs__axum-1730",
+        "repo": "tokio-rs/axum",
+        "language": "Rust",
+        "difficulty": "hard",
+        "baseCommit": "b4204e223dc96df3d51fc8893f32d37b66be7005",
+        "image": "swebench/sweb.eval.x86_64.tokio-rs_1776_axum-1730:latest"
+      },
+      {
+        "taskId": "jekyll__jekyll-9141",
+        "repo": "jekyll/jekyll",
+        "language": "Ruby",
+        "difficulty": "easy",
+        "baseCommit": "bb851e235dfbe1f197388aea3e7f0eeb1b50c4e3",
+        "image": "swebench/sweb.eval.x86_64.jekyll_1776_jekyll-9141:latest"
+      },
+      {
+        "taskId": "gin-gonic__gin-3820",
+        "repo": "gin-gonic/gin",
+        "language": "Go",
+        "difficulty": "easy",
+        "baseCommit": "9f598a31aafb92d675f38f1c8371e4ac76f858bf",
+        "image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-3820:latest"
+      },
+      {
+        "taskId": "axios__axios-5316",
+        "repo": "axios/axios",
+        "language": "JavaScript",
+        "difficulty": "hard",
+        "baseCommit": "65e8d1e28ce829f47a837e45129730e541950d3c",
+        "image": "swebench/sweb.eval.x86_64.axios_1776_axios-5316:latest"
+      },
+      {
+        "taskId": "micropython__micropython-10095",
+        "repo": "micropython/micropython",
+        "language": "C",
+        "difficulty": "medium",
+        "baseCommit": "cc26bf7406dac7822de347d14a9935c101d7e8aa",
+        "image": "swebench/sweb.eval.x86_64.micropython_1776_micropython-10095:latest"
+      },
+      {
+        "taskId": "phpoffice__phpspreadsheet-3463",
+        "repo": "phpoffice/phpspreadsheet",
+        "language": "PHP",
+        "difficulty": "easy",
+        "baseCommit": "99a7de3812c9033b80eddbf759efd298cd50c3c5",
+        "image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-3463:latest"
+      },
+      {
+        "taskId": "facebook__docusaurus-8927",
+        "repo": "facebook/docusaurus",
+        "language": "TypeScript",
+        "difficulty": "hard",
+        "baseCommit": "41f1c1e3c26ad1e24acd3306077e2534dd8fa0db",
+        "image": "swebench/sweb.eval.x86_64.facebook_1776_docusaurus-8927:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-1683",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "easy",
+        "baseCommit": "981b517ccf2d91bf3bf52c518ac43710b57b5e17",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-1683:latest"
+      },
+      {
+        "taskId": "burntsushi__ripgrep-2576",
+        "repo": "burntsushi/ripgrep",
+        "language": "Rust",
+        "difficulty": "medium",
+        "baseCommit": "fed4fea217abbc502f2e823465de903c8f2b623d",
+        "image": "swebench/sweb.eval.x86_64.burntsushi_1776_ripgrep-2576:latest"
+      },
+      {
+        "taskId": "projectlombok__lombok-3571",
+        "repo": "projectlombok/lombok",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "55f3a02909957f97c2496ef25135857bf27cdd36",
+        "image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3571:latest"
+      },
+      {
+        "taskId": "prometheus__prometheus-15142",
+        "repo": "prometheus/prometheus",
+        "language": "Go",
+        "difficulty": "hard",
+        "baseCommit": "16bba78f1549cfd7909b61ebd7c55c822c86630b",
+        "image": "swebench/sweb.eval.x86_64.prometheus_1776_prometheus-15142:latest"
+      },
+      {
+        "taskId": "valkey-io__valkey-1499",
+        "repo": "valkey-io/valkey",
+        "language": "C",
+        "difficulty": "easy",
+        "baseCommit": "93b701d8d48eaf87077e707dd77eaaed0e66900f",
+        "image": "swebench/sweb.eval.x86_64.valkey-io_1776_valkey-1499:latest"
+      },
+      {
+        "taskId": "fluent__fluentd-3616",
+        "repo": "fluent/fluentd",
+        "language": "Ruby",
+        "difficulty": "medium",
+        "baseCommit": "26c62cddbf236361b797eac498301c7d4a77d010",
+        "image": "swebench/sweb.eval.x86_64.fluent_1776_fluentd-3616:latest"
+      },
+      {
+        "taskId": "briannesbitt__carbon-2981",
+        "repo": "briannesbitt/carbon",
+        "language": "PHP",
+        "difficulty": "hard",
+        "baseCommit": "1d762cbdb379838b10bde0a5a901c5b5c2a83437",
+        "image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-2981:latest"
+      },
+      {
+        "taskId": "babel__babel-14532",
+        "repo": "babel/babel",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "fbd065256ca00d68089293ad48ea9aeba5481914",
+        "image": "swebench/sweb.eval.x86_64.babel_1776_babel-14532:latest"
+      },
+      {
+        "taskId": "vuejs__core-11870",
+        "repo": "vuejs/core",
+        "language": "TypeScript",
+        "difficulty": "medium",
+        "baseCommit": "67d6596d40b1807b9cd8eb0d9282932ea77be3c0",
+        "image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11870:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-3248",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "easy",
+        "baseCommit": "840ec8569ddb304345f082bb82d733742f431504",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3248:latest"
+      },
+      {
+        "taskId": "sharkdp__bat-2835",
+        "repo": "sharkdp/bat",
+        "language": "Rust",
+        "difficulty": "hard",
+        "baseCommit": "db66e4459bc4e66c03629d7cbc235f59245280c0",
+        "image": "swebench/sweb.eval.x86_64.sharkdp_1776_bat-2835:latest"
+      },
+      {
+        "taskId": "caddyserver__caddy-5626",
+        "repo": "caddyserver/caddy",
+        "language": "Go",
+        "difficulty": "hard",
+        "baseCommit": "0e2c7e1d35b287fc0e56d6db2951f791e09b5a37",
+        "image": "swebench/sweb.eval.x86_64.caddyserver_1776_caddy-5626:latest"
+      },
+      {
+        "taskId": "rubocop__rubocop-13375",
+        "repo": "rubocop/rubocop",
+        "language": "Ruby",
+        "difficulty": "medium",
+        "baseCommit": "75160946ac3620005874d5188101dab77d585be2",
+        "image": "swebench/sweb.eval.x86_64.rubocop_1776_rubocop-13375:latest"
+      },
+      {
+        "taskId": "apache__lucene-12196",
+        "repo": "apache/lucene",
+        "language": "Java",
+        "difficulty": "easy",
+        "baseCommit": "0651d25713dde144df6541663b18accbc93cdc64",
+        "image": "swebench/sweb.eval.x86_64.apache_1776_lucene-12196:latest"
+      },
+      {
+        "taskId": "php-cs-fixer__php-cs-fixer-7663",
+        "repo": "php-cs-fixer/php-cs-fixer",
+        "language": "PHP",
+        "difficulty": "hard",
+        "baseCommit": "c5cde0cf7542234dc061af8a25f77fcdad430e35",
+        "image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-7663:latest"
+      },
+      {
+        "taskId": "redis__redis-13115",
+        "repo": "redis/redis",
+        "language": "C",
+        "difficulty": "medium",
+        "baseCommit": "4979cf02ff83e90ced80db5111452a4c3e082c3a",
+        "image": "swebench/sweb.eval.x86_64.redis_1776_redis-13115:latest"
+      },
+      {
+        "taskId": "mrdoob__three.js-25687",
+        "repo": "mrdoob/three.js",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "114134e195a451fdbaa8d2e9492d869d5c853814",
+        "image": "swebench/sweb.eval.x86_64.mrdoob_1776_three.js-25687:latest"
+      },
+      {
+        "taskId": "vuejs__core-11915",
+        "repo": "vuejs/core",
+        "language": "TypeScript",
+        "difficulty": "easy",
+        "baseCommit": "d0b513eb463f580e29378e43d112ff6859aa366e",
+        "image": "swebench/sweb.eval.x86_64.vuejs_1776_core-11915:latest"
+      },
+      {
+        "taskId": "fmtlib__fmt-3158",
+        "repo": "fmtlib/fmt",
+        "language": "C++",
+        "difficulty": "easy",
+        "baseCommit": "80f8d34427d40ec5e7ce3b10ededc46bd4bd5759",
+        "image": "swebench/sweb.eval.x86_64.fmtlib_1776_fmt-3158:latest"
+      },
+      {
+        "taskId": "tokio-rs__tokio-6724",
+        "repo": "tokio-rs/tokio",
+        "language": "Rust",
+        "difficulty": "medium",
+        "baseCommit": "0cbf1a5adae81e8ff86ca6d040aeee67cf888262",
+        "image": "swebench/sweb.eval.x86_64.tokio-rs_1776_tokio-6724:latest"
+      },
+      {
+        "taskId": "fastlane__fastlane-20958",
+        "repo": "fastlane/fastlane",
+        "language": "Ruby",
+        "difficulty": "hard",
+        "baseCommit": "6ff1c49bd90bdc29a94b6f99f568cf86fffc376d",
+        "image": "swebench/sweb.eval.x86_64.fastlane_1776_fastlane-20958:latest"
+      },
+      {
+        "taskId": "gohugoio__hugo-12343",
+        "repo": "gohugoio/hugo",
+        "language": "Go",
+        "difficulty": "medium",
+        "baseCommit": "060cce0a910ffd9dc4e92efbe758fc5f187c3145",
+        "image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12343:latest"
+      },
+      {
+        "taskId": "google__gson-2479",
+        "repo": "google/gson",
+        "language": "Java",
+        "difficulty": "hard",
+        "baseCommit": "4dfae77af3d543bea2782f85a154cc070290f086",
+        "image": "swebench/sweb.eval.x86_64.google_1776_gson-2479:latest"
+      },
+      {
+        "taskId": "preactjs__preact-3763",
+        "repo": "preactjs/preact",
+        "language": "JavaScript",
+        "difficulty": "hard",
+        "baseCommit": "e968a5a4000dfa9bec7e8d7b26543b23def6d29d",
+        "image": "swebench/sweb.eval.x86_64.preactjs_1776_preact-3763:latest"
+      },
+      {
+        "taskId": "jqlang__jq-2658",
+        "repo": "jqlang/jq",
+        "language": "C",
+        "difficulty": "medium",
+        "baseCommit": "c077b95ba2dcaafee39e302cc086bf99fa9248d0",
+        "image": "swebench/sweb.eval.x86_64.jqlang_1776_jq-2658:latest"
+      },
+      {
+        "taskId": "php-cs-fixer__php-cs-fixer-7523",
+        "repo": "php-cs-fixer/php-cs-fixer",
+        "language": "PHP",
+        "difficulty": "easy",
+        "baseCommit": "10fb65e3e8b8645f74f6ab099dfa11ce5ac5cfcd",
+        "image": "swebench/sweb.eval.x86_64.php-cs-fixer_1776_php-cs-fixer-7523:latest"
+      },
+      {
+        "taskId": "uutils__coreutils-6377",
+        "repo": "uutils/coreutils",
+        "language": "Rust",
+        "difficulty": "hard",
+        "baseCommit": "e2aa2c74408d46da900cad4a0b764c8760a300ff",
+        "image": "swebench/sweb.eval.x86_64.uutils_1776_coreutils-6377:latest"
+      },
+      {
+        "taskId": "jekyll__jekyll-8761",
+        "repo": "jekyll/jekyll",
+        "language": "Ruby",
+        "difficulty": "medium",
+        "baseCommit": "310459370ad8bb9c0b574735dcca4868a5f05803",
+        "image": "swebench/sweb.eval.x86_64.jekyll_1776_jekyll-8761:latest"
+      },
+      {
+        "taskId": "javaparser__javaparser-4538",
+        "repo": "javaparser/javaparser",
+        "language": "Java",
+        "difficulty": "hard",
+        "baseCommit": "e0eb16b8870fc05c03ab794e502dd76f97422e26",
+        "image": "swebench/sweb.eval.x86_64.javaparser_1776_javaparser-4538:latest"
+      },
+      {
+        "taskId": "hashicorp__terraform-34580",
+        "repo": "hashicorp/terraform",
+        "language": "Go",
+        "difficulty": "easy",
+        "baseCommit": "8faa757e20d8df6c458a002c6bd4e1bc26f41581",
+        "image": "swebench/sweb.eval.x86_64.hashicorp_1776_terraform-34580:latest"
+      },
+      {
+        "taskId": "briannesbitt__carbon-3073",
+        "repo": "briannesbitt/carbon",
+        "language": "PHP",
+        "difficulty": "medium",
+        "baseCommit": "da64770bf83ac06914418db7df14dadd4ded0212",
+        "image": "swebench/sweb.eval.x86_64.briannesbitt_1776_carbon-3073:latest"
+      },
+      {
+        "taskId": "valkey-io__valkey-1842",
+        "repo": "valkey-io/valkey",
+        "language": "C",
+        "difficulty": "easy",
+        "baseCommit": "4de8cf3567b4dfd3a541219462b22d46c730c4b4",
+        "image": "swebench/sweb.eval.x86_64.valkey-io_1776_valkey-1842:latest"
+      },
+      {
+        "taskId": "mrdoob__three.js-27395",
+        "repo": "mrdoob/three.js",
+        "language": "JavaScript",
+        "difficulty": "medium",
+        "baseCommit": "b99b3fd955864f534b1e2649518112f7e50fef21",
+        "image": "swebench/sweb.eval.x86_64.mrdoob_1776_three.js-27395:latest"
+      },
+      {
+        "taskId": "astral-sh__ruff-15330",
+        "repo": "astral-sh/ruff",
+        "language": "Rust",
+        "difficulty": "hard",
+        "baseCommit": "b2a0d68d70ee690ea871fe9b3317be43075ddb33",
+        "image": "swebench/sweb.eval.x86_64.astral-sh_1776_ruff-15330:latest"
+      },
+      {
+        "taskId": "faker-ruby__faker-2705",
+        "repo": "faker-ruby/faker",
+        "language": "Ruby",
+        "difficulty": "easy",
+        "baseCommit": "4d52bc1e148d5290da10cb2775e244e0023778b0",
+        "image": "swebench/sweb.eval.x86_64.faker-ruby_1776_faker-2705:latest"
+      },
+      {
+        "taskId": "apache__druid-16875",
+        "repo": "apache/druid",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "483a03f26c7221f10493d86715985a58e61af967",
+        "image": "swebench/sweb.eval.x86_64.apache_1776_druid-16875:latest"
+      },
+      {
+        "taskId": "phpoffice__phpspreadsheet-3659",
+        "repo": "phpoffice/phpspreadsheet",
+        "language": "PHP",
+        "difficulty": "hard",
+        "baseCommit": "37a8a56299d3098032e3f8e1c2790607e226952e",
+        "image": "swebench/sweb.eval.x86_64.phpoffice_1776_phpspreadsheet-3659:latest"
+      },
+      {
+        "taskId": "gin-gonic__gin-3741",
+        "repo": "gin-gonic/gin",
+        "language": "Go",
+        "difficulty": "easy",
+        "baseCommit": "c2ba8f19ec19914b73290c53a32de479cd463555",
+        "image": "swebench/sweb.eval.x86_64.gin-gonic_1776_gin-3741:latest"
+      },
+      {
+        "taskId": "redis__redis-11631",
+        "repo": "redis/redis",
+        "language": "C",
+        "difficulty": "hard",
+        "baseCommit": "df327b8bd56023931cd41e233f8703de7bbaa82c",
+        "image": "swebench/sweb.eval.x86_64.redis_1776_redis-11631:latest"
+      },
+      {
+        "taskId": "babel__babel-15649",
+        "repo": "babel/babel",
+        "language": "JavaScript",
+        "difficulty": "medium",
+        "baseCommit": "35116224d21e16fb863293f9011d1d6c97ed0bf4",
+        "image": "swebench/sweb.eval.x86_64.babel_1776_babel-15649:latest"
+      },
+      {
+        "taskId": "nushell__nushell-13246",
+        "repo": "nushell/nushell",
+        "language": "Rust",
+        "difficulty": "medium",
+        "baseCommit": "46ed69ab126015375d5163972ae321715f34874b",
+        "image": "swebench/sweb.eval.x86_64.nushell_1776_nushell-13246:latest"
+      },
+      {
+        "taskId": "jordansissel__fpm-1829",
+        "repo": "jordansissel/fpm",
+        "language": "Ruby",
+        "difficulty": "hard",
+        "baseCommit": "c7e7b187316a0969c90706b04db35e78b0e2fc09",
+        "image": "swebench/sweb.eval.x86_64.jordansissel_1776_fpm-1829:latest"
+      },
+      {
+        "taskId": "gohugoio__hugo-12562",
+        "repo": "gohugoio/hugo",
+        "language": "Go",
+        "difficulty": "easy",
+        "baseCommit": "c8dac67defbb512877e974814e196782989b8214",
+        "image": "swebench/sweb.eval.x86_64.gohugoio_1776_hugo-12562:latest"
+      },
+      {
+        "taskId": "projectlombok__lombok-3602",
+        "repo": "projectlombok/lombok",
+        "language": "Java",
+        "difficulty": "medium",
+        "baseCommit": "f3a4b1b4151a9dd1646f1b170c17f5f29903f45a",
+        "image": "swebench/sweb.eval.x86_64.projectlombok_1776_lombok-3602:latest"
+      },
+      {
+        "taskId": "laravel__framework-46234",
+        "repo": "laravel/framework",
+        "language": "PHP",
+        "difficulty": "easy",
+        "baseCommit": "3799f7f3118d57dc5d3dfaabde69a912fff65a7e",
+        "image": "swebench/sweb.eval.x86_64.laravel_1776_framework-46234:latest"
+      },
+      {
+        "taskId": "micropython__micropython-12158",
+        "repo": "micropython/micropython",
+        "language": "C",
+        "difficulty": "hard",
+        "baseCommit": "c0d4c604e6a140c0f2967e1b43fd94d0b029c73f",
+        "image": "swebench/sweb.eval.x86_64.micropython_1776_micropython-12158:latest"
+      },
+      {
+        "taskId": "axios__axios-4738",
+        "repo": "axios/axios",
+        "language": "JavaScript",
+        "difficulty": "easy",
+        "baseCommit": "9bb016f95e6de871a44f3276fd06562704a0abb0",
+        "image": "swebench/sweb.eval.x86_64.axios_1776_axios-4738:latest"
+      }
+    ]
+  }
+}

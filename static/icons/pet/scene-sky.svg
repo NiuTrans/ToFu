@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 48" width="120" height="48" preserveAspectRatio="none">
+  <!-- FULL-HEIGHT painterly sky (mirrors the validated meadow recipe).
+       preserveAspectRatio="none" + CSS background-size:120px 100% stretches
+       this 120-wide tile to the bar's full height. A warm dawn gradient fills
+       the whole body (palest at the TOP behind the frosted pills for
+       legibility) with VOLUMETRIC cloud banks rising from the base: each bank
+       has a gradient body (shadowed underside -> bright sunlit top) plus a warm
+       rim light. A soft feTurbulence haze mottle is CONFINED to the lower banks
+       so it never darkens the pill band. SEAM: every cloud profile starts and
+       ends at the same y (x=0 == x=120) and the turbulence is stitched, so the
+       120px tile repeats with no seam (parallax-safe). Warm cream/peach keeps
+       it in the tofu palette. -->
+  <defs>
+    <!-- dawn atmosphere: palest at the very top (pill legibility) -->
+    <linearGradient id="sk-atmo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F4F6FB"/>
+      <stop offset="0.55" stop-color="#EAEEF7"/>
+      <stop offset="1" stop-color="#F3E7DA"/>
+    </linearGradient>
+    <!-- far cloud bank: soft, low-contrast -->
+    <linearGradient id="sk-far" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBFCFE"/>
+      <stop offset="1" stop-color="#DCE4F0"/>
+    </linearGradient>
+    <!-- near cloud bank: shadowed underside -> bright sunlit top -->
+    <linearGradient id="sk-near" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFDF8"/>
+      <stop offset="0.6" stop-color="#F3EAD9"/>
+      <stop offset="1" stop-color="#D9C3A8"/>
+    </linearGradient>
+    <!-- warm rim light along the near-cloud tops -->
+    <linearGradient id="sk-rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBE3C0"/>
+      <stop offset="1" stop-color="#FBE3C0" stop-opacity="0"/>
+    </linearGradient>
+    <!-- soft haze mottle: stitched fractal noise, warm, low alpha -->
+    <filter id="sk-haze" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.04 0.10" numOctaves="2"
+                    seed="9" stitchTiles="stitch" result="n"/>
+      <feColorMatrix in="n" type="matrix"
+                     values="0 0 0 0 0.98
+                             0 0 0 0 0.90
+                             0 0 0 0 0.78
+                             0 0 0 0.32 0"/>
+    </filter>
+  </defs>
+
+  <!-- atmosphere fills the whole bar (top stays pale behind the pills) -->
+  <rect x="0" y="0" width="120" height="48" fill="url(#sk-atmo)"/>
+
+  <!-- FAR cloud bank: soft billows reaching into the middle -->
+  <path fill="url(#sk-far)" opacity="0.85" d="M0,22 q15,-9 30,0 q15,-9 30,0 q15,-9 30,0 q15,-9 30,0 L120,48 L0,48 Z"/>
+
+  <!-- NEAR cloud bank: bigger lobed billows, kept lower (below pill band) -->
+  <path fill="url(#sk-near)" d="M0,30 q12,-10 24,0 q12,-10 24,0 q12,-10 24,0 q12,-10 24,0 q12,-10 24,0 L120,48 L0,48 Z"/>
+
+  <!-- warm rim light hugging the near-cloud tops -->
+  <path fill="url(#sk-rim)" d="M0,30 q12,-10 24,0 q12,-10 24,0 q12,-10 24,0 q12,-10 24,0 q12,-10 24,0 L120,34 q-12,-8 -24,0 q-12,8 -24,0 q-12,-8 -24,0 q-12,8 -24,0 q-12,-8 -24,0 Z" opacity="0.6"/>
+
+  <!-- haze mottle over the lower cloud banks only (below the pill band) -->
+  <rect x="0" y="30" width="120" height="18" fill="#000" opacity="0.4" filter="url(#sk-haze)"/>
+
+  <!-- a couple of small high wisps in the upper haze (thin, few dark px) -->
+  <g fill="#FBFCFE" opacity="0.7">
+    <ellipse cx="30" cy="12" rx="9" ry="2.4"/>
+    <ellipse cx="88" cy="10" rx="8" ry="2.1"/>
+  </g>
+</svg>

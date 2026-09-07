@@ -1,0 +1,1326 @@
+/* ══════════════════════════════════════
+   Pending Message Queue
+   ══════════════════════════════════════ */
+.pending-queue-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 14px;
+  margin: 0 0 8px 0;
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  animation: queueSlideIn 0.25s cubic-bezier(0.22,1,0.36,1);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  /* ★ Bound the bar so a long queue scrolls INSIDE it instead of growing
+     upward and covering the chat transcript (reported: "too many queued
+     messages, can't see the content behind"). The header below is sticky so
+     the count + Clear-all stay visible while the item list scrolls. */
+  max-height: min(42vh, 320px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.pending-queue-bar.queue-removing {
+  opacity: 0;
+  transform: translateY(6px);
+}
+/* ── Header row ── */
+.pending-queue-bar .queue-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.3px;
+  /* Stay pinned to the top of the scroll area so the count + Clear-all button
+     remain reachable no matter how far the item list is scrolled. */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-secondary);
+  padding-bottom: 4px;
+}
+.pending-queue-bar .queue-header > svg {
+  flex-shrink: 0;
+  animation: queueSpin 3s linear infinite;
+}
+.pending-queue-bar .queue-header .queue-header-label {
+  /* Expanded state: the label is the header's flex-grow element, pushing
+     clear-all to the right edge (the next-up preview is display:none here).
+     The collapsed state hands the grow to the preview below. */
+  flex: 1 1 auto;
+  white-space: nowrap;
+}
+.pending-queue-bar.queue-collapsed .queue-header .queue-header-label {
+  flex: 0 1 auto;
+}
+/* ── Collapse toggle (chevron) ── */
+.pending-queue-bar .queue-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.pending-queue-bar .queue-toggle:hover {
+  background: var(--bg-tertiary);
+  color: var(--accent);
+}
+.pending-queue-bar .queue-toggle svg {
+  display: block;
+  transition: transform 0.2s ease;
+}
+.pending-queue-bar.queue-collapsed .queue-toggle svg {
+  transform: rotate(-90deg);
+}
+/* ── Collapsed state: the item list folds away, leaving a one-line bar
+   (count + next-up preview + clear-all) so a flooded queue can never bury
+   the transcript. The next-up preview + autopilot chip are expanded-only
+   hidden. ── */
+.pending-queue-bar .queue-items {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.pending-queue-bar.queue-collapsed {
+  max-height: none;
+  overflow: visible;
+}
+.pending-queue-bar.queue-collapsed .queue-items {
+  display: none;
+}
+.pending-queue-bar .queue-next-preview,
+.pending-queue-bar .queue-header .queue-header-ap {
+  display: none;
+}
+.pending-queue-bar.queue-collapsed .queue-next-preview {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.pending-queue-bar.queue-collapsed .queue-header .queue-header-ap {
+  display: inline-flex;
+  align-items: center;
+  color: #818cf8;
+  flex-shrink: 0;
+}
+.pending-queue-bar .queue-header .queue-header-ap svg {
+  display: block;
+}
+/* ── Each queued item ── */
+.pending-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid transparent;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  animation: queueItemIn 0.2s ease-out both;
+}
+.pending-queue-item:hover {
+  background: var(--bg-primary);
+  border-color: var(--border-light);
+}
+/* Number badge */
+.pending-queue-item .queue-item-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+  box-shadow: 0 1px 4px rgba(99,102,241,0.3);
+}
+/* Text preview */
+.pending-queue-item .queue-item-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  /* Clamp each preview to 3 lines with an ellipsis so one long message can't
+     dominate the bar; the full text is still sent/removed intact. Replaces the
+     old per-item 6-line nested scrollbar (double-scrollbar with the bar). */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-height: calc(1.4em * 3);
+}
+/* Attachment badges */
+.pending-queue-item .queue-item-attachments {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.pending-queue-item .queue-item-attachments span {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(99,102,241,0.12);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+/* Cancel button (per-item) */
+.pending-queue-item .queue-item-cancel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+.pending-queue-item .queue-item-cancel:hover {
+  background: rgba(239,68,68,0.12);
+  color: #ef4444;
+}
+/* Server-synced indicator */
+.pending-queue-item .queue-item-synced {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+  flex-shrink: 0;
+  margin-left: 2px;
+  margin-right: -2px;
+}
+/* Clear all button */
+.queue-clear-all {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.queue-clear-all:hover {
+  background: rgba(239,68,68,0.1);
+  color: #ef4444;
+}
+
+/* ── Item body + source attribution line ── */
+.pending-queue-item .queue-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pending-queue-item .queue-item-src {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-bottom: 3px;
+  cursor: pointer;
+}
+.pending-queue-item .queue-item-src:hover {
+  text-decoration: underline;
+}
+.pending-queue-item .queue-item-src.queue-item-src-static {
+  cursor: default;
+}
+.pending-queue-item .queue-item-src.queue-item-src-static:hover {
+  text-decoration: none;
+}
+.pending-queue-item .queue-item-src svg {
+  display: block;
+  flex-shrink: 0;
+}
+/* ── Per-source tinting: each queue origin gets a left edge + number badge
+   in its own hue so a mixed queue reads at a glance ──
+   own (default, accent) / agent (violet) / operator (amber) /
+   workflow (teal) / autopilot (indigo dashed). */
+.pending-queue-item.qsrc-agent {
+  border-left: 3px solid rgba(139,92,246,0.55);
+  background: rgba(139,92,246,0.08);
+}
+.pending-queue-item.qsrc-agent .queue-item-number {
+  background: #8b5cf6;
+  box-shadow: 0 1px 4px rgba(139,92,246,0.35);
+}
+.pending-queue-item.qsrc-agent .queue-item-src {
+  color: #a78bfa;
+}
+.pending-queue-item.qsrc-operator {
+  border-left: 3px solid rgba(245,158,11,0.55);
+  background: rgba(245,158,11,0.08);
+}
+.pending-queue-item.qsrc-operator .queue-item-number {
+  background: #f59e0b;
+  box-shadow: 0 1px 4px rgba(245,158,11,0.35);
+}
+.pending-queue-item.qsrc-operator .queue-item-src {
+  color: #fbbf24;
+}
+.pending-queue-item.qsrc-workflow {
+  border-left: 3px solid rgba(45,212,191,0.55);
+  background: rgba(45,212,191,0.08);
+}
+.pending-queue-item.qsrc-workflow .queue-item-number {
+  background: #14b8a6;
+  box-shadow: 0 1px 4px rgba(45,212,191,0.35);
+}
+.pending-queue-item.qsrc-workflow .queue-item-src {
+  color: #2dd4bf;
+}
+/* Autopilot armed sentinel — indigo dashed frame, steering-wheel icon chip. */
+.pending-queue-item.pending-queue-autopilot {
+  border: 1px dashed rgba(129,140,248,0.5);
+  background: rgba(129,140,248,0.06);
+}
+.pending-queue-item .queue-item-autopilot-icon {
+  background: rgba(129,140,248,0.16);
+  color: #818cf8;
+  box-shadow: none;
+}
+/* SVG glyphs inside the cancel / synced affordances. */
+.pending-queue-item .queue-item-cancel > svg,
+.pending-queue-item .queue-item-synced > svg {
+  display: block;
+}
+
+/* ── Queue badge on stop button ── */
+.send-btn { position: relative; }
+.send-btn .queue-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  box-shadow: 0 2px 8px rgba(99,102,241,0.45);
+  animation: queueBadgePop 0.3s cubic-bezier(0.22,1,0.36,1);
+  pointer-events: none;
+}
+
+/* ── Animations ── */
+@keyframes queueSlideIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes queueItemIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes queueSpin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes queueBadgePop {
+  0%   { transform: scale(0); }
+  50%  { transform: scale(1.25); }
+  100% { transform: scale(1); }
+}
+
+/* ── Export-to-Images ────────────────────────────────── */
+.export-progress-toast{position:fixed;bottom:32px;left:50%;transform:translateX(-50%);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);padding:14px 24px;display:flex;align-items:center;gap:12px;z-index:10001;box-shadow:var(--shadow);font-size:13px;color:var(--text-primary);transition:opacity .3s,transform .3s}
+.export-progress-toast .export-progress-icon{font-size:18px;flex-shrink:0}
+.export-progress-toast .export-progress-body{display:flex;flex-direction:column;gap:6px;min-width:180px}
+.export-progress-toast .export-progress-text{font-size:13px;white-space:nowrap}
+.export-progress-toast .export-progress-bar-wrap{height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+.export-progress-toast .export-progress-bar-fill{height:100%;background:var(--accent);border-radius:2px;transition:width .3s ease}
+.export-progress-toast.done .export-progress-bar-fill{background:#22c55e}
+.export-progress-toast.error .export-progress-bar-fill{background:#ef4444}
+.export-preview-overlay{position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.85);z-index:10000;display:flex;flex-direction:column;align-items:center;overflow-y:auto;padding:40px 20px}
+.export-preview-overlay .epv-toolbar{position:sticky;top:0;z-index:1;display:flex;gap:10px;margin-bottom:24px;padding:12px 20px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
+.export-preview-overlay .epv-toolbar button{padding:8px 18px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text-primary);font-size:13px;cursor:pointer;transition:background .2s}
+.export-preview-overlay .epv-toolbar button:hover{background:var(--bg-hover)}
+.export-preview-overlay .epv-toolbar button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.export-preview-overlay .epv-toolbar button.primary:hover{background:var(--accent-hover)}
+.export-preview-overlay .epv-grid{display:flex;flex-wrap:wrap;gap:20px;justify-content:center}
+.export-preview-overlay .epv-card{background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;cursor:pointer;transition:border-color .2s,transform .2s}
+.export-preview-overlay .epv-card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.export-preview-overlay .epv-card img{display:block;height:320px;width:auto}
+.export-preview-overlay .epv-card .epv-label{padding:6px 10px;font-size:11px;color:var(--text-secondary);text-align:center;background:var(--bg-secondary);display:flex;align-items:center;justify-content:space-between}
+.export-preview-overlay .epv-card .epv-label .epv-card-dl{background:none;border:none;color:var(--text-secondary);cursor:pointer;padding:2px 4px;border-radius:4px;transition:color .2s,background .2s}
+.export-preview-overlay .epv-card .epv-label .epv-card-dl:hover{color:var(--accent);background:var(--bg-hover)}
+
+/* ═══════════════════════════════════════════════════════════
+   ★★★ MOBILE RESPONSIVE DESIGN ★★★
+   Complete phone-friendly experience
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Sidebar Backdrop (mobile overlay) ── */
+.sidebar-backdrop{display:none;position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.35);z-index:25;opacity:0;transition:opacity .3s ease;-webkit-tap-highlight-color:transparent}
+.sidebar-backdrop.visible{display:block;opacity:1}
+
+/* ═══════════════════════════════════════════════════════════
+   PORTRAIT-TABLET / FOLDABLE CHAT DRAWER  (769px–1024px, coarse pointer)
+   ───────────────────────────────────────────────────────────
+   At this viewport paper-reading mode ALREADY single-panes
+   (`@media(max-width:768px),(max-width:1024px) and (pointer:coarse)`), but the
+   CHAT sidebar stayed a pinned 280px flex child — an internal inconsistency
+   across our own surfaces at one screen size. This block turns the chat sidebar
+   into the SAME slide-over drawer the phone uses, WITHOUT the ≤768px 360px
+   compaction (topbar badge-hiding, message avatar removal, font shrink) which a
+   ~900px tablet does not need. The `pointer:coarse` half keeps a fine-pointer
+   desktop narrowed to <1024px, and any landscape tablet >1024px, on the pinned
+   two-pane layout. The lower bound (min-width:769px) hands ≤768 to the phone
+   master block so the two never both apply.
+
+   KEEP IN SYNC with core.js isTabletDrawerViewport() / TOFU_BP.tablet=1024 and
+   the paper-mode predicate above (guarded by
+   tests/test_breakpoint_coordination.py). */
+@media(min-width:769px) and (max-width:1024px) and (pointer:coarse){
+  /* Sidebar → fixed slide-over drawer (mirrors the phone drawer geometry, a
+   * touch wider since a tablet has the room). */
+  .sidebar{position:fixed!important;left:0;top:0;bottom:0;width:min(360px,80vw);max-width:360px;min-width:auto!important;z-index:30;padding-top:env(safe-area-inset-top,0px);transform:translateX(-100%);transition:transform .3s cubic-bezier(.4,0,.2,1);box-shadow:none;will-change:transform}
+  /* The derived desktop has-rail width (rail + list-min) must NOT widen the
+   * fixed drawer — reset it; the icon-only rail lives INSIDE the drawer. Also
+   * neutralize the pre-paint html[data-rail] hint (JS hasn't added .has-rail
+   * yet on first paint, so match the hint too or the drawer paints too wide). */
+  .sidebar.has-rail,.sidebar.has-rail.rail-collapsed,
+  html[data-rail] .sidebar{width:min(360px,80vw)!important;min-width:auto!important}
+  .sidebar.collapsed{margin-left:0;transform:translateX(-100%)}
+  .sidebar.has-rail.collapsed,.sidebar.has-rail.rail-collapsed.collapsed{margin-left:0!important}
+  .sidebar:not(.collapsed){transform:translateX(0);box-shadow:4px 0 24px rgba(0,0,0,0.25)}
+  /* Tofu theme sets overflow:visible / position:relative on these for desktop
+   * dropdown popovers; re-assert containment at matching (0,2,0) specificity so
+   * the drawer clips correctly (same war the phone block fights). */
+  [data-theme="tofu"] .sidebar{position:fixed!important;overflow:hidden!important}
+  [data-theme="tofu"] .sidebar.collapsed{transform:translateX(-100%)!important}
+  [data-theme="tofu"] .sidebar:not(.collapsed){transform:translateX(0)!important}
+  /* Main pane takes the full width — it is no longer pushed by the (now fixed)
+   * sidebar. */
+  .main{width:100%!important;flex:1!important;min-width:0!important}
+  /* ★ ROOT-CAUSE FIX (portrait-tablet blank screen): the desktop tofu rule
+   * `[data-theme="tofu"] .chat-wrapper{overflow:visible}` (a dropdown-escape
+   * hatch, ~L13315) leaks into this drawer layout. With overflow:visible the
+   * wrapper (a `flex:1;min-height:0` item) no longer establishes a definite
+   * height context, so its child `.chat-container` (also `flex:1;min-height:0`)
+   * collapses to height:0 and the whole chat pane paints blank — even though
+   * `.chat-inner` has content. Re-assert containment at matching (0,2,0)
+   * specificity, exactly as the ≤768 phone block does. The toolbar-dropdown
+   * escape need is a desktop-hover concern; the drawer layout doesn't rely on it. */
+  [data-theme="tofu"] .chat-wrapper{overflow:hidden!important}
+  /* Sidebar-header action buttons get 44px touch targets (beats the tofu
+   * 0,3,0 selector — same insurance the phone block uses). */
+  .sidebar-header-actions .action-btn,
+  [data-theme="tofu"] .sidebar-header .action-btn{width:44px!important;height:44px!important}
+  /* Comfortable touch rows for the conversation list. */
+  .conv-item{min-height:48px}
+
+  /* The width-only desktop-compaction breakpoints (≤1080/≤1024) are gated on
+   * `pointer:fine`, so they never strip labels here — no re-show needed. What we
+   * DO need is graceful clipping for the topbar model badge: its base rule has
+   * `white-space:nowrap` but NO max-width/ellipsis (that only exists in the ≤768
+   * phone block), so a long model name at 769px would be hard-cut by the
+   * topbar's `overflow:hidden` with no ellipsis. Cap + ellipsis it, matching the
+   * phone treatment but roomier. */
+  .model-badge{max-width:200px;overflow:hidden;text-overflow:ellipsis}
+
+  /* ===== TOUCH-ENABLE MESSAGE ACTIONS =====
+   * The base `.message-actions` is a hover-reveal (opacity:0 → 1 on
+   * `.message:hover`), which a coarse-pointer tablet can NEVER trigger — so
+   * copy / edit / regenerate / delete are invisible and unreachable here. The
+   * ≤768 phone block fixes this by re-flowing them inline; a tablet keeps the
+   * roomier desktop message layout (avatar column intact), so we instead just
+   * make them permanently visible in their absolute top-right slot (same place
+   * they appear on desktop hover) and give each control a comfortable touch
+   * target. `.message:hover` still applies on a hybrid device with a mouse. */
+  .message-actions{opacity:1}
+  .msg-action-btn{padding:6px 10px;font-size:11px;min-height:36px;display:inline-flex;align-items:center}
+  /* Tofu sets `.msg-action-btn{padding:3px 6px;font-size:10px}` at (0,2,0),
+   * beating the plain rule above — re-assert the touch padding/font to match
+   * (same war the phone block fights). */
+  [data-theme="tofu"] .msg-action-btn{padding:6px 10px;font-size:11px}
+
+  /* ===== INPUT AREA touch sizing =====
+   * The desktop toolbar fits at this width (no ···-sheet compaction like the
+   * phone), so we keep the full toolbar but grow the send button + textarea
+   * font to comfortable touch/no-iOS-zoom sizes. */
+  .send-btn{width:40px;height:40px;padding:0}
+  textarea{font-size:16px}
+
+  /* ===== CHAT READING MEASURE =====
+   * The sidebar is now a slide-over drawer, so the chat pane spans the FULL
+   * viewport width (up to 1024px). The base `.chat-inner{max-width:820px}` then
+   * sits centered with ~102px of dead gutter each side at a 1024px portrait
+   * tablet (e.g. iPad Pro 12.9") — the pane no longer "breathes". Widen the
+   * reading measure to 920px for the band: it fills the tablet pane far better
+   * (~52px gutters at 1024px, edge-to-edge below ~968px) while staying a
+   * comfortable line length (content ~872px after the 24px inner padding, still
+   * under the ~90ch upper bound). Phones (≤768) keep the base cap via their own
+   * `max-width:100%` overflow rule. */
+  .chat-inner{max-width:920px}
+
+  /* ===== MODEL-PICKER DROPDOWN must ESCAPE the clipped chat-wrapper =====
+   * This block clips `.chat-wrapper{overflow:hidden}` (blank-screen fix above).
+   * The desktop `.preset-dropdown` opens UPWARD (position:absolute;
+   * bottom:calc(100%+6px)) INSIDE that now-clipped wrapper, so tapping the
+   * model toggle rendered a dropdown that was clipped away → "nothing happens".
+   * Make it a position:fixed bottom-sheet (like the phone block) so it escapes
+   * ANY ancestor overflow. Sized off the --vh100 guard var, not bare dvh (which
+   * collapses to 0 in the WebView — same class as the 11-overlay fix). */
+  .preset-dropdown{position:fixed;bottom:0;left:0;right:0;top:auto;transform:none;
+    min-width:auto;width:100%;border-radius:16px 16px 0 0;
+    padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));
+    max-height:60vh;max-height:calc(var(--vh100,100vh) * 0.6);overflow-y:auto;z-index:200}
+  .preset-toggle-wrapper.open .preset-dropdown{transform:none}
+  .preset-dropdown-item{padding:12px 14px;border-radius:10px;font-size:13px;min-height:48px}
+  .ps-dd-search{margin:-8px -8px 8px;top:-8px}
+
+  /* ===== COMPACT TOOLBAR (same as phone) — else the model picker vanishes =====
+   * This block keeps the FULL desktop toolbar (it does NOT inherit the ≤768
+   * compaction). At ~837px, submenus (增强/工具/模式) + action buttons + search +
+   * send fill the nowrap row, and the model picker — fully shrinkable
+   * (.input-actions-scroll flex:0 1 auto → #modelGroup flex-shrink:1 →
+   * .preset-toggle-wrapper flex:0 1 auto, all min-width:0, .preset-toggle
+   * overflow:hidden) — collapses to an invisible sliver (NOT display:none, so a
+   * grep for hidden misses it). Root-cause fix: apply the phone's compaction —
+   * move the submenus + standalone actions into the "···" bottom sheet and free
+   * the row width, so the model picker keeps its natural size. */
+  #submenuExtras,#submenuFlow,#submenuMode,
+  #imageGenBtn,#projectBtn{display:none!important}
+  .mobile-more-btn{display:flex!important;width:40px;height:40px;align-items:center;
+    justify-content:center;flex-shrink:0;border:1.5px solid var(--border);
+    border-radius:12px;background:var(--bg-tertiary);color:var(--text-secondary);
+    cursor:pointer;box-sizing:border-box}
+  /* Model picker must NOT shrink below a readable width now that the row has
+   * room — pin a floor so it can never collapse to a sliver again. */
+  #modelGroup{flex-shrink:0}
+  .preset-toggle{flex-shrink:0;min-width:96px;max-width:200px}
+}
+
+/* ═══════════════════════════════════════════════════════════
+   WIDE COARSE-POINTER TABLET  (≥1025px, pointer:coarse)
+   ───────────────────────────────────────────────────────────
+   A ≥1025px touch device (e.g. a 1280px Android tablet in the WebView) is
+   ABOVE the tablet-drawer band (≤1024 coarse) and TOFU_BP.tablet=1024, so the
+   app treats it as DESKTOP: pinned sidebar + FULL composer toolbar. But in
+   project mode the sidebar carries the project rail (--project-rail-w 150 +
+   --sidebar-list-min 280 = 430px), leaving the chat pane ~850px at 1280 — too
+   tight for the nowrap toolbar (attach + model + 3 submenus + search + send).
+   The model picker is the ONLY shrinkable child (.input-actions-scroll
+   flex:0 1 auto → #modelGroup flex-shrink:1), so it collapses to an invisible
+   sliver — the SAME "model preset vanished" bug the ≤1024-coarse and ≤768
+   blocks already fix, just at a wider viewport neither of them matches.
+
+   A desktop mouse user (pointer:fine) at 1280px has no rail-tax touch layout
+   and never hits this, so the fix is gated on pointer:coarse. min-width:1025px
+   (not a max-width…coarse predicate) keeps this ADDITIVE above the drawer band
+   and preserves the single-source coarse-tablet width the coordination guard
+   (tests/test_breakpoint_coordination.py) locks at 1024. Same compaction as the
+   ≤1024 block: move submenus + standalone launchers into the "···" sheet, pin
+   the picker, and make the sheet + model dropdown reachable. Guarded by
+   tests/test_preset_dropdown_coarse_escape.py. */
+@media (pointer:coarse) and (min-width:1025px){
+  #submenuExtras,#submenuFlow,#submenuMode,
+  #imageGenBtn,#projectBtn{display:none!important}
+  .mobile-more-btn{display:flex!important;width:40px;height:40px;align-items:center;
+    justify-content:center;flex-shrink:0;border:1.5px solid var(--border);
+    border-radius:12px;background:var(--bg-tertiary);color:var(--text-secondary);
+    cursor:pointer;box-sizing:border-box}
+  /* Model picker must NOT shrink below a readable width now that the row has
+   * room — pin a floor so it can never collapse to a sliver again. */
+  #modelGroup{flex-shrink:0}
+  .preset-toggle{flex-shrink:0;min-width:96px;max-width:200px}
+}
+/* ── Safe area insets for notched phones ──
+ * env(safe-area-inset-*) resolves to 0px where unsupported, so these are
+ * folded DIRECTLY into the mobile height/padding rules below (single source
+ * of truth). A separate @supports block is NOT used: it would be overridden
+ * by the later @media rules that redefine height/padding at equal specificity
+ * and lose to source order — the original notch bug. */
+
+/* ── Mobile: max-width 768px ── */
+@media(max-width:768px){
+
+  /* ===== OVERFLOW CONTAINMENT =====
+   * Every level in the layout hierarchy must prevent horizontal overflow.
+   * Theme-specific overrides (specificity 0,2,0) are repeated here to win. */
+  html,body{overflow:hidden!important;overscroll-behavior:none}
+  .main,.chat-wrapper,.chat-container,.chat-inner,
+  .message,.message-content,.message-body,.md-content,
+  .input-area,.input-inner{max-width:100%!important;overflow-x:hidden!important}
+  /* Tofu theme sets overflow:visible on many containers for desktop dropdown popovers.
+   * On mobile we MUST override all of them at matching specificity. */
+  [data-theme="tofu"] .sidebar{position:fixed!important;overflow:hidden!important}
+  [data-theme="tofu"] .sidebar.collapsed{transform:translateX(-100%)!important}
+  [data-theme="tofu"] .sidebar:not(.collapsed){transform:translateX(0)!important}
+  [data-theme="tofu"] .chat-wrapper,
+  [data-theme="tofu"] .input-area,
+  [data-theme="tofu"] .input-inner,
+  [data-theme="tofu"] .input-actions,
+  [data-theme="tofu"] .input-actions-scroll,
+  [data-theme="tofu"] .input-group,
+  [data-theme="tofu"] .toolbar-submenu,
+  [data-theme="tofu"] .preset-toggle-wrapper{overflow:hidden!important;overflow-x:hidden!important;max-width:100%!important}
+
+  /* ===== BODY & LAYOUT ===== */
+  body{position:fixed!important;width:100%!important;height:100%!important;height:100dvh!important}
+  .main{width:100%!important;flex:1!important;min-width:0!important;overflow:hidden!important}
+
+  /* ===== SIDEBAR: slide-over drawer ===== */
+  .sidebar{position:fixed!important;left:0;top:0;bottom:0;width:82vw;max-width:320px;min-width:auto!important;z-index:30;padding-top:env(safe-area-inset-top,0px);transform:translateX(-100%);transition:transform .3s cubic-bezier(.4,0,.2,1);box-shadow:none;will-change:transform}
+  /* Derived desktop has-rail width must not widen the fixed phone drawer
+   * (incl. the pre-paint html[data-rail] hint before JS adds .has-rail). */
+  .sidebar.has-rail,.sidebar.has-rail.rail-collapsed,
+  html[data-rail] .sidebar{width:82vw!important;max-width:320px;min-width:auto!important}
+  .sidebar.collapsed{margin-left:0;transform:translateX(-100%)}
+  .sidebar.has-rail.collapsed,.sidebar.has-rail.rail-collapsed.collapsed{margin-left:0!important}
+  .sidebar:not(.collapsed){transform:translateX(0);box-shadow:4px 0 24px rgba(0,0,0,0.25)}
+  .sidebar-header{padding:14px 16px}
+  .sidebar-header h1{font-size:15px}
+  /* Sidebar-header action buttons (search / settings) — 44px touch targets.
+   * Specificity must beat `.sidebar-header-actions .action-btn` (0,2,0) and the
+   * tofu `[data-theme="tofu"] .sidebar-header .action-btn` (0,3,0), so we match
+   * the tofu selector and add !important as insurance. */
+  .sidebar-header-actions .action-btn,
+  [data-theme="tofu"] .sidebar-header .action-btn{width:44px!important;height:44px!important}
+  .sidebar-header-actions{gap:4px}
+  .sidebar-action-row{padding:10px 12px}
+  .new-chat-btn{padding:10px 14px;font-size:13px}
+  .sidebar-search-wrapper{padding:0 12px 10px}
+
+  /* ===== CONVERSATION ITEMS: larger touch targets ===== */
+  .conv-item{padding:12px 14px!important;min-height:48px}
+
+  /* ===== TOPBAR: clean mobile header =====
+   * Mobile topbar shows ONLY: hamburger | title | model badge
+   * All feature badges, action buttons, and selectors are hidden.
+   * Users access those features via sidebar or settings. */
+  .topbar{height:calc(48px + env(safe-area-inset-top,0px));padding:env(safe-area-inset-top,0px) 10px 0;gap:8px;overflow:hidden!important;flex-wrap:nowrap}
+  .topbar-title{font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* Hide ALL badges and action buttons — not enough room on 360px screens */
+  .search-badge,.project-badge,.code-exec-badge,.browser-badge,
+  .memory-badge,.scheduler-badge,.timer-trigger,
+  #debugToggle,
+  .topbar .action-btn{display:none!important}
+  /* Model badge: keep it, right-aligned, compact */
+  .model-badge{font-size:10px;padding:3px 8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;margin-left:auto}
+  /* Coarse phones no longer inherit the (now pointer:fine) ≤1080 label hide, so
+   * strip the topbar tool labels HERE to keep the 360px header icon-only. */
+  .topbar-tool-label,.update-btn-label{display:none}
+
+  /* ===== PAPER READING MODE topbar =====
+   * In reading mode the input bar (and its "···" sheet) is hidden, so the
+   * ONLY exit affordance is the Paper button, which turns into a back-arrow
+   * (#paperModeBtn.active). The .topbar-tools cluster is otherwise clipped by
+   * overflow:hidden on a 360px screen, which could strand the user with no way
+   * out. So when paper mode is active: keep ONLY the back button (44px touch
+   * target, pinned right), hide the rest of the cluster. */
+  .topbar-tools:has(#paperModeBtn.active) .topbar-tool-btn:not(#paperModeBtn),
+  .topbar-tools:has(#paperModeBtn.active) .update-btn:not(#paperModeBtn){display:none!important}
+  #paperModeBtn.active{display:inline-flex!important;min-width:44px;min-height:40px;justify-content:center;flex-shrink:0}
+
+  /* ===== CHAT AREA ===== */
+  .chat-inner{padding:16px calc(12px + env(safe-area-inset-right,0px)) 120px calc(12px + env(safe-area-inset-left,0px));max-width:100%!important;overflow-x:hidden!important;word-break:break-word}
+  .welcome-icon{width:52px;height:52px;font-size:22px;margin-bottom:14px}
+  .welcome h2{font-size:20px}
+  .welcome p{font-size:13px;max-width:320px}
+  .feature-pills{gap:6px;margin-top:16px}
+  .feature-pill{font-size:11px;padding:5px 10px}
+
+  /* --- Messages: hide avatar, remove indent, bigger font --- */
+  .message{gap:0;margin-bottom:16px;flex-direction:column;max-width:100%;overflow:hidden}
+  .message-avatar{display:none}
+  /* ConversationSurface keeps avatar, content, and the optional rail as
+   * sibling grid items. Once the avatar is hidden, auto-placement otherwise
+   * puts content into the intrinsic first track and collapses it to roughly
+   * half the phone width. Own the mobile placement explicitly. */
+  .conversation-turn.message > .conversation-turn-content{grid-column:1 / -1}
+  .message-content{width:100%;overflow:hidden}
+  .message-header{gap:8px;margin-bottom:4px}
+  .message-role{font-size:13px}
+  .message-time{font-size:10px}
+  .stream-elapsed-timer{font-size:10px}
+  .md-content{font-size:15px;line-height:1.75}
+  .md-content pre code{padding:12px;font-size:12.5px}
+  .md-content code{font-size:13px}
+  .md-content h1{font-size:19px}
+  .md-content h2{font-size:17px}
+  .md-content h3{font-size:15px}
+  .md-content th,.md-content td{padding:6px 8px;font-size:12px}
+  .md-content ul,.md-content ol{margin-left:16px}
+  .md-content blockquote{padding:6px 12px;font-size:14px}
+  .message-body img:not(.ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){max-width:200px;max-height:150px}
+  .msg-img-thumb{width:60px;height:60px}
+  .msg-img-badge{font-size:6px;padding:0 3px}
+  .msg-img-size{font-size:7px}
+  .code-header{padding:5px 10px;font-size:11px}
+
+  /* --- Message actions: always visible on mobile (no hover) --- */
+  .message-actions{opacity:1;position:relative;top:auto;right:auto;margin-top:4px;flex-wrap:wrap}
+  .msg-action-btn{padding:7px 12px;font-size:11px;min-height:44px;display:inline-flex;align-items:center}
+  /* Tofu sets `.msg-action-btn{padding:3px 6px;font-size:10px}` at 0,2,0 which
+   * beats the plain rule above (0,1,0): the button keeps its 44px min-height but
+   * its cramped desktop padding/font, mismatching the other touch controls.
+   * Re-assert comfortable touch padding/font at matching specificity. */
+  [data-theme="tofu"] .msg-action-btn{padding:7px 12px;font-size:11px}
+  /* Tofu decorative glyphs anchored OUTSIDE their box (negative left) are
+   * clipped by the mobile overflow:hidden containers, so they render as dead
+   * space or a sliver on narrow screens. The active-conv left-border and the
+   * thinking-block frame already signal state — drop the ornaments on mobile. */
+  [data-theme="tofu"] .conv-item.active::before{display:none!important}   /* pixel ▸ cursor */
+  [data-theme="tofu"] .thinking-block::after{display:none!important}      /* thought-bubble dots */
+  .delete-turn-popup{position:fixed;bottom:auto;top:50%;left:50%;right:auto;transform:translate(-50%,-50%);min-width:200px;max-width:calc(100vw - 32px);max-height:80dvh;max-height:calc(var(--vh100,100dvh)*0.8);overflow-y:auto}
+
+  /* --- Thinking blocks --- */
+  .thinking-header{padding:8px 12px}
+  .thinking-label{font-size:13px}
+  .thinking-text{padding:0 12px 12px;font-size:13.5px;line-height:1.65}
+
+  /* --- Search result blocks --- */
+      .search-result-item{padding:8px 12px}
+  .search-result-title{font-size:13px}
+  .search-result-snippet{font-size:12px}
+
+  /* ===== INPUT AREA: Mobile-first compact design =====
+   * Layout: textarea on top, single-row toolbar below
+   * Toolbar: [Model▾] [depth] [···] ――― [🔍] [⏎]
+   * All submenus (增强/工具/模式) and standalone action btns
+   * are hidden behind a "more" (···) button that opens a bottom sheet.
+   * This keeps the toolbar to ~4 items on a 360px screen. */
+  .input-area{padding:6px 8px calc(8px + env(safe-area-inset-bottom,0px));max-width:100%!important;overflow:hidden!important;border-top:1px solid var(--border)}
+  .input-inner{max-width:100%!important;overflow:hidden!important;padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px);margin-left:0;margin-right:0;min-width:0}
+  .input-box{border-radius:16px;margin-top:8px}
+  textarea{font-size:16px;padding:12px 14px 10px;min-height:44px;max-height:140px}
+  /* All toolbar controls share a single 40px touch-target height so the row
+   * reads as one consistent band instead of mismatched 32/36/44px pills. */
+  .send-btn{width:40px;height:40px;padding:0;border-radius:12px}
+
+  /* --- Toolbar: single compact row --- */
+  .input-actions{padding:8px 10px 10px;gap:8px;overflow:hidden!important;flex-wrap:nowrap}
+  .input-actions::before{display:none}
+  .input-actions-scroll{gap:8px;flex-shrink:1;min-width:0;overflow:visible}
+  .input-actions-right{margin-left:auto;gap:8px;flex-shrink:0;align-items:center}
+  .input-group{flex-shrink:1;min-width:0}
+
+  /* --- Hide submenus & standalone action btns on mobile ---
+   * These are accessible via the "more" (···) bottom sheet.
+   * Only the model picker (#modelGroup) stays in the toolbar. */
+  #submenuExtras,#submenuFlow,#submenuMode,#submenuAgentMode{display:none!important}
+
+  /* --- Model picker: compact, 40px tall to match the other controls --- */
+  .preset-toggle{height:40px;padding:0 10px;gap:5px;max-width:150px;overflow:hidden;box-sizing:border-box;align-items:center}
+  .preset-toggle .ps-label{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .preset-toggle .ps-arrow{display:none}
+  .preset-toggle .ps-icon{flex-shrink:0}
+  #modelGroup{gap:8px;flex-shrink:1;min-width:0;overflow:visible;display:flex;align-items:center;flex-wrap:nowrap}
+
+  /* --- Thinking depth: hidden in the model dropdown on mobile (both the bar
+   *     and its folded-in wrapper title) — mobile depth lives in the bottom
+   *     sheet's .mobile-depth-bar, so the dropdown copy would be redundant. --- */
+  .thinking-depth-bar{display:none!important}
+  .ps-dd-depth-wrap{display:none!important}
+
+  /* --- Search toggle: clean icon-only pill, square 40px to match the row --- */
+  .search-mode-toggle{width:40px;height:40px;padding:0;gap:0;flex-shrink:0;border-radius:12px;min-width:40px;min-height:40px;box-sizing:border-box;justify-content:center}
+  .search-mode-toggle .sm-label{display:none}
+  .search-mode-toggle .sm-mode-pill{display:none}
+  .search-mode-toggle .sm-icon{display:flex}
+  .search-mode-toggle .sm-icon svg{width:17px;height:17px}
+
+  /* --- "More" button — visible only on mobile --- */
+  .mobile-more-btn{display:flex!important;width:40px;height:40px;align-items:center;justify-content:center;
+    background:none;border:1px solid var(--border);border-radius:12px;cursor:pointer;
+    color:var(--text-secondary);flex-shrink:0;box-sizing:border-box;
+    transition:background .15s,color .15s;padding:0;-webkit-tap-highlight-color:transparent}
+  .mobile-more-btn svg{width:18px;height:18px}
+  .mobile-more-btn:active{background:var(--bg-hover)}
+  .mobile-more-btn.has-active{color:var(--accent);border-color:var(--accent)}
+
+  /* --- Attach file button — now the leftmost control in the toolbar row
+   *     (was a flex-end child of .input-row). Square 40px to match the band. --- */
+  .attach-btn{display:flex!important;width:40px;height:40px;min-width:40px;margin:0;border-radius:12px;box-sizing:border-box;align-items:center;justify-content:center;flex-shrink:0}
+  .attach-btn svg{width:20px;height:20px}
+
+  /* --- Portaled desktop popovers (timer / optimizer) as bottom sheets ---
+   * mobile_panels.js re-parents #timerPanel / #optimizerPanel to <body> and
+   * adds .mobile-panel-portaled. Their desktop absolute-position rules (anchored
+   * to the now-hidden topbar badge) must be overridden to a full-width sheet. */
+  .mobile-panel-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:259;
+    display:none;-webkit-tap-highlight-color:transparent}
+  .mobile-panel-backdrop.open{display:block}
+  .timer-panel.mobile-panel-portaled,
+  .optimizer-panel.mobile-panel-portaled{position:fixed!important;top:auto!important;left:0!important;
+    right:0!important;bottom:0!important;width:100%!important;max-width:100%!important;min-width:0!important;
+    margin:0!important;border-radius:16px 16px 0 0!important;z-index:260!important;
+    max-height:80dvh!important;max-height:calc(var(--vh100,100dvh)*0.8)!important;overflow-y:auto!important;
+    padding-bottom:calc(12px + env(safe-area-inset-bottom,0px))!important;
+    transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);display:block!important}
+  .timer-panel.mobile-panel-portaled.visible,
+  .optimizer-panel.mobile-panel-portaled.visible{transform:translateY(0)}
+
+  /* --- Preset/submenu dropdowns: bottom sheet style on mobile --- */
+  .preset-dropdown{position:fixed;bottom:0;left:0;right:0;top:auto;transform:none;min-width:auto;width:100%;
+    border-radius:16px 16px 0 0;padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));
+    max-height:60dvh;max-height:calc(var(--vh100,100vh) * 0.6);overflow-y:auto;z-index:200}
+  .preset-toggle-wrapper.open .preset-dropdown{transform:none}
+  .preset-dropdown-item{padding:12px 14px;border-radius:10px;font-size:13px;min-height:48px}
+  .ps-dd-search{margin:-8px -8px 8px;top:-8px}
+
+  /* (Legacy submenu dropdowns — still used if opened directly) */
+  .submenu-dropdown{position:fixed;bottom:0;left:0;right:0;top:auto;transform:none;min-width:auto;width:100%;
+    border-radius:16px 16px 0 0;padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));
+    max-height:60dvh;max-height:calc(var(--vh100,100dvh)*0.6);overflow-y:auto;z-index:200}
+  .submenu-dropdown::after{display:none}
+  .toolbar-submenu.open .submenu-dropdown{transform:none}
+  .submenu-item{padding:12px 14px;gap:12px;min-height:48px}
+  .submenu-item-name{font-size:14px}
+  .submenu-item-desc{font-size:12px}
+  .submenu-label{display:none}
+  .submenu-arrow{display:none}
+
+  /* Action buttons (those that remain visible) */
+  .action-btn{width:44px;height:44px}
+  #convRefBtn{display:none}
+
+  /* ===== TOFU THEME: strip decorations on mobile =====
+   * The mascot, grip wings, D-pad, sparkles, etc. eat too much
+   * space on a 360px screen. Keep the warm colors but ditch the ornaments. */
+  [data-theme="tofu"] .input-area{overflow:hidden!important;padding-top:6px!important}
+  [data-theme="tofu"] .input-area::before,
+  [data-theme="tofu"] .input-area::after{display:none!important}  /* sparkles */
+  [data-theme="tofu"] .input-box{border-radius:var(--radius)!important;overflow:hidden!important;
+    box-shadow:var(--clay-md)!important}
+  [data-theme="tofu"] .input-box::before{display:none!important}  /* (retired) */
+  [data-theme="tofu"] .input-box::after{display:none!important}   /* (retired) */
+  [data-theme="tofu"] .input-row::before,
+  [data-theme="tofu"] .input-row::after{display:none!important}   /* D-pad + dots */
+  [data-theme="tofu"] .input-inner::before{display:none!important} /* speech bubble */
+  [data-theme="tofu"] textarea{min-height:44px!important;padding:12px 14px 10px!important;font-size:15px!important}
+  [data-theme="tofu"] .input-actions{padding:8px 10px 10px!important;gap:8px!important}
+  /* Tofu theme sets its own padding/height on these controls (specificity
+   * 0,2,0) which beats the plain mobile rules above — re-assert the unified
+   * 40px square sizing at matching specificity so the row stays consistent. */
+  [data-theme="tofu"] .search-mode-toggle{width:40px!important;height:40px!important;min-width:40px!important;padding:0!important;justify-content:center}
+  [data-theme="tofu"] .preset-toggle{height:40px!important;padding:0 10px!important;box-sizing:border-box}
+  [data-theme="tofu"] .send-btn{width:40px!important;height:40px!important}
+  [data-theme="tofu"] .input-actions::before{display:none!important}
+  [data-theme="tofu"] .input-actions-scroll .input-group:not(:last-child)::after{display:none!important}
+  [data-theme="tofu"] .mobile-more-btn{border-color:var(--border);color:var(--text-primary);border-radius:var(--radius-xs)}
+  [data-theme="tofu"] .attach-btn{color:var(--text-primary);border-radius:var(--radius-xs)}
+
+  /* Input footer: hidden on mobile.
+   * The hint only describes desktop affordances (Enter/Ctrl+Enter to send,
+   * Shift+Enter newline, drag-and-drop file upload) — none of which apply on
+   * a touch device, where sending is the ⏎ button and files come via the
+   * attach (+) button. Removing it also frees vertical space, reducing the
+   * cramped feel of the composer. */
+  .input-footer{display:none!important}
+
+  /* --- Turn navigation on mobile: COMPACT, never removed. Hiding the dots
+   * outright used to leave touch users with no conversation-scale navigation
+   * at all — the same "vanishing cliff" class as the desktop float. The
+   * strip stays above the composer; the label goes, dots shrink, and the row
+   * scrolls horizontally. --- */
+  .turn-nav-label{display:none}
+  .turn-dot{width:22px;height:22px;font-size:8px}
+
+  /* --- Modals: full screen on mobile --- */
+  .modal{padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));width:100%;max-width:100%;max-height:var(--vh100,100dvh);height:var(--vh100,100dvh);border-radius:0;border:none}
+  .modal-overlay.open{align-items:stretch}
+  .modal h3{font-size:16px;margin-bottom:16px}
+  .modal .modal-actions{flex-wrap:wrap}
+  .modal .btn{padding:12px 20px;font-size:14px;flex:1;min-width:0}
+
+  /* Settings panel — stack tabs on top for mobile */
+  .settings-panel{width:100%;max-width:100%;max-height:var(--vh100,100dvh);height:var(--vh100,100dvh);box-shadow:none;border-width:0;padding-bottom:env(safe-area-inset-bottom,0px)}
+  .settings-body{flex-direction:column}
+  .settings-tabs{flex-direction:row;width:100%;min-width:0;border-right:none;border-bottom:3px solid #1a1814;padding:8px;overflow-x:auto;overflow-y:hidden}
+  .settings-tab-group{display:none}
+  .settings-tab{padding:7px 10px;font-size:11px}
+  .settings-tab.active{box-shadow:2px 2px 0 var(--s-ink)}
+  .settings-tab.active:active{box-shadow:1px 1px 0 var(--s-ink)}
+  .settings-tab span{display:none}
+  .settings-tab svg{margin:0}
+  .settings-content{padding:16px}
+  .settings-panel .theme-picker{grid-template-columns:repeat(3,1fr)}
+    .stg-field-grid{grid-template-columns:1fr}
+  .stg-edit-grid{grid-template-columns:1fr}
+  .stg-mcard{flex-wrap:wrap;gap:6px}
+  .stg-mcard-actions{flex-direction:row;align-self:flex-end}
+    .stg-provider-badges{flex-wrap:wrap}
+  .stg-provider-body textarea{min-height:60px}
+  
+  /* Project modal — tabbed single-pane layout (one full-height pane at a time) */
+  .project-modal{max-width:100%}
+  .project-modal.pm-workbench{width:100%;max-width:100%;height:var(--vh100,100dvh);max-height:none}
+  .pm-header{padding:14px 16px 12px}
+
+  /* Segmented Browse / Workspace tabs */
+  .pm-mobile-tabs{display:flex;gap:6px;flex-shrink:0;padding:10px 14px 0}
+  .pm-mtab{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;
+    padding:9px 12px;font-size:13px;font-weight:600;
+    color:var(--text-secondary);background:var(--bg-secondary);
+    border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer}
+  .pm-mtab.active{color:var(--accent);background:var(--accent-subtle);border-color:var(--accent)}
+  .pm-mtab-count{font-size:10px;font-weight:700;min-width:16px;height:16px;line-height:16px;
+    text-align:center;border-radius:8px;padding:0 4px;background:var(--accent);color:#fff}
+  .pm-mtab-count:empty{display:none}
+
+  /* Single column; JS toggles which pane is visible via data-pm-view */
+  .pm-body{display:flex;flex-direction:column;grid-template-columns:none;grid-template-rows:none;
+    gap:0;padding:12px 14px;min-height:0;overflow:hidden}
+  .pm-browser-pane,.pm-rail{flex:1 1 auto;min-height:0}
+  .pm-workbench[data-pm-view="browse"] .pm-rail{display:none}
+  .pm-workbench[data-pm-view="workspace"] .pm-browser-pane{display:none}
+  .pm-browser-pane .folder-browser-list{min-height:0;max-height:none;flex:1 1 auto}
+  .pm-rail{gap:12px}
+  .pm-rail-workspace{max-height:none;flex:1 1 auto}
+  .pm-rail .recent-paths{flex:0 0 auto;max-height:40%}
+  .pm-workbench .modal-actions{padding:12px 14px}
+  .pm-workbench #projectModalStatus:not(:empty){margin:0 14px}
+
+  /* Memory modal */
+  .memory-modal{max-width:100%}
+  .memory-list{max-height:50dvh;max-height:calc(var(--vh100,100dvh)*0.5)}
+
+  /* --- Debug panel: full width bottom --- */
+  .debug-panel{right:0;left:0;bottom:0;width:100%;max-width:100%;border-radius:12px 12px 0 0;max-height:50dvh;max-height:calc(var(--vh100,100dvh)*0.5);padding-bottom:env(safe-area-inset-bottom,0px)}
+
+  /* --- Image previews --- */
+  /* --- Preview modal: preview-body fills the overlay so tapping outside the panel
+   *   hits preview-body (not the tiny overlay gap) and triggers closePreview(). --- */
+  #previewModal.open{align-items:stretch;justify-content:center}
+  .preview-body{max-width:none;max-height:none;width:100%;height:100%;padding:16px;box-sizing:border-box}
+  .preview-text-panel{width:100%;max-height:calc(100dvh - 32px);max-height:calc(var(--vh100,100dvh) - 32px);border-radius:8px}
+  .preview-close-btn{top:12px;right:12px;width:40px;height:40px;font-size:22px;background:rgba(255,255,255,0.18)}
+
+  .img-preview{width:52px;height:52px}
+
+  /* --- Project bar --- */
+  .project-bar{padding:6px 10px;font-size:11px;flex-wrap:wrap}
+  .project-bar-folders{max-width:60vw}
+
+  /* --- Finish tags --- */
+  .message-finish{flex-wrap:wrap;gap:4px}
+  .finish-tag,.token-tag{font-size:9px;padding:2px 6px}
+
+  /* --- File changes bar --- */
+  .fc-summary{padding:5px 8px;gap:4px}
+  .fc-summary-text{font-size:10px}
+  .fc-file{font-size:10px;gap:4px}
+  .fc-icon{width:14px;height:14px;font-size:10px}
+
+  /* --- Toast --- */
+  .toast-container{left:8px;right:8px;bottom:auto;top:8px}
+
+  /* --- Export preview --- */
+  .export-preview-overlay{padding:20px 8px}
+  .export-preview-overlay .epv-toolbar{flex-wrap:wrap;gap:6px;padding:10px 14px}
+  .export-preview-overlay .epv-card img{height:200px}
+
+  /* --- Log clean banner --- */
+  .log-clean-banner{flex-direction:column;align-items:stretch}
+  .log-clean-banner-actions{flex-wrap:wrap;gap:4px}
+  .log-clean-btn{flex:1;min-width:0;justify-content:center}
+
+  /* --- PDF progress --- */
+  .pdf-progress{font-size:11px}
+
+  /* --- Bilingual blocks --- */
+  .bilingual-header{padding:6px 10px}
+  .bilingual-body .md-content{padding:0 10px 8px;font-size:12px}
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ★ SINGLE SOURCE — bottom-sheet CONTAINER + CONTENT for every
+   touch/narrow viewport that can OPEN the "···" sheet.
+   Union = ≤768 (any pointer) + 769–1024 coarse + ≥1025 coarse.
+   Placed AFTER all three width blocks so it is never reverse-bitten
+   at equal specificity. fine-pointer desktops keep the full toolbar and
+   never open this sheet, so the (pointer:coarse) arm can't leak the sheet
+   layout onto them. The per-width blocks keep ONLY their real differences
+   (.mobile-more-btn value, #modelGroup pin, submenu hides, drawer geometry,
+   .preset-dropdown, topbar). Guarded by
+   tests/test_mobile_sheet_content_reaches_wide_coarse.py. Historic bug: the
+   container was copied into all 3 width blocks but the content into only 2
+   (≤768 + 769–1024 coarse) → a ≥1025 coarse tablet popped an UNSTYLED sheet
+   (bare-text rows / naked depth buttons). Single source ends that class. */
+@media (max-width:768px),(pointer:coarse){
+  /* ── Container + backdrop + flow-sheet ── */
+  .mobile-bottom-sheet{position:fixed;bottom:0;left:0;right:0;z-index:250;
+    background:var(--bg-secondary);border-radius:16px 16px 0 0;
+    box-shadow:0 -4px 24px rgba(0,0,0,0.2);padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));
+    max-height:70dvh;max-height:calc(var(--vh100,100vh) * 0.7);overflow-y:auto;transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
+    display:none}
+  .mobile-bottom-sheet.open{display:block;transform:translateY(0)}
+  .mobile-bottom-sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:249;
+    display:none;-webkit-tap-highlight-color:transparent}
+  .mobile-bottom-sheet-backdrop.open{display:block}
+  .mobile-flow-sheet{z-index:260}
+  .mobile-flow-sheet .flow-catalog-notice{margin:0 8px 8px;padding:9px 10px;font-size:12px}
+
+  /* ── Sheet content ── */
+  .mobile-sheet-header{font-size:13px;font-weight:700;color:var(--text-secondary);padding:4px 8px 10px;
+    border-bottom:1px solid var(--border);margin-bottom:8px}
+  .mobile-sheet-section{margin-bottom:8px}
+  .mobile-sheet-section-title{font-size:10px;font-weight:700;color:var(--text-tertiary);
+    text-transform:uppercase;letter-spacing:.08em;padding:4px 8px}
+  .mobile-sheet-section-subtitle{font-size:10px;font-weight:700;color:var(--text-tertiary);letter-spacing:.04em;padding:8px 8px 3px}
+  .mobile-workflow-section{padding-top:2px}
+  .mobile-workflow-manage{display:block;width:calc(100% - 16px);margin:4px 8px 2px;padding:11px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-tertiary);color:var(--accent);font:700 13px/1.2 inherit;cursor:pointer}
+  .mobile-workflow-empty{padding:16px 10px;color:var(--text-tertiary);font-size:12px;line-height:1.45;text-align:center}
+  .mobile-sheet-item{display:flex;align-items:center;gap:12px;width:100%;padding:12px 10px;border:0;border-radius:10px;background:transparent;color:inherit;font:inherit;text-align:left;
+    cursor:pointer;transition:background .12s;user-select:none;min-height:44px}
+  .mobile-sheet-item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .mobile-sheet-item:active{background:var(--bg-hover)}
+  .mobile-sheet-item.active{background:var(--accent-subtle)}
+  .mobile-sheet-item-icon{width:20px;height:20px;display:flex;align-items:center;justify-content:center;
+    color:var(--text-secondary);flex-shrink:0}
+  .mobile-sheet-item.active .mobile-sheet-item-icon{color:var(--accent)}
+  .mobile-sheet-item-text{flex:1;min-width:0;display:flex;flex-direction:column}
+  .mobile-sheet-item-name{font-size:14px;font-weight:600;color:var(--text-primary);line-height:1.3}
+  .mobile-sheet-item.active .mobile-sheet-item-name{color:var(--accent)}
+  .mobile-sheet-item-desc{font-size:11px;color:var(--text-tertiary);margin-top:2px;line-height:1.3}
+  .mobile-sheet-item-check{font-size:14px;color:var(--accent);opacity:0}
+  .mobile-sheet-item.active .mobile-sheet-item-check{opacity:1}
+  .mobile-sheet-item.disabled,.mobile-sheet-item:disabled{pointer-events:none;opacity:0.45}
+  .mobile-sheet-item.disabled .mobile-sheet-item-check,.mobile-sheet-item:disabled .mobile-sheet-item-check{opacity:0}
+  .mobile-depth-bar{display:flex;gap:6px;padding:6px 8px}
+  .mobile-depth-btn{flex:1;padding:10px 0;border:1.5px solid var(--border);border-radius:10px;
+    background:var(--bg-tertiary);color:var(--text-secondary);font-size:13px;font-weight:600;
+    cursor:pointer;text-align:center;transition:all .15s;-webkit-tap-highlight-color:transparent}
+  .mobile-depth-btn:active{transform:scale(.96)}
+  .mobile-depth-btn.active{background:var(--accent-subtle);color:var(--accent);border-color:var(--accent)}
+
+  /* ── tofu theme variants (superset from the former ≤768 block) ── */
+  [data-theme="tofu"] .mobile-bottom-sheet{background:var(--bg-secondary);border:1px solid var(--border);border-bottom:none}
+  [data-theme="tofu"] .mobile-sheet-item{font-family:var(--sans-body);font-size:13px}
+  [data-theme="tofu"] .mobile-sheet-item.active{background:var(--accent-subtle)}
+  [data-theme="tofu"] .mobile-sheet-item-name{color:var(--text-primary)}
+  [data-theme="tofu"] .mobile-sheet-item.active .mobile-sheet-item-name{color:var(--accent)}
+  [data-theme="tofu"] .mobile-sheet-item-check{color:var(--accent)}
+  [data-theme="tofu"] .mobile-depth-btn{font-family:var(--sans-body);font-size:12px;
+    border-color:rgba(194,188,164,0.4);color:#5C4A33;background:#FAF8F3}
+  [data-theme="tofu"] .mobile-depth-btn.active{background:rgba(196,149,106,0.15);
+    color:#6A4E2E;border-color:#A67B52}
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ★ My Day — NEO-BRUTALIST TOFU BLOCK
+   The entire modal IS a block of tofu.
+   Hard shadows · Thick borders · Physical press-down · Kintsugi gold
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Palette ── */
+.myday-modal {
+  /* The tofu itself */
+  --tf-white:     #faf7f2;
+  --tf-cream:     #f0ead6;
+  --tf-skin:      #e8dcc8;
+  /* The cutting board (sidebar) */
+  --tf-board:     #3a322a;
+  --tf-board-lit: #4a4238;
+  /* Kintsugi gold */
+  --tf-gold:      #d4a850;
+  --tf-gold-dim:  #b8923a;
+  /* Ink (borders, text) */
+  --tf-ink:       #1a1814;
+  --tf-ink-soft:  #3a342a;
+  /* Status */
+  --tf-done:      #4ade80;
+  --tf-progress:  #fbbf24;
+  --tf-blocked:   #f87171;
+  /* Brutalist shadow offset */
+  --tf-shadow:    6px 6px 0 var(--tf-ink);
+  --tf-shadow-sm: 4px 4px 0 var(--tf-ink);
+  --tf-shadow-xs: 3px 3px 0 var(--tf-ink);
+  /* Border */
+  --tf-border:    3px solid var(--tf-ink);
+  --tf-border-sm: 2px solid var(--tf-ink);
+}
+
+/* ── Light theme adjustments ── */
+[data-theme="light"] .myday-modal {
+  --tf-white:     #fefcf8;
+  --tf-cream:     #f5f0e0;
+  --tf-skin:      #ede4d2;
+  --tf-board:     #2e2820;
+  --tf-board-lit: #3e3830;
+  --tf-ink:       #141210;
+  --tf-ink-soft:  #302a22;
+}
+
+/* ══════════════════════════════════════
+   MODAL — the tofu block itself
+   ══════════════════════════════════════ */
+.myday-modal {
+  display: flex;
+  width: 780px;
+  max-width: 96vw;
+  max-height: 88vh;
+  max-height: calc(var(--vh100,100vh)*0.88);
+  background: var(--tf-white);
+  border: var(--tf-border);
+  border-width: 4px;
+  box-shadow: 10px 10px 0 var(--tf-ink);
+  border-radius: 0;
+  overflow: hidden;
+  font-family: 'Inter', 'SF Pro', -apple-system, system-ui, sans-serif;
+  color: var(--tf-ink);
+  animation: tofuSlam 0.25s cubic-bezier(0.2, 1.2, 0.4, 1) both;
+  position: relative;
+}
+.myday-modal * { box-sizing: border-box; }
+
+/* Slam-in: the tofu block drops onto the cutting board */
+@keyframes tofuSlam {
+  0%   { transform: translateY(-40px) scale(0.96); opacity: 0; }
+  60%  { transform: translateY(4px) scale(1.01); opacity: 1; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+/* ═══ Kintsugi crack — diagonal gold hairline across the modal ═══ */
+.myday-modal::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 1;
+  background:
+    linear-gradient(135deg,
+      transparent 42%,
+      var(--tf-gold) 42.2%, var(--tf-gold) 42.5%,
+      transparent 42.7%
+    );
+  opacity: 0.12;
+}
+
+/* ══════════════════════════════════════
+   LEFT: Main panel
+   ══════════════════════════════════════ */
+.myday-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+  z-index: 2;
+}
+
+/* ── Header — thick bottom border like a tofu slice line ── */
+.myday-header {
+  padding: 20px 24px 14px;
+  border-bottom: var(--tf-border);
+  background: var(--tf-cream);
+  position: relative;
+}
+/* Gold kintsugi line under header */
+.myday-header::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 20px;
+  right: 20px;
+  height: 2px;
+  background: var(--tf-gold);
+  opacity: 0.5;
+}
+
+.myday-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.myday-title-area {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* ── Tofu face mascot — a little tofu block with a face ── */
+.myday-tofu-face {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--tf-white);
+  border: var(--tf-border-sm);
+  box-shadow: var(--tf-shadow-xs);
+  flex-shrink: 0;
+  transition: transform 0.15s, box-shadow 0.15s;
+  color: var(--tf-ink);
+}
+.myday-tofu-face:hover {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--tf-ink);
+}
+
+.myday-title {
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  color: var(--tf-ink);
+  text-transform: uppercase;
+  line-height: 1.1;
+}
+.myday-subtitle {
+  font-size: 12px;
+  color: var(--tf-ink-soft);
+  margin: 2px 0 0;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+/* ── Header action buttons — tofu blocks ── */
+.myday-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.myday-refresh-btn,
+.myday-close {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--tf-white);
+  border: var(--tf-border-sm);
+  box-shadow: var(--tf-shadow-xs);
+  cursor: pointer;
+  color: var(--tf-ink);
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+  padding: 0;
+}
+.myday-refresh-btn:hover,
+.myday-close:hover {
+  transform: translate(1px, 1px);
+  box-shadow: 2px 2px 0 var(--tf-ink);
+  background: var(--tf-cream);
+}
+.myday-refresh-btn:active,
+.myday-close:active {
+  transform: translate(3px, 3px);
+  box-shadow: 0 0 0 var(--tf-ink);
+}
+.myday-close:hover { background: var(--tf-blocked); color: var(--tf-white); }
+
+/* Spin animation for refresh */
+.myday-refresh-btn.spinning svg {
+  animation: brutSpin 0.6s linear infinite;
+}
+@keyframes brutSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Progress bar — thick bar with hard shadow ── */
+.myday-progress {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 0;
+}
+.myday-progress:empty { display: none; }
+.myday-prog-track {
+  flex: 1;
+  height: 14px;
+  background: var(--tf-skin);
+  border: var(--tf-border-sm);
+  box-shadow: var(--tf-shadow-xs);
+  overflow: hidden;
+  position: relative;
+}
+.myday-prog-fill {
+  height: 100%;
+  width: 0;
+  background: var(--tf-done);
+  border-right: 2px solid var(--tf-ink);
+  transition: width 0.5s ease;
+}
+.myday-prog-label {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--tf-ink);
+  min-width: 40px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ══════════════════════════════════════
+   TASK LIST — scrollable area
+   ══════════════════════════════════════ */
+.myday-tasks-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px 20px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--tf-skin) transparent;
+}
+
+/* ── Section labels — stamped ── */
+.myday-section-label {
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--tf-ink-soft);
+  padding: 0 2px;
+  margin: 20px 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.myday-section-label:first-child { margin-top: 0; }
+.myday-section-label .myday-accountability-bar { margin-left: 4px; }
+.myday-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 800;
+  background: var(--tf-ink);
+  color: var(--tf-white);
+  border: none;
+}

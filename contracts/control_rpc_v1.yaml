@@ -1,0 +1,56 @@
+contract: tofu.control-rpc/v1
+responsibility: >-
+  Carry small authenticated request/response operations over the existing
+  browser WebSocket when an HTTP reverse proxy has high per-request overhead.
+
+transport:
+  endpoint: /api/push
+  framing: json-rpc-2.0
+  requestId: connection-scoped-string
+  cancellationMethod: $/cancelRequest
+  fallback: endpoint-owned-http
+
+budgets:
+  requestBytes: 16384
+  responseBytes: 2097152
+  inFlightPerConnection: 4
+  requestsPerConnectionPerMinute: 120
+  globalWorkersEnvironment: TOFU_CONTROL_RPC_WORKERS
+  methodTimeoutMilliseconds: 10000
+
+errors:
+  invalidRequest: -32600
+  methodNotFound: -32601
+  invalidParams: -32602
+  internal: -32603
+  overloaded: -32001
+  timedOut: -32002
+  responseTooLarge: -32003
+  domain: -32010
+  cancelled: -32800
+
+methods:
+  project.browse:
+    authority: routes/api_v1/project.py#/api/v1/project/browse
+    classification: read-only
+    params:
+      path:
+        type: string
+        required: false
+        maximumLength: 4096
+      showHidden:
+        type: boolean
+        required: false
+    result: project-browse-response
+    clientPolicy:
+      useWhen: constrained-proxy
+      fallbackOn: [socket-unavailable, socket-disconnected, method-not-found]
+
+invariants:
+  - Authentication and owner identity are resolved once at the WebSocket boundary.
+  - The method registry is an explicit allowlist; HTTP paths cannot be invoked by name.
+  - RPC responses use a reliable bounded lane and are never silently dropped.
+  - Saturation fails fast before work enters a thread or the event loop blocks.
+  - Cancellation and timeout release the client request but retain the global slot until underlying filesystem work actually exits.
+  - HTTP remains the compatibility fallback and the only path used outside constrained proxies.
+  - No RPC method mutates durable state without its own idempotency and authorization contract.

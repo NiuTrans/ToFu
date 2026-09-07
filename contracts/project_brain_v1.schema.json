@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/project_brain_v1.schema.json",
+  "title": "Project Brain v1",
+  "description": "Public signal-driven Project Brain projections and executable Charter records.",
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "title": {"type": "string", "maxLength": 500},
+        "format": {"type": "string", "maxLength": 128},
+        "path": {"type": "string", "maxLength": 4096}
+      },
+      "additionalProperties": false
+    },
+    "projectWorkItem": {
+      "type": "object",
+      "required": [
+        "id", "taskId", "conversationId", "title", "trigger", "status",
+        "changedPaths", "artifacts", "resultSummary", "startedAt", "finishedAt"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^pw_[a-f0-9]{24}$"},
+        "taskId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "conversationId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "title": {"type": "string", "minLength": 1, "maxLength": 500},
+        "trigger": {"enum": ["todo_write", "file_write", "isolated_workspace"]},
+        "status": {"enum": ["active", "completed", "failed", "cancelled"]},
+        "changedPaths": {
+          "type": "array", "maxItems": 200, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+        },
+        "artifacts": {
+          "type": "array", "maxItems": 100,
+          "items": {"$ref": "#/$defs/artifact"}
+        },
+        "resultSummary": {"type": "string", "maxLength": 4000},
+        "startedAt": {"type": "integer", "minimum": 0},
+        "finishedAt": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "narrativeEvent": {
+      "type": "object",
+      "required": ["sequence", "kind", "text", "timestamp"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 1},
+        "kind": {"type": "string", "minLength": 1, "maxLength": 64},
+        "text": {"type": "string", "minLength": 1, "maxLength": 720},
+        "workId": {"type": "string", "maxLength": 128},
+        "conversationId": {"type": "string", "maxLength": 256},
+        "timestamp": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "checkerRef": {
+      "type": "object",
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "version": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "checkerDefinition": {
+      "type": "object",
+      "required": [
+        "checkerId", "version", "label", "argv", "cwd", "pathGlobs",
+        "timeoutMs", "enabled"
+      ],
+      "properties": {
+        "checkerId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "version": {"type": "integer", "minimum": 1},
+        "label": {"type": "string", "minLength": 1, "maxLength": 256},
+        "argv": {
+          "type": "array", "minItems": 1, "maxItems": 32,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "cwd": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "pathGlobs": {
+          "type": "array", "minItems": 1, "maxItems": 64,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "timeoutMs": {"type": "integer", "minimum": 100, "maximum": 3600000},
+        "enabled": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "checkerResult": {
+      "type": "object",
+      "required": [
+        "checkerRef", "label", "ok", "exitCode", "timedOut", "durationMs",
+        "reason", "summary", "output", "workId", "timestamp"
+      ],
+      "properties": {
+        "checkerRef": {"$ref": "#/$defs/checkerRef"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 256},
+        "ok": {"type": "boolean"},
+        "exitCode": {"type": ["integer", "null"]},
+        "timedOut": {"type": "boolean"},
+        "durationMs": {"type": "integer", "minimum": 0},
+        "reason": {"type": "string", "maxLength": 64},
+        "summary": {"type": "string", "maxLength": 1000},
+        "output": {"type": "string", "maxLength": 4000},
+        "workId": {"type": "string", "maxLength": 128},
+        "timestamp": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "charterDecision": {
+      "type": "object",
+      "required": [
+        "decisionId", "text", "checkerRef", "sourceConversationId",
+        "sourceTurnId", "latestVerification"
+      ],
+      "properties": {
+        "decisionId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "checkerRef": {"$ref": "#/$defs/checkerRef"},
+        "sourceConversationId": {
+          "type": "string", "minLength": 1, "maxLength": 256
+        },
+        "sourceTurnId": {
+          "type": "string", "minLength": 1, "maxLength": 256
+        },
+        "latestVerification": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/checkerResult"}]
+        }
+      },
+      "additionalProperties": false
+    },
+    "boardProjection": {
+      "type": "object",
+      "required": ["project", "headSequence", "active", "recentOutcomes"],
+      "properties": {
+        "project": {"type": "string"},
+        "headSequence": {"type": "integer", "minimum": 0},
+        "active": {
+          "type": "array", "maxItems": 100,
+          "items": {"$ref": "#/$defs/projectWorkItem"}
+        },
+        "recentOutcomes": {
+          "type": "array", "maxItems": 100,
+          "items": {"$ref": "#/$defs/projectWorkItem"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "feedProjection": {
+      "type": "object",
+      "required": ["events", "headSequence"],
+      "properties": {
+        "events": {
+          "type": "array", "maxItems": 200,
+          "items": {"$ref": "#/$defs/narrativeEvent"}
+        },
+        "headSequence": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/projectWorkItem"},
+    {"$ref": "#/$defs/narrativeEvent"},
+    {"$ref": "#/$defs/checkerDefinition"},
+    {"$ref": "#/$defs/charterDecision"},
+    {"$ref": "#/$defs/boardProjection"},
+    {"$ref": "#/$defs/feedProjection"}
+  ]
+}

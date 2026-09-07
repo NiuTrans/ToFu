@@ -1,0 +1,2659 @@
+{
+  "format": "tofu.storage-operation-catalog.v1",
+  "generatedBy": "scripts/gen_storage_operation_catalog.py",
+  "sourceProtocol": "storage.v1",
+  "sourceSchemaVersion": 58,
+  "sourceRegistryVersion": 38,
+  "operationCount": 331,
+  "operationsSha256": "dd3bb5e43e9842f7f3de7602910c9b30037d5c1fc4b4d9df406047866c6c7e93",
+  "operations": [
+    {
+      "name": "artifact.create",
+      "domain": "artifacts",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "artifact.delete",
+      "domain": "artifacts",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "artifact.get",
+      "domain": "artifacts",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "artifact.library",
+      "domain": "artifacts",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "artifact.list",
+      "domain": "artifacts",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "artifact.pin",
+      "domain": "artifacts",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "artifact.versions",
+      "domain": "artifacts",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.ledger.append",
+      "domain": "billing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.ledger.find",
+      "domain": "billing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.ledger.list",
+      "domain": "billing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.ledger.recompute",
+      "domain": "billing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.payment.find",
+      "domain": "billing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.payment.list",
+      "domain": "billing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.payment.record",
+      "domain": "billing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.payment.settle",
+      "domain": "billing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.redeem_code.apply",
+      "domain": "billing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.redeem_codes.list",
+      "domain": "billing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.redeem_codes.mint",
+      "domain": "billing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.reserve.stale",
+      "domain": "billing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.wallet.apply",
+      "domain": "billing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.wallet.get",
+      "domain": "billing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "billing.wallet.settle",
+      "domain": "billing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "browser.site_observation.get",
+      "domain": "browser",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "browser.site_observation.record",
+      "domain": "browser",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "compaction_archive.create",
+      "domain": "archives",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "compaction_archive.delete_conversation",
+      "domain": "archives",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "compaction_archive.get",
+      "domain": "archives",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "compaction_archive.list",
+      "domain": "archives",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "compaction_archive.prune",
+      "domain": "archives",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "compaction_archive.update_summary",
+      "domain": "archives",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.activity_dates",
+      "domain": "conversations",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.clone",
+      "domain": "conversations",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.count",
+      "domain": "conversations",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.create",
+      "domain": "conversations",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.delete",
+      "domain": "conversations",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.get",
+      "domain": "conversations",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.list",
+      "domain": "conversations",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.metadata.update",
+      "domain": "conversations",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.purge",
+      "domain": "conversations",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.restore",
+      "domain": "conversations",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.search",
+      "domain": "conversations",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.settings.update",
+      "domain": "conversations",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "conversation.trash.prune",
+      "domain": "conversations",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.authenticate",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.create",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.create_if_owner_empty",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.exists",
+      "domain": "identity",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.get",
+      "domain": "identity",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.identify",
+      "domain": "identity",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.list",
+      "domain": "identity",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.revoke",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.touch",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.update",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "credential.validate",
+      "domain": "identity",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "daily_cost.delete",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "daily_cost.latest",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "daily_cost.month",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "daily_cost.persisted_dates",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "daily_cost.upsert",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "desktop.egress_agent.get",
+      "domain": "desktop",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "desktop.egress_agent.initialize",
+      "domain": "desktop",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "desktop.egress_agent.set",
+      "domain": "desktop",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "event.append",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "event.append_batch",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "event.bounds",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "event.inspector_summary",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "event.latest",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "event.list",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "event.prune",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "goal.run.get",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "goal.run.latest",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "goal.run.start",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "goal.run.transition",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.event.record",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.status",
+      "domain": "integration",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.claim_next",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.discard",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.get",
+      "domain": "integration",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.get_integrating",
+      "domain": "integration",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.mark_failed",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.mark_merged",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.peek_ready",
+      "domain": "integration",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.quarantine",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.register",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.requeue",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.retry",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.save_checkpoint",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.set_meta",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "integration.workspace.submit",
+      "domain": "integration",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.asset.claim",
+      "domain": "knowledge",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.asset.get",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.asset.update",
+      "domain": "knowledge",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.assets.mark_no_vision",
+      "domain": "knowledge",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.availability",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.catalog",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.assets",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.content",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.create",
+      "domain": "knowledge",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.delete",
+      "domain": "knowledge",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.find_digest",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.get",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.list",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.metadata",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.patch",
+      "domain": "knowledge",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.document.replace",
+      "domain": "knowledge",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.enrichment.activity",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.enrichment.owners",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.owner.clear",
+      "domain": "knowledge",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.search.candidates",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.settings.get",
+      "domain": "knowledge",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "knowledge.settings.patch",
+      "domain": "knowledge",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "log_aggregate.flush",
+      "domain": "observability",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "log_aggregate.query",
+      "domain": "observability",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "model_routing.commit",
+      "domain": "model_routing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "model_routing.get",
+      "domain": "model_routing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "model_routing.migration_receipt",
+      "domain": "model_routing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "model_routing.migration_receipt.put",
+      "domain": "model_routing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "model_routing.secret.delete",
+      "domain": "model_routing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "model_routing.secret.get",
+      "domain": "model_routing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "model_routing.secret.list",
+      "domain": "model_routing",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "model_routing.secret.prune",
+      "domain": "model_routing",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "model_routing.secret.put",
+      "domain": "model_routing",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.action.expired",
+      "domain": "observability",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.action.for_proposal",
+      "domain": "observability",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.action.list",
+      "domain": "observability",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.action.outcome",
+      "domain": "observability",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.action.record",
+      "domain": "observability",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.action.revert",
+      "domain": "observability",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.proposal.create",
+      "domain": "observability",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.proposal.get",
+      "domain": "observability",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.proposal.list",
+      "domain": "observability",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "optimizer.proposal.update",
+      "domain": "observability",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.definition.create",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.definition.delete",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.definition.get",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.definition.list",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.definition.update",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.event.append",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.event.page",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.event.project",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.run.create",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.run.delete",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.run.get",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.run.list",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.run.retire_interrupted",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.run.retire_interrupted_all",
+      "domain": "workflows",
+      "kind": "maintenance",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "orchestration.run.update_status",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.delete",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.get",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.identity",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.inputs",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.list",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.put",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.reader",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.recent",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.summaries",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.library.title.backfill",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.note.create",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.note.delete",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.note.list",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.note.update",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.podcast.get",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.podcast.mark_interrupted",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.podcast.upsert",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.report.excerpts",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.report.get",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.report.latest",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.report.reopen",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.report.resolve",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.report.second_pass.accumulate",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.report.second_pass.merge",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.report.upsert",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.translation.get",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "paper.translation.upsert",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "plugin.manifest.get",
+      "domain": "plugins",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "plugin.register",
+      "domain": "plugins",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project.recent.clear",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project.recent.list",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project.recent.touch",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project.recent.touch_many",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project.relink",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": 120.0,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.active.list",
+      "domain": "project_brain",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.checker.register",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.checker.result",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.cursor.confirm",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.cursor.prepare",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.cutover",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.cutover.status",
+      "domain": "project_brain",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.decision.promote",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.get",
+      "domain": "project_brain",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.narrative.add",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.rebuild",
+      "domain": "project_brain",
+      "kind": "maintenance",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.recovery.snapshot",
+      "domain": "project_brain",
+      "kind": "maintenance",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.watch.add",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.watch.delete",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.watch.update",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.work.change",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.work.finish",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.work.refine",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "project_brain.work.start",
+      "domain": "project_brain",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "provider.create",
+      "domain": "providers",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "provider.delete",
+      "domain": "providers",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "provider.get",
+      "domain": "providers",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "provider.list",
+      "domain": "providers",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "provider.touch",
+      "domain": "providers",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "provider.update",
+      "domain": "providers",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.autopilot.arm",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.autopilot.clear",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.autopilot.get",
+      "domain": "queue",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.autopilot.list_all",
+      "domain": "queue",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.clear",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.conversations.list_all",
+      "domain": "queue",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.depth",
+      "domain": "queue",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.dequeue",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.enqueue",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.finalize",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.kind.clear",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.lease.bind",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.lease.release",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.list",
+      "domain": "queue",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.reap",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "queue.remove",
+      "domain": "queue",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "rate_limit.record_and_check",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "raw_archive.list",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "raw_archive.put",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "raw_archive.read",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "record.delete",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "record.get",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "record.list",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "record.put",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "research.artifact.upsert",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "research.artifacts.get",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "research.directions.list",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "research.workspace.get",
+      "domain": "research",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "research.workspace.put",
+      "domain": "research",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.poll.append",
+      "domain": "scheduler",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.poll.log",
+      "domain": "scheduler",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.claim_due",
+      "domain": "scheduler",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.create",
+      "domain": "scheduler",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.delete",
+      "domain": "scheduler",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.ensure",
+      "domain": "scheduler",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.get",
+      "domain": "scheduler",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.list",
+      "domain": "scheduler",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.list_all",
+      "domain": "scheduler",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.record_result",
+      "domain": "scheduler",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "scheduler.task.update",
+      "domain": "scheduler",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.agent.save",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.agents.mark_delivered",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.resumable.list",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.session.delete",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.session.get",
+      "domain": "workflows",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.session.quarantine_ownerless",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.session.save",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "swarm.session.terminate",
+      "domain": "workflows",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "system.reclaim",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "system.schema_version",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "task_results.abort",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "task_results.abort_requested",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "task_results.checkpoint",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "task_results.cost_experiment_scan",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "task_results.recover_running",
+      "domain": "core",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "task_results.replay_get",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "task_results.summary_list",
+      "domain": "core",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tenant.user.authentication",
+      "domain": "identity",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tenant.user.create",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tenant.user.get",
+      "domain": "identity",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tenant.user.list",
+      "domain": "identity",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tenant.user.record_login",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tenant.user.set_role",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tenant.user.set_status",
+      "domain": "identity",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.active.count",
+      "domain": "timers",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.active.list_all",
+      "domain": "timers",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.cancel",
+      "domain": "timers",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.create",
+      "domain": "timers",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.get",
+      "domain": "timers",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.history",
+      "domain": "timers",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.list",
+      "domain": "timers",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.poll.append",
+      "domain": "timers",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.poll.commit",
+      "domain": "timers",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.poll.log",
+      "domain": "timers",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.progress",
+      "domain": "timers",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "timer.update",
+      "domain": "timers",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tool_result_artifact.prune",
+      "domain": "artifacts",
+      "kind": "maintenance",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tool_result_artifact.put",
+      "domain": "artifacts",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tool_result_artifact.read",
+      "domain": "artifacts",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "tool_result_artifact.search",
+      "domain": "artifacts",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.append_settled",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.attempt.bind",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.attempt.claim",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.attempt.create",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.attempt.dispatch_worker",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.attempt.dispatchable.list",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.attempt.get",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.attempt.start",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.branch.create",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.branch.delete",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.cleanup",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.compact",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.create_pair",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.delete",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.event.record",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.events.list",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.events.prune",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.exists",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.get",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.image.get",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.list",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.list_delta",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.perception.record",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.projection.update",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.queue.activate",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.queue.cancel",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.recover",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.related.announce",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.revision",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.search.backfill",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.steer.commit",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.sync.changes",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.sync.page",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.sync.prune",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.sync.snapshot",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.timing_trace.get",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.timing_trace.list",
+      "domain": "turns",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "turn.visible.sync",
+      "domain": "turns",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "worker_job.claim_next",
+      "domain": "worker_jobs",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "worker_job.claim_state",
+      "domain": "worker_jobs",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "worker_job.complete",
+      "domain": "worker_jobs",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "worker_job.enqueue",
+      "domain": "worker_jobs",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "worker_job.get",
+      "domain": "worker_jobs",
+      "kind": "query",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "worker_job.heartbeat",
+      "domain": "worker_jobs",
+      "kind": "command",
+      "receiptRequired": false,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    },
+    {
+      "name": "worker_job.request_cancel",
+      "domain": "worker_jobs",
+      "kind": "command",
+      "receiptRequired": true,
+      "transactionTimeoutSeconds": null,
+      "ownerScope": "handler-enforced"
+    }
+  ]
+}

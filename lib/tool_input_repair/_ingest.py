@@ -1,0 +1,401 @@
+"""Unified tool-call ingestion seam — the single front door every dispatch
+path funnels a raw ``tool_call`` through before executing it.
+
+Historically the ingestion preamble (name-drop guards, name-alias, JSON decode
++ repair, schema/param repair, hallucination reject) was hand-reimplemented at
+four sites, each covering only a SUBSET. :func:`ingest_tool_call` is the ONE
+place all five stages live so parity is structural, not a checklist. It is pure
+orchestration over the existing primitives — it adds NO new repair logic.
+Presentation concerns (UI "auto-fixed" badges, SSE early-announce, autopilot
+loop-break, phantom empty-arg dedup) stay in the caller.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Mapping
+
+from lib.log import audit_log, get_logger
+
+from lib.tool_input_repair._classify import classify_tool_call, resolve_tool_name
+from lib.tool_input_repair._concat import split_concatenated_tool_name
+from lib.tool_input_repair._rejection import (
+    build_rejection_message,
+    clear_rejection,
+    record_rejection,
+    report_hallucinated,
+    report_tool_name_aliased,
+)
+from lib.tool_input_repair._repair import schema_hint, validate_then_repair
+from lib.tool_input_repair._schema import RepairLog, _schemas
+from lib.tools.contracts import (
+    ToolContractError,
+    validate_tool_arguments_from_documents,
+)
+
+logger = get_logger(__name__)
+
+
+# Canary payloads of known UPSTREAM canned probes — fixed byte-identical
+# blobs the gateway / Anthropic-native layer injects into the tool-call
+# stream (measured: ``print('HELLO_CHECK')`` on Opus-5 wire ids, 2026-07,
+# 21 sightings across 9 unrelated tasks in 2 days). They always hit the
+# drop guard (empty/artefact name); recognising them there turns silent
+# pollution into a greppable count. Adding the next canary is a one-liner.
+_UPSTREAM_PROBE_MARKERS = ('HELLO_CHECK',)
+
+
+# Names to DROP outright (never a real tool call): proxy artefacts like
+# ``antml:thinking`` / ``__internal`` and XML-corrupted names. Mirrors the
+# guards at the top of ``parse_tool_calls``. A dropped call must be skipped by
+# the caller, NOT executed and NOT rejected-as-hallucination (it's a streaming
+# artefact, not a model decision).
+def _tool_name_drop_reason(name: str) -> str | None:
+    """Return why a tool name must be dropped, or None if it's dispatchable.
+
+    * ``''`` / non-str → 'missing'
+    * contains ``:`` or leading ``__`` → 'internal_artifact' (proxy leak, e.g.
+      ``antml:thinking``)
+    * not ``[A-Za-z0-9_-]+`` → 'malformed' (XML/HTML corruption, e.g.
+      ``list_dir">.</parameter>``)
+    """
+    if not name or not isinstance(name, str):
+        return 'missing'
+    if ':' in name or name.startswith('__'):
+        return 'internal_artifact'
+    if not name.replace('_', '').replace('-', '').isalnum():
+        return 'malformed'
+    return None
+
+
+class IngestedToolCall:
+    """Normalized result of funnelling one raw ``tool_call`` through the pipe.
+
+    Attributes:
+        raw_name: The tool name exactly as the model emitted it.
+        fn_name: The dispatchable name AFTER alias resolution (== raw_name when
+            no alias fired). Meaningless when ``drop_reason`` is set.
+        fn_args: The decoded + repaired argument dict (``{}`` on parse failure).
+        alias_kind: ``'alias'`` / ``'casefold'`` when the name was rewritten,
+            else ``None``.
+        json_repaired: True when ``repair_json`` recovered malformed JSON.
+        repair_log: The :data:`RepairLog` from ``validate_then_repair`` (schema/
+            param coercions), empty when nothing was touched.
+        parse_error: A model-facing error string when the args were unparseable
+            OR the call was rejected as a hallucination — the caller returns
+            this to the LLM and skips execution. ``None`` on success.
+        contract_error: Stable ToolContractV2 error metadata when final
+            execution validation rejected the call, else ``None``.
+        rejection: The ``classify_tool_call`` descriptor when the name is a
+            hallucination (``{kind,attempted,suggestions,_repeat_count}``), else
+            ``None``. Presence signals a rejected (never-executed) call.
+        drop_reason: Non-None when the name is a streaming artefact that must be
+            SKIPPED entirely (not executed, not rejected).
+        repeat_count: Consecutive-rejection streak for this name in the conv
+            (1 = first), for the caller's loop-breaker. 0 when not a rejection.
+    """
+
+    __slots__ = ('raw_name', 'fn_name', 'fn_args', 'alias_kind', 'json_repaired',
+                 'repair_log', 'parse_error', 'rejection', 'drop_reason',
+                 'repeat_count', 'contract_error')
+
+    def __init__(self, *, raw_name='', fn_name='', fn_args=None, alias_kind=None,
+                 json_repaired=False, repair_log=None, parse_error=None,
+                 rejection=None, drop_reason=None, repeat_count=0,
+                 contract_error=None):
+        self.raw_name = raw_name
+        self.fn_name = fn_name
+        self.fn_args = fn_args if fn_args is not None else {}
+        self.alias_kind = alias_kind
+        self.json_repaired = json_repaired
+        self.repair_log = repair_log or []
+        self.parse_error = parse_error
+        self.rejection = rejection
+        self.drop_reason = drop_reason
+        self.repeat_count = repeat_count
+        self.contract_error = contract_error
+
+    @property
+    def dropped(self) -> bool:
+        return self.drop_reason is not None
+
+    @property
+    def rejected(self) -> bool:
+        return self.rejection is not None
+
+    @property
+    def contract_rejected(self) -> bool:
+        return self.contract_error is not None
+
+    @property
+    def ok(self) -> bool:
+        """True when the call is dispatchable (not dropped, not rejected, no
+        unrecoverable parse error)."""
+        return not self.dropped and not self.rejected and self.parse_error is None
+
+    def __repr__(self) -> str:
+        if self.dropped:
+            return f'<IngestedToolCall DROP {self.raw_name!r} ({self.drop_reason})>'
+        if self.rejected:
+            return f'<IngestedToolCall REJECT {self.raw_name!r}>'
+        tag = f'{self.raw_name!r}'
+        if self.alias_kind:
+            tag += f'→{self.fn_name!r}'
+        return f'<IngestedToolCall {tag} args={len(self.fn_args)}keys>'
+
+
+def ingest_tool_call(
+    tool_call: dict[str, Any],
+    *,
+    known_tools: set[str] | None = None,
+    model: str = '',
+    conv_id: str = '',
+    reject_hallucinated: bool = True,
+    emit_audit: bool = True,
+    contract_documents_by_name: Mapping[str, Any] | None = None,
+) -> IngestedToolCall:
+    """Funnel one raw ``tool_call`` through the full ingestion pipe.
+
+    The stages, in order, keep bounded repair separate from final authority:
+
+    1. **Drop guard** — :func:`_tool_name_drop_reason`. Streaming artefacts
+       (``antml:thinking``, XML-corrupted names) → ``drop_reason`` set, caller
+       SKIPS. Not executed, not rejected.
+    2. **Name alias** — :func:`resolve_tool_name` against ``known_tools``.
+       A confident 1:1 rewrite sets ``alias_kind`` + emits ``tool_name_aliased``.
+       When the name IS real, :func:`clear_rejection` resets any prior streak.
+    3. **Decode** malformed JSON conservatively.
+    4. **Repair** only the curated syntax/shape patterns shared by every lane.
+    5. **Validate** the repaired value against the request-owned
+       ``ToolContractV2`` document; this last step never guesses semantics.
+
+    Args:
+        tool_call: The raw ``{'function': {'name', 'arguments'}, 'id'?}`` dict.
+        known_tools: The live REAL-tool set for this turn (built-ins + MCP +
+            swarm + memory + custom). Used as the membership oracle for BOTH
+            alias resolution and hallucination classification. ``None`` falls
+            back to the schema-indexed built-ins (correct for the timer path,
+            whose alias targets are all built-ins).
+        model: Model id for audit telemetry.
+        conv_id: Conversation id — keys the rejection streak so it spans
+            autopilot follow-up tasks.
+        reject_hallucinated: When False, an unknown name is NOT rejected — it
+            passes through so the caller's own unknown-tool path handles it
+            (e.g. a harness that wants the executor's raw error). Default True.
+        emit_audit: When False, suppress the ``tool_name_aliased`` /
+            ``tool_hallucinated`` audit events (e.g. a dry-run / test).
+        contract_documents_by_name: Request-owned execution contracts. ``None``
+            preserves the legacy read-compatible path; a supplied map fails
+            closed when the selected tool has no valid v2 document.
+
+    Returns:
+        An :class:`IngestedToolCall`. Check ``.dropped`` → skip; ``.rejection``
+        / ``.parse_error`` → return the error to the LLM, skip execution;
+        else dispatch ``.fn_name`` with ``.fn_args``.
+    """
+    if not isinstance(tool_call, dict):
+        return IngestedToolCall(
+            raw_name='', fn_name='', drop_reason='malformed_shape',
+            parse_error=(
+                'ERROR: Tool call was NOT executed because the provider '
+                'returned a non-object tool_call entry.'),
+        )
+    fn_obj = tool_call.get('function') or {}
+    if not isinstance(fn_obj, dict):
+        return IngestedToolCall(
+            raw_name='', fn_name='', drop_reason='malformed_shape',
+            parse_error=(
+                'ERROR: Tool call was NOT executed because its function '
+                'field was not an object.'),
+        )
+    raw_name_value = fn_obj.get('name', '')
+    if raw_name_value is not None and not isinstance(raw_name_value, str):
+        return IngestedToolCall(
+            raw_name='', fn_name='', drop_reason='malformed_shape',
+            parse_error=(
+                'ERROR: Tool call was NOT executed because its function '
+                'name was not a string.'),
+        )
+    raw_name = raw_name_value or ''
+
+    # ── Stage 1: drop guard ──
+    drop = _tool_name_drop_reason(raw_name)
+    if drop:
+        # Upstream canned probes land here (they carry an empty/artefact
+        # name). Count each sighting LOUDLY — an upstream health-check blob
+        # inside a user turn is pollution, not traffic ().
+        _args_blob = fn_obj.get('arguments') or ''
+        if isinstance(_args_blob, str):
+            _probe = next((m for m in _UPSTREAM_PROBE_MARKERS
+                           if m in _args_blob), None)
+            if _probe:
+                logger.warning('[ToolRepair] Upstream probe tool call '
+                               'sighted (marker=%s, drop_reason=%s) '
+                               'model=%s conv=%s',
+                               _probe, drop, model, conv_id)
+                if emit_audit:
+                    audit_log('upstream_tool_probe', marker=_probe,
+                              drop_reason=drop, model=model, conv_id=conv_id)
+        return IngestedToolCall(raw_name=raw_name, fn_name=raw_name,
+                                drop_reason=drop)
+
+    known = known_tools if known_tools is not None else set(_schemas().keys())
+
+    # ── Stage 2: name alias ──
+    fn_name = raw_name
+    alias_kind = None
+    if raw_name not in known:
+        resolved, alias_kind = resolve_tool_name(raw_name, known=known)
+        if alias_kind and resolved != raw_name:
+            fn_name = resolved
+            if emit_audit:
+                report_tool_name_aliased(raw_name, resolved, alias_kind, model=model)
+        else:
+            alias_kind = None
+
+    # ── Stage 5a: hallucination check (before wasting a parse on a fake tool) ──
+    # Done here (post-alias, pre-parse) so a rejected call never parses/repairs
+    # args it will never use — mirrors the chat dispatcher's short-circuit.
+    if reject_hallucinated and fn_name not in known:
+        # ── Defensive assertion: is this OUR concatenation, not a model
+        #    invention? The root cause (a tool name accumulated with ``+=``
+        #    across a slot collision) is fixed in lib/llm/_sse_core.py; this
+        #    catches any path that still produces the shape and names it as
+        #    ours, LOUDLY, instead of letting it be misfiled as a
+        #    hallucination. It never repairs the call: the fused calls'
+        #    arguments are already interleaved, so re-splitting them would be
+        #    guessing at model intent.
+        _parts = split_concatenated_tool_name(fn_name, known)
+        if _parts:
+            logger.warning(
+                '[ToolRepair] CONCATENATED tool name %r splits into real tools '
+                '%s — this is a HARNESS defect (tool-name accumulation), not a '
+                'model hallucination. Rejecting without executing; NOT counted '
+                'toward the hallucination streak. model=%s conv=%s',
+                fn_name, _parts, model, conv_id)
+            if emit_audit:
+                audit_log('tool_name_concatenated',
+                          attempted=fn_name, parts=_parts,
+                          model=model, conv_id=conv_id)
+            descriptor = {
+                'kind': 'concatenated',
+                'attempted': fn_name,
+                'suggestions': _parts,
+                '_repeat_count': 0,
+                '_harness_defect': True,
+            }
+            msg = (
+                f'Error: `{fn_name}` is not a real tool and was NOT executed. '
+                f'This name was produced by a harness defect that fused two '
+                f'tool calls together — it is not your mistake. Please re-issue '
+                f'the calls you intended, one at a time, using exact names '
+                f'from the tool list (likely: '
+                + ', '.join(f'`{p}`' for p in _parts) + ').'
+            )
+            # Deliberately NOT record_rejection(): a defect of ours must never
+            # push the conversation toward the autopilot hallucination abort.
+            return IngestedToolCall(
+                raw_name=raw_name, fn_name=fn_name, alias_kind=alias_kind,
+                rejection=descriptor, parse_error=msg, repeat_count=0)
+        descriptor = classify_tool_call(fn_name, known)
+        if descriptor is not None:
+            repeat_n = record_rejection(conv_id, fn_name)
+            descriptor['_repeat_count'] = repeat_n
+            if emit_audit:
+                report_hallucinated(fn_name, descriptor, model=model)
+            msg = build_rejection_message(descriptor, repeat_count=repeat_n,
+                                          known_tools=known)
+            return IngestedToolCall(
+                raw_name=raw_name, fn_name=fn_name, alias_kind=alias_kind,
+                rejection=descriptor, parse_error=msg, repeat_count=repeat_n)
+    elif fn_name in known:
+        # Real tool → reset any stale rejection streak for this name.
+        clear_rejection(conv_id, fn_name)
+
+    # ── Stage 3: JSON decode + repair ──
+    raw_args = fn_obj.get('arguments', '')
+    if raw_args is None:
+        raw_args = ''
+    json_repaired = False
+    parse_error = None
+    fn_args: dict[str, Any] = {}
+    try:
+        if isinstance(raw_args, dict):
+            fn_args = raw_args
+        elif isinstance(raw_args, str):
+            _s = raw_args
+            fn_args = json.loads(_s) if _s.strip() else {}
+        else:
+            parse_error = (
+                f'ERROR: Your tool call for `{fn_name}` was NOT executed '
+                'because `function.arguments` must be a JSON object or a '
+                f'JSON string, not {type(raw_args).__name__}.')
+            fn_args = {}
+    except (json.JSONDecodeError, TypeError, KeyError) as e:
+        try:
+            from lib.utils import repair_json as _repair_json
+            fn_args = _repair_json(raw_args if isinstance(raw_args, str) else '{}')
+            json_repaired = True
+        except Exception as _rj_e:
+            logger.debug('[ToolRepair] repair_json fallback failed for %s (%s) — '
+                         'returning parse-error hint', fn_name, _rj_e)
+            _hint = schema_hint(fn_name)
+            parse_error = (
+                f'ERROR: Your tool call for `{fn_name}` had malformed JSON '
+                f'arguments — {e}. Please retry with valid JSON.'
+                + (f' {_hint}' if _hint else ''))
+            fn_args = {}
+    if not isinstance(fn_args, dict):
+        fn_args = {}
+
+    # ── Stage 4: schema / param repair ──
+    repair_log: RepairLog = []
+    if parse_error is None:
+        try:
+            fn_args, repair_log = validate_then_repair(fn_name, fn_args, model=model)
+        except Exception as e:
+            logger.warning('[ingest] validate_then_repair failed for %s '
+                           '(passing args through): %s', fn_name, e)
+
+    # ── Stage 5b: authoritative ToolContractV2 execution validation ──
+    # Curated repair may recover syntax/shape, but the request-owned contract
+    # is the final authority. This check deliberately runs after repair and
+    # before every dispatcher so a searched/dynamic schema cannot bypass the
+    # same bounds used to generate provider and discovery representations.
+    contract_error = None
+    if parse_error is None:
+        before_contract = fn_args
+        try:
+            fn_args = validate_tool_arguments_from_documents(
+                contract_documents_by_name, fn_name, fn_args)
+            if fn_args != before_contract:
+                added = sorted(set(fn_args) - set(before_contract))
+                if added:
+                    repair_log.extend(
+                        (f'$.{key}', 'schema_default') for key in added)
+                else:
+                    repair_log.append(('$', 'schema_default'))
+        except ToolContractError as exc:
+            contract_error = exc.to_dict()
+            # The bare code/path leaves weak models guessing the correct
+            # shape (conv mtdqz4bkuyitzj retried blindly); the hint names
+            # the expected keys so the recovery round can self-correct.
+            _hint = schema_hint(fn_name)
+            parse_error = (
+                f'ERROR: Tool call `{fn_name}` was NOT executed. '
+                f'[{exc.code}] {exc} Path: {exc.path}. {exc.next_action}'
+                + (f' {_hint}' if _hint else ''))
+            logger.warning(
+                '[ToolContract] rejected tool=%s code=%s path=%s model=%s '
+                'conv=%s', fn_name, exc.code, exc.path, model, conv_id)
+            if emit_audit:
+                audit_log(
+                    'tool_contract_rejected', tool=fn_name, code=exc.code,
+                    path=exc.path, retryable=exc.retryable, model=model,
+                    conv_id=conv_id)
+
+    return IngestedToolCall(
+        raw_name=raw_name, fn_name=fn_name, fn_args=fn_args,
+        alias_kind=alias_kind, json_repaired=json_repaired,
+        repair_log=repair_log, parse_error=parse_error,
+        contract_error=contract_error)

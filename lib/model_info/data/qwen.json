@@ -1,0 +1,13 @@
+{
+  "brand": "qwen",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "qwen",
+  "category": "official",
+  "name": "Qwen (DashScope)",
+  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "offering_recipes": [
+    {"model_id": "qwen3.8-max",   "capabilities": ["text", "vision", "thinking", "cheap"]},
+    {"model_id": "qwen3.7-plus",  "capabilities": ["text", "vision", "thinking", "cheap"]},
+    {"model_id": "qwen3.8-flash", "capabilities": ["text", "vision", "thinking", "cheap"]}
+  ]
+}

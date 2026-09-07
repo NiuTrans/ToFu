@@ -1,0 +1,432 @@
+# ── Secrets & Environment ──
+.env
+.env.*
+!.env.example
+
+# Repository guidance is source even when a local Git exclude hides it.
+!/AGENTS.md
+
+# ── Per-host env marker (written by install.sh, read by server.py
+#    / bootstrap.py to re-exec into the correct conda interpreter).
+#    Contains absolute paths — machine-specific, never commit. ──
+.tofu_env.json
+
+# ── Migration backups ──
+.migrate_backup/
+load_env.py
+
+# ── Self-update backups (originals of files replaced by the tarball-overlay
+#    updater for non-git deployments; reversible safety net, machine-local). ──
+.update_backup/
+
+# ── Data-cleanup leftovers (large stray artifacts at repo root, e.g. the
+#    276MB delete.list.all.final; not part of the app, exceed GitHub's
+#    100MB limit and break export/push — see export-large-stray-file note). ──
+/delete.list*
+
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+
+# Local interpreters and test-run state.  Modern venv/pytest versions create
+# nested .gitignore files themselves, but the repository boundary must not
+# depend on a tool having initialized those directories successfully.
+/.venv/
+/venv/
+/.pytest_cache/
+/.hypothesis/
+
+
+# ── Runtime data (auto-created, contains databases, configs, temp files) ──
+# ROOT-ANCHORED on purpose: a bare `data/` matches a nested `data` dir at ANY
+# depth, and it silently swallowed NEW untracked files under
+# android/app/src/.../client/data/ (the android Room package — the 3 existing
+# files survive only because they are tracked). Anchored to the repo root, the
+# runtime dir stays ignored without hiding legitimate nested `data` packages.
+/data/
+# Runtime scratch under lib/ (tmp/, tool-results/) — rode the old unanchored
+# rule; kept ignored explicitly.
+/lib/data/
+# ── Database ──
+*.db
+
+# ── Internal analysis (not part of the app) ──
+/analysis_scripts/
+/sundries/
+/tools/
+# External Codex source checkout used for local comparison/evaluation.
+/codex/
+
+# ── Academic / personal scratch content (NOT part of the app — must never
+#    be published to the public mirror). overleaf_cache holds fetched
+#    Overleaf projects (real unpublished papers/theses); paper/ holds a
+#    paper draft; thesis_references.bib is a personal bib file. ──
+/overleaf_cache/
+/paper/
+/thesis_references.bib
+
+# Separate internal LongCat harness workspace. Its own AGENTS.md explicitly
+# marks links/data as company-internal; keep it on disk but outside Tofu's Git
+# baseline and every Tofu export.
+/autoharness/
+
+# ── Personal scratch copy script (not part of the app) ──
+/copy_to_chenxin.sh
+
+# ── Export-stripped / not-part-of-the-public-product (DRIFT-GUARDED) ──
+# These are excluded by export.py (ALWAYS_EXCLUDE_* / OPENSOURCE_EXTRA_EXCLUDE_*)
+# but were committed BEFORE a matching ignore existed. .gitignore is the SECOND
+# defense line (export is the publication gate / first line); the drift-guard
+# tests/test_gitignore_covers_export_excludes.py asserts the two lists stay in
+# sync so this gap cannot silently reopen. Documented keepers stay tracked:
+#   scripts/gen_desktop_icons.py (CI icon gen), export.py, CLAUDE.md,
+#   static/provider_templates/meituan.json (functional internal template),
+#   scripts/package_extension.sh (builds the store upload zip; the SHIPPED
+#     docs/chrome-web-store/ kit tells the reader to run it, so a clean clone
+#     without it makes that instruction a dead end),
+#   scripts/install_on_server.sh (server-side installer; same shape — a
+#     documented entry point that must exist in a clean clone to be runnable).
+# Benchmark result payloads remain local, but executable benchmark contracts
+# imported by the release test suite must exist in a clean clone.
+/benchmarks/
+!/benchmarks/
+/benchmarks/*
+!/benchmarks/AGENTS.md
+!/benchmarks/task_replay_bench.py
+!/benchmarks/context_efficiency_bench.py
+!/benchmarks/context_efficiency_manifest.json
+!/benchmarks/context_efficiency/
+/benchmarks/context_efficiency/*
+!/benchmarks/context_efficiency/__init__.py
+!/benchmarks/context_efficiency/analyze.py
+!/benchmarks/context_efficiency/cli.py
+!/benchmarks/context_efficiency/dataset.py
+!/benchmarks/context_efficiency/runtime.py
+!/benchmarks/context_efficiency/README.md
+/audit_codex_session.py
+!/audit_codex_session.py
+/promo/
+# Retired root-level README screenshot dump. Referenced documentation assets
+# belong beside their owning docs or in the canonical static asset tree.
+/propaganda/
+/scripts/*
+!/scripts/AGENTS.md
+!/scripts/rootless_egress_bridge.c
+!/scripts/gen_desktop_icons.py
+!/scripts/gen_tofu_icons.py
+!/scripts/png_to_svg.py
+!/scripts/build_frontend.mjs
+!/scripts/check_i18n_usage.mjs
+!/scripts/check_lazy_runtime_bindings.mjs
+!/scripts/check_runtime_reachability.mjs
+!/scripts/check_frontend_tdz.mjs
+!/scripts/frontend_bundle_canary.py
+!/scripts/compose_frontend_runtime.mjs
+!/scripts/runtime_action_analysis.mjs
+!/scripts/compose_frontend_styles.mjs
+!/scripts/frontend_budget.py
+!/scripts/release_open.sh
+# scripts/check_helm_render.py is the CI semantic gate for the rendered chart.
+!/scripts/check_helm_render.py
+!/scripts/check_developer_runtime_artifacts.py
+!/scripts/gen_i18n_contract.mjs
+!/scripts/update_runtime_actions.mjs
+!/scripts/verify_frontend_dist.py
+!/scripts/gen_orchestration_authoring_metadata.py
+!/scripts/gen_orchestration_compatibility_defaults.py
+!/scripts/gen_orchestration_http_contract.py
+!/scripts/gen_orchestration_wire_formats.py
+!/scripts/gen_conversation_sync_contract.py
+!/scripts/gen_api_v4_contract.py
+!/scripts/gen_tool_inventory.py
+!/scripts/gen_storage_operation_catalog.py
+!/scripts/gen_storage_v2_contract.py
+!/scripts/gen_tofudb_ir_contract.py
+!/scripts/gen_tofudb_unicode_casefold.py
+!/scripts/gen_tofudb_unicode_simple_fold.py
+!/scripts/audit_tests.py
+!/scripts/bootstrap_rootless_qemu.sh
+!/scripts/rootless_qemu-conda-linux-64.lock
+!/scripts/rootless_terminal_bench_21.py
+
+# Release-bound ESM behavior gates must remain visible even when an older
+# checkout carries the historical ``tests/test_frontend_*.py`` local exclude.
+!/tests/test_frontend_browser_storage_vite.py
+!/tests/test_frontend_authoritative_composer.py
+!/tests/test_frontend_conversation_surface_vite.py
+!/tests/test_frontend_conversation_startup.py
+!/tests/test_frontend_model_catalog_vite.py
+!/tests/test_frontend_paper_podcast_runtime_vite.py
+!/tests/test_frontend_paper_report_runtime_vite.py
+!/tests/test_frontend_paper_video_runtime_vite.py
+!/tests/test_frontend_project_mode_decoupling.py
+!/tests/test_orchestration_wire_contracts.py
+# P2 test tooling (docs/TESTING_STRATEGY.md): test_select.py is loaded by
+# tests/test_test_select.py and driven by `make test-affected`; ratchet_audit.py
+# is loaded by tests/test_ratchet_incident_link.py and regenerates
+# docs/RATCHET_AUDIT.md. A clean clone without them breaks both consumers.
+!/scripts/test_select.py
+!/scripts/ratchet_audit.py
+# Test-harness bundler for native TS/ESM owners: tests/_runtime_sections.py
+# shells out to it to materialize isolated classic-script test views. A clean
+# clone without it breaks every harness that adapter serves (it raises
+# AssertionError at collection).
+!/scripts/vite_test_bundle.mjs
+!/scripts/package_extension.sh
+!/scripts/vendor_mcp.sh
+!/scripts/migrate_pg_to_sqlite.py
+!/scripts/migrate_sqlite_to_postgres.py
+!/scripts/activate_sqlite_cutover.py
+!/scripts/storagectl.py
+!/scripts/storage_certify.py
+# Offline bloat-reclamation window tool (verify-gated VACUUM INTO + retained
+# pre-image) — the same supported storage-maintenance surface as storagectl.
+!/scripts/storage_deep_clean.py
+!/scripts/ptc_live_smoke.py
+!/scripts/verify_pdf_stack.py
+!/scripts/install_on_server.sh
+# Shared "is this release complete?" predicate. BOTH gates in
+# build-desktop.yml call it — the version gate judges an already-published
+# release, the release job judges the artifacts it just downloaded — so a
+# clean clone without it breaks the release pipeline in CI rather than
+# locally, which is the worst place to discover a missing file.
+!/scripts/release_assets.py
+# Shared "is this VERSION documented?" predicate. The version gate in
+# build-desktop.yml calls it BEFORE any build, so a clean clone without it
+# fails the release pipeline in CI — the same worst-place-to-discover argument
+# as release_assets.py above. It is also the reason nine versions (0.11.0
+# through 0.15.2) shipped with no changelog entry: nothing in the repo
+# referenced CHANGELOG.md, so no check could observe the drift.
+!/scripts/changelog_gate.py
+!/scripts/check_documentation.py
+!/scripts/check_architecture.py
+# Cache-waste distribution report. The measurement discipline it encodes —
+# rates DERIVED from lib.cost rather than hand-written, non-waste classes
+# (TTL expiry / cold start) excluded from the recoverable denominator,
+# percentiles that treat 0 as a number — is the deliverable. An untracked copy
+# means the next cost audit goes back to throwaway one-liners and re-makes the
+# errors tests/test_cache_waste_report.py now pins.
+!/scripts/cache_waste_report.py
+# Second-path cache A/B probe. It is the control the gateway report is missing,
+# and it is DRY-RUN by default — the value is the encoded experiment design
+# (deterministic prefix, 4k to clear the cacheable minimum cheaply, and the
+# size-dependence caveat that stops a cheap null result being read as
+# exoneration). An untracked copy means whoever finally runs the control
+# re-derives that design and probably drops the caveat.
+!/scripts/cache_ab_probe.py
+# debug/ = standalone scratch/benchmark scripts (never imported by the app);
+# tracked *.log already ignored above, this covers the .py/.json/.png/.md/.html too.
+# NOTE: contents-level (/debug/*), NOT dir-level (/debug/) — git never descends
+# into an excluded DIRECTORY, so a /debug/ rule would make the negation below
+# dead (the uploads/* + !.gitkeep pattern is the established shape).
+/debug/*
+!/debug/AGENTS.md
+# Whitelist: the CI wizard pixel probe (the manual installer-ui-probe.yml
+# workflow drives it on windows-latest). That workflow ships in the
+# opensource export, so the script must too — the same dead-pipeline
+# argument as release_assets.py: a public clone without it carries a
+# workflow that dies on a missing file.
+!/debug/win_ci_shot.py
+# Canonical read-only conversation diagnostic used by serverctl and shipped
+# into source/Docker installs; all other debug scripts remain scratch-only.
+!/debug/inspect_conversation.py
+# Raw AI-gen asset candidates + proof strips (review-only, multi-MB) under the
+# pet-icon dir. Anchored to that subtree, not a bare _candidates glob.
+static/icons/pet/_candidates/
+# Unreferenced marketing assets (~12.4MB) — stripped from the opensource export
+# (export.py OPENSOURCE_EXTRA_EXCLUDE_FILES, zero-reference verdict 2026-08-01);
+# gitignore is the second defense line so they can't be re-tracked silently.
+static/images/tofu-cache-article-cover.png
+static/images/tofu-cache-article-cover-zh.png
+static/images/tofu-poster-core-strength.png
+static/images/tofu-poster-v2.png
+static/images/attach-icon.png
+static/images/attach-icon.svg
+static/images/onigiri-icon.png
+static/images/onigiri-icon.svg
+# setuptools egg metadata (regenerable build artifact)
+/*.egg-info/
+# Per-host helper scripts (hardcoded internal proxy IP / mount paths)
+/setup_bashrc.sh
+/copy_to_dst.sh
+# Internal dev summaries / extension docs (kept in docs/, stripped from opensource)
+docs/BROWSER_ENHANCEMENTS_SUMMARY.md
+docs/README_BROWSER_ENHANCEMENTS.md
+docs/README_EXTENSION.md
+# Personal scratch answer PDFs (export ALWAYS_EXCLUDE_FILES; never source)
+docs/解答260505.pdf
+docs/解答260505_v2.pdf
+
+# ── Eval / bench workdirs (large, causes FUSE timeouts) ──
+# Glob covers every eval/bench harness output dir (swebench_workdir/,
+# swebench_glm_ab_workdir/, swebench_pilot_workdir/, abtest_workdir/, …).
+# These hold thousands of repo clones + conda envs (800K+ files combined)
+# and are the #1 cause of grep/find FUSE timeouts — never track or scan them.
+*_workdir/
+
+# Hermetic evaluation outputs. The supported runner writes outside the project
+# by default and also makes every artifact root self-ignoring; these root rules
+# are the final guard when TOFU_EVAL_ROOT is deliberately placed in this repo.
+/.eval-runs/
+/eval-runs/
+# Common upstream SWE-bench / Harbor output names, in case their CLIs are run
+# directly from the repository root instead of through our wrapper.
+/evaluation_results/
+/sb-cli-reports/
+/jobs/
+/trials/
+
+# ── CWD pollution: stray dirs created by eval/agent harnesses that wrote
+#    output to a path RELATIVE to the repo root instead of an absolute one
+#    (e.g. an absolute build-farm path whose leading "/" got stripped and
+#    re-created as a nested tree under the repo). Not part
+#    of the app — see the 2026-06 "unrelated folders polluting the tree" note. ──
+/INS/
+/mnt/
+/Mant/
+/_/
+/django/
+/outputs/
+/similar_fix.py/
+/pylint-*/
+# Root-level .project_sessions/ — a CWD-pollution variant of the per-project
+# undo store (the real one is lib/.project_sessions/, registry-derived below).
+# A harness wrote it relative to repo root; never track. Root-anchored so it
+# does NOT shadow the registry-managed lib/.project_sessions/ entry.
+/.project_sessions/
+
+# ── Test coverage ──
+.coverage
+.coverage.*
+/coverage.xml
+/htmlcov/
+
+# ── Debug artifacts (developer-only, may contain API endpoints/keys) ──
+debug/benchmark_results.json
+debug/benchmark_speed_results.json
+debug/prompt_output.txt
+debug/ask.txt
+
+# ── Logs ──
+logs/
+# Stray root-level run logs (e.g. server_15000.log written by restart_<port>.sh
+# into CWD instead of logs/). Runtime-only, never source.
+*.log
+server_*.log
+
+# ── misc/ (collected strays) ──
+# Untracked leftovers gathered out of the repo root: runtime logs, per-host
+# copy scripts, temp residue, regenerable node_modules backups. Tracked
+# strays (git mv'd) live alongside them and stay tracked.
+misc/logs/
+misc/scripts/
+misc/tmp/
+misc/node_modules.local_bak.*/
+# Untracked personal scratch PDFs collected into misc/docs (tracked strays there stay tracked).
+misc/docs/*.pdf
+
+static/js/.bundle-*.js
+static/js/.i18n-*.js
+
+# ── Minified stylesheets (auto-generated at startup by lib/css_bundler) ──
+static/styles-*.css
+static/settings-*.css
+
+# ── Frontend type-check harness (tsc --checkJs) ──
+node_modules/
+/node_modules.local_bak.*/
+*.tsbuildinfo
+
+# ── Linting ──
+.ruff_cache/
+
+# ── IDE ──
+# Keep shared workspace settings (settings.json, extensions.json) committed so
+# every collaborator gets the same file-watcher / search excludes — this is
+# what prevents code-server / web-VSCode from spawning multi-GB fileWatcher
+# processes on FUSE-mounted repos (see CLAUDE.md §9 cross-DC notes).
+# Personal files (launch.json, tasks.json, *.code-workspace) stay ignored.
+.vscode/*
+!.vscode/AGENTS.md
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/README.md
+.idea/
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Sessions & caches (auto-generated, may contain sensitive context) ──
+# lib/.project_sessions/ is the per-project undo/redo store (modifications.json
+# pre-image blobs). It is REGISTRY-DERIVED — see lib/runtime_layout.INSTALL_STATE
+# / gitignore_lines(); do not hand-maintain a parallel entry. The drift-guard
+# test_gitignore_covers_registry enforces this line matches the registry.
+lib/.project_sessions/
+**/.project_indexes/
+.chatui/
+
+# ── File-history store (per-project copy-backup undo data, auto-created
+#    by lib/file_history; round-by-round GC churns it, so it must never be
+#    version-tracked — see the 2026-06 "satus full of D" incident). This
+#    file-history/ line is kept for documentation, but the trailing .tofu* glob
+#    (bottom of file) is what actually ignores the ENTIRE .tofu/ tree — INCLUDING
+#    .tofu/skills/, which is the per-project memory/skill DATA dir (export strips
+#    all of .tofu, like data/). It is NOT source and must not be tracked. ──
+.tofu/file-history/
+
+# ── Safe-delete trash (files moved aside by the delete mechanism instead of
+#    being unlinked; purge manually to reclaim disk). Never track. ──
+.tofu_trash/
+
+# ── Sensitive reports (moved to docs/ but should not be published) ──
+docs/SECURITY_AUDIT_REPORT.md
+docs/RATE_LIMITING_DOS_AUDIT_REPORT.md
+
+# ── Uploads (runtime data, not source — export strips the whole dir like data/) ──
+# Ignore everything under uploads/ EXCEPT the .gitkeep placeholder that keeps the
+# dir present in a fresh checkout. A broad uploads/* + negation closes the
+# stray-at-root gap (e.g. uploads/cat_dog_manor.png) that the old per-subdir
+# rules (uploads/images/* , uploads/pptx/ , uploads/papers/) let through.
+uploads/*
+!uploads/images/
+uploads/images/*
+!uploads/images/.gitkeep
+
+# ── Model-generated posters (output of generate_image into project) ──
+static/posters/
+
+# Vite production output is content-addressed and rebuilt from frontend/src.
+static/vite/
+# Interrupted Vite builds leave temporary siblings beside the final output.
+/static/.vite-build-*/
+/static/tmp/
+
+# ── PyInstaller / desktop build artifacts ──
+build/
+dist/
+/packages/tofu-db/target/
+*.spec.bak
+installer_output/
+static/icons/tofu.ico
+static/icons/tofu.icns
+static/icons/installer/
+.icon-backups/
+# AI assistant evolution journal (per-developer, not source)
+JOURNAL.md
+# Context-efficiency run logs and patches (generated; manifest stays tracked)
+benchmarks/context_efficiency_results/
+# AI assistant runtime artifacts (file-history, trash, sandbox)
+.tofu*
+
+# ── Local generated output and test fault-injection leftovers ──
+/artifacts/
+/"artifacts/
+/config-temp/
+/.playwright-cli/
+/output/
+/remote:*/
+/*.tmp.js
+*.neuter
+JOURNAL.md.lock

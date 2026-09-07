@@ -1,0 +1,104 @@
+{{- $root := . -}}
+{{- include "tofu.validateExtraEnv" $root -}}
+{{- range $role := list "api" "worker" "scheduler" -}}
+{{- $roleValues := index $root.Values.roles $role -}}
+{{- if $roleValues.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tofu.fullname" $root }}-{{ $role }}
+  labels:
+{{ include "tofu.labels" $root | indent 4 }}
+    tofu.openai.com/process-role: {{ $role }}
+spec:
+  replicas: {{ $roleValues.replicas }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+{{ include "tofu.selectorLabels" (dict "root" $root "role" $role) | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "tofu.selectorLabels" (dict "root" $root "role" $role) | indent 8 }}
+{{- with $root.Values.podLabels }}
+{{ toYaml $root.Values.podLabels | indent 8 }}
+{{- end }}
+{{- with $root.Values.podAnnotations }}
+      annotations:
+{{ toYaml $root.Values.podAnnotations | indent 8 }}
+{{- end }}
+    spec:
+      serviceAccountName: {{ include "tofu.serviceAccountName" $root }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ $root.Values.terminationGracePeriodSeconds }}
+      securityContext:
+{{ include "tofu.podSecurityContext" $root | indent 8 }}
+{{- with $root.Values.images.pullSecrets }}
+      imagePullSecrets:
+{{- range . }}
+        - name: {{ . | quote }}
+{{- end }}
+{{- end }}
+      containers:
+        - name: {{ $role }}
+          image: {{ include "tofu.image" (dict "root" $root "role" $role) }}
+          imagePullPolicy: {{ $root.Values.images.pullPolicy }}
+          env:
+{{ include "tofu.appEnv" (dict "root" $root "role" $role) | indent 12 }}
+{{- with $root.Values.extraEnvFrom }}
+          envFrom:
+{{ toYaml $root.Values.extraEnvFrom | indent 12 }}
+{{- end }}
+          ports:
+            - {name: http, containerPort: 15000, protocol: TCP}
+          resources:
+{{ toYaml $roleValues.resources | indent 12 }}
+          securityContext:
+{{ include "tofu.containerSecurityContext" $root | indent 12 }}
+          volumeMounts:
+{{ include "tofu.appVolumeMounts" $root | indent 12 }}
+          startupProbe:
+            httpGet: {path: /health/startup, port: http}
+{{ toYaml $root.Values.probes.startup | indent 12 }}
+          readinessProbe:
+            httpGet: {path: /health/ready, port: http}
+{{ toYaml $root.Values.probes.readiness | indent 12 }}
+          livenessProbe:
+            httpGet: {path: /health/live, port: http}
+{{ toYaml $root.Values.probes.liveness | indent 12 }}
+{{ include "tofu.storageSidecar" (dict "root" $root "role" $role) | indent 8 }}
+      volumes:
+{{ include "tofu.runtimeVolumes" $root | indent 8 }}
+{{- with $root.Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml $root.Values.nodeSelector | indent 8 }}
+{{- end }}
+{{- with $root.Values.tolerations }}
+      tolerations:
+{{ toYaml $root.Values.tolerations | indent 8 }}
+{{- end }}
+      affinity:
+{{- if $root.Values.affinity }}
+{{ toYaml $root.Values.affinity | indent 8 }}
+{{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+{{ include "tofu.selectorLabels" (dict "root" $root "role" $role) | indent 20 }}
+{{- end }}
+{{- with $root.Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+{{ toYaml $root.Values.topologySpreadConstraints | indent 8 }}
+{{- end }}
+---
+{{- end }}
+{{- end }}

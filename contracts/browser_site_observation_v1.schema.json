@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/browser_site_observation_v1.schema.json",
+  "title": "Browser site observation v1",
+  "description": "Owner-scoped, non-executable, reconstructible structural evidence from one authorized browser research route family.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "origin", "route_family", "operation", "strategy",
+    "api_hints", "anti_bot_vendor", "auth_signal", "status",
+    "confidence_milli", "visit_count", "successful_visits", "hinted_visits",
+    "hint_match_visits",
+    "consecutive_failures", "last_outcome", "last_elapsed_ms",
+    "last_verified_at_ms", "last_observed_at_ms", "expires_at_ms",
+    "payload_bytes"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "origin": {"type": "string", "pattern": "^https?://[^/?#]+$", "maxLength": 512},
+    "route_family": {"type": "string", "pattern": "^/[^?#]*$", "maxLength": 512},
+    "operation": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "maxLength": 64},
+    "strategy": {
+      "enum": ["token_gated_api", "hydrated_state", "captured_api", "rendered_dom"]
+    },
+    "api_hints": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["method", "origin", "path_template", "shape_summary", "score", "passive_only"],
+        "properties": {
+          "method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]},
+          "origin": {"type": "string", "pattern": "^https?://[^/?#]+$", "maxLength": 512},
+          "path_template": {"type": "string", "pattern": "^/[^?#]*$", "maxLength": 512},
+          "shape_summary": {
+            "type": "object",
+            "maxProperties": 12,
+            "propertyNames": {"maxLength": 240},
+            "additionalProperties": {"type": "string", "maxLength": 80}
+          },
+          "score": {"type": "number", "minimum": 0, "maximum": 1},
+          "passive_only": {"const": true}
+        }
+      }
+    },
+    "anti_bot_vendor": {"type": "string", "maxLength": 64},
+    "auth_signal": {"enum": ["none", "challenge"]},
+    "status": {"enum": ["active", "quarantined"]},
+    "confidence_milli": {"type": "integer", "minimum": 0, "maximum": 1000},
+    "visit_count": {"type": "integer", "minimum": 1},
+    "successful_visits": {"type": "integer", "minimum": 1},
+    "hinted_visits": {"type": "integer", "minimum": 0},
+    "hint_match_visits": {"type": "integer", "minimum": 0},
+    "consecutive_failures": {"type": "integer", "minimum": 0},
+    "last_outcome": {
+      "enum": ["success", "not_observed", "structure_mismatch", "not_found", "auth_challenge", "rate_limited", "transient_failure", "policy_denied"]
+    },
+    "last_elapsed_ms": {"type": "integer", "minimum": 0, "maximum": 120000},
+    "last_verified_at_ms": {"type": "integer", "minimum": 1},
+    "last_observed_at_ms": {"type": "integer", "minimum": 1},
+    "expires_at_ms": {"type": "integer", "minimum": 1},
+    "payload_bytes": {"type": "integer", "minimum": 1, "maximum": 4096}
+  }
+}

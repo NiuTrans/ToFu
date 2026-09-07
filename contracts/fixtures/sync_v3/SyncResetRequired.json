@@ -1,0 +1,7 @@
+{
+  "contract": "tofu.conversation-sync.event/v1",
+  "conversationId": "s",
+  "cursor": "s",
+  "reason": "cursor_expired",
+  "type": "sync.reset_required"
+}

@@ -1,0 +1,15 @@
+{
+  "agentId": "s",
+  "completed_agents": 1,
+  "content": "s",
+  "duration_s": 1.5,
+  "model": "s",
+  "objective": "s",
+  "phase": "s",
+  "role": "s",
+  "roundNum": 1,
+  "status": "s",
+  "tokens": 1,
+  "total_agents": 1,
+  "type": "swarm_agent_phase"
+}

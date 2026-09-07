@@ -1,0 +1,12 @@
+{
+  "action": "s",
+  "detail": "s",
+  "emittedAt": 1.5,
+  "model": "s",
+  "parentSpanId": "s",
+  "reasonCode": "s",
+  "roundNum": 1,
+  "stage": "s",
+  "toolName": "s",
+  "type": "tool_schema_rejected"
+}

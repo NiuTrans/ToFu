@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 18" width="120" height="18" preserveAspectRatio="none">
+  <!-- Wave crest that STRADDLES the rim and reaches above it (matches the
+       deeper ::before top:-10px poke). A rolling swell + a bright foam line.
+       SEAM: both tile ends flat at y=11 so tile1 meets tile2 in a smooth
+       trough (verified pixel-diff col0==col119). Teal family = top of the same
+       water surface. -->
+  <defs>
+    <linearGradient id="edg-pl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#83B0AB"/>
+      <stop offset="1" stop-color="#5E948D"/>
+    </linearGradient>
+  </defs>
+  <!-- base band, flat at both ends -->
+  <path fill="url(#edg-pl)" d="M0,18 L120,18 L120,11 L108,11 C96,7 84,13 60,11 C36,9 24,7 12,11 L0,11 Z"/>
+  <!-- rolling swell crest, flat margins x0..4 and x116..120 -->
+  <path fill="url(#edg-pl)" d="M0,11 L4,11
+    C16,3 28,3 40,9 C52,15 64,15 76,8 C88,2 100,4 116,11 L120,11
+    L120,18 L0,18 Z"/>
+  <!-- bright foam line riding the crest -->
+  <path fill="none" stroke="#EAF6F3" stroke-width="1.3" stroke-linecap="round" opacity="0.8"
+        d="M4,11 C16,3 28,3 40,9 C52,15 64,15 76,8 C88,2 100,4 116,11"/>
+</svg>

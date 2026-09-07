@@ -1,0 +1,11 @@
+{
+  "agentCount": 1,
+  "agents": [],
+  "content": "s",
+  "error": "s",
+  "failedCount": 1,
+  "phase": "s",
+  "swarmKey": "s",
+  "totalTokens": 1,
+  "type": "swarm_phase"
+}

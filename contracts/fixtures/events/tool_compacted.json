@@ -1,0 +1,12 @@
+{
+  "compactedContent": "s",
+  "compactedFromChars": 1,
+  "compactedToChars": 1,
+  "compactionLayer": "s",
+  "roundNum": 1,
+  "toolCallId": "s",
+  "toolName": "s",
+  "toolResultEvidence": {},
+  "toolTokens": 1,
+  "type": "tool_compacted"
+}

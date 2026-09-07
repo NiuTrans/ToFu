@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2604 723" width="360" height="100">
+  <defs>
+    <linearGradient id="gT" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f5d5a0"/>
+      <stop offset="100%" stop-color="#e8b86d"/>
+    </linearGradient>
+    <linearGradient id="gO" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fdf2d7"/>
+      <stop offset="100%" stop-color="#f0dbb8"/>
+    </linearGradient>
+    <linearGradient id="gF" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#dcc8a4"/>
+      <stop offset="100%" stop-color="#c5a87e"/>
+    </linearGradient>
+    <linearGradient id="gU" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e8b86d"/>
+      <stop offset="100%" stop-color="#d4a050"/>
+    </linearGradient>
+  </defs>
+  <!-- Flip Y axis: font coords have Y-up, SVG has Y-down -->
+  <g transform="translate(0,671) scale(1,-1)">
+    <!-- T -->
+    <path d="M241 -12V530H161V440H60V540H151V631H433V540H525V440H423V530H343V-12Z"
+          transform="translate(40,0)" fill="url(#gT)"/>
+    <!-- o -->
+    <path d="M151 -12V78H60V359H151V450H433V359H525V78H433V-12ZM161 88H423V350H161Z"
+          transform="translate(686,0)" fill="url(#gO)" fill-rule="evenodd"/>
+    <!-- f -->
+    <path d="M60 -12V540H151V631H433V540H525V440H423V530H161V359H343V260H161V-12Z"
+          transform="translate(1332,0)" fill="url(#gF)"/>
+    <!-- u -->
+    <path d="M151 -12V78H60V450H161V88H423V450H525V78H433V-12Z"
+          transform="translate(1978,0)" fill="url(#gU)"/>
+  </g>
+</svg>

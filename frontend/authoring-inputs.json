@@ -1,0 +1,27 @@
+{
+  "responsibility": "Single source of truth for files and source suffixes that invalidate a published Vite graph.",
+  "configPaths": [
+    "frontend/authoring-inputs.json",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "tsconfig.vite.json",
+    "vite.config.mjs",
+    "scripts/build_frontend.mjs",
+    "scripts/check_frontend_tdz.mjs",
+    "scripts/frontend_bundle_canary.py",
+    "scripts/compose_frontend_runtime.mjs",
+    "scripts/compose_frontend_styles.mjs",
+    "scripts/gen_i18n_contract.mjs"
+  ],
+  "sourceSuffixes": [
+    ".css",
+    ".html",
+    ".js",
+    ".json",
+    ".ts",
+    ".ttf",
+    ".woff",
+    ".woff2"
+  ]
+}

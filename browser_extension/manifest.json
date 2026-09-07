@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "Tofu Browser Bridge",
+  "version": "5.4.4",
+  "description": "Connect Tofu to your browser so AI can research logged-in sites, automate pages, inspect console errors, and debug JavaScript.",
+
+  "permissions": [
+    "tabs",
+    "scripting",
+    "activeTab",
+    "storage",
+    "cookies",
+    "webNavigation",
+    "webRequest",
+    "downloads",
+    "clipboardRead",
+    "clipboardWrite",
+    "notifications",
+    "bookmarks",
+    "history",
+    "debugger",
+    "declarativeNetRequest",
+    "management",
+    "alarms",
+    "offscreen"
+  ],
+
+  "host_permissions": [
+    "<all_urls>"
+  ],
+
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Tofu Browser Bridge",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

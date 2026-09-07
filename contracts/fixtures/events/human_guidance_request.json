@@ -1,0 +1,9 @@
+{
+  "guidanceId": "s",
+  "options": [],
+  "question": "s",
+  "responseType": "s",
+  "roundNum": 1,
+  "toolCallId": "s",
+  "type": "human_guidance_request"
+}

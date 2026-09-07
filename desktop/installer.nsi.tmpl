@@ -1,0 +1,774 @@
+; desktop/installer.nsi.tmpl — server-side Windows installer authoring (NSIS).
+; ─────────────────────────────────────────────────────────────────────────
+; Why NSIS and not Inno (the CI's tool), measured 2026-08-01 on the
+; server-side build box (epic pt_ce426157):
+;   * iscc must run under our userspace Wine (no cross-build server) — but
+;     EVERY 32-bit Windows app measured (Inno's own installer, innounp)
+;     HANGS under the new WoW64 without the preloader (seccomp SIGSYS);
+;     64-bit apps work. Inno 6's iscc is 32-bit, and the Inno 7 x64
+;     installer (our only way to get a 64-bit iscc) is itself 32-bit-hosted
+;     and hangs. Extraction without the installer fails too (7-Zip 23.01
+;     cannot read Inno 7's container).
+;   * makensis runs NATIVELY on Linux (conda-forge nsis): no wine, no
+;     display, deterministic. That determinism is what a release pipeline
+;     needs most.
+; The CI keeps its Inno authoring (.github/workflows/build-desktop.yml).
+; The two authorings are bound by tests/test_installer_parity.py, which
+; asserts they agree on the semantic contract (app name, install dir,
+; privilege level, shortcuts, launch-after-install, output name, payload
+; contents, wizard branding, preseed file). The contract — not the tool —
+; is the single source of truth.
+;
+; ── The 2026-08-04 modernization (owner: "the installer looks 2000s") ──
+; The classic MUI2 wizard (gray sidebar bitmap, MS Shell Dlg 8, bevels)
+; is replaced by a fully custom nsDialogs wizard:
+;   * EVERY page is one full-page bitmap (rendered at wrap time by
+;     lib/desktop_dist/installer_art.py into ART_DIR) + real controls.
+;     Only the brand name/version is baked into the art; every sentence
+;     is a real LangString label sitting on a #F0F0F0 card (the conda
+;     nsDialogs has NO control-coloring, so labels must sit on COLOR_3DFACE
+;     plates baked into the page art — du coordinates shared both sides).
+;   * Modern type: Segoe UI / Microsoft YaHei UI labels via CreateFont,
+;     DPI-scaled; ManifestDPIAware for crisp chrome.
+;   * Speed: /SOLID lzma (measured 2026-08-04: 53.2 MB → 45.2 MB on the
+;     agent) and NO per-file log pane (the classic details list repainted
+;     3316 times during File /r — a marquee bar replaces it).
+;   * Silent mode (/S) still installs fully (pages are skipped, so the
+;     install body lives in DoInstall, callable without UI).
+; Runtime verification boundary: 32-bit apps cannot run on this build
+; box's wine (SIGSYS), so makensis compile + the parity/ratchet suites +
+; the art render tests are the gates; first pixel-level proof rides the
+; owner's real-machine acceptance (same gate as epic pt_59b62951aad2463e).
+;
+; Placeholders (rendered by lib/desktop_dist/winbuilder.py::_render_nsi).
+; They are named here WITHOUT their @@ delimiters ON PURPOSE: the
+; renderer is a global string replace, and a code-valued placeholder
+; expanding inside a comment inserts code outside any function — makensis
+; aborts. Never write an @-delimited token in a comment.
+;   APP_VERSION          e.g. 0.16.0
+;   PAYLOAD_DIR          absolute path of the unpacked payload (contains the
+;                        app exe and, when pre-seeded, preseed_server.json)
+;   OUT_FILE             absolute output path for the .exe
+;   ASSET_DIR            repo static/icons dir (the tofu.ico app icon)
+;   ART_DIR              wrap-time rendered wizard pages (welcome.bmp,
+;                        directory.bmp, progress.bmp, finish.bmp)
+;   APP_NAME             display name (Tofu / Tofu Agent)
+;   APP_EXE              payload exe (Tofu.exe / TofuAgent.exe)
+;   INSTALL_DIR_NAME     dir under $LOCALAPPDATA\Programs (Tofu / TofuAgent)
+;   AUTOSTART_DECL       'Var ChkAutoStart' or empty
+;   AUTOSTART_PAGE       checkbox creation block on the directory page
+;                        (agent only) or empty
+;   AUTOSTART_INSTALL    registry write inside DoInstall (agent only)
+;   AUTOSTART_UNINSTALL  matching DeleteRegValue, or empty
+; ─────────────────────────────────────────────────────────────────────────
+
+!define APP_NAME      "@APP_NAME@"
+!define APP_VERSION   "@APP_VERSION@"
+!define PUBLISHER     "Tofu Project"
+!define APP_EXE       "@APP_EXE@"
+
+Unicode True
+SetCompressor /SOLID lzma
+SetCompressorDictSize 32
+ManifestDPIAware true
+XPStyle on
+
+Name "${APP_NAME}"
+Caption "${APP_NAME}"
+OutFile "@OUT_FILE@"
+Icon "@ASSET_DIR@/tofu.ico"
+UninstallIcon "@ASSET_DIR@/tofu.ico"
+RequestExecutionLevel user          ; per-user install, no UAC — the Inno
+                                    ; authoring's PrivilegesRequired=lowest
+InstallDir "$LOCALAPPDATA\Programs\@INSTALL_DIR_NAME@"
+BrandingText " "                    ; blank the stock stub footer
+ShowInstDetails nevershow           ; no log pane exists in the new UI
+
+!include "LogicLib.nsh"
+!include "nsDialogs.nsh"
+!include "WinMessages.nsh"
+
+LoadLanguageFile "${NSISDIR}\Contrib\Language files\English.nlf"
+LoadLanguageFile "${NSISDIR}\Contrib\Language files\SimpChinese.nlf"
+
+!ifndef PBS_MARQUEE
+  !define PBS_MARQUEE 0x08
+!endif
+!ifndef LR_LOADFROMFILE
+  !define LR_LOADFROMFILE 0x10
+!endif
+
+; ── Wizard text (every sentence on the pages; buttons ride the NLF) ──
+LangString TOFU_WELCOME_TITLE 1033 "Install ${APP_NAME}"
+LangString TOFU_WELCOME_TITLE 2052 "安装 ${APP_NAME}"
+LangString TOFU_WELCOME_SUB 1033 "Version ${APP_VERSION} — per-user install, no administrator rights."
+LangString TOFU_WELCOME_SUB 2052 "版本 ${APP_VERSION}——无需管理员权限。"
+LangString TOFU_WELCOME_BODY 1033 "Click Install to continue. You can change the install folder on the next page."
+LangString TOFU_WELCOME_BODY 2052 "点击「安装」继续；下一页可以更改安装位置。"
+LangString TOFU_DIR_TITLE 1033 "Install ${APP_NAME} to:"
+LangString TOFU_DIR_TITLE 2052 "将 ${APP_NAME} 安装到："
+LangString TOFU_DIR_EMPTY 1033 "Please choose an install folder."
+LangString TOFU_DIR_EMPTY 2052 "请选择安装目录。"
+LangString TOFU_BTN_BROWSE 1033 "…"
+LangString TOFU_BTN_BROWSE 2052 "…"
+LangString TOFU_BTN_INSTALL 1033 "&Install"
+LangString TOFU_BTN_INSTALL 2052 "安装(&I)"
+LangString TOFU_BTN_FINISH 1033 "&Finish"
+LangString TOFU_BTN_FINISH 2052 "完成(&F)"
+LangString TOFU_BTN_UNINSTALL 1033 "&Uninstall"
+LangString TOFU_BTN_UNINSTALL 2052 "卸载(&U)"
+LangString TOFU_CHK_AUTOSTART 1033 "Start ${APP_NAME} with Windows"
+LangString TOFU_CHK_AUTOSTART 2052 "开机自动启动 ${APP_NAME}"
+LangString TOFU_CHK_LAUNCH 1033 "Launch ${APP_NAME}"
+LangString TOFU_CHK_LAUNCH 2052 "运行 ${APP_NAME}"
+LangString TOFU_PROG_COPYING 1033 "Copying files…"
+LangString TOFU_PROG_COPYING 2052 "正在复制文件…"
+LangString TOFU_PROG_SHORTCUTS 1033 "Creating shortcuts…"
+LangString TOFU_PROG_SHORTCUTS 2052 "正在创建快捷方式…"
+LangString TOFU_PROG_REGISTERING 1033 "Registering the uninstaller…"
+LangString TOFU_PROG_REGISTERING 2052 "正在注册卸载信息…"
+LangString TOFU_PROG_DONE 1033 "Done."
+LangString TOFU_PROG_DONE 2052 "完成。"
+LangString TOFU_DONE_TITLE 1033 "${APP_NAME} is installed"
+LangString TOFU_DONE_TITLE 2052 "${APP_NAME} 安装完成"
+LangString TOFU_DONE_SUB 1033 "Press Finish to close the installer."
+LangString TOFU_DONE_SUB 2052 "点击「完成」退出安装向导。"
+LangString TOFU_UN_TITLE 1033 "Remove ${APP_NAME}"
+LangString TOFU_UN_TITLE 2052 "卸载 ${APP_NAME}"
+LangString TOFU_UN_BODY 1033 "This removes ${APP_NAME} from this computer. Your data in the user folder is kept."
+LangString TOFU_UN_BODY 2052 "将从本机移除 ${APP_NAME}，用户目录中的数据会保留。"
+LangString TOFU_UN_PROGRESS 1033 "Removing ${APP_NAME}…"
+LangString TOFU_UN_PROGRESS 2052 "正在卸载 ${APP_NAME}…"
+LangString TOFU_UN_DONE_TITLE 1033 "${APP_NAME} has been removed"
+LangString TOFU_UN_DONE_TITLE 2052 "${APP_NAME} 已卸载"
+LangString TOFU_UN_DONE_SUB 1033 "Press Finish to close."
+LangString TOFU_UN_DONE_SUB 2052 "点击「完成」退出。"
+; Bilingual prompt for the running-app guard below.
+LangString TOFU_RUNNING_PROMPT 1033 "${APP_NAME} is currently running.$\r$\n$\r$\nChoose Yes to close it automatically and continue, or No to cancel."
+LangString TOFU_RUNNING_PROMPT 2052 "${APP_NAME} 正在运行。$\r$\n$\r$\n选择「是」自动关闭并继续，选择「否」取消。"
+
+Var Dialog
+Var BmpCtl
+Var StatusCtl
+Var ProgressCtl
+Var DirCtl
+Var ChkLaunch
+Var FontFamily
+Var FontTitle
+Var FontBody
+@AUTOSTART_DECL@
+
+; ── Running-app guard ──
+; A running app locks its exe image, so the payload copy (File /r) used
+; to die mid-install on a raw file-in-use Abort/Retry/Ignore box. Probe
+; the lock FIRST (an append-mode open of a running image is refused by
+; Windows) and offer to close the app FOR the user. Inserted into
+; .onInit (upgrade-over-running), the directory-page leave (the user may
+; retarget another existing install), and un.onInit (uninstall-while-
+; running would leave a half-deleted dir). Labels stay function-scoped,
+; so the three insertions never collide.
+!macro TOFU_CLOSE_RUNNING_APP
+  ${If} ${FileExists} "$INSTDIR\${APP_EXE}"
+    ${Do}
+      ClearErrors
+      FileOpen $0 "$INSTDIR\${APP_EXE}" a
+      ${If} ${Errors}
+        MessageBox MB_ICONQUESTION|MB_YESNO|MB_DEFBUTTON1 \
+          "$(TOFU_RUNNING_PROMPT)" /SD IDYES \
+          IDYES tofu_close_app IDNO tofu_abort_setup
+        tofu_abort_setup:
+          Abort
+        tofu_close_app:
+          ; nsExec hides the taskkill console (no black flash); /T takes
+          ; the whole tree so the agent's ssh tunnels die with it, /F
+          ; forces — a tray agent owns no unsaved document.
+          nsExec::Exec 'taskkill /IM ${APP_EXE} /T /F'
+          Pop $1
+          Sleep 1200
+      ${Else}
+        FileClose $0
+        ${ExitDo}
+      ${EndIf}
+    ${Loop}
+  ${EndIf}
+!macroend
+
+; ── DPI-scaled modern fonts for our labels ──
+; The NLF font (MS Shell Dlg 8) stays for the stock buttons; OUR labels
+; get the 2020s stack. The family is chosen per UI language (Segoe UI
+; has no CJK glyphs; YaHei UI is the zh system face), the height is
+; MulDiv'd by the real display DPI so 125%/150% scaling stays crisp.
+!macro TOFU_CREATE_FONTS
+  StrCpy $FontFamily "Segoe UI"
+  ${If} $LANGUAGE == ${LANG_SIMPCHINESE}
+    StrCpy $FontFamily "Microsoft YaHei UI"
+  ${EndIf}
+  System::Call 'user32::GetDC(p 0) p .r0'
+  System::Call 'gdi32::GetDeviceCaps(p r0, i 90) i .r1'  ; LOGPIXELSY
+  System::Call 'user32::ReleaseDC(p 0, p r0) i .r3'
+  IntOp $2 $r1 * 13
+  IntOp $2 $2 / 72
+  IntOp $2 0 - $2
+  StrCpy $4 $2
+  System::Call 'gdi32::CreateFont(i $2, i 0, i 0, i 0, i 700, i 0, i 0, i 0, i 1, i 0, i 0, i 5, i 0, w "$FontFamily") p .s'
+  Pop $FontTitle
+  IntOp $2 $r1 * 9
+  IntOp $2 $2 / 72
+  IntOp $2 0 - $2
+  StrCpy $5 $2
+  System::Call 'gdi32::CreateFont(i $2, i 0, i 0, i 0, i 400, i 0, i 0, i 0, i 1, i 0, i 0, i 5, i 0, w "$FontFamily") p .s'
+  Pop $FontBody
+  !insertmacro TOFU_DIAG_FONTS $r1
+!macroend
+
+; Full-page art + one label helper shared by every page.
+!macro TOFU_PAGE_ART bitmap
+  ${NSD_CreateBitmap} 0 0 100% 100% ""
+  Pop $BmpCtl
+  ; The art is the page BACKGROUND — pin it to the bottom of the
+  ; Z-order EXPLICITLY (HWND_BOTTOM=1, SWP_NOMOVE|SWP_NOSIZE|
+  ; SWP_NOACTIVATE=0x13). Creation order alone is an invisible
+  ; assumption: if the art ever ends up above a control, that control
+  ; receives NO WM_PAINT at all — the 2026-08-05 blank-wizard failure
+  ; class (band+cards render, every label/edit/button silently dead).
+  System::Call 'user32::SetWindowPos(p $BmpCtl, i 1, i 0, i 0, i 0, i 0, i 0x13)'
+  ; Load from $PLUGINSDIR (extracted by .onInit via File). The
+  ; documented NSIS pattern: File extracts the bmp into $PLUGINSDIR,
+  ; LoadImage(LR_LOADFROMFILE) reads it. The prior approach used a
+  ; non-existent NSIS variable for the exe module handle, which
+  ; expanded to empty → LoadImage(p 0, i resid, …) returns NULL
+  ; silently — the root cause of the 2026-08-07 blank-wizard
+  ; (image_handle=0 on every page, every control w=0 h=0).
+  System::Call 'user32::LoadImage(p 0, t "$PLUGINSDIR\${bitmap}", i ${IMAGE_BITMAP}, i 0, i 0, i ${LR_LOADFROMFILE}) p .R0'
+  System::Call 'kernel32::GetLastError() i .r9'
+  SendMessage $BmpCtl ${STM_SETIMAGE} ${IMAGE_BITMAP} $R0
+  !insertmacro TOFU_DIAG_PAGE "${bitmap}"
+!macroend
+!macro TOFU_LABEL x y w h text font
+  ; Opaque STATIC at exstyle 0 — the official nsDialogs example's shape.
+  ; Stock ${NSD_CreateLabel} inherits __NSD_Label_EXSTYLE =
+  ; WS_EX_TRANSPARENT from nsDialogs.nsh: a transparent static's first
+  ; paint is deferred behind its siblings and can simply never arrive
+  ; (the documented "label invisible until a forced redraw" failure
+  ; class — prime suspect in the 2026-08-06 still-blank wizard after
+  ; the HWND_BOTTOM pin shipped). Transparency buys this design
+  ; NOTHING: every label sits on a #F0F0F0 card baked into the page
+  ; art, exactly the COLOR_3DFACE an opaque static paints anyway.
+  ; Leaves the control's HWND in $0.
+  nsDialogs::CreateControl STATIC ${WS_VISIBLE}|${WS_CHILD}|${WS_CLIPSIBLINGS}|${SS_NOTIFY} 0 ${x} ${y} ${w} ${h} "${text}"
+  Pop $0
+  SendMessage $0 ${WM_SETFONT} ${font} 1
+  !insertmacro TOFU_DIAG_HW "label" $0
+  !insertmacro TOFU_DIAG_TEXT "label" $0
+!macroend
+
+; ── Diagnostic build seam (compile with -DTOFU_DIAG=1) ────────────
+; The SAME wizard with a fact log at $TEMP\tofu-setup-diag.log: per
+; page — the inner dialog + art control + image handle + LoadImage's
+; GetLastError at CREATE time, every label's rect/visibility, and a
+; one-shot probe 400 ms into nsDialogs::Show that walks EVERY child
+; window while the page is live. Production compiles expand every
+; insertion to nothing. Added 2026-08-06 for the real-machine
+; blank-wizard hunt: two hypothesis fixes (Z-order pin, opaque labels)
+; shipped without pixel verification — the next fix is measured.
+!ifndef STM_GETIMAGE
+  !define STM_GETIMAGE 0x0173
+!endif
+!ifndef IMAGE_BITMAP
+  !define IMAGE_BITMAP 0
+!endif
+!ifdef TOFU_DIAG
+; The log rides ONE handle opened once in .onInit — the first CI probe
+; run (2026-08-07) proved per-line FileOpen/FileWrite/FileClose cycles
+; lose ~90% of lines on a guarded Windows host (AV/EDR file races).
+; The wizard exits via a normal Finish click, and process exit flushes
+; the CRT buffer.
+Var DiagLog
+; Append one line to the diag log. Writes through the shared $DiagLog
+; handle (opened by TOFU_DIAG_HEADER); clobbers nothing.
+!macro TOFU_DIAG_WRITE line
+  FileWrite $DiagLog "${line}$\r$\n"
+!macroend
+; Rect + visibility of a window. Clobbers $8, $r3-$r7; preserves $0.
+!macro TOFU_DIAG_HW tag hwnd
+  Push $0
+  System::Alloc 16
+  Pop $0
+  System::Call 'user32::GetWindowRect(p ${hwnd}, p $0) i .r2'
+  System::Call '*$0(i .r3, i .r4, i .r5, i .r6)'
+  System::Free $0
+  System::Call 'user32::IsWindowVisible(p ${hwnd}) i .r7'
+  IntOp $r5 $r5 - $r3
+  IntOp $r6 $r6 - $r4
+  StrCpy $8 "${tag}: hwnd=${hwnd} visible=$r7 pos=$r3,$r4 w=$r5 h=$r6"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  Pop $0
+!macroend
+; Page banner: GetLastError is captured FIRST so it still describes the
+; LoadImage inside NSD_SetStretchedImage (every later call clobbers it).
+!macro TOFU_DIAG_PAGE name
+  SendMessage $BmpCtl ${STM_GETIMAGE} ${IMAGE_BITMAP} 0 $r7
+  StrCpy $8 "page ${name}: dialog=$Dialog bmpctl=$BmpCtl image_handle=$R0 stm_getimage=$r7 loadimage_lasterror=$r9"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  !insertmacro TOFU_DIAG_HW "page ${name} dialog" $Dialog
+  !insertmacro TOFU_DIAG_HW "page ${name} art" $BmpCtl
+  ; The uninstaller pass may only reference un.* functions (and the
+  ; installer pass vice versa) — pick the context's own probe.
+  !ifdef __UNINSTALL__
+    ${NSD_CreateTimer} un.OnTofuDiagProbe 400
+  !else
+    ${NSD_CreateTimer} OnTofuDiagProbe 400
+  !endif
+!macroend
+!macro TOFU_DIAG_HEADER
+  FileOpen $DiagLog "$TEMP\tofu-setup-diag.log" w
+  StrCpy $8 "=== tofu-setup-diag ${APP_NAME} ${APP_VERSION} compiled ${__DATE__} ${__TIME__} ==="
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  System::Call 'user32::GetDC(p 0) p .r6'
+  System::Call 'gdi32::GetDeviceCaps(p r6, i 90) i .r7'
+  System::Call 'user32::ReleaseDC(p 0, p r6) i .r5'
+  StrCpy $8 "env: language=$LANGUAGE dpi=$r7 temp=$TEMP"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  StrCpy $8 "env: pluginsdir=$PLUGINSDIR exedir=$EXEDIR"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+!macroend
+; A label's live text length — distinguishes "created but EMPTY" (len 0)
+; from "created with text yet never painted". Clobbers $8, $r7.
+!macro TOFU_DIAG_TEXT tag hwnd
+  SendMessage ${hwnd} ${WM_GETTEXTLENGTH} 0 0 $r7
+  StrCpy $8 "${tag} text: len=$r7"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+!macroend
+; The font pipeline facts: real DPI, the two requested pixel heights
+; (negative = EM-height request) and the resulting GDI handles — a zero
+; or absurd value here blanks text without touching geometry.
+!macro TOFU_DIAG_FONTS dpi
+  StrCpy $8 "fonts: dpi=${dpi} htitle=$4 hbody=$5 title=$FontTitle body=$FontBody"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+!macroend
+; A one-line marker (page reached Show / page left Show).
+!macro TOFU_DIAG_MARK msg
+  !insertmacro TOFU_DIAG_WRITE "${msg}"
+!macroend
+; The nav-button retitle lane, every link logged: $HWNDPARENT, the
+; GetDlgItem result (in $0 by the caller), and the button's ACTUAL text
+; after the retitle. The 2026-08-07 real-machine screenshot showed the
+; STOCK Next text on the first page — this probe adjudicates between
+; "retitle no-opped" and "retitle landed but was overwritten".
+; Clobbers $8; preserves $0.
+!macro TOFU_DIAG_RETITLE page expected
+  StrCpy $8 "page ${page} retitle: hwndparent=$HWNDPARENT next_btn=$0 expected='${expected}'"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  System::Call 'user32::GetWindowTextW(p $0, w .r8, i 256)'
+  StrCpy $8 "page ${page} retitle: actual='$8'"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+!macroend
+; The live-page probe body: 400 ms into nsDialogs::Show, log the
+; dialog, the art control's image, then EVERY child window (class +
+; rect + visibility) — the discriminating snapshot for "created but
+; invisible" vs "never created" vs "wrong geometry". Instantiated
+; twice because install functions cannot reference un.* and vice versa.
+!macro _TOFU_DIAG_PROBE_LINES selffunc
+  ${NSD_KillTimer} ${selffunc}
+  !insertmacro TOFU_DIAG_HW "probe dialog-live" $Dialog
+  SendMessage $BmpCtl ${STM_GETIMAGE} ${IMAGE_BITMAP} 0 $r7
+  StrCpy $8 "probe art-live: bmpctl=$BmpCtl stm_getimage=$r7 image_handle=$R0"
+  !insertmacro TOFU_DIAG_WRITE "$8"
+  System::Call 'user32::GetWindow(p $Dialog, i 5) p .r1'
+  ${While} $r1 P<> 0
+    System::Call 'user32::GetClassName(p r1, t .r8, i 64)'
+    StrCpy $8 "probe child class=$r8"
+    !insertmacro TOFU_DIAG_WRITE "$8"
+    !insertmacro TOFU_DIAG_HW "probe child" $r1
+    System::Call 'user32::GetWindow(p r1, i 2) p .r1'
+  ${EndWhile}
+!macroend
+Function OnTofuDiagProbe
+  !insertmacro _TOFU_DIAG_PROBE_LINES OnTofuDiagProbe
+FunctionEnd
+Function un.OnTofuDiagProbe
+  !insertmacro _TOFU_DIAG_PROBE_LINES un.OnTofuDiagProbe
+FunctionEnd
+!else
+!macro TOFU_DIAG_WRITE line
+!macroend
+!macro TOFU_DIAG_HW tag hwnd
+!macroend
+!macro TOFU_DIAG_PAGE name
+!macroend
+!macro TOFU_DIAG_HEADER
+!macroend
+!macro TOFU_DIAG_TEXT tag hwnd
+!macroend
+!macro TOFU_DIAG_FONTS dpi
+!macroend
+!macro TOFU_DIAG_MARK msg
+!macroend
+!macro TOFU_DIAG_RETITLE page expected
+!macroend
+!endif
+
+; ══════════════════════════════════════════════════════════════════
+;  Install body — callable from the progress page AND from silent mode
+; ══════════════════════════════════════════════════════════════════
+Function DoInstall
+  SetOutPath "$INSTDIR"
+  ${If} $StatusCtl <> ""
+    ${NSD_SetText} $StatusCtl "$(TOFU_PROG_COPYING)"
+  ${EndIf}
+  ; The whole payload — the app exe, _internal/, and preseed_server.json
+  ; when the build pre-seeded one (see desktop/launcher.py's first-run
+  ; import; the file lives NEXT TO the exe by contract).
+  File /r "@PAYLOAD_DIR@/*"
+
+  ; Legacy sidecar compatibility. New downloads carry the same JSON INSIDE
+  ; the installer (the fixed trailer below), so users never handle a ZIP or
+  ; keep two files together. Old already-downloaded bundles still install.
+  ${If} ${FileExists} "$EXEDIR\tofu-agent-attach.json"
+    CopyFiles "$EXEDIR\tofu-agent-attach.json" "$INSTDIR\tofu-agent-attach.json"
+  ${EndIf}
+
+  ; One-file zero-config attachment. lib/desktop_dist/agent_installer.py
+  ; appends exactly 1000 ASCII bytes to the built NSIS executable and swaps
+  ; that slot per download. NSIS checks CRC only for its own data, so an
+  ; appended customer-data record does not disturb the installer. FileRead
+  ; stays under this build's NSIS_MAX_STRLEN=1024; the JSON is one line and
+  ; trailing spaces are legal JSON whitespace.
+  FileOpen $0 "$EXEPATH" r
+  ${IfNot} ${Errors}
+    FileSeek $0 -1000 END
+    FileRead $0 $1 1024
+    FileClose $0
+    StrCpy $2 "$1" 21
+    ${If} $2 == "TOFU_AGENT_ATTACH_V2:"
+      StrCpy $1 "$1" "" 21
+      FileOpen $0 "$INSTDIR\tofu-agent-attach.json" w
+      ${IfNot} ${Errors}
+        FileWrite $0 "$1"
+        FileClose $0
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+
+  ${If} $StatusCtl <> ""
+    ${NSD_SetText} $StatusCtl "$(TOFU_PROG_SHORTCUTS)"
+  ${EndIf}
+  ; Shortcuts — same two the Inno authoring creates.
+  CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+  CreateShortcut  "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  CreateShortcut  "$DESKTOP\${APP_NAME}.lnk"                 "$INSTDIR\${APP_EXE}"
+
+  ${If} $StatusCtl <> ""
+    ${NSD_SetText} $StatusCtl "$(TOFU_PROG_REGISTERING)"
+  ${EndIf}
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
+  ; Add/Remove Programs registration (the Inno authoring gets this for
+  ; free; NSIS must write it by hand — parity pinned in the tests).
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    "DisplayName" "${APP_NAME}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    "DisplayVersion" "${APP_VERSION}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    "Publisher" "${PUBLISHER}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    "DisplayIcon" '"$INSTDIR\${APP_EXE},0"'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    "InstallLocation" '"$INSTDIR"'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    "UninstallString" '"$INSTDIR\Uninstall.exe"'
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    "NoModify" 1
+  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    "NoRepair" 1
+@AUTOSTART_INSTALL@
+
+  ${If} $ProgressCtl <> ""
+    SendMessage $ProgressCtl ${PBM_SETMARQUEE} 0 0
+    SendMessage $ProgressCtl ${PBM_SETPOS} 100 0
+  ${EndIf}
+  ${If} $StatusCtl <> ""
+    ${NSD_SetText} $StatusCtl "$(TOFU_PROG_DONE)"
+  ${EndIf}
+FunctionEnd
+
+Function .onInit
+  !insertmacro TOFU_CLOSE_RUNNING_APP
+  ${If} ${Silent}
+    ; Pages never run when silent, so the install body is invoked
+    ; directly — /S keeps working exactly like the classic authoring.
+    Call DoInstall
+    Quit
+  ${EndIf}
+  SetOutPath $PLUGINSDIR
+  File "@ART_DIR@/welcome.bmp"
+  File "@ART_DIR@/directory.bmp"
+  File "@ART_DIR@/progress.bmp"
+  File "@ART_DIR@/finish.bmp"
+  !insertmacro TOFU_DIAG_HEADER
+FunctionEnd
+
+Function .onGUIInit
+  !insertmacro TOFU_CREATE_FONTS
+FunctionEnd
+
+; ══════════════════════════════════════════════════════════════════
+;  Page 1 — welcome
+; ══════════════════════════════════════════════════════════════════
+Function WelcomePageCreate
+  nsDialogs::Create 1018
+  Pop $Dialog
+  ${If} $Dialog == error
+    Abort
+  ${EndIf}
+  !insertmacro TOFU_PAGE_ART "welcome.bmp"
+  !insertmacro TOFU_LABEL 20u 56u 236u 13u "$(TOFU_WELCOME_TITLE)" $FontTitle
+  !insertmacro TOFU_LABEL 20u 73u 236u 10u "$(TOFU_WELCOME_SUB)" $FontBody
+  !insertmacro TOFU_LABEL 20u 87u 236u 26u "$(TOFU_WELCOME_BODY)" $FontBody
+  GetDlgItem $0 $HWNDPARENT 1
+  SendMessage $0 ${WM_SETTEXT} 0 "STR:$(TOFU_BTN_INSTALL)"
+  !insertmacro TOFU_DIAG_RETITLE "welcome" "$(TOFU_BTN_INSTALL)"
+  !insertmacro TOFU_DIAG_MARK "welcome: reached Show"
+  nsDialogs::Show
+  ${NSD_FreeImage} $R0
+FunctionEnd
+
+; ══════════════════════════════════════════════════════════════════
+;  Page 2 — install folder (+ agent autostart)
+; ══════════════════════════════════════════════════════════════════
+Function DirPageCreate
+  nsDialogs::Create 1018
+  Pop $Dialog
+  ${If} $Dialog == error
+    Abort
+  ${EndIf}
+  !insertmacro TOFU_PAGE_ART "directory.bmp"
+  !insertmacro TOFU_LABEL 20u 54u 236u 10u "$(TOFU_DIR_TITLE)" $FontBody
+  ${NSD_CreateDirRequest} 20u 66u 196u 12u "$INSTDIR"
+  Pop $DirCtl
+  SendMessage $DirCtl ${WM_SETFONT} $FontBody 1
+  ${NSD_CreateBrowseButton} 220u 66u 28u 12u "$(TOFU_BTN_BROWSE)"
+  Pop $0
+  ${NSD_OnClick} $0 OnBrowseFolder
+@AUTOSTART_PAGE@
+  !insertmacro TOFU_DIAG_MARK "directory: reached Show"
+  nsDialogs::Show
+  ${NSD_FreeImage} $R0
+FunctionEnd
+
+Function OnBrowseFolder
+  Pop $0
+  nsDialogs::SelectFolderDialog "$(TOFU_DIR_TITLE)" "$INSTDIR"
+  Pop $1
+  ${If} $1 != error
+    ${NSD_SetText} $DirCtl "$1"
+  ${EndIf}
+FunctionEnd
+
+Function DirPageLeave
+  ${NSD_GetText} $DirCtl $INSTDIR
+  ${If} $INSTDIR == ""
+    MessageBox MB_ICONEXCLAMATION|MB_OK "$(TOFU_DIR_EMPTY)" /SD IDOK
+    Abort
+  ${EndIf}
+  ; The user may have retargeted another existing (running) install.
+  !insertmacro TOFU_CLOSE_RUNNING_APP
+FunctionEnd
+
+; ══════════════════════════════════════════════════════════════════
+;  Page 3 — progress (the install runs on the first timer tick so the
+;  dialog is fully up; a marquee replaces the 3316-line log pane)
+; ══════════════════════════════════════════════════════════════════
+Function ProgressPageCreate
+  nsDialogs::Create 1018
+  Pop $Dialog
+  ${If} $Dialog == error
+    Abort
+  ${EndIf}
+  !insertmacro TOFU_PAGE_ART "progress.bmp"
+  !insertmacro TOFU_LABEL 20u 62u 236u 10u "$(TOFU_PROG_COPYING)" $FontBody
+  ; TOFU_LABEL already popped the HWND into $0 — copying it; a second
+  ; Pop would underflow the stack and leave $StatusCtl empty, turning
+  ; every DoInstall status update into its guarded no-op.
+  StrCpy $StatusCtl $0
+  ${NSD_CreateProgressBar} 20u 96u 226u 8u ""
+  Pop $ProgressCtl
+  ${NSD_AddStyle} $ProgressCtl ${PBS_MARQUEE}
+  SendMessage $ProgressCtl ${PBM_SETMARQUEE} 1 50
+  GetDlgItem $0 $HWNDPARENT 1
+  EnableWindow $0 0
+  GetDlgItem $0 $HWNDPARENT 2
+  EnableWindow $0 0
+  GetDlgItem $0 $HWNDPARENT 3
+  EnableWindow $0 0
+  ${NSD_CreateTimer} OnInstallNow 150
+  !insertmacro TOFU_DIAG_MARK "progress: reached Show"
+  nsDialogs::Show
+  ${NSD_FreeImage} $R0
+FunctionEnd
+
+Function OnInstallNow
+  ${NSD_KillTimer} OnInstallNow
+  Call DoInstall
+  GetDlgItem $0 $HWNDPARENT 1
+  EnableWindow $0 1
+  SendMessage $0 ${BM_CLICK} 0 0
+FunctionEnd
+
+; ══════════════════════════════════════════════════════════════════
+;  Page 4 — finish (launch-after-install checkbox: the contract piece
+;  the MUI_FINISHPAGE_RUN define carried in the classic authoring)
+; ══════════════════════════════════════════════════════════════════
+Function FinishPageCreate
+  nsDialogs::Create 1018
+  Pop $Dialog
+  ${If} $Dialog == error
+    Abort
+  ${EndIf}
+  !insertmacro TOFU_PAGE_ART "finish.bmp"
+  !insertmacro TOFU_LABEL 20u 56u 236u 13u "$(TOFU_DONE_TITLE)" $FontTitle
+  !insertmacro TOFU_LABEL 20u 73u 236u 10u "$(TOFU_DONE_SUB)" $FontBody
+  ${NSD_CreateCheckBox} 20u 113u 226u 10u "$(TOFU_CHK_LAUNCH)"
+  Pop $ChkLaunch
+  SendMessage $ChkLaunch ${WM_SETFONT} $FontBody 1
+  ${NSD_Check} $ChkLaunch
+  GetDlgItem $0 $HWNDPARENT 1
+  SendMessage $0 ${WM_SETTEXT} 0 "STR:$(TOFU_BTN_FINISH)"
+  !insertmacro TOFU_DIAG_RETITLE "finish" "$(TOFU_BTN_FINISH)"
+  !insertmacro TOFU_DIAG_MARK "finish: reached Show"
+  nsDialogs::Show
+  ${NSD_FreeImage} $R0
+FunctionEnd
+
+Function FinishPageLeave
+  ${NSD_GetState} $ChkLaunch $0
+  ${If} $0 == ${BST_CHECKED}
+    Exec '"$INSTDIR\${APP_EXE}"'
+  ${EndIf}
+FunctionEnd
+
+Page custom WelcomePageCreate
+Page custom DirPageCreate DirPageLeave
+Page custom ProgressPageCreate
+Page custom FinishPageCreate FinishPageLeave
+
+; The install body lives in DoInstall (custom pages + silent mode call
+; it), so nothing runs as a Section — but makensis refuses a script with
+; zero sections. These hidden stubs satisfy the compiler and never
+; execute (no instfiles page exists; warning 8000 is the design).
+Section -hidden
+SectionEnd
+
+; ══════════════════════════════════════════════════════════════════
+;  Uninstaller — same design language, three pages
+; ══════════════════════════════════════════════════════════════════
+Function un.DoUninstall
+  ${If} $StatusCtl <> ""
+    ${NSD_SetText} $StatusCtl "$(TOFU_UN_PROGRESS)"
+  ${EndIf}
+  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
+  RMDir  "$SMPROGRAMS\${APP_NAME}"
+  Delete "$DESKTOP\${APP_NAME}.lnk"
+  DeleteRegKey HKCU \
+    "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
+@AUTOSTART_UNINSTALL@
+  ; User data is NOT touched: it lives in ~/.local/share/Tofu per the
+  ; runtime_paths read-only-exe-dir contract — same rule as the Inno
+  ; authoring and the .deb.
+  RMDir /r "$INSTDIR"
+  ${If} $ProgressCtl <> ""
+    SendMessage $ProgressCtl ${PBM_SETMARQUEE} 0 0
+    SendMessage $ProgressCtl ${PBM_SETPOS} 100 0
+  ${EndIf}
+FunctionEnd
+
+Function un.onInit
+  !insertmacro TOFU_CLOSE_RUNNING_APP
+  ${If} ${Silent}
+    Call un.DoUninstall
+    Quit
+  ${EndIf}
+  SetOutPath $PLUGINSDIR
+  File "@ART_DIR@/welcome.bmp"
+  File "@ART_DIR@/directory.bmp"
+  File "@ART_DIR@/progress.bmp"
+  File "@ART_DIR@/finish.bmp"
+  !insertmacro TOFU_DIAG_HEADER
+FunctionEnd
+
+Function un.onGUIInit
+  !insertmacro TOFU_CREATE_FONTS
+FunctionEnd
+
+Function un.ConfirmPageCreate
+  nsDialogs::Create 1018
+  Pop $Dialog
+  ${If} $Dialog == error
+    Abort
+  ${EndIf}
+  !insertmacro TOFU_PAGE_ART "welcome.bmp"
+  !insertmacro TOFU_LABEL 20u 56u 236u 13u "$(TOFU_UN_TITLE)" $FontTitle
+  !insertmacro TOFU_LABEL 20u 73u 236u 30u "$(TOFU_UN_BODY)" $FontBody
+  GetDlgItem $0 $HWNDPARENT 1
+  SendMessage $0 ${WM_SETTEXT} 0 "STR:$(TOFU_BTN_UNINSTALL)"
+  !insertmacro TOFU_DIAG_RETITLE "un.confirm" "$(TOFU_BTN_UNINSTALL)"
+  !insertmacro TOFU_DIAG_MARK "un.confirm: reached Show"
+  nsDialogs::Show
+  ${NSD_FreeImage} $R0
+FunctionEnd
+
+Function un.ProgressPageCreate
+  nsDialogs::Create 1018
+  Pop $Dialog
+  ${If} $Dialog == error
+    Abort
+  ${EndIf}
+  !insertmacro TOFU_PAGE_ART "progress.bmp"
+  !insertmacro TOFU_LABEL 20u 62u 236u 10u "$(TOFU_UN_PROGRESS)" $FontBody
+  StrCpy $StatusCtl $0
+  ${NSD_CreateProgressBar} 20u 96u 226u 8u ""
+  Pop $ProgressCtl
+  ${NSD_AddStyle} $ProgressCtl ${PBS_MARQUEE}
+  SendMessage $ProgressCtl ${PBM_SETMARQUEE} 1 50
+  GetDlgItem $0 $HWNDPARENT 1
+  EnableWindow $0 0
+  GetDlgItem $0 $HWNDPARENT 2
+  EnableWindow $0 0
+  GetDlgItem $0 $HWNDPARENT 3
+  EnableWindow $0 0
+  ${NSD_CreateTimer} un.OnUninstallNow 150
+  !insertmacro TOFU_DIAG_MARK "un.progress: reached Show"
+  nsDialogs::Show
+  ${NSD_FreeImage} $R0
+FunctionEnd
+
+Function un.OnUninstallNow
+  ${NSD_KillTimer} un.OnUninstallNow
+  Call un.DoUninstall
+  GetDlgItem $0 $HWNDPARENT 1
+  EnableWindow $0 1
+  SendMessage $0 ${BM_CLICK} 0 0
+FunctionEnd
+
+Function un.FinishPageCreate
+  nsDialogs::Create 1018
+  Pop $Dialog
+  ${If} $Dialog == error
+    Abort
+  ${EndIf}
+  !insertmacro TOFU_PAGE_ART "finish.bmp"
+  !insertmacro TOFU_LABEL 20u 56u 236u 13u "$(TOFU_UN_DONE_TITLE)" $FontTitle
+  !insertmacro TOFU_LABEL 20u 73u 236u 10u "$(TOFU_UN_DONE_SUB)" $FontBody
+  GetDlgItem $0 $HWNDPARENT 1
+  SendMessage $0 ${WM_SETTEXT} 0 "STR:$(TOFU_BTN_FINISH)"
+  !insertmacro TOFU_DIAG_RETITLE "un.finish" "$(TOFU_BTN_FINISH)"
+  !insertmacro TOFU_DIAG_MARK "un.finish: reached Show"
+  nsDialogs::Show
+  ${NSD_FreeImage} $R0
+FunctionEnd
+
+UninstPage custom un.ConfirmPageCreate
+UninstPage custom un.ProgressPageCreate
+UninstPage custom un.FinishPageCreate
+
+Section -un.hidden
+SectionEnd

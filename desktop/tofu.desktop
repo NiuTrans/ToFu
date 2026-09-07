@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Tofu
+GenericName=AI Assistant
+Comment=Self-hosted AI assistant with a system-tray launcher
+Exec=__INSTALL_DIR__/Tofu
+Icon=tofu
+Terminal=false
+Categories=Utility;Development;
+Keywords=AI;assistant;LLM;chat;
+StartupNotify=true

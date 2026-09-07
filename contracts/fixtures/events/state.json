@@ -1,0 +1,12 @@
+{
+  "content": "s",
+  "error": {},
+  "finishReason": "s",
+  "model": "s",
+  "phase": "s",
+  "status": "s",
+  "thinking": "s",
+  "toolRounds": [],
+  "type": "state",
+  "usage": {}
+}

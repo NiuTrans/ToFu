@@ -1,0 +1,10 @@
+{
+  "autopilotRunId": "s",
+  "emits": "s",
+  "flowProjection": "s",
+  "iteration": 1,
+  "phase": "s",
+  "turnRole": "s",
+  "type": "flow_iteration",
+  "vuMsgId": "s"
+}

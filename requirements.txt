@@ -1,0 +1,274 @@
+# Compatibility projection for personal/bootstrap installs that still consume
+# a requirements file. It is the union of core dependencies and the ``app`` +
+# ``worker`` extras; API-only containers install the smaller core set from
+# ``uv.lock``.
+quart>=0.20
+hypercorn>=0.17
+# cryptography — auto-generates TLS certificates for zero-config HTTP/2.
+# Also pulls in the standard Python crypto stack (used transitively by many packages).
+cryptography>=42.0
+requests>=2.31
+# urllib3 — transitive via requests; pinned explicitly to a floor that clears
+# the redirect-leak CVE trio (CVE-2023-43804 / CVE-2023-45803 Cookie+body leak
+# on cross-origin redirect, CVE-2024-37891 proxy-auth leak), fixed in 1.26.18/.19.
+urllib3>=1.26.19
+# Jinja2 — transitive via Quart; pinned to a floor past the sandbox/attr
+# escaping bypasses (CVE-2024-22195/34064/56201/56326, CVE-2025-27516), fixed
+# across 3.1.3–3.1.6.
+Jinja2>=3.1.6
+psutil>=5.9
+# sqlite3 is built into Python — no external package needed
+# tofu-search — standalone multi-engine web search + content fetch pipeline,
+# extracted from this repo's former lib/search + lib/fetch. chatui wires its
+# own LLM routing / browser-extension / auth-source behavior into tofu-search's
+# provider seams via lib/search_bridge.py at startup.
+# >=0.3.1: the browser-search fallback now relies on the BrowserProvider.fetch_html
+# seam (the SERP parser lives IN the library); the bridge no longer ships its own
+# parser, so an older tofu-search would leave browser-search dead.
+# >=0.3.2: adds the pre-fetch relevance gate (skips fetching zero-query-overlap
+# SERP junk before it costs a fetch / floods the browser bridge); default-on,
+# so chatui search + Reading-Mode reports stop pulling off-topic pages.
+# >=0.4.0: carries the `tofu_search.verify` subpackage (zero-LLM citation
+# verifier). Below this floor, paper-mode's citation-integrity card silently
+# never appears (build_citation_audit degrades to None on the missing import).
+# >=0.4.1: adaptive per-engine dual-path proxy (proxied↔direct, sticky+TTL'd)
+# — the bridge passes proxy_dual_attempt; below this floor that kwarg is
+# rejected by an older configure(), so keep the floor at the version that
+# defines it.
+# >=0.4.2: docs/packaging hygiene (lxml transitive-dep note); no API change —
+# floor bumped to always resolve the latest published release.
+# >=0.4.3: entity-diversified rerank top-K for multi-entity comparison queries
+# (search/rerank.py::_diversify_by_entity + shared authority.host_brand_labels)
+# — internal reranking improvement, no public-API change.
+# >=0.5.0: hard wall-clock deadlines (search_deadline_secs / fetch_url_deadline_secs).
+# HARD FLOOR — not optional: lib/search_bridge.py::sync_search_config passes both
+# kwargs to tofu_search.configure() UNCONDITIONALLY, and server.py calls
+# install_search_bridge() at boot with no guard. An older configure() rejects the
+# unknown kwargs with `TypeError: SearchConfig.__init__() got an unexpected keyword
+# argument 'search_deadline_secs'`, so the server crashes on startup against any
+# tofu-search < 0.5.0. Do not lower this floor without first making the bridge pass
+# the deadline kwargs defensively.
+# >=0.5.1: per-engine request throttle (min_request_interval_ms, default 400ms) that
+# stops two concurrent search calls from self-inflicting an engine rate-limit (the
+# DDG 202). SOFT floor (unlike the 0.5.0 deadline kwargs): the bridge does NOT pass
+# min_request_interval_ms to configure(), so an older tofu-search does not crash — it
+# just lacks the throttle. Live-tune via the TOFU_SEARCH_MIN_REQUEST_INTERVAL_MS env
+# var (configure() picks it up for any field the bridge leaves unset).
+# >=0.5.2: identity fallback seams — 200+SPA-shell / login-wall / known-SPA-empty /
+# auth-source-failed outcomes now consult the host BrowserProvider (the user's live
+# logged-in browser) instead of dying at anonymous Playwright. SOFT floor: with no
+# extension connected the seams are no-ops (byte-identical to 0.5.1); an older
+# tofu-search does not crash, it just never reaches the browser on shell outcomes
+# (the your-llm-gateway.example.com failure shape). Deployed-package acceptance:
+# tests/_acceptance_fetch_identity_fallback.py.
+# >=0.5.3: `allow_private_hosts` — the hostname-anchored SSRF exemption.
+# HARD floor, same shape as 0.5.0: lib/search_bridge.py::sync_search_config
+# passes `allow_private_hosts` (and `block_private_addresses` /
+# `allow_insecure_ssl_fallback`) to tofu_search.configure() UNCONDITIONALLY,
+# and server.py calls install_search_bridge() at boot with no guard, so an
+# older configure() raises TypeError on the unknown kwarg and the server
+# dies at startup. Do not lower this floor without first making the bridge
+# pass the security-posture kwargs defensively.
+# >=0.6.0: verdict-only `gate` filter mode + filter result cache — the fix for
+# "LLM filter makes search practically unusable" (step-5 was 30-120s: the
+# pre-0.6 filter regenerated each whole page, min_chars=0 dragged short pages
+# in, timeout was 300s, nothing cached). HARD floor, same shape as 0.5.0: the
+# bridge passes `filter_mode` to configure() UNCONDITIONALLY, so an older
+# configure() raises TypeError at startup. Do not lower this floor without
+# first making the bridge pass filter_mode defensively.
+# >=0.6.1: PlaywrightPool.register_task_kind — the generic task-kind registry on
+# the shared pool worker. chatui's browser_preview_page (lib/browser/preview.py)
+# renders page previews THROUGH the pool instead of launching a second Chromium.
+# SOFT floor: the caller guards with _register_once() and converts a missing
+# registry into a model-visible error string, so an older tofu-search degrades
+# the preview feature at call time rather than crashing anything at startup.
+# >=0.7.3: replay no-ops when the matched row holds no cookies (browser_first
+# rows match cookie-less — the live session IS the credential), on top of
+# 0.7.2's access_strategy consumption. SOFT floor: older libraries just waste
+# one anonymous pool load in that fallback — inert, no crash.
+# >=0.8.0: travel vertical chain — RollingGo (keyed) → FlyAI (Fliggy
+# anonymous), hotel type usable key-free for the first time. SOFT floor: the
+# bridge passes no 0.8.0-only kwargs, an older library just lacks the travel
+# chain. Also the first version actually PUBLISHED to public PyPI past 0.5.3
+# (0.7.2/0.7.3 were cut but never uploaded), so the floor moves to the
+# artifact CI can resolve.
+# >=0.9.0: read-only SiteSearchProvider, request-bound provider propagation,
+# and the browser-only SSRF bypass used by native site adapters. HARD floor:
+# chatui registers the site provider and passes deepen_enabled at startup.
+# >=0.10.3: the 2026-08-21 proxy chain trio. 0.10.1 routes per-call config
+# overrides to the engine layer (bind_call_config ContextVar — without it a
+# per-call proxy_url never reached the engines); 0.10.2 makes SearXNG raise on
+# total blockage instead of returning a fake "no matches" [] (the dead engine
+# masquerading as the survivor); 0.10.3 routes the FETCH layer through the
+# configured proxy — before it, do_request never passed proxies=, so on a host
+# without direct egress every page body failed with DNS errors and search
+# silently degraded to snippet-only. SOFT floor for startup (the bridge
+# introspects SearchConfig fields before passing 0.10.x kwargs), but the fetch
+# proxy fix is operationally critical on no-egress hosts — do not lower.
+tofu-search>=0.10.3
+trafilatura>=1.6
+# playwright is mandatory for slide preview/layout rendering and also powers
+# the JS-rendered fallback in tofu_search.fetch. Slide admission smoke-launches
+# Chromium before any research/LLM spend so an interpreter mismatch fails fast.
+# On Linux, Chromium needs X11/GTK shared libs (libatk, libgbm, libXcomposite, …).
+#   With root:    sudo python -m playwright install-deps chromium
+#   Without root: install.sh falls back to `conda install -c conda-forge`
+#                 (atk-1.0, xorg-libxcomposite, mesa-libgbm-cos7-x86_64, …) and
+#                 tofu_search/fetch/playwright_pool.py auto-augments LD_LIBRARY_PATH.
+playwright>=1.40
+Pillow>=10.0
+python-pptx>=0.6.21
+# fontTools — CFF→glyf conversion for PPTX font embedding (lib/slides/
+# export_pptx.py, P4). Without it the export deliberately degrades to NO
+# embedded fonts (PowerPoint then substitutes the typeface), which read as a
+# silent feature loss on a clean env (public CI, 2026-08-06). Pure-Python,
+# no native build step.
+fontTools>=4.40
+# Brotli is required when fontTools opens WOFF2 faces for portable PPTX font
+# embedding.  Without an explicit declaration export fails only after all
+# research, authoring and rendering work has already completed.
+brotli>=1.1
+# lxml — floor aligned with bootstrap.py's _CONDA_PYTHON_DEPS so the pip path
+# and the conda-repair path build the SAME environment (they drifted: 4.9 here
+# vs >=5.3 there). >=5.3 is not a guess, it is the floor our own declared deps
+# already impose, measured from installed metadata:
+#     trafilatura 2.0.0   -> lxml>=5.3.0   (non-Darwin)
+#     justext     3.0.2   -> lxml[html_clean]>=4.4.2
+#     lxml_html_clean 0.4.5 -> lxml>=6.1.1
+# So a resolver could never actually hand us 4.9 while trafilatura is declared;
+# the old floor was dead text that only served to disagree with the other list.
+#
+# NOTE the comment below is about PACKAGING, not about this floor: since lxml
+# 5.2 the `lxml.html.clean` module is a backward-compat shim that re-exports the
+# separately-distributed `lxml_html_clean` and raises ImportError when it is
+# absent (verified by reading the installed lxml/html/clean.py). justext pulls
+# it via the `lxml[html_clean]` extra, but we declare it explicitly so the
+# dependency survives even if justext's extras change.
+lxml>=5.3
+lxml_html_clean>=0.4
+# BeautifulSoup — HTML fallback parser in tofu_search/fetch/html_extract.py.
+# Usually pulled in transitively by trafilatura, but listed here so it's
+# guaranteed even if trafilatura's deps change.
+beautifulsoup4>=4.12
+# python-dateutil — robust date parsing for HTML publish-date extraction
+# in tofu_search/fetch/html_extract.py (imported eagerly, no ImportError fallback).
+python-dateutil>=2.8
+# Office document parsing — lib/doc_parser.py handles .docx/.pptx/.xlsx/
+# .doc/.xls/.ppt uploads. Each has a graceful ImportError fallback, but
+# shipping them by default means uploads Just Work.
+python-docx>=1.0
+openpyxl>=3.1
+xlrd>=2.0
+olefile>=0.46
+# MCP Python SDK, client side: v2 line. The 2026-07-28 protocol revision is
+# only spoken by mcp>=2 (v1's protocol constants stop at 2025-11-25), and the
+# client bridge (lib/mcp/client/_bridge.py) was migrated to the v2 API
+# (streamable_http_client + 2-tuple transport, snake_case model fields).
+#
+# Why this is SAFE for servers that still run v1: a 2x2 wire-interop matrix
+# (v1/v2 client x v1/v2 server, real stdio handshakes) negotiates 2025-11-25
+# in ALL four quadrants — SDK major version is not a wire boundary. And why
+# no server's pin can break this client anymore: vendored internal servers
+# launch isolated via `uv run --with-editable` (lib/mcp/client/_vendor), each
+# resolving its own mcp into its own env.
+#
+# The bound stays major-bounded (<3) because the next rework is unknowable.
+# Enforced by tests/test_mcp_sdk_pin_bounded.py.
+#
+# INSTALL-CHANNEL NOTE (measured 2026-07-31): mcp 2.x pulls mcp-types /
+# httpx2 / httpcore2, which the internal pip mirror does NOT carry (404).
+# The deploy paths are unaffected — bootstrap.py and install.sh install this
+# dep via conda-forge, which solves the full tree (verified by dry-run:
+# mcp 2.0.0 + mcp-types 2.0.0 + httpx2 2.9.1 + httpcore2 2.9.1). Only a
+# manual `pip install -r requirements.txt` against the internal mirror fails;
+# use `pip install --index-url https://pypi.org/simple -r requirements.txt`.
+mcp>=2,<3
+# httpx — the async HTTP client the LLM transport imports UNCONDITIONALLY at
+# module top (lib/llm/_transport.py, plus lib/llm/astream.py and the guarded
+# async branch of lib/http_client.py). Undeclared for months because this env
+# happened to carry it transitively; the desktop_dist builder's clean venv
+# proved the gap: PyInstaller packed a binary whose boot smoke dies on
+# ModuleNotFoundError: httpx (2026-08-01, desktop build attempt 4). NOTE the
+# name: mcp 2.x pulls the httpx2 FORK, which does NOT provide the `httpx`
+# module — the two are different distributions.
+httpx>=0.28
+# orjson — fast C JSON encoder. REQUIRED (not optional): routes/chat.py's SSE
+# state snapshot serializes the ENTIRE conversation (content+thinking+toolRounds,
+# 10+ MB for long convs). Plain json.dumps holds the GIL for the whole call, so
+# even via asyncio.to_thread it stalls the event loop ~40 ms and overflows the
+# accept queue → the page goes dark (the 15000 incident, 2026-06). orjson encodes
+# the same payload in ~5 ms, dropping the loop stall below the danger threshold.
+# A stdlib iterencode fallback covers the rare inputs orjson rejects (non-str keys).
+orjson>=3.9
+# Pydantic validates generated OpenAPI 3.1 boundary types. It is imported by
+# the default HTTP application, so the compatibility projection must declare
+# it directly rather than relying on a transitive dependency.
+pydantic>=2.7,<3
+# Loaded only by the external-PostgreSQL Storage Sidecar adapter.  The binary
+# extra supplies libpq consistently; the pool extra is the supported Psycopg 3
+# synchronous ConnectionPool used by sidecar worker threads.
+psycopg[binary,pool]>=3.2
+# tiktoken — exact BPE tokenizer (cl100k/o200k) used by lib/token_counter as
+# the local "exact" tier for OpenAI/Claude-family models. Without it the
+# resolver chain falls through to the CJK/entropy heuristic, which under-counts
+# high-entropy content (base64/minified data) and can let an oversized prompt
+# slip past the proactive-compaction trigger. Optional at runtime (the
+# heuristic is the always-present fallback), but shipping it makes the
+# compaction token-gate substantially tighter.
+tiktoken>=0.7
+# PDF parsing stack — pymupdf (fitz) is used across lib/pdf_parser, routes/paper,
+# and tofu_search.fetch for fast local PDF text/image extraction. pymupdf4llm is an
+# optional LLM-oriented Markdown extractor built on top of pymupdf.
+# PINNED AS A TRIO at the same exact version: pymupdf4llm 1.27.2.3 exact-pins
+# pymupdf==1.27.2.3 AND pymupdf_layout==1.27.2.3, so the three lines MUST move
+# together — a floor-only pin is what produced the 2026-07-27 split-brain env
+# (pymupdf 1.24.1 without the `pymupdf` module name → pymupdf4llm ImportError →
+# every parse silently degraded to flat raw text and the corpus froze that way).
+# pymupdf_layout is only exercised by pymupdf4llm's OPTIONAL layout/OCR pipeline,
+# which lib/pdf_parser/text.py deliberately bypasses (it calls the classic
+# pymupdf_rag implementation directly); it is declared because it is a hard
+# transitive dep. Some internal mirrors do not carry pymupdf-layout — install it
+# from pypi.org if your index lacks it.
+pymupdf==1.27.2.3
+pymupdf_layout==1.27.2.3
+pymupdf4llm==1.27.2.3
+# Markdown — server-side renderer for paper-report HTML export
+# (routes/paper.py:export_report). Frontend still uses marked.js for live
+# rendering; this dep is only used for downloadable .html exports.
+markdown>=3.5
+# markdown-it-py — CommonMark renderer for markdown-ARTIFACT export
+# (lib/artifacts/pdf_export.py). Its docstring always assumed it was a project
+# dep, but it was only ever present TRANSITIVELY — a clean env (public CI)
+# silently degrades exports to <pre>plaintext. Declared explicitly 2026-08-05.
+markdown-it-py>=3.0
+# PyYAML — serves the YAML variant of the OpenAPI spec
+# (routes/api_docs.py::openapi_yaml). The route degrades to JSON on
+# ImportError, so this is a soft feature dep; declared explicitly because it
+# was previously only present transitively and went missing in clean envs.
+PyYAML>=6.0
+# uv powers several MCP servers (via `uvx`) — see lib/mcp/client.py. Installing
+# it here guarantees uvx is on PATH inside the conda env without requiring a
+# separate curl|sh bootstrap.
+uv>=0.4
+# zhconv — pure-Python (MediaWiki tables, MIT) Traditional↔Simplified Chinese
+# converter. Used by lib/transcription/_zh.py as a FAIL-SAFE last gate on voice
+# transcripts: Whisper-family / omni-chat ASR models emit Mandarin as Traditional
+# by default, so a Simplified-Chinese user sees garbled variant text. No native
+# build step (fits a vanilla self-hosted box + bootstrap.py). Soft dep at runtime:
+# normalize_zh_variant() degrades to a no-op on ImportError, so the transcribe
+# path works without it — shipping it makes voice input Just Work in Simplified.
+# Disable/retarget via TOFU_ASR_ZH_VARIANT (default zh-cn; empty/off = raw).
+zhconv>=1.4
+
+# qrcode — QR symbol encoder used by lib/qr.py to turn a scan-to-login URL
+# into a PNG the browser can render (the ask_human scan-to-login prompt).
+# Pure-Python, no native build step; Pillow (already declared above) does the
+# PNG write. SOFT dep at runtime: qr_png_data_uri() logs and returns '' on
+# ImportError, so the app runs without it — but the scan-to-login prompt then
+# has no code to show, and RECOVERY of QR codes printed as terminal art by
+# other CLIs (lib/qr.terminal_qr_images, which needs only Pillow) is the half
+# that keeps working. Declared because it was previously present only by
+# accident in this env: a clean install would have degraded generation
+# silently, which for a login prompt looks like a broken feature rather than a
+# missing optional extra.
+qrcode>=7.4

@@ -1,0 +1,17 @@
+{
+  "brand": "bedrock",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "bedrock",
+  "category": "official",
+  "name": "Amazon Bedrock (OpenAI-compat)",
+  "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+  "offering_recipes": [
+    {"model_id": "us.anthropic.fable-5-1-v1:0",       "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "us.anthropic.claude-opus-5-v1:0",   "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "us.anthropic.claude-sonnet-5-v1:0", "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "us.anthropic.claude-opus-4-8-v1:0", "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "us.anthropic.claude-opus-4-7-v1:0", "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "us.anthropic.claude-sonnet-4-6-v1:0", "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "us.anthropic.claude-haiku-4-5-v1:0", "capabilities": ["text", "vision", "cheap"]}
+  ]
+}

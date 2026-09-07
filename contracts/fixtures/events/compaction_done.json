@@ -1,0 +1,14 @@
+{
+  "archiveId": "s",
+  "convId": "s",
+  "msgsAfter": 1,
+  "msgsBefore": 1,
+  "receipt": {},
+  "reductionPct": 1.5,
+  "roundNum": 1,
+  "tokenCountKind": "s",
+  "tokensAfter": 1,
+  "tokensBefore": 1,
+  "trigger": "s",
+  "type": "compaction_done"
+}

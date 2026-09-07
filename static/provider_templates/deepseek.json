@@ -1,0 +1,22 @@
+{
+  "brand": "deepseek",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "deepseek",
+  "category": "official",
+  "name": "DeepSeek",
+  "base_url": "https://api.deepseek.com",
+  "offering_recipes": [
+    {
+      "model_id": "deepseek-v4-pro",
+      "capabilities": ["text", "thinking", "cheap"],
+      "rpm": 30,
+      "context_window": 1000000
+    },
+    {
+      "model_id": "deepseek-v4-flash",
+      "capabilities": ["text", "thinking", "cheap"],
+      "rpm": 60,
+      "context_window": 1000000
+    }
+  ]
+}

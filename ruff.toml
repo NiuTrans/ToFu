@@ -1,0 +1,38 @@
+# ═══════════════════════════════════════════════════════════
+#  Tofu (豆腐) — Ruff Linter Configuration
+# ═══════════════════════════════════════════════════════════
+#
+#  This config is used by both local development and CI.
+#  CI step: ruff check lib/ routes/ tests/
+#
+# ═══════════════════════════════════════════════════════════
+
+target-version = "py312"
+extend-exclude = ["codex"]
+
+[lint]
+# Default rule set: pyflakes (F) + pycodestyle errors (E)
+select = ["F", "E"]
+
+ignore = [
+    # ── Style choices (deliberate, not bugs) ──────────────
+    "E501",   # Line too long — enforced by code review, not linter
+    "E701",   # Multiple statements on one line (colon) — compact if/elif chains
+    "E702",   # Multiple statements on one line (semicolon) — compact one-liners
+    "E731",   # Lambda assignment — used for closures with captured variables
+    "E741",   # Ambiguous variable name (l, O, I) — common in list comprehensions
+
+    # ── Structural patterns (by design) ───────────────────
+    "E402",   # Module-level import not at top — __init__.py lazy imports, sys.path in tests
+]
+
+[lint.per-file-ignores]
+# Test files often manipulate sys.path before imports and use unused locals for mocking
+"tests/*" = ["F401", "F841"]
+# Package __init__.py files are facades: they re-export public + test-facing
+# private symbols by name (and by reference, so there's exactly one binding
+# per process — see e.g. lib/api_keys/__init__.py). Those re-exports are NOT
+# listed in __all__ on purpose, so F401 ("imported but unused") fires on every
+# one even though external call sites import them through the facade path.
+# This is the documented facade architecture, not dead code.
+"**/__init__.py" = ["F401"]

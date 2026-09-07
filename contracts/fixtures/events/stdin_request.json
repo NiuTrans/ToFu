@@ -1,0 +1,8 @@
+{
+  "command": "s",
+  "prompt": "s",
+  "roundNum": 1,
+  "stdinId": "s",
+  "toolCallId": "s",
+  "type": "stdin_request"
+}
