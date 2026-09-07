@@ -304,6 +304,14 @@ jobs:
         with:
           node-version: "20.19"
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install frontend contract and browser-canary dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install 'PyYAML>=6,<7' 'playwright>=1.56,<2'
+          python -m playwright install --with-deps chromium
       - name: Build and verify the Vite graph once
         run: |
           set -euo pipefail
@@ -903,6 +911,28 @@ jobs:
 
       - name: Build agent with PyInstaller
         run: pyinstaller tofu-agent.spec
+
+      - name: Smoke test the built macOS agent
+        shell: bash
+        env:
+          TOFU_AGENT_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/TofuAgent.app/Contents/MacOS/TofuAgent > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
+          cat /tmp/agent_smoke.out /tmp/agent_smoke.err
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built macOS agent failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/agent_smoke.err; then
+            echo "::error::The macOS agent emitted a traceback."
+            exit 1
+          fi
+          grep -q 'TOFU_AGENT_SMOKE_OK' /tmp/agent_smoke.out || {
+            echo "::error::The macOS agent did not execute its smoke gate."
+            exit 1
+          }
 
       - name: Create agent DMG
         shell: bash

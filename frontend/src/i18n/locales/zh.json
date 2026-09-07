@@ -2810,7 +2810,7 @@
   "local.agentDownloadFor": "受控端·轻量",
   "local.agentInstallerBtn": "下载受控端安装包",
   "local.agentInstallerNote": "下载后直接运行即可。服务器地址和连接信息都已内置，无需额外设置。",
-  "local.installerRebuilding": "受控端安装包正在后台准备，完成后下载按钮会自动出现。",
+  "local.installerUnavailable": "此服务器目前没有兼容的受控端安装包，请前往发布页面查看可用下载。",
   "local.bindLoopbackWarn": "⚠️ 服务器当前只监听本机回环（BIND_HOST=127.0.0.1）——受控端无法直连内网地址，将使用浏览器安全通道或自动隧道；去掉该环境变量并重启后可直连，更快更稳。",
   "local.fullVersionToggle": "这台电脑也想跑 Tofu 本体（服务器+界面）？下载完整桌面版",
   "local.awaitingAgent": "正在等待受控端首次连入……它会自动寻找服务器并重试，一般一分钟内变绿。",

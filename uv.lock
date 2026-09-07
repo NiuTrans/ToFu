@@ -2642,7 +2642,7 @@ wheels = [
 
 [[package]]
 name = "tofu-agent"
-version = "0.17.0"
+version = "0.17.4"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },

@@ -211,7 +211,8 @@ def undersized_assets(sizes: dict) -> list[str]:
         Human-readable lines, empty when every present asset clears its floor.
     """
     gaps: list[str] = []
-    for _os, _arch, label, pattern, min_bytes in PLATFORM_ASSETS:
+    for _os, _arch, label, pattern, min_bytes in (
+            PLATFORM_ASSETS + AGENT_PLATFORM_ASSETS):
         for name, size in sorted(sizes.items()):
             if not fnmatch.fnmatch(name, pattern):
                 continue

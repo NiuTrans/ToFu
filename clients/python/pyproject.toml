@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-sdk"
-version = "0.17.0"
+version = "0.17.4"
 description = "Sync and async Python client for the Tofu agent runtime"
 readme = "README.md"
 requires-python = ">=3.10"

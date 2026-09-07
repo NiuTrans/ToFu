@@ -139,6 +139,8 @@ __pycache__/
 !/scripts/gen_orchestration_wire_formats.py
 !/scripts/gen_conversation_sync_contract.py
 !/scripts/gen_api_v4_contract.py
+!/scripts/gen_api_v1_model_routing_contract.py
+!/scripts/gen_event_contract.py
 !/scripts/gen_tool_inventory.py
 !/scripts/gen_storage_operation_catalog.py
 !/scripts/gen_storage_v2_contract.py

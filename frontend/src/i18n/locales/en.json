@@ -2810,7 +2810,7 @@
   "local.agentDownloadFor": "Lightweight agent",
   "local.agentInstallerBtn": "Download the agent installer",
   "local.agentInstallerNote": "Run it directly after downloading. Server and connection details are built in; no setup is required.",
-  "local.installerRebuilding": "The agent installer is being prepared; the download button will appear automatically when ready.",
+  "local.installerUnavailable": "No compatible controlled-end installer is currently available on this server. Visit the release page for available downloads.",
   "local.bindLoopbackWarn": "⚠️ The server binds loopback only (BIND_HOST=127.0.0.1) — agents cannot reach it over the LAN and will use the browser-assisted channel or an automatic tunnel; unset it and restart for a direct, faster attach.",
   "local.fullVersionToggle": "Want Tofu itself on this machine (server + UI)? Get the full desktop app",
   "local.awaitingAgent": "Waiting for the agent's first contact… it finds the server and retries automatically, usually turning green within a minute.",

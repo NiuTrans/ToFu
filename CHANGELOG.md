@@ -5206,6 +5206,58 @@ All notable changes to tofu-open are documented in this file.
   exclusive with the empty state on desktop and mobile; keyboard opening waits
   until the animated menu can receive focus.
 
+## [0.17.4] - 2026-09-07
+
+### Fixed
+- Restored the desktop release prerequisite by documenting the selected
+  version instead of bypassing the changelog gate. The release includes the
+  existing native macOS lightweight-agent build targets.
+- Local Control reports a missing compatible agent installer as unavailable,
+  retains the release-page link, and no longer claims a build is running when
+  no package has been published. Windows personalization and Mac/Linux
+  platform-specific download selection remain separate.
+- Restored frontend contract generators and browser-canary scripts to public
+  exports, and provisioned Python, PyYAML, Playwright and Chromium before the
+  clean-checkout frontend release gate.
+- Applied the declared package-size floors to lightweight agents as well as
+  full desktop installers, and require each native macOS agent to pass its
+  frozen-runtime smoke test before DMG packaging.
+- Aligned application and SDK release metadata and regenerated frontend
+  delivery artifacts from their committed sources.
+
+## [0.17.3] - 2026-09-07
+
+### Changed
+- Advanced the public source version metadata to 0.17.3. No desktop installer
+  release was published for this version.
+
+## [0.17.2] - 2026-09-06
+
+### Fixed
+- Corrected the open-source release helper's ATIF freshness check to inspect
+  `lib/trajectory.py`, hardened optional arguments and freshness probes under
+  strict shell options, and derived the printed install pin from `VERSION`.
+- Synchronized the `tofu-agent` package version in `pyproject.toml` with
+  `VERSION` at 0.17.2.
+
+## [0.17.1] - 2026-09-06
+
+### Changed
+- `tofu-agent run` now defaults to the current working directory, the full
+  storage-free tool surface and native exposure, and ATIF trajectory output.
+  Configured model slots are disabled by default for headless runs, while
+  explicit environment overrides remain supported.
+
+### Fixed
+- Added model access-envelope hosts to proxy bypass settings when proxy
+  variables are present, deferred server imports until `serve`, and reported
+  run failures on stderr while preserving JSON results on stdout.
+
+### Added
+- Added an open-source release helper requiring an explicit source ref,
+  checking exported CLI content and runtime freshness before publication,
+  and printing an install pin with optional Harbor pin updates.
+
 ## [0.17.0] - 2026-08-25
 
 ### Changed

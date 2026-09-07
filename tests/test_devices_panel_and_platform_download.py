@@ -659,22 +659,32 @@ _LC_HARNESS = textwrap.dedent("""
 
     {shipped}
 
-    _lcRenderDesktop({payload});
-    const box = document.getElementById('lcDesktopSetup');
-    const links = Array.from(box.querySelectorAll('a')).map(a => ({{
-      href: a.getAttribute('href'),
-      text: a.textContent,
-      cls: a.className,
-    }}));
-    console.log(JSON.stringify({{ html: box.innerHTML, links: links }}));
+    const locale = {locale};
+    global.t = (k) => locale[k] || k;
+    window.t = global.t;
+    const snapshots = [];
+    for (const payload of [{payload}]) {{
+      _lcRenderDesktop(payload);
+      const box = document.getElementById('lcDesktopSetup');
+      const links = Array.from(box.querySelectorAll('a')).map(a => ({{
+        href: a.getAttribute('href'),
+        text: a.textContent,
+        cls: a.className,
+      }}));
+      snapshots.push({{ html: box.innerHTML, text: box.textContent, links }});
+    }}
+    console.log(JSON.stringify({{ ...snapshots[snapshots.length - 1], snapshots }}));
 """)
 
 
-def _run_lc_desktop(payload_js: str) -> dict:
+def _run_lc_desktop(payload_js: str, language: str | None = None) -> dict:
     if not _has_jsdom():
         pytest.skip("jsdom not available")
     src = _LC_HARNESS.format(
-        shipped=LC_JS.read_text(encoding="utf-8"), payload=payload_js)
+        shipped=LC_JS.read_text(encoding="utf-8"), payload=payload_js,
+        locale=("require(" + json.dumps(str(
+            ROOT / 'frontend/src/i18n/locales' / f'{language}.json')) + ")")
+        if language else '{}')
     proc = subprocess.run([_node(), "-e", src], cwd=ROOT,
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, (
@@ -773,19 +783,76 @@ def test_a_mac_visitor_is_never_offered_the_windows_agent_exe():
     assert any("x86_64" in (l["text"] or "") for l in direct), direct
 
 
-def test_a_mac_visitor_with_no_agent_asset_gets_an_honest_wait_not_an_exe():
-    """Mirror still fetching (or no GitHub route): the macOS visitor waits
-    for the DMG with the releases page as escape hatch — the .exe is never
-    the stand-in."""
-    out = _run_lc_desktop(
-        "{setup_state:'remote', visitor_os:'macos', agent_installer_ready:true,"
-        " download_url:'https://example.invalid/releases/latest',"
-        " server_url:'https://tofu.invalid', agent_downloads:[], downloads:[]}")
-    hrefs = [l["href"] for l in out["links"]]
-    assert not any('agent-installer' in (h or '') for h in hrefs), hrefs
-    assert "lcAgentInstallerBtn" not in out["html"]
-    assert 'https://example.invalid/releases/latest' in hrefs, (
-        f"the releases-page escape hatch vanished: {hrefs!r}")
+@pytest.mark.parametrize('setup_state', ['remote', 'local_source'])
+@pytest.mark.parametrize('os_key', ['macos', 'linux', 'windows'])
+@pytest.mark.parametrize('language', [None, 'en', 'zh'])
+def test_missing_agent_installer_reports_unavailability(setup_state, os_key, language):
+    """A full desktop package and Windows readiness do not imply a Mac agent build."""
+    payload = {
+        'setup_state': setup_state, 'visitor_os': os_key,
+        'agent_installer_ready': os_key != 'windows',
+        'download_url': 'https://example.invalid/releases/latest',
+        'server_url': 'https://tofu.invalid', 'agent_downloads': [],
+        'downloads': [{'os': os_key, 'arch': 'arm64', 'label': 'Full desktop',
+                       'filename': 'Tofu-full.dmg', 'size': 160778384,
+                       'url': 'https://example.invalid/d/Tofu-full.dmg'}],
+    }
+    out = _run_lc_desktop(json.dumps(payload), language)
+    hrefs = [link['href'] for link in out['links']]
+    assert not any('agent-installer' in (href or '') for href in hrefs)
+    assert 'lcAgentInstallerBtn' not in out['html']
+    assert 'https://example.invalid/releases/latest' in hrefs
+    if language == 'en':
+        assert 'No compatible controlled-end installer is currently available on this server.' in out['text']
+        assert 'Visit the release page' in out['text']
+    else:
+        assert '此服务器目前没有兼容的受控端安装包' in out['text']
+        assert '请前往发布页面' in out['text']
+    for promise in ('being prepared', 'automatically when ready', '后台准备', '自动出现'):
+        assert promise not in out['text']
+
+
+@pytest.mark.parametrize('setup_state', ['remote', 'local_source'])
+@pytest.mark.parametrize('os_key', ['macos', 'windows'])
+def test_agent_installer_ready_transition_replaces_unavailable_copy(setup_state, os_key):
+    missing = {
+        'setup_state': setup_state, 'visitor_os': os_key,
+        'agent_installer_ready': False, 'agent_downloads': [], 'downloads': [],
+        'download_url': 'https://example.invalid/releases/latest',
+    }
+    ready = dict(missing, agent_installer_ready=True)
+    if os_key == 'macos':
+        ready['agent_downloads'] = [{
+            'os': 'macos', 'arch': 'arm64', 'label': 'macOS agent arm64 DMG',
+            'filename': 'TofuAgent-macos-arm64.dmg',
+            'url': 'https://example.invalid/d/TofuAgent-macos-arm64.dmg',
+        }]
+    out = _run_lc_desktop(','.join(map(json.dumps, [missing, ready, missing])), 'en')
+    before, installed, after = out['snapshots']
+    assert 'No compatible controlled-end installer' in before['text']
+    assert 'No compatible controlled-end installer' not in installed['text']
+    assert 'No compatible controlled-end installer' in after['text']
+    hrefs = [link['href'] for link in installed['links']]
+    if os_key == 'windows':
+        assert 'lcAgentInstallerBtn' in installed['html']
+        assert any('/api/v1/desktop/agent-installer' in href for href in hrefs)
+    else:
+        assert 'https://example.invalid/d/TofuAgent-macos-arm64.dmg' in hrefs
+        assert 'macOS agent arm64 DMG' in installed['text']
+        assert not any('agent-installer' in href or '.exe' in href for href in hrefs)
+
+
+def test_unknown_platform_never_gets_personalized_exe_even_when_ready():
+    out = _run_lc_desktop(json.dumps({
+        'setup_state': 'remote', 'visitor_os': '', 'agent_installer_ready': True,
+        'agent_downloads': [], 'downloads': [],
+        'download_url': 'https://example.invalid/releases/latest',
+    }), 'en')
+    assert 'lcAgentInstallerBtn' not in out['html']
+    assert any(link['href'] == 'https://example.invalid/releases/latest'
+               and link['text'].strip() for link in out['links'])
+    assert not any('agent-installer' in link['href'] or '.exe' in link['href']
+                   for link in out['links'])
 
 
 def test_a_windows_visitor_keeps_the_personalized_agent_installer():

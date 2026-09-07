@@ -494,11 +494,12 @@ function _lcAgentInstallerUrl() {
   return u + (base ? ('?base=' + encodeURIComponent(base)) : '');
 }
 
-function _lcInstallerWaitHtml() {
-  // A stale/absent artifact must not render a dead button. Do not offer a
-  // multi-file/manual fallback: polling replaces this note when ready.
-  return '<p class="lc-substep">' + _lcEsc(_lcT('local.installerRebuilding',
-      '受控端安装包正在后台准备，完成后下载按钮会自动出现。')) + '</p>';
+function _lcInstallerUnavailableHtml(d) {
+  // Missing artifacts do not imply that a build or publication is running.
+  return '<p class="lc-substep">' + _lcEsc(_lcT('local.installerUnavailable',
+      '此服务器目前没有兼容的受控端安装包，请前往发布页面查看可用下载。')) + '</p>' +
+    _lcDownloadLinks({ download_url: d && d.download_url, agent_downloads: [] },
+      'agent');
 }
 
 function _lcAgentInstallerBlockHtml(d, osHint) {
@@ -514,7 +515,7 @@ function _lcAgentInstallerBlockHtml(d, osHint) {
         '<p class="lc-substep">' + _lcEsc(_lcT('local.agentInstallerNote',
           '下载后直接运行即可。服务器地址和连接信息都已内置，无需额外设置。')) + '</p>';
     }
-    return _lcInstallerWaitHtml();
+    return _lcInstallerUnavailableHtml(d);
   }
   var picks = (d && Array.isArray(d.agent_downloads)) ? d.agent_downloads : [];
   if (picks.length) {
@@ -524,12 +525,7 @@ function _lcAgentInstallerBlockHtml(d, osHint) {
     return _lcDownloadLinks(d, 'agent', true);
   }
   if (os) {
-    // The mirror has not landed this platform's agent asset yet — the 3 s
-    // poll replaces this note when it does. The releases page stays visible
-    // as the escape hatch that always works.
-    return _lcInstallerWaitHtml() +
-      _lcDownloadLinks({ download_url: d && d.download_url, agent_downloads: [] },
-        'agent');
+    return _lcInstallerUnavailableHtml(d);
   }
   // Unrecognised platform: nothing direct is honest — releases page only.
   return _lcDownloadLinks({ download_url: d && d.download_url, agent_downloads: [] },
