@@ -5222,6 +5222,12 @@ All notable changes to tofu-open are documented in this file.
 - Applied the declared package-size floors to lightweight agents as well as
   full desktop installers, and require each native macOS agent to pass its
   frozen-runtime smoke test before DMG packaging.
+- Included the package-owned provider catalog and Vite runtime metadata in
+  frozen full-app builds and required native macOS full-app startup smoke
+  before packaging, preventing missing data from passing as a successful build.
+- Corrected Windows log-root startup to use native no-follow handles rather
+  than POSIX directory descriptors. Reparse points and access errors fail
+  closed; Windows ACLs remain authoritative and POSIX mode hardening is unchanged.
 - Aligned application and SDK release metadata and regenerated frontend
   delivery artifacts from their committed sources.
 

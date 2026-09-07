@@ -67,11 +67,9 @@ _ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOW = _ROOT / '.github' / 'workflows' / 'build-desktop.yml'
 _LAUNCHER = _ROOT / 'desktop' / 'launcher.py'
 
-# Legs whose runner can execute the artifact it just built. macOS is excluded
-# deliberately: its build produces a .app bundle whose inner binary path
-# differs, and no defect has been measured there — adding an unverified step
-# would be speculation, not coverage.
-_SMOKE_JOBS = ('build-windows', 'build-linux')
+# Every native runner can start its own output. Missing package-owned data
+# affects the shared spec on macOS too, even when DMG creation succeeds.
+_SMOKE_JOBS = ('build-windows', 'build-linux', 'build-macos')
 
 
 def _jobs():
@@ -80,7 +78,7 @@ def _jobs():
 
 def _smoke_step(job_name):
     for step in _jobs()[job_name].get('steps', []):
-        if 'smoke' in (step.get('name') or '').lower():
+        if (step.get('env') or {}).get('TOFU_SMOKE') == '1':
             return step
     return None
 

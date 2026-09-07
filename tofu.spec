@@ -102,6 +102,12 @@ hidden_imports += [
 _candidate_datas = [
     # Frontend
     (os.path.join(ROOT, 'static'), 'static'),
+    # Imported by lib.vite_assets even when no frontend authoring source ships.
+    (os.path.join(ROOT, 'frontend', 'authoring-inputs.json'), 'frontend'),
+    (os.path.join(ROOT, 'frontend', 'src', 'application-shell', 'fragments'),
+     os.path.join('frontend', 'src', 'application-shell', 'fragments')),
+    # Runtime download selection loads the single release policy by path.
+    (os.path.join(ROOT, 'scripts', 'release_assets.py'), 'scripts'),
     (os.path.join(ROOT, 'index.html'), '.'),
     (os.path.join(ROOT, 'trading.html'), '.'),   # optional (legacy plugin shell)
 
@@ -125,8 +131,10 @@ _candidate_datas = [
     # modules derive from their own ``__file__`` when frozen.
     (os.path.join(ROOT, 'browser_extension'), 'browser_extension'),
 
-    # Provider templates (loaded at runtime by lib/llm_dispatch)
-    # Bundled inside static/ already — no extra entry needed
+    # Provider template catalog and import-time GPT-5.6 contract live in
+    # package data, not static/. Preserve the loader's __file__-relative path.
+    (os.path.join(ROOT, 'lib', 'model_info', 'data'),
+     os.path.join('lib', 'model_info', 'data')),
 ]
 
 datas = []

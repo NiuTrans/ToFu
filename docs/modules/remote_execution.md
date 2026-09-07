@@ -156,11 +156,19 @@ requires its personalized installer's attachment slot before offering that
 button. macOS agent DMGs come from native macOS release jobs, never from the
 Linux server's on-demand builder. Release publication remains gated on the
 selected version's changelog and the complete platform/component asset set.
-Size floors apply to both full-app and agent artifacts. Each native macOS
-agent must execute its frozen-runtime smoke gate before DMG packaging. Public
-exports retain every frontend generator and build canary invoked by the package scripts; the shared
-frontend CI job provisions Python, PyYAML, Playwright and Chromium before
-checking and packaging its graph.
+Size floors apply to both full-app and agent artifacts. Every native full-app
+and agent build must execute its frozen-runtime smoke gate before packaging,
+including both macOS architectures. The full-app spec preserves the
+`lib/model_info/data` catalog and `frontend/authoring-inputs.json` metadata at
+their runtime-relative paths; bundling `static/` alone cannot satisfy the
+import-time model and Vite contracts. HTML fragments and the download-platform
+policy also retain their runtime paths. A frozen image contains only required
+HTML fragments under `frontend/src`, so it validates the published graph and
+digests without treating those fragments as a full authoring checkout. The
+spec still checks source freshness before building. Public exports
+retain every frontend generator and build canary invoked by the package
+scripts; the shared frontend CI job provisions Python, PyYAML, Playwright and
+Chromium before checking and packaging its graph.
 
 Startup role selection and tray strings are shared code with parity tests.
 Installers may differ by platform, but artifact kind, version, checksum,

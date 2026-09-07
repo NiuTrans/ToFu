@@ -8,6 +8,7 @@ import html
 import json
 import os
 import posixpath
+import sys
 import threading
 import time
 from urllib.parse import urlparse
@@ -190,10 +191,10 @@ def _validate_vite_authoring_digest(
     if not validate_authoring_sources:
         return
     source_root = os.path.join(BASE_DIR, 'frontend', 'src')
-    if not os.path.isdir(source_root):
-        # Minimal release images may contain only the committed artifact. Its
-        # digest remains mandatory, while absence of all authoring sources is
-        # not interpreted as drift.
+    if getattr(sys, 'frozen', False) or not os.path.isdir(source_root):
+        # Frozen releases ship HTML fragments under frontend/src, not the full
+        # authoring graph. Their artifact digest remains mandatory above;
+        # source freshness was enforced by the spec before freezing.
         return
     if value != _source_vite_authoring_digest():
         raise ValueError(

@@ -402,6 +402,31 @@ jobs:
       - name: Generate icons
         run: python scripts/gen_desktop_icons.py
 
+      - name: Smoke test native Windows log handles
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          from lib.log_retention import (
+              ensure_private_log_directory, ensure_private_log_file,
+              append_bytes_locked, copytruncate_if_oversize,
+          )
+          with TemporaryDirectory(prefix='tofu-log-smoke-') as temporary:
+              root = Path(temporary) / 'logs'
+              ensure_private_log_directory(root)
+              target = root / 'app.log'
+              ensure_private_log_file(target, create=True)
+              append_bytes_locked(target, b'first\n')
+              append_bytes_locked(target, b'second\n')
+              assert target.read_bytes() == b'first\nsecond\n'
+              result = copytruncate_if_oversize(target, max_bytes=7, backup_count=1)
+              assert not result['errors'], result['errors']
+              assert target.read_bytes() == b''
+              assert target.with_name('app.log.1').read_bytes() == b'second\n'
+          print('WINDOWS_LOG_SMOKE_OK')
+          PY
+
       - name: Verify build inputs
         shell: bash
         run: |
@@ -821,6 +846,29 @@ jobs:
 
       - name: Build with PyInstaller
         run: pyinstaller tofu.spec
+
+      - name: Smoke test the built macOS binary
+        shell: bash
+        timeout-minutes: 2
+        env:
+          TOFU_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/Tofu.app/Contents/MacOS/Tofu > /tmp/smoke.out 2> /tmp/smoke.err || rc=$?
+          cat /tmp/smoke.out /tmp/smoke.err
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built macOS app failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/smoke.err; then
+            echo "::error::The macOS app emitted a traceback."
+            exit 1
+          fi
+          grep -q 'TOFU_SMOKE_OK' /tmp/smoke.out || {
+            echo "::error::The macOS app did not emit TOFU_SMOKE_OK."
+            exit 1
+          }
 
       # ── Code signing / notarization (INERT until secrets are provided) ──
       # macOS Gatekeeper blocks unsigned apps ("Tofu is damaged / cannot be

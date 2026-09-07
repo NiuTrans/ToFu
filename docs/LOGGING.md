@@ -12,9 +12,18 @@ registry in `lib/log_policy.py`, the incident record schema in
 2. Every core durable stream has a per-file ceiling, backup count, family
    budget, retention age, and priority in `lib/log_policy.py`. A direct child
    stdout file outside `logs/` must call `register_external_log`; an
-   unregistered append-only log is a defect. Managed files are `0600` and the
-   direct log directory is `0700`; maintenance migrates older permissive modes
-   without changing unrecognized operator-owned files.
+   unregistered append-only log is a defect. On POSIX, managed files are `0600`
+   and the direct log directory is `0700`; maintenance migrates older permissive
+   modes without changing unrecognized operator-owned files. On Windows,
+   filesystem ACLs remain authoritative: in-place operations retain existing
+   ACLs, while new files and replacement/rotation files inherit their parent's
+   ACL. Python mode bits are not an owner-only ACL and maintenance does not
+   claim mode migrations.
+   Operators must place logs (including external stdout files) under a trusted,
+   access-restricted parent directory; Tofu does not audit or rewrite its ACL.
+   Windows opens validate no-follow native handles and reject final-component
+   reparse points (including junctions), not just symbolic links. Ancestor paths
+   must be trusted; this is not a sandbox against ancestor replacement.
 3. WARNING and above produce two views: redacted human evidence and a compact
    JSONL incident index. Repeated records may be physically coalesced, but
    `occurrence_delta` preserves the admitted aggregate count. CRITICAL is never

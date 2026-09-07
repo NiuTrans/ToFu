@@ -57,6 +57,30 @@ _COPYTRUNCATE_STREAMS = frozenset({
 })
 _PROCESS_LOCK = threading.Lock()
 
+_WINDOWS = os.name == 'nt'
+
+
+def _is_link(info: os.stat_result) -> bool:
+    return (stat.S_ISLNK(info.st_mode)
+            or bool(getattr(info, 'st_file_attributes', 0) & 0x400))
+
+
+def _open_log(path, flags: int, mode: int = LOG_FILE_MODE) -> int:
+    if _WINDOWS:
+        from lib.log_windows_paths import open_log_path
+        return open_log_path(path, flags)
+    return os.open(path, flags, mode)
+
+
+def _set_log_mode(descriptor: int, path, mode: int) -> None:
+    # Windows chmod controls readonly, not privacy. Retain the existing ACL.
+    if _WINDOWS:
+        return
+    try:
+        os.fchmod(descriptor, mode)
+    except (AttributeError, OSError):
+        os.chmod(path, mode, follow_symlinks=False)
+
 
 def _mode_label(mode: int) -> str:
     return format(stat.S_IMODE(mode), '04o')
@@ -64,7 +88,7 @@ def _mode_label(mode: int) -> str:
 
 def ensure_private_log_file(path: str | os.PathLike[str], *,
                             create: bool = False) -> bool:
-    """Make one regular log owner-readable/writable only, without following links.
+    """Validate one direct log; enforce owner-only modes on POSIX, retain Windows ACLs.
 
     ``create=True`` prepares an append-only subprocess target before the child
     inherits it.  The function never truncates and returns whether it changed
@@ -77,29 +101,30 @@ def ensure_private_log_file(path: str | os.PathLike[str], *,
         flags |= os.O_WRONLY | os.O_APPEND | os.O_CREAT
     else:
         flags |= os.O_RDONLY
-    descriptor = os.open(target, flags, LOG_FILE_MODE)
+    descriptor = _open_log(target, flags, LOG_FILE_MODE)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise OSError('log target is not a regular file: %s' % target)
-        changed = stat.S_IMODE(info.st_mode) != LOG_FILE_MODE
+        changed = not _WINDOWS and stat.S_IMODE(info.st_mode) != LOG_FILE_MODE
         if changed:
-            try:
-                os.fchmod(descriptor, LOG_FILE_MODE)
-            except (AttributeError, OSError):
-                os.chmod(target, LOG_FILE_MODE, follow_symlinks=False)
+            _set_log_mode(descriptor, target, LOG_FILE_MODE)
         return changed
     finally:
         os.close(descriptor)
 
 
 def ensure_private_log_directory(path: str | os.PathLike[str]) -> bool:
-    """Create one log root if needed and restrict it to its service owner."""
+    """Create/validate a direct log root; POSIX modes or existing Windows ACLs."""
     target = Path(path)
     target.mkdir(parents=True, exist_ok=True, mode=LOG_DIRECTORY_MODE)
     info = target.lstat()
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+    if _is_link(info) or not stat.S_ISDIR(info.st_mode):
         raise OSError('log root is not a direct directory: %s' % target)
+    if _WINDOWS:
+        from lib.log_windows_paths import open_log_path
+        open_log_path(target, os.O_RDONLY, directory=True)
+        return False  # ACLs are retained, not migrated or certified private.
     changed = stat.S_IMODE(info.st_mode) != LOG_DIRECTORY_MODE
     if not changed:
         return False
@@ -130,13 +155,15 @@ def _regular_file(path: Path, directory: Path) -> os.stat_result | None:
         info = path.lstat()
     except OSError:
         return None
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    if _is_link(info) or not stat.S_ISREG(info.st_mode):
         return None
     return info
 
 
 def _harden_file_permissions(path: Path, directory: Path, result: dict, *,
                              dry_run: bool) -> None:
+    if _WINDOWS:
+        return  # No POSIX mode migration or misleading dry-run report on Windows.
     info = _regular_file(path, directory)
     if info is None or stat.S_IMODE(info.st_mode) == LOG_FILE_MODE:
         return
@@ -170,11 +197,18 @@ def _harden_file_permissions(path: Path, directory: Path, result: dict, *,
 
 def _harden_directory_permissions(path: Path, result: dict, *,
                                   dry_run: bool) -> None:
+    if _WINDOWS:
+        try:
+            from lib.log_windows_paths import open_log_path
+            open_log_path(path, os.O_RDONLY, directory=True)
+        except OSError as exc:
+            _record_error(result, 'validate_log_directory', path, exc)
+        return
     try:
         info = path.lstat()
     except OSError:
         return
-    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+    if (_is_link(info) or not stat.S_ISDIR(info.st_mode)
             or stat.S_IMODE(info.st_mode) == LOG_DIRECTORY_MODE):
         return
     action = {
@@ -217,8 +251,9 @@ def _record_error(result: dict, operation: str, path: Path, exc: BaseException) 
 
 def _remove(path: Path, result: dict, *, reason: str, dry_run: bool) -> bool:
     try:
-        size = path.lstat().st_size
-        if path.is_symlink() or not path.is_file():
+        info = path.lstat()
+        size = info.st_size
+        if _is_link(info) or not stat.S_ISREG(info.st_mode):
             return False
         if not dry_run:
             path.unlink()
@@ -258,9 +293,7 @@ def _shift_numbered_backups(path: Path, backups: int, result: dict,
         source = path.with_name(path.name + '.%d' % index)
         target = path.with_name(path.name + '.%d' % (index + 1))
         try:
-            if source.is_symlink():
-                continue
-            if source.is_file():
+            if _regular_file(source, source.parent) is not None:
                 os.replace(source, target)
         except OSError as exc:
                 _record_error(result, 'shift_backup', source, exc)
@@ -326,7 +359,7 @@ def _planned_retained_tail_bytes(path: Path, info: os.stat_result,
     """Preview the exact bounded tail size without copying the whole file."""
     source_fd = -1
     try:
-        source_fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        source_fd = _open_log(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
         opened = os.fstat(source_fd)
         if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
             return min(info.st_size, max(1, int(ceiling)))
@@ -378,7 +411,7 @@ def copytruncate_if_oversize(path: str | os.PathLike[str], *, max_bytes: int,
     temporary_name = ''
     try:
         flags = os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
-        source_fd = os.open(target, flags)
+        source_fd = _open_log(target, flags)
         try:
             try:
                 import fcntl
@@ -398,11 +431,7 @@ def copytruncate_if_oversize(path: str | os.PathLike[str], *, max_bytes: int,
             temporary_fd, temporary_name = tempfile.mkstemp(
                 prefix='.%s.rotate-' % target.name, dir=str(directory))
             try:
-                try:
-                    os.fchmod(temporary_fd, LOG_FILE_MODE)
-                except (AttributeError, OSError):
-                    os.chmod(temporary_name, LOG_FILE_MODE,
-                             follow_symlinks=False)
+                _set_log_mode(temporary_fd, temporary_name, LOG_FILE_MODE)
                 os.lseek(source_fd, tail_start, os.SEEK_SET)
                 remaining = max(0, tail_end - tail_start)
                 while remaining > 0:
@@ -471,7 +500,7 @@ def _compact_closed_file_if_oversize(
     temporary_fd = -1
     temporary_name = ''
     try:
-        source_fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        source_fd = _open_log(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
         opened = os.fstat(source_fd)
         if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
             return
@@ -482,11 +511,7 @@ def _compact_closed_file_if_oversize(
         temporary_fd, temporary_name = tempfile.mkstemp(
             prefix='.%s.compact-' % path.name, dir=str(directory))
         try:
-            try:
-                os.fchmod(temporary_fd, LOG_FILE_MODE)
-            except (AttributeError, OSError):
-                os.chmod(temporary_name, LOG_FILE_MODE,
-                         follow_symlinks=False)
+            _set_log_mode(temporary_fd, temporary_name, LOG_FILE_MODE)
             os.lseek(source_fd, tail_start, os.SEEK_SET)
             remaining = action['retained_bytes']
             while remaining > 0:
@@ -550,15 +575,12 @@ def append_bytes_locked(path: str | os.PathLike[str], payload: bytes,
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
     flags |= getattr(os, 'O_NOFOLLOW', 0)
     flags |= getattr(os, 'O_NONBLOCK', 0)
-    descriptor = os.open(target, flags, int(mode))
+    descriptor = _open_log(target, flags, int(mode))
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise OSError('diagnostic target is not a regular file: %s' % target)
-        try:
-            os.fchmod(descriptor, int(mode))
-        except (AttributeError, OSError):
-            os.chmod(target, int(mode), follow_symlinks=False)
+        _set_log_mode(descriptor, target, int(mode))
         try:
             import fcntl
             fcntl.flock(descriptor, fcntl.LOCK_EX)
