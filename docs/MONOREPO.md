@@ -126,6 +126,12 @@ build artifacts and application compatibility gates in the same change.
 
 ## Releases
 
+Frozen desktop contracts — Problem: a partial schema list let installers build
+but fail at startup when a runtime loader opened an omitted authority. Decision:
+the full desktop application bundles the complete exported `contracts/` directory
+at its runtime resource root. Alternatives: adding only the first missing schema
+leaves neighboring loaders broken; embedding copies creates schema drift.
+
 Use `search-vX.Y.Z` and `trading-vX.Y.Z` for workspace members. The established
 agent release contract retains `vX.Y.Z` until its OCI/SDK promotion workflow is
 versioned together. A tag builds only its owning member plus shared compatibility

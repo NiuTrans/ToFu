@@ -95,6 +95,11 @@ hidden_imports += [
 ]
 
 # ── Data files to bundle ──
+# The full application loads multiple contract authorities by resource path.
+# Preserve the directory boundary rather than maintaining a partial schema list.
+if not os.path.isdir(os.path.join(ROOT, 'contracts')):
+    raise SystemExit('tofu.spec requires the contracts resource directory')
+
 # Each entry is (source, dest). Some sources are OPTIONAL — a missing source in
 # `datas` is a HARD ERROR that aborts the whole build (PyInstaller raises
 # "Unable to find file …"). ``trading.html`` in particular was moved to the
@@ -102,8 +107,7 @@ hidden_imports += [
 # unconditionally broke every build. We therefore filter to existing paths and
 # log what we drop, instead of crashing.
 _candidate_datas = [
-    (os.path.join(ROOT, 'contracts', 'desktop_bridge_v3.schema.json'), 'contracts'),
-    (os.path.join(ROOT, 'contracts', 'paper_build_v1.schema.json'), 'contracts'),
+    (os.path.join(ROOT, 'contracts'), 'contracts'),
     # Frontend
     (os.path.join(ROOT, 'static'), 'static'),
     # Imported by lib.vite_assets even when no frontend authoring source ships.

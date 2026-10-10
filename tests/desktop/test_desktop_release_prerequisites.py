@@ -125,6 +125,39 @@ def test_frozen_bundle_can_load_the_package_owned_model_contract(tmp_path):
     assert (tmp_path / target / 'openai.json').is_file()
 
 
+def test_frozen_bundle_can_load_research_observation_contract(tmp_path):
+    import importlib.util
+    import shutil
+    from tests.desktop.test_desktop_bundle_extension import _spec_datas
+
+    # Materialize the real post-filter data list at the frozen resource root.
+    for source, target in _spec_datas():
+        if Path(target) != Path('contracts'):
+            continue
+        source = Path(source)
+        destination = tmp_path / target
+        destination.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, destination / source.name)
+
+    loader = tmp_path / 'lib/research/action_observations.py'
+    loader.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / 'lib/research/action_observations.py', loader)
+    spec = importlib.util.spec_from_file_location(
+        'lib.research._frozen_action_observations', loader)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert not module._validator('binding').is_valid({})
+
+    # Neighboring runtime authorities must survive the same bundle boundary.
+    for source in (ROOT / 'contracts').rglob('*'):
+        if source.is_file() and source.suffix in {'.json', '.yaml', '.yml'}:
+            bundled = tmp_path / 'contracts' / source.relative_to(ROOT / 'contracts')
+            assert bundled.read_bytes() == source.read_bytes(), source.name
+
+
 def test_frozen_html_and_platform_selection_have_their_runtime_assets(tmp_path):
     import runpy
     import shutil
