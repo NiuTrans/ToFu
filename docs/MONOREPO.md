@@ -131,6 +131,10 @@ but fail at startup when a runtime loader opened an omitted authority. Decision:
 the full desktop application bundles the complete exported `contracts/` directory
 at its runtime resource root. Alternatives: adding only the first missing schema
 leaves neighboring loaders broken; embedding copies creates schema drift.
+The macOS job has a bounded 45-minute budget: a measured cold Intel build
+reached the former 30-minute limit while assembling the agent after the full
+app smoke passed. That bound covers both installers without allowing an
+unbounded build.
 
 Use `search-vX.Y.Z` and `trading-vX.Y.Z` for workspace members. The established
 agent release contract retains `vX.Y.Z` until its OCI/SDK promotion workflow is
