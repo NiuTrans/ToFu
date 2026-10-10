@@ -1,0 +1,96 @@
+/* Tool badges and saved-output continuations. One token palette across themes;
+ * artifact intent/patterns are visible, technical scope is disclosure evidence. */
+.ptool-mcp-link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+.ptool-mcp-link:hover { border-bottom-style: solid; }
+.ptool-badge {
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  font-family: var(--font-mono);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+.ptool-badge-info { color: var(--chip-info-color); background: var(--chip-info-bg); }
+.ptool-badge-ok { color: var(--chip-ok-color); background: var(--chip-ok-bg); }
+.ptool-badge-err { color: var(--chip-err-color); background: var(--chip-err-bg); }
+
+.ptool-artifact-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  white-space: normal;
+  user-select: text;
+}
+.ptool-artifact-title {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+.ptool-artifact-source {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+.ptool-artifact-queries {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--text-secondary);
+}
+.ptool-artifact-label {
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+}
+.ptool-artifact-queries .ptool-artifact-query {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  user-select: text;
+}
+.ptool-artifact-omitted {
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.ptool-artifact-request {
+  min-width: 0;
+  margin: var(--space-2) var(--space-3) 0;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.ptool-artifact-request :is(p, ol) {
+  margin-block: var(--space-1);
+}
+.ptool-artifact-request ol { padding-inline-start: var(--space-5); }
+.ptool-artifact-failure {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--error-color);
+  overflow-wrap: anywhere;
+}

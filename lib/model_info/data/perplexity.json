@@ -1,0 +1,33 @@
+{
+  "brand": "perplexity",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "perplexity",
+  "category": "official",
+  "name": "Perplexity",
+  "base_url": "https://api.perplexity.ai",
+  "offering_recipes": [
+    {
+      "model_id": "sonar",
+      "capabilities": [
+        "text"
+      ]
+    },
+    {
+      "model_id": "sonar-pro",
+      "capabilities": [
+        "text"
+      ]
+    },
+    {
+      "model_id": "sonar-reasoning-pro",
+      "capabilities": [
+        "text",
+        "thinking"
+      ]
+    }
+  ],
+  "catalog_source": {
+    "url": "https://docs.perplexity.ai/llms.txt",
+    "checked_at": "2026-09-08"
+  }
+}

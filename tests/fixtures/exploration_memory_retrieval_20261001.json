@@ -1,0 +1,199 @@
+{
+  "version": 1,
+  "source_kind": "synthetic multilingual known failures; no demand/value verification",
+  "source_receipts": [
+    {
+      "sequence": 1,
+      "step": {
+        "title": "Observed failure 1",
+        "kind": "experiment"
+      },
+      "result": "The network link saturated and delayed replicas; extra processors did not improve transfer throughput.",
+      "review": {
+        "outcome": "fail"
+      },
+      "error": "",
+      "outcome": "failed",
+      "run_id": "fixture-run-1"
+    },
+    {
+      "sequence": 2,
+      "step": {
+        "title": "Observed failure 2",
+        "kind": "experiment"
+      },
+      "result": "A stale connector token caused 401 rejection. Retrying unchanged credentials repeated the failure.",
+      "review": {
+        "outcome": "fail"
+      },
+      "error": "",
+      "outcome": "failed",
+      "run_id": "fixture-run-2"
+    },
+    {
+      "sequence": 3,
+      "step": {
+        "title": "Observed failure 3",
+        "kind": "experiment"
+      },
+      "result": "Increasing simultaneous workers exceeded the provider request-per-minute allowance; fewer calls finished sooner.",
+      "review": {
+        "outcome": "fail"
+      },
+      "error": "",
+      "outcome": "failed",
+      "run_id": "fixture-run-3"
+    },
+    {
+      "sequence": 4,
+      "step": {
+        "title": "Observed failure 4",
+        "kind": "experiment"
+      },
+      "result": "A request may have been accepted before the socket dropped. No usage invoice arrived, so remaining allowance cannot be proven.",
+      "review": {
+        "outcome": "fail"
+      },
+      "error": "",
+      "outcome": "failed",
+      "run_id": "fixture-run-4"
+    },
+    {
+      "sequence": 5,
+      "step": {
+        "title": "Observed failure 5",
+        "kind": "experiment"
+      },
+      "result": "The review cited tests from a different repository revision. Current-source reruns invalidated the completion claim.",
+      "review": {
+        "outcome": "fail"
+      },
+      "error": "",
+      "outcome": "failed",
+      "run_id": "fixture-run-5"
+    },
+    {
+      "sequence": 6,
+      "step": {
+        "title": "Observed failure 6",
+        "kind": "experiment"
+      },
+      "result": "Small-screen controls covered the next action and keyboard users could not reach it.",
+      "review": {
+        "outcome": "fail"
+      },
+      "error": "",
+      "outcome": "failed",
+      "run_id": "fixture-run-6"
+    },
+    {
+      "sequence": 7,
+      "step": {
+        "title": "Observed failure 7",
+        "kind": "experiment"
+      },
+      "result": "Exact word lookup missed earlier rejected experiments written with other vocabulary, so an invalid design was proposed again.",
+      "review": {
+        "outcome": "fail"
+      },
+      "error": "",
+      "outcome": "failed",
+      "run_id": "fixture-run-7"
+    },
+    {
+      "sequence": 8,
+      "step": {
+        "title": "Observed failure 8",
+        "kind": "experiment"
+      },
+      "result": "Automatic retry sent the same customer notification twice after a crash; no acknowledgement did not prove the first send failed.",
+      "review": {
+        "outcome": "fail"
+      },
+      "error": "",
+      "outcome": "failed",
+      "run_id": "fixture-run-8"
+    }
+  ],
+  "queries": [
+    {
+      "query": "带宽瓶颈造成复制延迟",
+      "expected_sequences": [
+        1
+      ]
+    },
+    {
+      "query": "认证过期导致反复失败",
+      "expected_sequences": [
+        2
+      ]
+    },
+    {
+      "query": "降低并发能否减少限流",
+      "expected_sequences": [
+        3
+      ]
+    },
+    {
+      "query": "缺失回执时怎样避免再次透支",
+      "expected_sequences": [
+        4
+      ]
+    },
+    {
+      "query": "旧版本测试不能证明当前修复",
+      "expected_sequences": [
+        5
+      ]
+    },
+    {
+      "query": "移动端和键盘操作阻碍用户完成流程",
+      "expected_sequences": [
+        6
+      ]
+    },
+    {
+      "query": "历史反例换种表述之后无法召回",
+      "expected_sequences": [
+        7
+      ]
+    },
+    {
+      "query": "如何避免重启后重复发出外部消息",
+      "expected_sequences": [
+        8
+      ]
+    },
+    {
+      "query": "Expired credentials repeatedly rejected after retry",
+      "expected_sequences": [
+        2
+      ]
+    },
+    {
+      "query": "network transfer congestion",
+      "expected_sequences": [
+        1
+      ]
+    },
+    {
+      "query": "401",
+      "expected_sequences": [
+        2
+      ]
+    },
+    {
+      "query": "evidence that scientists will buy this product",
+      "expected_sequences": []
+    }
+  ],
+  "metrics": [
+    "exact_source_set",
+    "positive_top1",
+    "negative_abstention",
+    "exact_quote_correspondence",
+    "provider_reported_tokens",
+    "latency"
+  ],
+  "evidence_boundary": "Fixed synthetic labels; real consumer value and production durability require separate evidence. Raw model results remain outside the repository."
+}

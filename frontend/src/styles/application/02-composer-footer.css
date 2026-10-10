@@ -1,0 +1,35 @@
+
+
+/* Hide tool-badges inside submenu (they exist for JS compat) */
+.submenu-item .tool-badge,.submenu-dropdown .tool-badge{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+
+/* ── Footer ── */
+.input-footer{display:flex;align-items:center;justify-content:center;padding:var(--space-2) 0 0;gap:var(--space-4)}
+.input-hint{font-size:10.5px;color:var(--text-tertiary);opacity:.5;letter-spacing:.02em}
+.input-hint-clip{width:12px;height:12px;vertical-align:-2px}
+#fileInput{display:none}
+@property --search-angle{syntax:'<angle>';initial-value:0deg;inherits:false}@keyframes searchBorderSpin{to{--search-angle:360deg}}@keyframes searchGlow{0%,100%{box-shadow:0 0 12px color-mix(in srgb,var(--search-blue) 15%,transparent),0 0 4px color-mix(in srgb,var(--search-blue) 8%,transparent)}50%{box-shadow:0 0 22px color-mix(in srgb,var(--search-blue) 28%,transparent),0 0 8px color-mix(in srgb,var(--search-blue) 15%,transparent)}}@keyframes searchGlowPurple{0%,100%{box-shadow:0 0 12px color-mix(in srgb,var(--search-purple) 15%,transparent),0 0 4px color-mix(in srgb,var(--search-purple) 8%,transparent)}50%{box-shadow:0 0 22px color-mix(in srgb,var(--search-purple) 28%,transparent),0 0 8px color-mix(in srgb,var(--search-purple) 15%,transparent)}}@keyframes searchIconPulse{0%{transform:scale(1) rotate(0deg)}30%{transform:scale(1.18) rotate(-8deg)}60%{transform:scale(.95) rotate(4deg)}100%{transform:scale(1) rotate(0deg)}}
+/* Model identity stays with the fixed input area, outside transcript scrolling. */
+.composer-model-notice { margin-bottom: var(--space-2); }
+.composer-model-notice[hidden] { display: none; }
+.conversation-model-notice {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+.conversation-model-notice--switched {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-inline-start: var(--control-edge-inset) solid var(--warning-border);
+  color: var(--warning-text);
+  background: var(--warning-bg);
+  line-height: var(--leading-title);
+}
+.conversation-model-notice--switched .conversation-model-notice-label {
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+}

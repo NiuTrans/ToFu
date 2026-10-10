@@ -1,0 +1,194 @@
+{
+  "contract": "tofudb-commit-path-recency-borrow-control-v1",
+  "date": "2026-10-08",
+  "summary": {
+    "rows": [
+      {
+        "entries": 0,
+        "round": 0,
+        "mode": "owned",
+        "ns_per_update": 106
+      },
+      {
+        "entries": 0,
+        "round": 0,
+        "mode": "borrowed",
+        "ns_per_update": 71
+      },
+      {
+        "entries": 0,
+        "round": 1,
+        "mode": "borrowed",
+        "ns_per_update": 73
+      },
+      {
+        "entries": 0,
+        "round": 1,
+        "mode": "owned",
+        "ns_per_update": 105
+      },
+      {
+        "entries": 0,
+        "round": 2,
+        "mode": "owned",
+        "ns_per_update": 103
+      },
+      {
+        "entries": 0,
+        "round": 2,
+        "mode": "borrowed",
+        "ns_per_update": 74
+      },
+      {
+        "entries": 0,
+        "round": 3,
+        "mode": "borrowed",
+        "ns_per_update": 74
+      },
+      {
+        "entries": 0,
+        "round": 3,
+        "mode": "owned",
+        "ns_per_update": 104
+      },
+      {
+        "entries": 8,
+        "round": 0,
+        "mode": "owned",
+        "ns_per_update": 350
+      },
+      {
+        "entries": 8,
+        "round": 0,
+        "mode": "borrowed",
+        "ns_per_update": 171
+      },
+      {
+        "entries": 8,
+        "round": 1,
+        "mode": "borrowed",
+        "ns_per_update": 172
+      },
+      {
+        "entries": 8,
+        "round": 1,
+        "mode": "owned",
+        "ns_per_update": 348
+      },
+      {
+        "entries": 8,
+        "round": 2,
+        "mode": "owned",
+        "ns_per_update": 349
+      },
+      {
+        "entries": 8,
+        "round": 2,
+        "mode": "borrowed",
+        "ns_per_update": 171
+      },
+      {
+        "entries": 8,
+        "round": 3,
+        "mode": "borrowed",
+        "ns_per_update": 171
+      },
+      {
+        "entries": 8,
+        "round": 3,
+        "mode": "owned",
+        "ns_per_update": 351
+      },
+      {
+        "entries": 128,
+        "round": 0,
+        "mode": "owned",
+        "ns_per_update": 5797
+      },
+      {
+        "entries": 128,
+        "round": 0,
+        "mode": "borrowed",
+        "ns_per_update": 2318
+      },
+      {
+        "entries": 128,
+        "round": 1,
+        "mode": "borrowed",
+        "ns_per_update": 2318
+      },
+      {
+        "entries": 128,
+        "round": 1,
+        "mode": "owned",
+        "ns_per_update": 5830
+      },
+      {
+        "entries": 128,
+        "round": 2,
+        "mode": "owned",
+        "ns_per_update": 5785
+      },
+      {
+        "entries": 128,
+        "round": 2,
+        "mode": "borrowed",
+        "ns_per_update": 2310
+      },
+      {
+        "entries": 128,
+        "round": 3,
+        "mode": "borrowed",
+        "ns_per_update": 2308
+      },
+      {
+        "entries": 128,
+        "round": 3,
+        "mode": "owned",
+        "ns_per_update": 5775
+      }
+    ],
+    "summary": {
+      "0": {
+        "owned_ns": 104.5,
+        "borrowed_ns": 73,
+        "percent": -30.14354066985646
+      },
+      "8": {
+        "owned_ns": 349.5,
+        "borrowed_ns": 171.25,
+        "percent": -51.00143061516452
+      },
+      "128": {
+        "owned_ns": 5796.75,
+        "borrowed_ns": 2313.5,
+        "percent": -60.0897054383922
+      }
+    },
+    "scope": "Copied actual binary directory decode/upsert/sort/encode, fixed synthetic0/8/128-entry fixtures; before timing every output byte-equal. System allocator, no DB or source IO, no full malformed corpus, no macro admission."
+  },
+  "differential_checks": 14573,
+  "differential_scope": "For0/1/8/128-entry fixtures, every truncation length, every byte replaced by0/255, and trailing byte; complete encoded output or error kind/text matches. Not an exhaustive input-space proof.",
+  "reproducers": {
+    "probe.rs": "mod owned{use std::io; const MAX_RECENCY_DIRECTORY_ENTRIES:usize=128;const VALUE_MAGIC:&[u8;3]=b\"RD1\";fn invalid_data(s:&str)->io::Error{io::Error::new(io::ErrorKind::InvalidData,s)}\ntype Entry=(u64,Vec<u8>);\nfn sort_entries(entries: &mut [Entry]) {\n    entries.sort_unstable_by(|left, right| {\n        right\n            .0\n            .cmp(&left.0)\n            .then_with(|| right.1.cmp(&left.1))\n    });\n}\n\nfn upsert(entries: &mut Vec<Entry>, updated_at_ms: u64, conversation_id: &[u8]) {\n    if let Some(existing) = entries\n        .iter_mut()\n        .find(|(_, id)| id.as_slice() == conversation_id)\n    {\n        existing.0 = updated_at_ms;\n    } else {\n        entries.push((updated_at_ms, conversation_id.to_vec()));\n    }\n    sort_entries(entries);\n    entries.truncate(MAX_RECENCY_DIRECTORY_ENTRIES);\n}\n\nfn remove(entries: &mut Vec<Entry>, conversation_id: &[u8]) {\n    entries.retain(|(_, id)| id.as_slice() != conversation_id);\n}\n\nfn encode_directory(live_count: u64, entries: &[Entry]) -> Vec<u8> {\n    let mut encoded = Vec::with_capacity(15 + entries.len() * 24);\n    encoded.extend_from_slice(VALUE_MAGIC);\n    encoded.extend_from_slice(&live_count.to_le_bytes());\n    encoded.extend_from_slice(&(entries.len() as u32).to_le_bytes());\n    for (updated_at_ms, conversation_id) in entries {\n        encoded.extend_from_slice(&updated_at_ms.to_le_bytes());\n        encoded.push(conversation_id.len() as u8);\n        encoded.extend_from_slice(conversation_id);\n    }\n    encoded\n}\n\nfn decode_directory(value: &[u8]) -> io::Result<(u64, Vec<Entry>)> {\n    if value.len() < 15 || !value.starts_with(VALUE_MAGIC) {\n        return Err(invalid_data(\"conversation recency directory is malformed\"));\n    }\n    let live_count = u64::from_le_bytes(value[3..11].try_into().unwrap());\n    let declared = u32::from_le_bytes(value[11..15].try_into().unwrap()) as usize;\n    if declared > MAX_RECENCY_DIRECTORY_ENTRIES {\n        return Err(invalid_data(\"conversation recency directory exceeds its entry bound\"));\n    }\n    let mut entries = Vec::with_capacity(declared);\n    let mut offset = 15_usize;\n    for _ in 0..declared {\n        if offset + 9 > value.len() {\n            return Err(invalid_data(\"conversation recency directory entry is truncated\"));\n        }\n        let updated_at_ms = u64::from_le_bytes(value[offset..offset + 8].try_into().unwrap());\n        let id_len = value[offset + 8] as usize;\n        offset += 9;\n        if id_len == 0 || offset + id_len > value.len() {\n            return Err(invalid_data(\"conversation recency directory id is truncated\"));\n        }\n        entries.push((updated_at_ms, value[offset..offset + id_len].to_vec()));\n        offset += id_len;\n    }\n    if offset != value.len() {\n        return Err(invalid_data(\"conversation recency directory has trailing bytes\"));\n    }\n    Ok((live_count, entries))\n}\n\npub fn mutate(value:&[u8],id:&[u8],ts:u64)->io::Result<Vec<u8>>{let(count,mut entries)=decode_directory(value)?;upsert(&mut entries,ts,id);Ok(encode_directory(count,&entries))}\npub fn fixture(count:usize)->Vec<u8>{let entries=(0..count).map(|i|(i as u64,format!(\"conv_{i:04}_abcdefghijklmnop\").into_bytes())).collect::<Vec<_>>();encode_directory(count as u64,&entries)}\n}\nmod borrowed{use std::io; const MAX_RECENCY_DIRECTORY_ENTRIES:usize=128;const VALUE_MAGIC:&[u8;3]=b\"RD1\";fn invalid_data(s:&str)->io::Error{io::Error::new(io::ErrorKind::InvalidData,s)}\ntype Entry<'a>=(u64,&'a[u8]);\nfn sort_entries(entries: &mut [Entry]) {\n    entries.sort_unstable_by(|left, right| {\n        right\n            .0\n            .cmp(&left.0)\n            .then_with(|| right.1.cmp(&left.1))\n    });\n}\n\nfn upsert<'a>(entries: &mut Vec<Entry<'a>>, updated_at_ms: u64, conversation_id: &'a [u8]) {\n    if let Some(existing) = entries\n        .iter_mut()\n        .find(|(_, id)| *id == conversation_id)\n    {\n        existing.0 = updated_at_ms;\n    } else {\n        entries.push((updated_at_ms, conversation_id));\n    }\n    sort_entries(entries);\n    entries.truncate(MAX_RECENCY_DIRECTORY_ENTRIES);\n}\n\nfn remove(entries: &mut Vec<Entry>, conversation_id: &[u8]) {\n    entries.retain(|(_, id)| *id != conversation_id);\n}\n\nfn encode_directory(live_count: u64, entries: &[Entry]) -> Vec<u8> {\n    let mut encoded = Vec::with_capacity(15 + entries.len() * 24);\n    encoded.extend_from_slice(VALUE_MAGIC);\n    encoded.extend_from_slice(&live_count.to_le_bytes());\n    encoded.extend_from_slice(&(entries.len() as u32).to_le_bytes());\n    for (updated_at_ms, conversation_id) in entries {\n        encoded.extend_from_slice(&updated_at_ms.to_le_bytes());\n        encoded.push(conversation_id.len() as u8);\n        encoded.extend_from_slice(conversation_id);\n    }\n    encoded\n}\n\nfn decode_directory(value: &[u8]) -> io::Result<(u64, Vec<Entry>)> {\n    if value.len() < 15 || !value.starts_with(VALUE_MAGIC) {\n        return Err(invalid_data(\"conversation recency directory is malformed\"));\n    }\n    let live_count = u64::from_le_bytes(value[3..11].try_into().unwrap());\n    let declared = u32::from_le_bytes(value[11..15].try_into().unwrap()) as usize;\n    if declared > MAX_RECENCY_DIRECTORY_ENTRIES {\n        return Err(invalid_data(\"conversation recency directory exceeds its entry bound\"));\n    }\n    let mut entries = Vec::with_capacity(declared);\n    let mut offset = 15_usize;\n    for _ in 0..declared {\n        if offset + 9 > value.len() {\n            return Err(invalid_data(\"conversation recency directory entry is truncated\"));\n        }\n        let updated_at_ms = u64::from_le_bytes(value[offset..offset + 8].try_into().unwrap());\n        let id_len = value[offset + 8] as usize;\n        offset += 9;\n        if id_len == 0 || offset + id_len > value.len() {\n            return Err(invalid_data(\"conversation recency directory id is truncated\"));\n        }\n        entries.push((updated_at_ms, &value[offset..offset + id_len]));\n        offset += id_len;\n    }\n    if offset != value.len() {\n        return Err(invalid_data(\"conversation recency directory has trailing bytes\"));\n    }\n    Ok((live_count, entries))\n}\n\npub fn mutate(value:&[u8],id:&[u8],ts:u64)->io::Result<Vec<u8>>{let(count,mut entries)=decode_directory(value)?;upsert(&mut entries,ts,id);Ok(encode_directory(count,&entries))}\n}\nuse std::{time::Instant,hint::black_box};\nfn main(){for count in [0,8,128]{let fixture=owned::fixture(count);let id=b\"conv_0004_abcdefghijklmnop\";let expected=owned::mutate(&fixture,id,9999).unwrap();assert_eq!(borrowed::mutate(&fixture,id,9999).unwrap(),expected);for round in 0..4{let modes=if round%2==0{[\"owned\",\"borrowed\"]}else{[\"borrowed\",\"owned\"]};for mode in modes{let start=Instant::now();let mut sum=0;for _ in 0..100000{let v=if mode==\"owned\"{owned::mutate(black_box(&fixture),id,9999).unwrap()}else{borrowed::mutate(black_box(&fixture),id,9999).unwrap()};sum+=black_box(v.len());}assert_eq!(sum,expected.len()*100000);println!(\"{} {} {} {}\",count,round,mode,start.elapsed().as_nanos()/100000);}}}}\n",
+    "differential.rs": "mod owned{use std::io; const MAX_RECENCY_DIRECTORY_ENTRIES:usize=128;const VALUE_MAGIC:&[u8;3]=b\"RD1\";fn invalid_data(s:&str)->io::Error{io::Error::new(io::ErrorKind::InvalidData,s)}\ntype Entry=(u64,Vec<u8>);\nfn sort_entries(entries: &mut [Entry]) {\n    entries.sort_unstable_by(|left, right| {\n        right\n            .0\n            .cmp(&left.0)\n            .then_with(|| right.1.cmp(&left.1))\n    });\n}\n\nfn upsert(entries: &mut Vec<Entry>, updated_at_ms: u64, conversation_id: &[u8]) {\n    if let Some(existing) = entries\n        .iter_mut()\n        .find(|(_, id)| id.as_slice() == conversation_id)\n    {\n        existing.0 = updated_at_ms;\n    } else {\n        entries.push((updated_at_ms, conversation_id.to_vec()));\n    }\n    sort_entries(entries);\n    entries.truncate(MAX_RECENCY_DIRECTORY_ENTRIES);\n}\n\nfn remove(entries: &mut Vec<Entry>, conversation_id: &[u8]) {\n    entries.retain(|(_, id)| id.as_slice() != conversation_id);\n}\n\nfn encode_directory(live_count: u64, entries: &[Entry]) -> Vec<u8> {\n    let mut encoded = Vec::with_capacity(15 + entries.len() * 24);\n    encoded.extend_from_slice(VALUE_MAGIC);\n    encoded.extend_from_slice(&live_count.to_le_bytes());\n    encoded.extend_from_slice(&(entries.len() as u32).to_le_bytes());\n    for (updated_at_ms, conversation_id) in entries {\n        encoded.extend_from_slice(&updated_at_ms.to_le_bytes());\n        encoded.push(conversation_id.len() as u8);\n        encoded.extend_from_slice(conversation_id);\n    }\n    encoded\n}\n\nfn decode_directory(value: &[u8]) -> io::Result<(u64, Vec<Entry>)> {\n    if value.len() < 15 || !value.starts_with(VALUE_MAGIC) {\n        return Err(invalid_data(\"conversation recency directory is malformed\"));\n    }\n    let live_count = u64::from_le_bytes(value[3..11].try_into().unwrap());\n    let declared = u32::from_le_bytes(value[11..15].try_into().unwrap()) as usize;\n    if declared > MAX_RECENCY_DIRECTORY_ENTRIES {\n        return Err(invalid_data(\"conversation recency directory exceeds its entry bound\"));\n    }\n    let mut entries = Vec::with_capacity(declared);\n    let mut offset = 15_usize;\n    for _ in 0..declared {\n        if offset + 9 > value.len() {\n            return Err(invalid_data(\"conversation recency directory entry is truncated\"));\n        }\n        let updated_at_ms = u64::from_le_bytes(value[offset..offset + 8].try_into().unwrap());\n        let id_len = value[offset + 8] as usize;\n        offset += 9;\n        if id_len == 0 || offset + id_len > value.len() {\n            return Err(invalid_data(\"conversation recency directory id is truncated\"));\n        }\n        entries.push((updated_at_ms, value[offset..offset + id_len].to_vec()));\n        offset += id_len;\n    }\n    if offset != value.len() {\n        return Err(invalid_data(\"conversation recency directory has trailing bytes\"));\n    }\n    Ok((live_count, entries))\n}\n\npub fn mutate(value:&[u8],id:&[u8],ts:u64)->io::Result<Vec<u8>>{let(count,mut entries)=decode_directory(value)?;upsert(&mut entries,ts,id);Ok(encode_directory(count,&entries))}\npub fn fixture(count:usize)->Vec<u8>{let entries=(0..count).map(|i|(i as u64,format!(\"conv_{i:04}_abcdefghijklmnop\").into_bytes())).collect::<Vec<_>>();encode_directory(count as u64,&entries)}\n}\nmod borrowed{use std::io; const MAX_RECENCY_DIRECTORY_ENTRIES:usize=128;const VALUE_MAGIC:&[u8;3]=b\"RD1\";fn invalid_data(s:&str)->io::Error{io::Error::new(io::ErrorKind::InvalidData,s)}\ntype Entry<'a>=(u64,&'a[u8]);\nfn sort_entries(entries: &mut [Entry]) {\n    entries.sort_unstable_by(|left, right| {\n        right\n            .0\n            .cmp(&left.0)\n            .then_with(|| right.1.cmp(&left.1))\n    });\n}\n\nfn upsert<'a>(entries: &mut Vec<Entry<'a>>, updated_at_ms: u64, conversation_id: &'a [u8]) {\n    if let Some(existing) = entries\n        .iter_mut()\n        .find(|(_, id)| *id == conversation_id)\n    {\n        existing.0 = updated_at_ms;\n    } else {\n        entries.push((updated_at_ms, conversation_id));\n    }\n    sort_entries(entries);\n    entries.truncate(MAX_RECENCY_DIRECTORY_ENTRIES);\n}\n\nfn remove(entries: &mut Vec<Entry>, conversation_id: &[u8]) {\n    entries.retain(|(_, id)| *id != conversation_id);\n}\n\nfn encode_directory(live_count: u64, entries: &[Entry]) -> Vec<u8> {\n    let mut encoded = Vec::with_capacity(15 + entries.len() * 24);\n    encoded.extend_from_slice(VALUE_MAGIC);\n    encoded.extend_from_slice(&live_count.to_le_bytes());\n    encoded.extend_from_slice(&(entries.len() as u32).to_le_bytes());\n    for (updated_at_ms, conversation_id) in entries {\n        encoded.extend_from_slice(&updated_at_ms.to_le_bytes());\n        encoded.push(conversation_id.len() as u8);\n        encoded.extend_from_slice(conversation_id);\n    }\n    encoded\n}\n\nfn decode_directory(value: &[u8]) -> io::Result<(u64, Vec<Entry>)> {\n    if value.len() < 15 || !value.starts_with(VALUE_MAGIC) {\n        return Err(invalid_data(\"conversation recency directory is malformed\"));\n    }\n    let live_count = u64::from_le_bytes(value[3..11].try_into().unwrap());\n    let declared = u32::from_le_bytes(value[11..15].try_into().unwrap()) as usize;\n    if declared > MAX_RECENCY_DIRECTORY_ENTRIES {\n        return Err(invalid_data(\"conversation recency directory exceeds its entry bound\"));\n    }\n    let mut entries = Vec::with_capacity(declared);\n    let mut offset = 15_usize;\n    for _ in 0..declared {\n        if offset + 9 > value.len() {\n            return Err(invalid_data(\"conversation recency directory entry is truncated\"));\n        }\n        let updated_at_ms = u64::from_le_bytes(value[offset..offset + 8].try_into().unwrap());\n        let id_len = value[offset + 8] as usize;\n        offset += 9;\n        if id_len == 0 || offset + id_len > value.len() {\n            return Err(invalid_data(\"conversation recency directory id is truncated\"));\n        }\n        entries.push((updated_at_ms, &value[offset..offset + id_len]));\n        offset += id_len;\n    }\n    if offset != value.len() {\n        return Err(invalid_data(\"conversation recency directory has trailing bytes\"));\n    }\n    Ok((live_count, entries))\n}\n\npub fn mutate(value:&[u8],id:&[u8],ts:u64)->io::Result<Vec<u8>>{let(count,mut entries)=decode_directory(value)?;upsert(&mut entries,ts,id);Ok(encode_directory(count,&entries))}\n}\nuse std::{time::Instant,hint::black_box};\nfn compare(raw:&[u8]) {let a=owned::mutate(raw,b\"new-id\",9999);let b=borrowed::mutate(raw,b\"new-id\",9999);match(a,b){(Ok(a),Ok(b))=>assert_eq!(a,b),(Err(a),Err(b))=>{assert_eq!(a.kind(),b.kind());assert_eq!(a.to_string(),b.to_string());},other=>panic!(\"mismatch {:?}\",other)}}\nfn main(){let mut checks=0;for count in [0,1,8,128]{let v=owned::fixture(count);for end in 0..=v.len(){compare(&v[..end]);checks+=1;}for index in 0..v.len(){for byte in [0,255]{let mut mutated=v.clone();mutated[index]=byte;compare(&mutated);checks+=1;}}let mut trailing=v.clone();trailing.push(0);compare(&trailing);checks+=1;}println!(\"Exact output/error comparisons {}\",checks);}\n"
+  },
+  "source_findings": {
+    "prepared_blob_publish": "Sampled original frozen profiles show28-40us perturn.event.record for publication; authority commit explicitly excludes GC deletion after OCC validation through publication/commit. Moving it outside requires a new verified lease protocol.",
+    "recency_bounds": "Owner recency directory retains top128, not all1000 live conversations. Current binary decoder allocates one Vec perID; borrowed slices remove those ID allocations in a standalone decode/update/sort/encode control.",
+    "second_validation": "After business rebase to current head, prepare_commit validation returns immediately when snapshot==head; do not claim duplicated full OCC validation here."
+  },
+  "native_source_reference": "9ed0adae05578c09f4cf34af07739aac37acfe01208bbc449a0c89ccec3057cc",
+  "binary_hashes": {
+    "probe": "6ab1ae729f7aea1f67b6b0262fcbde466ea9c62c530560c05e374813b2e1d29e",
+    "differential": "edcac96c6e32deca930f68841bdf3153933a0d2483f3d07debe011d945c7543e"
+  },
+  "limitations": [
+    "No native runtime/source change admitted; no actual database latency gain.",
+    "System allocator, fixed synthetic fixtures; native mimalloc and authority index path not measured.",
+    "Standalone timings are not subtractable from sampled commit or productive FIFO delay.",
+    "Borrowed control keeps existing binary checks and sorts before encoding; native read/backfill lifetimes not yet implemented or verified.",
+    "Serialized commit prefix/index cost has not been independently attributed; small micro saving cannot explain entire1s miss."
+  ],
+  "next_action": "Evaluate shared borrowed binary decoder with owner/deadline/backfill/read-your-writes and publication fault contracts, then measure real native counterpart before admission."
+}

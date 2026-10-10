@@ -1,0 +1,197 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Project Brain — signal-driven read model (2026-09 redesign).
+   Board / Feed / Charter / Status are READ-ONLY projections of
+   the storage event authority; the only owned commands are Watch maintenance
+   and versioned Checker registration/execution. The Integration tab keeps its
+   own operational density in static/project-integration.css.
+   Every class name below is load-bearing for project-brain.js — do not
+   rename without updating the JS.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Local design tokens (scoped) so the whole surface stays internally
+   consistent and easy to retune. */
+.project-brain-overlay{
+  --pb-radius:12px; --pb-radius-sm:9px; --pb-radius-chip:999px;
+  --pb-card-bg:color-mix(in srgb,var(--bg-tertiary) 82%,var(--bg-secondary));
+  --pb-card-hover:color-mix(in srgb,var(--bg-hover) 70%,var(--bg-tertiary));
+  --pb-green:#22c55e; --pb-red:#ef4444; --pb-amber:#eab308;
+}
+/* Light surfaces: the dark-theme status hues above wash out on paper. Deepen
+   the same hues so badges, lane rails and tab colour keep ≥ ~4.4:1 on the
+   light card ground. */
+[data-theme="light"] .project-brain-overlay,
+[data-theme="tofu"] .project-brain-overlay{
+  --pb-green:#15803d; --pb-red:#dc2626; --pb-amber:#854d0e;
+}
+
+/* Overlay + sliding panel. */
+.project-brain-overlay{position:fixed;inset:0;height:100vh;height:var(--vh100,100vh);background:rgba(6,6,10,0.58);backdrop-filter:blur(4px);z-index:9998;display:flex;align-items:stretch;justify-content:flex-end;animation:fadeIn 0.16s ease}
+.project-brain-overlay[hidden]{display:none}
+/* WebView quirk: a position:fixed element sizes to the initial containing
+   block, which this Android WebView measures as height:0 (same root cause as
+   the blank-screen/modal fixes) — so inset:0 alone collapsed the overlay and
+   its height:100% panel to nothing. Pin an explicit height from the known-good
+   --vh100 px var (set by _installViewportHeightGuard), plain 100vh fallback. */
+.project-brain-panel{position:relative;background:var(--bg-secondary);border-left:1px solid var(--border-light);width:min(960px,94vw);height:100%;min-height:var(--vh100,100vh);display:flex;flex-direction:column;box-shadow:-24px 0 64px rgba(0,0,0,0.5);animation:pbSlideIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+/* Accent hairline running down the panel's leading edge — ties it to the brand. */
+.project-brain-panel::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:linear-gradient(180deg,var(--accent),color-mix(in srgb,var(--accent) 30%,transparent));opacity:0.9}
+@keyframes pbSlideIn{from{transform:translateX(28px);opacity:0}to{transform:translateX(0);opacity:1}}
+
+/* Head. */
+.project-brain-head{display:flex;align-items:center;justify-content:space-between;padding:var(--space-4) 22px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 7%,var(--bg-tertiary)),var(--bg-secondary))}
+.project-brain-title{display:flex;align-items:center;gap:10px;font-size:15.5px;font-weight:700;letter-spacing:0.01em;color:var(--text-primary)}
+.project-brain-title-ico{display:inline-flex;color:var(--accent)}
+.project-brain-title-ico svg{display:block}
+.project-brain-close{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;background:transparent;border:none;color:var(--text-tertiary);font-size:var(--font-size-xl);line-height:1;cursor:pointer;border-radius:var(--radius-xs);transition:color var(--transition),background var(--transition),transform 0.12s ease}
+.project-brain-close:hover{color:var(--text-primary);background:var(--bg-hover)}
+.project-brain-close:active{transform:scale(0.9)}
+.project-brain-head-actions{display:flex;align-items:center;gap:var(--space-2)}
+
+/* ── Tab bar: the six surfaces shown one-at-a-time ──
+   Six side-by-side columns would collapse to unreadable slivers on a narrow
+   panel (width:min(960px,94vw)) — so we tab between them and give the ACTIVE
+   surface the full width. Each tab carries a colour-coded dot + an optional
+   count badge. */
+/* Six tabs overflow the bar on a phone-width panel, and macOS auto-hides
+   overlay scrollbars — so the trailing tabs looked like they simply weren't
+   there. Lea-Verou scroll shadows: an edge shadow shows ONLY on a side that
+   can still scroll (the `local` cover gradients mask the `scroll` shadow
+   gradients at the extremes); the scrollbar itself stays hidden. */
+.project-brain-tabs{display:flex;align-items:stretch;gap:2px;padding:0 var(--space-3);background-color:var(--bg-secondary);border-bottom:1px solid var(--border);overflow-x:auto;flex-shrink:0;scrollbar-width:none;
+  background-image:linear-gradient(to right,var(--bg-secondary) 30%,transparent),linear-gradient(to right,transparent,var(--bg-secondary) 70%),radial-gradient(farthest-side at 0 50%,rgba(0,0,0,0.22),rgba(0,0,0,0)),radial-gradient(farthest-side at 100% 50%,rgba(0,0,0,0.22),rgba(0,0,0,0));
+  background-position:0 0,100% 0,0 0,100% 0;background-repeat:no-repeat;
+  background-size:32px 100%,32px 100%,10px 100%,10px 100%;
+  background-attachment:local,local,scroll,scroll}
+.project-brain-tabs::-webkit-scrollbar{height:0}
+.pb-tab{position:relative;display:inline-flex;align-items:center;gap:7px;padding:var(--space-3) 15px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--text-tertiary);font-family:inherit;font-size:12.5px;font-weight:600;letter-spacing:0.01em;cursor:pointer;white-space:nowrap;transition:color var(--transition),border-color var(--transition)}
+.pb-tab::before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor;opacity:0.45;flex-shrink:0}
+.pb-tab:hover{color:var(--text-secondary)}
+.pb-tab-active{color:var(--text-primary);border-bottom-color:var(--accent)}
+.pb-tab-active::before{opacity:1}
+.pb-tab[data-pb-tab="charter"].pb-tab-active{color:var(--accent)}
+.pb-tab[data-pb-tab="board"].pb-tab-active{color:var(--pb-green)}
+.pb-tab[data-pb-tab="activity"].pb-tab-active{color:var(--pb-amber)}
+.pb-tab-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;font-size:10.5px;font-weight:700;line-height:1;border-radius:999px;background:var(--bg-tertiary);border:1px solid var(--border);color:var(--text-secondary)}
+.pb-tab-count[hidden]{display:none}
+
+/* ── Keyboard focus rings ──
+   Every control is a real <button>/<input> reachable by Tab; one shared ring
+   keeps keyboard navigation visible (`:focus-visible` never fires on mouse
+   click, so pointer users see no change). */
+.project-brain-overlay .pb-tab:focus-visible,
+.project-brain-overlay .pb-btn:focus-visible,
+.project-brain-overlay .pb-watch-composer select:focus-visible,
+.project-brain-overlay .pb-watch-composer input:focus-visible,
+.project-brain-overlay .pb-watch-composer button:focus-visible,
+.project-brain-overlay .pb-watch-actions button:focus-visible,
+.project-brain-overlay .pb-note-editor input:focus-visible,
+.project-brain-overlay .project-brain-close:focus-visible{
+  outline:2px solid color-mix(in srgb,var(--accent) 60%,transparent);
+  outline-offset:2px;
+  border-radius:var(--pb-radius-sm,4px);
+}
+
+/* Tab-panel host: the active panel fills the panel; the rest are hidden.
+   NOTE: the panels carry BOTH .project-brain-col AND .pb-tab-panel, so the
+   show/hide rules MUST out-specify .project-brain-col (which sets display:flex);
+   a bare .pb-tab-panel selector has equal specificity and loses on source order,
+   leaving every panel visible → tab clicks appear to do nothing. */
+.project-brain-columns{flex:1;display:block;background:var(--bg-secondary);overflow:hidden;min-height:0}
+.project-brain-col.pb-tab-panel{display:none;height:100%}
+.project-brain-col.pb-tab-panel-active{display:flex}
+.project-brain-col{background:var(--bg-secondary);display:flex;flex-direction:column;min-height:0;flex:1}
+.project-brain-col-body{flex:1;overflow-y:auto;padding:var(--space-4) 18px;display:flex;flex-direction:column;max-width:820px;width:100%;margin:0 auto;box-sizing:border-box}
+.project-brain-col-body::-webkit-scrollbar{width:8px}
+.project-brain-col-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.project-brain-col-body::-webkit-scrollbar-thumb:hover{background:var(--border-light)}
+
+/* Empty states — a centered, quiet dashed frame instead of bare text.
+   .pb-board-empty doubles as the shared placeholder: project-brain.js renders
+   it through _empty() on every surface. */
+.pb-charter-empty,.pb-board-empty,.pb-activity-empty,.pb-status-empty{flex:1;display:flex;align-items:center;justify-content:center;min-height:200px;color:var(--text-tertiary);font-size:var(--font-size-md);text-align:center;padding:var(--space-6);margin:2px;border:1px dashed var(--border);border-radius:var(--pb-radius);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent)}
+
+/* ── Shared card grammar ──
+   One shape for every projected item — board work card, feed event, charter
+   decision/checker row, watch item — so the eye learns the surface once.
+   Status and severity read from the leading rail, never from saturated
+   fills. */
+.pb-board-card,.pb-activity-item,.pb-charter-decision,.pb-watch-item{background:var(--pb-card-bg);border:1px solid var(--border);border-radius:var(--pb-radius);padding:11px 13px;margin-bottom:9px;transition:border-color var(--transition),background var(--transition),transform 0.12s ease;animation:pbRowIn 0.24s cubic-bezier(0.16,1,0.3,1)}
+.pb-board-card:hover,.pb-activity-item:hover,.pb-charter-decision:hover,.pb-watch-item:hover{border-color:var(--border-light);background:var(--pb-card-hover);transform:translateY(-1px)}
+@keyframes pbRowIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+
+/* Section block + small-caps head shared by Board lanes, Charter sections and
+   the Watch lane. */
+.pb-board-lane,.pb-charter-section,#pbWatchSection{margin-bottom:var(--space-5)}
+.pb-board-lane:last-child,.pb-charter-section:last-child,#pbWatchSection:last-child{margin-bottom:0}
+.pb-board-lane>h3,.pb-charter-section>h3,#pbWatchSection>h3{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--text-tertiary);margin:0 0 9px}
+
+/* Card-internal type scale: title leads, body recedes, meta whispers. */
+.pb-board-card-title{font-size:13.5px;font-weight:600;line-height:1.5;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
+.pb-board-card-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:6px;font-size:11.5px;color:var(--text-tertiary)}
+.pb-board-card-desc{margin-top:6px;font-size:var(--font-size-sm);line-height:1.55;color:var(--text-secondary);overflow-wrap:anywhere;word-break:break-word}
+.pb-activity-item time{display:block;margin-top:7px;font-size:10.5px;color:var(--text-tertiary)}
+
+/* ── Board: active work + recent outcomes (read-only projection) ──
+   The leading rail carries the status: active = green, completed = quiet
+   green, failed = red, cancelled = neutral. */
+.pb-board-card.pb-board-active{border-left:3px solid color-mix(in srgb,var(--pb-green) 65%,var(--border))}
+.pb-board-card.pb-board-completed{border-left:3px solid color-mix(in srgb,var(--pb-green) 38%,var(--border));opacity:0.78}
+.pb-board-card.pb-board-failed{border-left:3px solid color-mix(in srgb,var(--pb-red) 45%,var(--border))}
+.pb-board-card.pb-board-cancelled{border-left:3px solid var(--border);opacity:0.7}
+
+/* ── Activity feed ── */
+.pb-activity-list{display:flex;flex-direction:column;min-height:100%}
+.pb-activity-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:var(--space-1)}
+.pb-activity-body strong{font-size:var(--font-size-xs);font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--accent)}
+.pb-activity-body p{margin:0;font-size:12.5px;line-height:1.55;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
+
+/* ── Charter: executable decisions + versioned checker catalog ── */
+.pb-charter-decision{display:flex;align-items:flex-start;gap:10px;border-left:3px solid color-mix(in srgb,var(--accent) 55%,var(--border))}
+.pb-decision-text{flex:1;min-width:0;font-size:var(--font-size-md);line-height:1.5;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
+.pb-decision-text strong{font-weight:600}
+.pb-decision-text code{display:inline-block;margin-top:3px;font-family:var(--font-mono,ui-monospace,monospace);font-size:var(--font-size-xs);color:var(--text-secondary);background:color-mix(in srgb,var(--bg-tertiary) 55%,transparent);border:1px solid var(--border);border-radius:5px;padding:2px 7px;overflow-wrap:anywhere;word-break:break-all}
+.pb-decision-meta{margin-top:5px;font-size:var(--font-size-xs);color:var(--text-tertiary)}
+/* One button vocabulary panel-wide: quiet default, accent fill for the single
+   forward action (register / run). */
+.pb-btn{display:inline-flex;align-items:center;gap:5px;align-self:center;flex-shrink:0;background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:5px 11px;font-size:11.5px;font-weight:600;font-family:inherit;cursor:pointer;transition:color var(--transition),border-color var(--transition),background var(--transition)}
+.pb-btn:hover{color:var(--text-primary);border-color:var(--border-light)}
+.pb-btn:disabled{opacity:0.55;cursor:default}
+.pb-btn.pb-btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pb-btn.pb-btn-primary:hover{background:var(--accent-hover);color:#fff;border-color:var(--accent-hover)}
+/* Checker registration form — stacked, full-width fields; argv/globs are
+   JSON, so they read in mono. */
+.pb-note-editor{display:flex;flex-direction:column;gap:var(--space-2);margin-top:var(--space-3);padding:var(--space-3);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent);border:1px solid var(--border);border-radius:var(--pb-radius)}
+.pb-note-editor input{width:100%;box-sizing:border-box;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--pb-radius-sm);padding:7px 10px;font-size:var(--font-size-sm);color:var(--text-primary);font-family:inherit}
+.pb-note-editor input[name="argv"],.pb-note-editor input[name="pathGlobs"]{font-family:var(--font-mono,ui-monospace,monospace);font-size:11.5px}
+.pb-note-editor input:focus{outline:none;border-color:var(--accent)}
+.pb-note-editor .pb-btn{align-self:flex-end}
+
+/* ── Status & Watch: derived counters + the one human-maintained list ── */
+.pb-status-evidence{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px;opacity:0.85}
+.pb-status-ev-chip{font-size:var(--font-size-xs);font-weight:600;color:var(--text-secondary);padding:2px 9px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:999px}
+.pb-watch-composer{display:flex;align-items:center;gap:var(--space-2);margin-bottom:var(--space-3);padding:11px var(--space-3);background:color-mix(in srgb,var(--bg-tertiary) 30%,transparent);border:1px solid var(--border);border-radius:var(--pb-radius)}
+.pb-watch-composer select{flex-shrink:0;padding:6px var(--space-2);font:inherit;font-size:var(--font-size-sm);color:var(--text-primary);background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-watch-composer input{flex:1;min-width:0;padding:6px 10px;font:inherit;font-size:12.5px;color:var(--text-primary);background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--pb-radius-sm)}
+.pb-watch-composer select:focus,.pb-watch-composer input:focus{outline:none;border-color:color-mix(in srgb,var(--accent) 55%,transparent)}
+.pb-watch-composer button{flex-shrink:0;padding:6px 14px;font:inherit;font-size:var(--font-size-sm);font-weight:600;color:#fff;background:var(--accent);border:1px solid var(--accent);border-radius:var(--pb-radius-sm);cursor:pointer;transition:opacity var(--transition)}
+.pb-watch-composer button:hover{opacity:0.9}
+@media (max-width:560px){.pb-watch-composer{flex-wrap:wrap}.pb-watch-composer input{flex-basis:100%}}
+.pb-watch-item{display:flex;align-items:flex-start;gap:var(--space-3)}
+.pb-watch-main{flex:1;min-width:0}
+.pb-watch-main>strong{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-secondary);padding:1px var(--space-2);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:999px}
+.pb-watch-main>p{margin:7px 0 0;font-size:var(--font-size-md);line-height:1.5;color:var(--text-primary);overflow-wrap:anywhere;word-break:break-word}
+.pb-watch-verdict{margin-top:7px;padding:var(--space-2) 10px;font-size:var(--font-size-sm);line-height:1.55;color:var(--text-secondary);background:color-mix(in srgb,var(--bg-tertiary) 40%,transparent);border-radius:var(--pb-radius-sm);overflow-wrap:anywhere;word-break:break-word}
+.pb-watch-actions{display:flex;flex-direction:column;gap:6px;flex-shrink:0}
+.pb-watch-actions button{padding:var(--space-1) 11px;font:inherit;font-size:var(--font-size-xs);font-weight:600;color:var(--text-secondary);background:transparent;border:1px solid var(--border);border-radius:var(--pb-radius-sm);cursor:pointer;transition:color var(--transition),border-color var(--transition)}
+.pb-watch-actions button:hover{color:var(--text-primary);border-color:var(--text-tertiary)}
+.pb-watch-actions button:disabled{opacity:0.5;cursor:default}
+.pb-watch-actions button[data-pb-action="delete-watch"]:hover{color:var(--pb-red);border-color:color-mix(in srgb,var(--pb-red) 55%,transparent)}
+
+/* ── Responsive: narrow panel ──
+   NOTE: .project-brain-columns is a display:block tab host (one panel visible
+   at a time), NOT a grid. Tighten the body gutter, which is what actually
+   buys reading width on a phone. */
+@media (max-width:720px){
+  .project-brain-col-body{padding:var(--space-3) var(--space-3)}
+  .project-brain-tabs{padding:0 6px}
+}

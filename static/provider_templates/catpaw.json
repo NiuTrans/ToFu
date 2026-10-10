@@ -1,0 +1,27 @@
+{
+  "brand": "catpaw",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "catpaw",
+  "category": "relay",
+  "name": "CatPaw (Credit Hub)",
+  "base_url": "https://mcli.internal.example.com",
+  "protocol": "anthropic",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://console.catpaw.internal.example.com/credit-hub", "checked_at": "2026-09-09"},
+  "_gateway_note": "CatPaw CLI (mc --code) 的 mcli 网关，按员工个人 Credit Hub 每日额度计费（不走 Friday AppID）。API key 填 ~/.config/mcopilot-cli/.config.yaml 里的 AUTHORIZATION（32 位）。网关要求 system 以 Claude Code 身份串开头且携带非空 X-Working-Dir——由 lib/llm/catpaw_gateway.py 按 base_url host 自动适配，无需在此配置 extra_headers。模型白名单见学城 CatPaw 文档；capabilities 与 yourprovider.json 中同名模型对齐。",
+  "offering_recipes": [
+    {"model_id": "kimi-k3", "capabilities": ["text", "vision", "video", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "kimi-k2.7-code", "capabilities": ["text", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "kimi-k2.6", "capabilities": ["text", "cheap"], "rpm": 60},
+    {"model_id": "deepseek-v4-pro", "capabilities": ["text", "thinking", "cheap"], "rpm": 30},
+    {"model_id": "deepseek-v4-flash", "capabilities": ["text", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "glm-5.3", "capabilities": ["text", "thinking"], "rpm": 30},
+    {"model_id": "glm-5.3-flash", "capabilities": ["text", "vision", "video", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "glm-5.2", "capabilities": ["text", "thinking"], "rpm": 30},
+    {"model_id": "glm-5.1", "capabilities": ["text", "thinking"], "rpm": 30},
+    {"model_id": "MiniMax-M3", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 30},
+    {"model_id": "MiniMax-M2.7", "capabilities": ["text", "cheap"], "rpm": 30},
+    {"model_id": "gpt-5.4", "capabilities": ["text", "vision", "thinking"], "rpm": 30},
+    {"model_id": "LongCat-2.0", "capabilities": ["text", "thinking"], "rpm": 30}
+  ]
+}

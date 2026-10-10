@@ -1,0 +1,96 @@
+{
+  "scope": "Default-off observer explicitly enabled; exact fixedNative55180 plus two wait timer files; original frozen callers",
+  "observer_source": "5e4648d6ec80ef71ae1c6316f236a4735b1b26f4e498673000b0cb960689e538",
+  "tests": "21 maintenance tests passed",
+  "reports": {
+    "embedded": {
+      "correctness_passed": true,
+      "errors": 0,
+      "stages": [
+        {
+          "stage": "overlay_prepare_capture",
+          "calls": 323,
+          "ms": 0.423369
+        },
+        {
+          "stage": "overlay_prepare_encode",
+          "calls": 322,
+          "ms": 3949.165907
+        },
+        {
+          "stage": "overlay_prepare_publish",
+          "calls": 322,
+          "ms": 945.069277
+        },
+        {
+          "stage": "overlay_prepare_stale",
+          "calls": 19,
+          "ms": 0.0
+        },
+        {
+          "stage": "overlay_capture_authority_wait",
+          "calls": 318,
+          "ms": 15.985778
+        },
+        {
+          "stage": "overlay_publish_authority_wait",
+          "calls": 317,
+          "ms": 391.589603
+        }
+      ],
+      "latency_p99_ms": {
+        "stream_scheduled": 1349.7558236122131,
+        "settle": 2731.1409190297127
+      },
+      "limits": "Default-off observer explicitly enabled. Cumulative waits/encode are not per-request critical path or default-off performance. Original admitted callers; embedded abandon not SIGKILL."
+    },
+    "application": {
+      "correctness_passed": true,
+      "errors": 0,
+      "stages": [
+        {
+          "stage": "overlay_prepare_capture",
+          "calls": 264,
+          "ms": 0.328909
+        },
+        {
+          "stage": "overlay_prepare_encode",
+          "calls": 264,
+          "ms": 3566.005066
+        },
+        {
+          "stage": "overlay_prepare_publish",
+          "calls": 264,
+          "ms": 898.999112
+        },
+        {
+          "stage": "overlay_prepare_stale",
+          "calls": 5,
+          "ms": 0.0
+        },
+        {
+          "stage": "overlay_capture_authority_wait",
+          "calls": 259,
+          "ms": 3.919261
+        },
+        {
+          "stage": "overlay_publish_authority_wait",
+          "calls": 259,
+          "ms": 164.455776
+        }
+      ],
+      "latency_p99_ms": {
+        "stream_scheduled": 1838.5890498757362,
+        "settle": 3454.7810181975365
+      },
+      "pressure": 136,
+      "limits": "Observer-enabled diagnostic; summed waits not individual tail latency; no default-off acceptance claim"
+    }
+  },
+  "decision": "Capture authority wait not dominant in these cumulative windows; do not change scheduler priority based on this evidence",
+  "limits": [
+    "Wait and encode totals not per-request tail attribution",
+    "Observer timing not default-off acceptance",
+    "No universal all-scenes claim"
+  ]
+}

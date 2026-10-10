@@ -1,0 +1,77 @@
+{
+  "format": "tofu.markdown-stream-security-evidence/v1",
+  "scope": "Real renderer stream/terminal sanitation under an owned strict-CSP origin.\n\nLoads actual renderer owners and installed Marked/DOMPurify through permitted\nsame-origin scripts. This is browser security/DOM parity, not main-app CSP,\nbackend integration, Trusted Types or performance admission.\n",
+  "whole_system_verdict": "incomplete",
+  "candidate_verdict": "browser_stream_terminal_strict_fixture_csp_pass",
+  "production_promoted": false,
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/markdown-streaming-security.json",
+  "raw_artifact_sha256": "b1a10141dd5e146a74202c217059bd003fd72a5b74f7705b18a94652c2614e20",
+  "sources": {
+    "tests/visual/test_visual_streaming_markdown_security.py": "1198f5133532a2c80777a992a283f440d1ff82d0a67176078ba4b98dd767187c",
+    "frontend/src/conversation/ui/renderers/text-blocks.ts": "27744abb8e98b4c677fea517d8e212319feb741d102c044c4955137b745e5ffe",
+    "frontend/src/conversation/ui/renderers/stable-dom.ts": "10a2e27823f2c0290e4be4b7b2c05ecd9c5a15b1c16d8850eb62616461a9e052",
+    "frontend/src/markdown/index.ts": "d3f4e894552b74493f022667705e25a046f6a6570831e751cbd21c2da04f1428",
+    "frontend/src/markdown-policy.ts": "6eba3d70c9e956b12a2abc3633b3c486fa046664f1227918d5c02aa9d5318676"
+  },
+  "assets": {
+    "/marked.js": "27ade2eccd4d58ab5edeb4f046eae71f204979547c4575fa11e294332d30a291",
+    "/purify.js": "9ab3d44d73c3e3947f9ab72e0f0bc15c7f1931d60b365ba261fc85fe59013c56",
+    "/runner.js": "399fb5b390bdd6df59c4e34d88892b18f5c3860ff4fc860d0818edbeb37a9b8e",
+    "/cases.json": "da7ecffafa96c87a67eab86972c77fb14afdec448cdd781a353a86fb588e05d2",
+    "/markdown.js": "ebb2a291dd26d204567d1ad2c3f059cba7c0555b163712ab7530e0dcd92bfa26",
+    "/policy.js": "c77a2f023882f8a73c798e66922240934e13a219e4aec7b436fd46a34024e364",
+    "/text.js": "2f958d0ac23980b6efd77f193f276e6950cf0bc25608e2e003bb5f671f0ecde6"
+  },
+  "browser": "148.0.7778.96",
+  "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+  "checks": {
+    "frames": 918,
+    "streams": 84,
+    "error": null,
+    "violations": [
+      "script-src-attr",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem",
+      "style-src-elem"
+    ],
+    "attack": false
+  },
+  "neighbor_tests": {
+    "passed": 2,
+    "skipped": 1,
+    "skip_scope": "opt-in full performance cohort",
+    "log": "/tmp/tofu-system-perf-snapshot/markdown-streaming-security-neighbors.log"
+  },
+  "limitations": [
+    "Owned strict-CSP HTTP fixture; main application does not thereby gain CSP deployment",
+    "No Trusted Types or sanitizer custom hooks/config proof",
+    "Highlighter and math renderer are absent in this fixture",
+    "Inline style violations are blocked by this fixture; CSS safety without CSP is not established",
+    "No backend, transport, timing or memory/adoption evidence; existing performance failures remain unchanged"
+  ]
+}

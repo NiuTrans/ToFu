@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "tofu.compaction-receipt/v1",
+  "status": "skipped",
+  "trigger": "working_set",
+  "strategy": "selective_summary",
+  "implementation": "model_summary",
+  "continuation": {"format": "none"},
+  "summary": {
+    "generated": true,
+    "complete": true,
+    "accepted": false,
+    "chars": 28,
+    "durationMs": 1250,
+    "usage": {"inputTokens": 1500, "outputTokens": 500, "totalTokens": 2000, "cacheReadTokens": 250, "cacheWriteTokens": 0},
+    "projectedUsageTokens": 3000,
+    "rejectionReason": "Fixture candidate not adopted",
+    "route": {
+      "modelId": "fixture-summary-model",
+      "providerId": "fixture-summary-provider",
+      "policy": "qualified-cheapest",
+      "reason": "fixture_qualified_route",
+      "costBasis": "metered_api_equivalent"
+    },
+    "cost": {
+      "known": false,
+      "costUsd": null,
+      "knownCostUsd": 0.002,
+      "costBasis": "metered_api_equivalent",
+      "callCount": 2,
+      "unknownCallCount": 1,
+      "calls": [
+        {"model": "fixture-first-model", "providerId": "fixture-first-provider", "known": true, "costUsd": 0.002, "costBasis": "metered_api_equivalent"},
+        {"model": "fixture-summary-model", "providerId": "fixture-summary-provider", "known": false, "costUsd": null, "costBasis": "metered_api_equivalent", "reason": "usage_unavailable"}
+      ]
+    }
+  },
+  "contextBudget": {
+    "routeWindowTokens": 128000,
+    "hardCeilingTokens": 120000,
+    "reserveTokens": 8000,
+    "renderedPromptTokens": 96000,
+    "messageTokens": 92000,
+    "toolSchemaTokens": 4000,
+    "economicTargetTokens": 64000,
+    "decisionKind": "economic",
+    "contextWindowSource": "fixture_route"
+  },
+  "retention": {
+    "summarizedMessages": 7,
+    "preservedTurns": 2,
+    "foldedToolRounds": 3,
+    "objectiveAnchored": true,
+    "durableObjectiveApplied": false,
+    "retainedUserMessages": 1,
+    "recentFiles": ["fixture/summary.py"],
+    "turnDiffIncluded": false
+  },
+  "economics": {
+    "droppedTokens": 48000,
+    "cacheReadTokens": 0,
+    "cacheRewriteTokens": 3000,
+    "summaryCostTokens": 2000,
+    "paybackRounds": null,
+    "pricingSource": "fixture_unknown",
+    "pricingKnown": false,
+    "costBasis": "metered_api_equivalent",
+    "cacheRewriteCostUsd": 0.001,
+    "summaryCostUsd": null,
+    "savingsPerRoundUsd": 0.0005,
+    "totalCostUsd": null
+  }
+}

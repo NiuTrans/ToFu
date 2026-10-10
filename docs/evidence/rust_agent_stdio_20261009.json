@@ -1,0 +1,33 @@
+{
+  "format": "tofu.native-agent-stdio-evidence/v1",
+  "scope": "native executable HTTP/text rounds and declared read-only host tools",
+  "whole_application_admission": "incomplete",
+  "runtime_tests_passed": 159,
+  "existing_http_cli_cases_passed": 7,
+  "stdio_cases": [
+    "two-round text feedback",
+    "empty tool result",
+    "wrong request ID",
+    "wrong protocol version",
+    "tool wait cancel",
+    "tool wait deadline",
+    "tool stdin EOF",
+    "oversize tool frame",
+    "write catalog refused before network",
+    "silent HTTP deadline",
+    "frame schema field/version rejection"
+  ],
+  "sources": {
+    "contracts/native_agent_stdio_v1.schema.json": "c9a8462e7849a86191dc4d23c8ee48e2afc5b44a78f5e0907e18d43440c35431",
+    "packages/tofu-runtime/src/cli_agent.rs": "4f096a0f01d0f94d381cc5bc0a28d124cc3f3ce38684e1cbb8c18004c4224757",
+    "packages/tofu-runtime/src/cli_http.rs": "8b465429c329c5e734664f1664fc571e78998117efa7ea4459cc14d481119d9e",
+    "packages/tofu-runtime/tests/agent_stdio.rs": "e52c74e011ebe029dfec86491a8e64661560c3443fd58c5a193c3a48443e261f"
+  },
+  "limitations": [
+    "Linux exclusive stdio readiness; tool request stdout requires FIFO and PIPE_BUF bound",
+    "Cancel frames are consumed during tool waits; provider waits use deadline",
+    "Host owns external tool authority/effects/cleanup",
+    "Production route compiler, write approval, durable checkpoint/progress/multimodal/billing adapters pending",
+    "No whole-application CPU, RSS, throughput or latency claim"
+  ]
+}

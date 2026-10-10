@@ -1,0 +1,297 @@
+/* Thinking disclosures and generic tool evidence.
+ * Owner: ConversationSurface; tokens: 00-design-tokens.css.
+ * Delivery: ordered application manifest; neighboring content owners are independent.
+ */
+
+/*
+ * Reasoning is inspectable process evidence, not a competing answer card —
+ * and per-round reasoning is rarely opened, so a stack of full bordered
+ * cards reads as visual noise (the same "too huge" verdict the retained
+ * timeline's .seg-thinking already settled). Render it as a slim muted
+ * one-liner disclosure: no card chrome, secondary label, full opacity only
+ * while the reasoning is actually streaming. (2026-08-27 owner readability
+ * recalibration: the previous .58-opacity header + 11.5px tertiary label
+ * crossed from "quiet" into "hard to read".)
+ */
+
+.conversation-surface .thinking-block {
+  margin: var(--space-1) 0 var(--space-2);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.conversation-surface .thinking-header {
+  min-height: var(--control-h-md);
+  padding: var(--space-1) 0;
+  gap: var(--space-1);
+  background: transparent;
+  box-sizing: border-box;
+  opacity: 1;
+  font-size: var(--conversation-font-size-content);
+  transition: opacity var(--motion-fast) ease;
+}
+
+.conversation-surface .thinking-header:hover {
+  background: transparent;
+  opacity: 1;
+}
+
+.conversation-surface .thinking-block[data-state="active"] .thinking-header {
+  opacity: 1;
+}
+
+.conversation-surface .thinking-header:focus-visible,
+.conversation-surface .bilingual-header:focus-visible,
+.conversation-surface .conversation-tool-card__summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.conversation-surface .thinking-state-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--text-tertiary) 70%, transparent);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.conversation-surface .thinking-block[data-state="complete"] .thinking-state-dot {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
+  background: color-mix(in srgb, var(--accent) 72%, var(--bg-primary));
+}
+
+.conversation-surface .thinking-block[data-state="active"] .thinking-state-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  animation: turn-thinking-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes turn-thinking-pulse {
+  0%, 100% { opacity: .62; transform: scale(.9); }
+  50% { opacity: 1; transform: scale(1.18); }
+}
+
+.conversation-surface .thinking-label {
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+  font-weight: var(--weight-medium);
+  letter-spacing: .006em;
+}
+
+.conversation-surface .conversation-disclosure-chevron {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  opacity: .72;
+  transform: none;
+  transition: transform var(--motion-fast) ease, opacity var(--motion-fast) ease;
+}
+
+.conversation-surface :is(.thinking-block, .bilingual-block)[open] > summary .conversation-disclosure-chevron {
+  transform: rotate(180deg);
+}
+
+.conversation-surface .thinking-content,
+.conversation-surface .thinking-block[open] .thinking-content {
+  max-height: none;
+  overflow: visible;
+  transition: none;
+}
+
+.conversation-surface .thinking-block:not([open]) .thinking-content {
+  display: none;
+}
+
+.conversation-surface .thinking-text {
+  padding: var(--space-1) 0 var(--space-2) var(--space-3);
+  margin-left: var(--space-1);
+  border-top: 0;
+  border-left: 1px solid var(--turn-spine);
+  color: color-mix(in srgb, var(--text-primary) 42%, var(--text-secondary));
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+  font-weight: var(--weight-regular);
+  line-height: 1.66;
+}
+
+.conversation-surface .thinking-text > :first-child {
+  margin-top: var(--space-1);
+}
+
+/* Tool rounds share one restrained surface and never replay entrance effects. */
+
+.conversation-surface .conversation-block--tool .ptool-panel {
+  margin: 0;
+  animation: none;
+}
+
+.conversation-surface .conversation-block--tool .ptool-panel-header {
+  min-height: 24px;
+  padding: 0 var(--space-1) var(--space-1);
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-semibold);
+  letter-spacing: .012em;
+}
+
+.conversation-surface button.ptool-panel-header {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.conversation-surface button.ptool-panel-header:hover {
+  color: var(--text-secondary);
+}
+
+.conversation-surface button.ptool-panel-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
+
+.conversation-surface .ptool-panel-routine {
+  padding: var(--space-1) var(--space-1);
+  border: 1px solid color-mix(in srgb, var(--turn-rule) 82%, transparent);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0;
+}
+
+.conversation-surface .ptool-panel-chevron {
+  display: inline-flex;
+  color: var(--text-tertiary);
+  transition: transform var(--motion-fast) ease;
+}
+
+.conversation-surface .ptool-panel.collapsed > .ptool-panel-body {
+  display: none;
+}
+
+.conversation-surface .ptool-panel.collapsed .ptool-panel-chevron {
+  transform: rotate(-90deg);
+}
+
+.conversation-surface .ptool-parent-child {
+  margin-left: var(--space-3);
+  border-left: 2px solid color-mix(in srgb, var(--turn-rule) 74%, transparent);
+}
+
+.conversation-surface .conversation-block--tool .ptool-turn {
+  margin: var(--space-1) 0;
+  border: 1px solid var(--turn-rule);
+  border-radius: 8px;
+  background: var(--turn-process-surface);
+  box-shadow: none;
+}
+
+[data-theme="tofu"] .conversation-surface .conversation-block--tool .ptool-turn {
+  border-color: var(--turn-rule);
+  background: var(--turn-process-surface);
+  box-shadow: none;
+}
+
+.conversation-surface .conversation-block--tool .ptool-turn[data-batch-size="1"] > .ptool-turn-rno-solo {
+  display: none;
+}
+
+.conversation-surface .conversation-block--tool .ptool-line {
+  min-height: 34px;
+  padding: var(--space-1) var(--space-2);
+  gap: var(--space-2);
+  border-bottom-color: var(--turn-rule);
+  font-size: var(--conversation-font-size-meta);
+}
+
+.conversation-surface .conversation-block--tool .ptool-line:hover {
+  background: var(--turn-process-hover);
+}
+
+.conversation-surface .conversation-block--tool :is(
+  .ptool-badge-info,
+  .ptool-badge-ok,
+  .ptool-badge-err,
+  .ptool-badge-warn,
+  .ptool-badge-skip
+) {
+  border-width: 0;
+  border-radius: 5px;
+  box-shadow: none;
+  animation: none;
+}
+
+.conversation-surface .conversation-block--tool :is(.ptool-text, .ptool-cmd-label) {
+  font-size: var(--conversation-font-size-meta);
+  line-height: 1.5;
+}
+
+.conversation-surface .conversation-tool-card {
+  border-color: var(--turn-rule);
+  border-radius: 8px;
+  background: var(--turn-process-surface);
+}
+
+.conversation-surface button.ptool-results-header,
+.conversation-surface button.eb-toggle,
+.conversation-surface button.ptool-cmd-toggle {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  touch-action: manipulation;
+}
+
+.conversation-surface .ptool-results-header[role="button"] {
+  border-bottom: 1px solid transparent;
+}
+
+.conversation-surface .ptool-results-header[role="button"]:focus-visible,
+.conversation-surface button.eb-toggle:focus-visible,
+.conversation-surface button.ptool-cmd-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.conversation-surface button.ptool-cmd-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.conversation-surface :is(.ptool-results-toggle, .eb-arrow) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--motion-fast) ease;
+}
+
+.conversation-surface :is(.ptool-results-toggle, .eb-arrow) svg,
+.conversation-surface .ig-action-btn svg {
+  display: block;
+}
+
+.conversation-surface .ptool-results-block.expanded .ptool-results-toggle {
+  transform: rotate(180deg);
+}
+
+.conversation-surface .eb-section.eb-expanded .eb-arrow {
+  transform: rotate(90deg);
+}

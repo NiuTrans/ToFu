@@ -1,0 +1,646 @@
+{
+  "format": "tofudb.performance-rejection/v1",
+  "decision": "reject current byte-planning candidate; do not integrate production source",
+  "problem": "Reducing oversized materialization encoding retries must improve complete harness behavior across application and embedded paths.",
+  "candidate": "Plan exact commit-order prefix before cloning values using leaf input bytes and 3/4 existing 2MiB carried ceiling; unchanged actual physical admission, snapshot/cursor/dominance rules and fallback.",
+  "isolated_candidate_commit": "8774efb4ab4091fa6a5169a8b80e05a4e6740934",
+  "runtime_pairs": {
+    "baseline": {
+      "source_sha256": "e5830b6d18df7a3595b98ca64482238b0cc3baecfc380190fc3a7b4a38367afd",
+      "binary_sha256": "1bb7850f3984a658785c9126fc29b8598910d70e3e76bb8ce2cd3e7d182daa92",
+      "library_sha256": "48727d96f9065cccd770b46875a343233d2cded4bf07c80287c597263dc02439",
+      "scope": "Current retained Native baseline vs byte-planned materialization candidate; actual CLI/library exported identity and allocator checked; no deployment"
+    },
+    "candidate": {
+      "source_sha256": "916f7332225fe13247cdf4b4953d50b95fb553a7b06b4c1776f3f4a6a02a121a",
+      "binary_sha256": "6662282a130da593eb3e11cd647906a4f3e018b73bda1221ce6cfbcd98f22eab",
+      "library_sha256": "6c95334f87df3b7162b865c7d9220bfad2e769c7835bb7074704baecbafb2e86",
+      "scope": "Current retained Native baseline vs byte-planned materialization candidate; actual CLI/library exported identity and allocator checked; no deployment"
+    }
+  },
+  "caller_manifest_sha256": "e97218a422122f93213f777e6b6554f4a161830fffc127ef8c346569afb71d66",
+  "caller_files": 6804,
+  "baseline_tests": {
+    "passed": 1675,
+    "failed": 0,
+    "ignored": 6
+  },
+  "candidate_tests": {
+    "passed": 1678,
+    "failed": 0,
+    "ignored": 6
+  },
+  "overlay_neighbors": 53,
+  "fixture": {
+    "input_rows": 512,
+    "value_bytes": 8192,
+    "baseline_attempts": 3,
+    "candidate_attempts": 1,
+    "baseline_encoded_bytes": 7453631,
+    "candidate_encoded_bytes": 1580659,
+    "baseline_covered_rows": 128,
+    "candidate_covered_rows": 190,
+    "scope": "Deterministic logical encoded-page work plus partial-prefix reopen; not physical device amplification or harness latency"
+  },
+  "workload": "Unprofiled1000 conversations x4 rounds x8192 bytes, one-second fixed arrivals, strict durability, 30s RPC deadline, running restart and exact carried event recovery. ABBA+BAAB for both transports on disposable /tmp xfs authorities. Source/CLI/library/callers verified before/after, no shared Python import leakage.",
+  "comparison": [
+    {
+      "transport": "application",
+      "rows": [
+        {
+          "transport": "application",
+          "index": 0,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 2976.8939912319183,
+          "settleP99ms": 3762.6916244626045,
+          "engineRss": 1981730816,
+          "clientRss": 171884544,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 254,
+          "maintenanceEncodeTotalNanos": 3428501795
+        },
+        {
+          "transport": "application",
+          "index": 1,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1807.71704018116,
+          "settleP99ms": 3269.0600007772446,
+          "engineRss": 1953583104,
+          "clientRss": 147787776,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 286,
+          "maintenanceEncodeTotalNanos": 3863184474
+        },
+        {
+          "transport": "application",
+          "index": 2,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1928.800456225872,
+          "settleP99ms": 4686.338812112808,
+          "engineRss": 2003480576,
+          "clientRss": 149524480,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 269,
+          "maintenanceEncodeTotalNanos": 3967865078
+        },
+        {
+          "transport": "application",
+          "index": 3,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 2297.602005302906,
+          "settleP99ms": 3673.0369701981544,
+          "engineRss": 1988198400,
+          "clientRss": 276586496,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 292,
+          "maintenanceEncodeTotalNanos": 3969534177
+        },
+        {
+          "transport": "application",
+          "index": 4,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1824.3443146348,
+          "settleP99ms": 3493.2298436760902,
+          "engineRss": 1913708544,
+          "clientRss": 141340672,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 265,
+          "maintenanceEncodeTotalNanos": 3630136292
+        },
+        {
+          "transport": "application",
+          "index": 5,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1888.7269124388695,
+          "settleP99ms": 3244.360812008381,
+          "engineRss": 1932898304,
+          "clientRss": 139010048,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 290,
+          "maintenanceEncodeTotalNanos": 3919794472
+        },
+        {
+          "transport": "application",
+          "index": 6,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1858.0279499292374,
+          "settleP99ms": 3631.710685789585,
+          "engineRss": 1983483904,
+          "clientRss": 147095552,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 291,
+          "maintenanceEncodeTotalNanos": 4015929142
+        },
+        {
+          "transport": "application",
+          "index": 7,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1951.7723098397255,
+          "settleP99ms": 4685.039907693863,
+          "engineRss": 1928310784,
+          "clientRss": 155738112,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 275,
+          "maintenanceEncodeTotalNanos": 3920768567
+        }
+      ],
+      "pairedRatios": [
+        {
+          "candidateIndex": 1,
+          "baselineIndex": 0,
+          "ratios": {
+            "streamP99ms": 0.6072493832516617,
+            "settleP99ms": 0.8688089078371227,
+            "engineRss": 0.9857963999082305,
+            "clientRss": 0.8598084072061767
+          }
+        },
+        {
+          "candidateIndex": 2,
+          "baselineIndex": 3,
+          "ratios": {
+            "streamP99ms": 0.8394841455457327,
+            "settleP99ms": 1.2758757535348162,
+            "engineRss": 1.0076864441697568,
+            "clientRss": 0.5406065811687351
+          }
+        },
+        {
+          "candidateIndex": 4,
+          "baselineIndex": 5,
+          "ratios": {
+            "streamP99ms": 0.9659121721726653,
+            "settleP99ms": 1.0767081857068943,
+            "engineRss": 0.9900720281246622,
+            "clientRss": 1.0167658671695445
+          }
+        },
+        {
+          "candidateIndex": 7,
+          "baselineIndex": 6,
+          "ratios": {
+            "streamP99ms": 1.0504536866165326,
+            "settleP99ms": 1.2900366557352212,
+            "engineRss": 0.9721837319230396,
+            "clientRss": 1.058754733793718
+          }
+        }
+      ],
+      "medianPairRatios": {
+        "streamP99ms": 0.902698158859199,
+        "settleP99ms": 1.1762919696208551,
+        "engineRss": 0.9879342140164464,
+        "clientRss": 0.9382871371878606
+      }
+    },
+    {
+      "transport": "embedded",
+      "rows": [
+        {
+          "transport": "embedded",
+          "index": 0,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1244.7074055671692,
+          "settleP99ms": 5580.253534018993,
+          "engineRss": 2200780800,
+          "clientRss": 2202087424,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 336,
+          "maintenanceEncodeTotalNanos": 4309911507
+        },
+        {
+          "transport": "embedded",
+          "index": 1,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1230.9487387537956,
+          "settleP99ms": 2897.474803030491,
+          "engineRss": 2096586752,
+          "clientRss": 2096586752,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 334,
+          "maintenanceEncodeTotalNanos": 4203351996
+        },
+        {
+          "transport": "embedded",
+          "index": 2,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1260.7916668057442,
+          "settleP99ms": 2900.944523513317,
+          "engineRss": 2153156608,
+          "clientRss": 2153156608,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 334,
+          "maintenanceEncodeTotalNanos": 4214486275
+        },
+        {
+          "transport": "embedded",
+          "index": 3,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1256.059780716896,
+          "settleP99ms": 2887.753203511238,
+          "engineRss": 2192781312,
+          "clientRss": 2192781312,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 333,
+          "maintenanceEncodeTotalNanos": 4098721627
+        },
+        {
+          "transport": "embedded",
+          "index": 4,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1278.1855762004852,
+          "settleP99ms": 3139.3619999289513,
+          "engineRss": 2197008384,
+          "clientRss": 2193604608,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 337,
+          "maintenanceEncodeTotalNanos": 4263288336
+        },
+        {
+          "transport": "embedded",
+          "index": 5,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1253.8225799798965,
+          "settleP99ms": 2943.3579817414284,
+          "engineRss": 2164822016,
+          "clientRss": 2164822016,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 334,
+          "maintenanceEncodeTotalNanos": 4155605054
+        },
+        {
+          "transport": "embedded",
+          "index": 6,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1254.3114349246025,
+          "settleP99ms": 3016.9386193156242,
+          "engineRss": 2231164928,
+          "clientRss": 2231164928,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 332,
+          "maintenanceEncodeTotalNanos": 4121413871
+        },
+        {
+          "transport": "embedded",
+          "index": 7,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1269.6838527917862,
+          "settleP99ms": 2925.2441748976707,
+          "engineRss": 2121207808,
+          "clientRss": 2121207808,
+          "latencyPassed": false,
+          "coverageComplete": null,
+          "maintenanceEncodeCalls": 329,
+          "maintenanceEncodeTotalNanos": 4309224795
+        }
+      ],
+      "pairedRatios": [
+        {
+          "candidateIndex": 1,
+          "baselineIndex": 0,
+          "ratios": {
+            "streamP99ms": 0.9889462641968422,
+            "settleP99ms": 0.5192371252249681,
+            "engineRss": 0.9526558719523543,
+            "clientRss": 0.9520906069167943
+          }
+        },
+        {
+          "candidateIndex": 2,
+          "baselineIndex": 3,
+          "ratios": {
+            "streamP99ms": 1.003767245923715,
+            "settleP99ms": 1.0045680219438557,
+            "engineRss": 0.981929477516452,
+            "clientRss": 0.981929477516452
+          }
+        },
+        {
+          "candidateIndex": 4,
+          "baselineIndex": 5,
+          "ratios": {
+            "streamP99ms": 1.0194309758091766,
+            "settleP99ms": 1.066591973998201,
+            "engineRss": 1.0148679049649871,
+            "clientRss": 1.0132955927957452
+          }
+        },
+        {
+          "candidateIndex": 7,
+          "baselineIndex": 6,
+          "ratios": {
+            "streamP99ms": 1.012255662699996,
+            "settleP99ms": 0.969606791523404,
+            "engineRss": 0.9507176190248899,
+            "clientRss": 0.9507176190248899
+          }
+        }
+      ],
+      "medianPairRatios": {
+        "streamP99ms": 1.0080114543118555,
+        "settleP99ms": 0.9870874067336299,
+        "engineRss": 0.9672926747344032,
+        "clientRss": 0.9670100422166231
+      }
+    }
+  ],
+  "windows": [
+    {
+      "transport": "application",
+      "index": 0,
+      "variant": "baseline",
+      "report_name": "materialization-paired-application-0-baseline.json",
+      "report_sha256": "214e704771a904244f819112a2422d6b64b6859b2e5ce9e43e89ddcf450f6779",
+      "scope_sha256": "1db58310b686e6ca70eed378c0061565618fe0d4bad935c315d64b22bc5049e5",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "application",
+      "index": 1,
+      "variant": "candidate",
+      "report_name": "materialization-paired-application-1-candidate.json",
+      "report_sha256": "2204e18c4ca73d698052ad868ec22d1d5c094b399ebbfe023970ae6b36f11eb2",
+      "scope_sha256": "0924f3d0f155614e12e39275c184ceec2bda789135657471bb8f054e6a511e21",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "application",
+      "index": 2,
+      "variant": "candidate",
+      "report_name": "materialization-paired-application-2-candidate.json",
+      "report_sha256": "3d1759eadf8d0cbee7794396cab30b63d8b0eb58c56bb277a19a767431ed714a",
+      "scope_sha256": "0924f3d0f155614e12e39275c184ceec2bda789135657471bb8f054e6a511e21",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "application",
+      "index": 3,
+      "variant": "baseline",
+      "report_name": "materialization-paired-application-3-baseline.json",
+      "report_sha256": "fb865cff7beca2ff597c14a9a9885bc18257579be4849a2a9e4b2b9f99af4edc",
+      "scope_sha256": "1db58310b686e6ca70eed378c0061565618fe0d4bad935c315d64b22bc5049e5",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "application",
+      "index": 4,
+      "variant": "candidate",
+      "report_name": "materialization-paired-application-4-candidate.json",
+      "report_sha256": "c1d3fba188d80692a8322f0477ede0c7cc1061736a9669969942c582638d51d7",
+      "scope_sha256": "0924f3d0f155614e12e39275c184ceec2bda789135657471bb8f054e6a511e21",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "application",
+      "index": 5,
+      "variant": "baseline",
+      "report_name": "materialization-paired-application-5-baseline.json",
+      "report_sha256": "59edb2209e1e091239ef45f30c26beb9396f1844954f137ddc8491c87108453b",
+      "scope_sha256": "1db58310b686e6ca70eed378c0061565618fe0d4bad935c315d64b22bc5049e5",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "application",
+      "index": 6,
+      "variant": "baseline",
+      "report_name": "materialization-paired-application-6-baseline.json",
+      "report_sha256": "b50139cc182d985095fa8e6ce9b022342dbcb826f9ed92c1506fad811fa0913e",
+      "scope_sha256": "1db58310b686e6ca70eed378c0061565618fe0d4bad935c315d64b22bc5049e5",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "application",
+      "index": 7,
+      "variant": "candidate",
+      "report_name": "materialization-paired-application-7-candidate.json",
+      "report_sha256": "f4185e31d7f591bfadba715893cb0b052b6a13e9c80951752c7c74320dc43b4b",
+      "scope_sha256": "0924f3d0f155614e12e39275c184ceec2bda789135657471bb8f054e6a511e21",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "embedded",
+      "index": 0,
+      "variant": "baseline",
+      "report_name": "materialization-paired-embedded-0-baseline.json",
+      "report_sha256": "234970ccef4a2c400bdf40188713b15558775ba60b545e8a5492d813d84bb255",
+      "scope_sha256": "185264857cd2000f848d8002e3362212499be396da131fcdc60292ec3297c07c",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "embedded",
+      "index": 1,
+      "variant": "candidate",
+      "report_name": "materialization-paired-embedded-1-candidate.json",
+      "report_sha256": "850a825f952a5ce2d0264bf574848a2c8a60911fb14fc91f9155d39f4cedf248",
+      "scope_sha256": "31060a04c799f25da5089543577cee71996e47ac99811b9728550b094eff26f9",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "embedded",
+      "index": 2,
+      "variant": "candidate",
+      "report_name": "materialization-paired-embedded-2-candidate.json",
+      "report_sha256": "a68a405d6e846c28094eb8632a9d179503338a63ac72d2fe321010146e8b59cd",
+      "scope_sha256": "31060a04c799f25da5089543577cee71996e47ac99811b9728550b094eff26f9",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "embedded",
+      "index": 3,
+      "variant": "baseline",
+      "report_name": "materialization-paired-embedded-3-baseline.json",
+      "report_sha256": "bc3ed10c8137b31d6a9713cf63741435ffc810f1c618adf3278a09769994bff5",
+      "scope_sha256": "185264857cd2000f848d8002e3362212499be396da131fcdc60292ec3297c07c",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "embedded",
+      "index": 4,
+      "variant": "candidate",
+      "report_name": "materialization-paired-embedded-4-candidate.json",
+      "report_sha256": "0bc522ac2841ca4b08028a15ce72a64778c79b14d5a1d78d23a60357f1ac4bf8",
+      "scope_sha256": "31060a04c799f25da5089543577cee71996e47ac99811b9728550b094eff26f9",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "embedded",
+      "index": 5,
+      "variant": "baseline",
+      "report_name": "materialization-paired-embedded-5-baseline.json",
+      "report_sha256": "612485241bb702194fd85aa402c68ab27d0162abc5d21a6fce1db85d1aa6c999",
+      "scope_sha256": "185264857cd2000f848d8002e3362212499be396da131fcdc60292ec3297c07c",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "embedded",
+      "index": 6,
+      "variant": "baseline",
+      "report_name": "materialization-paired-embedded-6-baseline.json",
+      "report_sha256": "251aab5c024e6c96a0bcc34252ed8db046f7dd9db1b753e7a2ecf6a4aabd7f32",
+      "scope_sha256": "185264857cd2000f848d8002e3362212499be396da131fcdc60292ec3297c07c",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    },
+    {
+      "transport": "embedded",
+      "index": 7,
+      "variant": "candidate",
+      "report_name": "materialization-paired-embedded-7-candidate.json",
+      "report_sha256": "92ef0d21e320fca1baa1eea01ac93c0e62ab330197da5b0064181446afd091e2",
+      "scope_sha256": "31060a04c799f25da5089543577cee71996e47ac99811b9728550b094eff26f9",
+      "correctness_passed": true,
+      "error_count": 0,
+      "recovered_running": 1000,
+      "recovered_completed": 1000,
+      "recovered_exact_content": 1000,
+      "recovered_exact_replay": 1000,
+      "latency_passed": false
+    }
+  ],
+  "scope_limits": [
+    "Application/native protocol vs embedded transport; no new SQLite comparison",
+    "Scheduled settlement is the paired comparison metric; acceptance uses its existing unscheduled settlement definition",
+    "Embedded abandonment is not process SIGKILL",
+    "Embedded engine/client RSS share one process; do not add",
+    "No real provider/browser/soak or all-scenario superiority proof",
+    "Documentation gate failed existing catalog/line-budget issues"
+  ],
+  "reason": "Application scheduled settlement median paired ratio1.1763 with3/4 regressions; embedded stream1.0080 and settlement0.9871 approximately neutral. Lower fixture encoded bytes did not establish complete cross-transport improvement.",
+  "next_direction": "Measure large-value/tree-page rewrite amplification and evaluate storage layout changes; retain full recovery/GC/backup/old-format compatibility boundaries."
+}

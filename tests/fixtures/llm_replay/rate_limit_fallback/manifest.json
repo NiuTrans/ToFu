@@ -1,0 +1,5 @@
+{
+  "description": "Step 1 raises RateLimitError before any chunk (the documented way to inject pre-chunk failures); the real dispatch layer rotates the cooled slot and retries, step 2 succeeds. Proves fallback/retry evidence lands on the durable log under replay.",
+  "recorded_at": "2026-09-17",
+  "mode": "replay"
+}

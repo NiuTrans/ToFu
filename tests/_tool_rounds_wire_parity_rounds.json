@@ -1,0 +1,981 @@
+[
+ {
+  "_name": "generic-done",
+  "status": "done",
+  "toolName": "list_dir",
+  "query": "list_dir .",
+  "results": [
+   {}
+  ],
+  "roundNum": 1
+ },
+ {
+  "_name": "generic-searching",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "grep_search",
+  "query": "grep foo",
+  "results": [],
+  "roundNum": 2
+ },
+ {
+  "_name": "cmd-running",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "run_command",
+  "query": "npm test",
+  "toolArgs": "{\"description\":\"run tests\"}",
+  "_partialOutput": "line1\nline2",
+  "results": [],
+  "roundNum": 3
+ },
+ {
+  "_name": "cmd-done-ok",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "npm test",
+  "results": [
+   {
+    "command": "npm test",
+    "output": "ok output",
+    "exitCode": "0",
+    "description": "run tests"
+   }
+  ],
+  "roundNum": 4
+ },
+ {
+  "_name": "cmd-done-err",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "npm test",
+  "results": [
+   {
+    "command": "npm test",
+    "output": "boom",
+    "exitCode": "1"
+   }
+  ],
+  "roundNum": 5
+ },
+ {
+  "_name": "cmd-notrun",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "rm -rf /",
+  "results": [
+   {
+    "command": "rm -rf /",
+    "notRun": true,
+    "reason": "dangerous pattern",
+    "badge": "blocked"
+   }
+  ],
+  "roundNum": 6
+ },
+ {
+  "_name": "cmd-timeout",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "sleep",
+  "results": [
+   {
+    "command": "sleep 99",
+    "output": "partial",
+    "exitCode": "?",
+    "timedOut": true
+   }
+  ],
+  "roundNum": 7
+ },
+ {
+  "_name": "exec-js",
+  "status": "done",
+  "toolName": "browser_execute_js",
+  "query": "Execute JS",
+  "toolArgs": "{\"code\":\"1+1\",\"description\":\"math\"}",
+  "toolContent": "2",
+  "results": [
+   {}
+  ],
+  "roundNum": 8
+ },
+ {
+  "_name": "exec-js-err",
+  "status": "done",
+  "toolName": "browser_execute_js",
+  "query": "Execute JS",
+  "toolArgs": "{\"code\":\"x()\"}",
+  "toolContent": "ReferenceError",
+  "results": [
+   {
+    "badge": "error"
+   }
+  ],
+  "roundNum": 9
+ },
+ {
+  "_name": "search-empty",
+  "status": "done",
+  "toolName": "web_search",
+  "query": "cats",
+  "results": [],
+  "roundNum": 10
+ },
+ {
+  "_name": "search-empty-diag",
+  "status": "done",
+  "toolName": "web_search",
+  "query": "cats",
+  "results": [],
+  "searchDiag": {
+   "reason": "network_error"
+  },
+  "roundNum": 11
+ },
+ {
+  "_name": "search-results",
+  "status": "done",
+  "toolName": "web_search",
+  "query": "cats",
+  "results": [
+   {
+    "title": "A",
+    "url": "https://a.com",
+    "source": "google",
+    "snippet": "sa",
+    "fetched": true,
+    "fetchedChars": 1500
+   },
+   {
+    "title": "B",
+    "url": "https://b.com",
+    "source": "bing",
+    "_q": "dogs"
+   }
+  ],
+  "roundNum": 12
+ },
+ {
+  "_name": "search-multiq-vertical",
+  "status": "done",
+  "toolName": "web_search",
+  "query": "q1\nq2",
+  "results": [
+   {
+    "title": "A",
+    "url": "https://a.com",
+    "source": "google",
+    "_q": "q1"
+   },
+   {
+    "title": "B",
+    "url": "https://b.com",
+    "source": "bing",
+    "_q": "q2"
+   }
+  ],
+  "verticals": [
+   {
+    "domain": "academic",
+    "sources": [
+     {
+      "source": "hf",
+      "identifier": "x"
+     }
+    ],
+    "items": [
+     {
+      "title": "P1",
+      "url": "https://p1",
+      "upvotes": 5
+     }
+    ]
+   },
+   {
+    "domain": "academic",
+    "sources": [
+     {
+      "source": "hf",
+      "identifier": "x"
+     }
+    ],
+    "items": [
+     {
+      "title": "P1",
+      "url": "https://p1",
+      "upvotes": 9
+     },
+     {
+      "title": "P2",
+      "url": "https://p2",
+      "citations": 3
+     }
+    ]
+   }
+  ],
+  "engineBreakdown": {
+   "google": [
+    {
+     "title": "A",
+     "url": "https://a.com"
+    }
+   ]
+  },
+  "roundNum": 13
+ },
+ {
+  "_name": "readimg",
+  "status": "done",
+  "toolName": "read_files",
+  "query": "read x.png",
+  "results": [
+   {
+    "imageDataUris": [
+     {
+      "uri": "data:image/png;base64,AA",
+      "filename": "x.png"
+     },
+     {
+      "uri": "data:image/png;base64,BB",
+      "filename": "y.png"
+     }
+    ]
+   }
+  ],
+  "roundNum": 14
+ },
+ {
+  "_name": "inspectimg",
+  "status": "done",
+  "toolName": "inspect_image",
+  "query": "crop x.png",
+  "results": [
+   {
+    "imageDataUris": [
+     {
+      "uri": "data:image/png;base64,AA",
+      "filename": "x.png"
+     }
+    ],
+    "inspectOps": "crop, 2x"
+   }
+  ],
+  "roundNum": 15
+ },
+ {
+  "_name": "imagegen",
+  "status": "done",
+  "toolName": "generate_image",
+  "query": "a cat",
+  "results": [
+   {
+    "imageMode": "generate",
+    "imageDataUri": "data:image/png;base64,AA",
+    "imagePrompt": "a cat",
+    "badge": "✓ done",
+    "imageAspectRatio": "1:1",
+    "imageResolution": "1024"
+   }
+  ],
+  "roundNum": 16
+ },
+ {
+  "_name": "imagegen-edit",
+  "status": "done",
+  "toolName": "edit_image",
+  "query": "make it blue",
+  "results": [
+   {
+    "imageMode": "edit",
+    "imageDataUri": "data:image/png;base64,BB",
+    "imageSourceUrl": "https://src/img.png",
+    "imagePrompt": "make it blue"
+   }
+  ],
+  "roundNum": 17
+ },
+ {
+  "_name": "imagegen-err",
+  "status": "done",
+  "toolName": "generate_image",
+  "query": "a cat",
+  "results": [
+   {
+    "imageMode": "generate",
+    "imageError": "rate limited"
+   }
+  ],
+  "roundNum": 18
+ },
+ {
+  "_name": "imagegen-loading",
+  "status": "searching",
+  "toolName": "generate_image",
+  "query": "a cat",
+  "results": [
+   {
+    "imageMode": "generate",
+    "badge": "generating…"
+   }
+  ],
+  "roundNum": 19
+ },
+ {
+  "_name": "approval-cmd",
+  "status": "pending_approval",
+  "approvalId": "ap1",
+  "toolName": "run_command",
+  "query": "run_command",
+  "approvalMeta": {
+   "toolName": "run_command",
+   "command": "rm foo",
+   "description": "delete"
+  },
+  "results": [],
+  "roundNum": 20
+ },
+ {
+  "_name": "approval-single-diff",
+  "status": "pending_approval",
+  "approvalId": "ap2",
+  "toolName": "apply_diff",
+  "query": "apply_diff",
+  "approvalMeta": {
+   "toolName": "apply_diff",
+   "search": "old\nolder",
+   "replace": "new"
+  },
+  "results": [],
+  "roundNum": 21
+ },
+ {
+  "_name": "approval-batch",
+  "status": "pending_approval",
+  "approvalId": "ap3",
+  "toolName": "apply_diffs",
+  "query": "apply_diffs",
+  "approvalMeta": {
+   "toolName": "apply_diffs",
+   "batchMode": true,
+   "path": "x.py",
+   "editCount": 2,
+   "editSummaries": [
+    {
+     "path": "x.py",
+     "search": "a",
+     "replace": "b",
+     "searchLines": 1,
+     "replaceLines": 1,
+     "description": "e1"
+    },
+    {
+     "path": "y.py",
+     "search": "c",
+     "replace": "d",
+     "searchLines": 1,
+     "replaceLines": 1
+    }
+   ]
+  },
+  "results": [],
+  "roundNum": 22
+ },
+ {
+  "_name": "approval-write",
+  "status": "pending_approval",
+  "approvalId": "ap4",
+  "toolName": "write_file",
+  "query": "write_file",
+  "approvalMeta": {
+   "toolName": "write_file",
+   "path": "x.py",
+   "contentPreview": "print(1)\nprint(2)",
+   "contentLines": 2,
+   "contentChars": 17
+  },
+  "results": [],
+  "roundNum": 23
+ },
+ {
+  "_name": "aborted",
+  "status": "aborted",
+  "toolName": "run_command",
+  "query": "npm test",
+  "results": [],
+  "roundNum": 24
+ },
+ {
+  "_name": "aborted-with-results",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "npm test",
+  "results": [
+   {
+    "command": "npm test",
+    "output": "ok",
+    "exitCode": "0"
+   }
+  ],
+  "roundNum": 25
+ },
+ {
+  "_name": "stdin",
+  "status": "awaiting_stdin",
+  "stdinId": "s1",
+  "toolName": "run_command",
+  "query": "read x",
+  "stdinPrompt": "enter x:",
+  "results": [],
+  "roundNum": 26
+ },
+ {
+  "_name": "timer-waiting",
+  "status": "searching",
+  "toolName": "timer_create",
+  "query": "watch build",
+  "results": [],
+  "roundNum": 27
+ },
+ {
+  "_name": "hg-skipped",
+  "status": "done",
+  "toolName": "ask_human",
+  "_hgSkipped": true,
+  "guidanceQuestion": "Pick A or B?",
+  "results": [
+   {}
+  ],
+  "roundNum": 28
+ },
+ {
+  "_name": "hg-submitted",
+  "status": "submitted",
+  "toolName": "ask_human",
+  "_hgUserResponse": "A",
+  "results": [
+   {}
+  ],
+  "roundNum": 29
+ },
+ {
+  "_name": "hg-awaiting-card",
+  "status": "awaiting_human",
+  "toolName": "ask_human",
+  "toolCallId": "call_hg_1",
+  "guidanceId": "hg_test123",
+  "guidanceQuestion": "Which scope should the redesign cover?",
+  "guidanceType": "choice",
+  "guidanceOptions": [
+   {
+    "label": "Frontend only",
+    "description": "Visual + interaction, no contract change"
+   },
+   {
+    "label": "Frontend + defaults",
+    "description": "Also schema-level defaults"
+   }
+  ],
+  "results": [
+   {}
+  ],
+  "roundNum": 30
+ },
+ {
+  "_name": "badge-tokens",
+  "status": "done",
+  "toolName": "fetch_url",
+  "query": "fetch x",
+  "toolTokens": 1530,
+  "results": [
+   {}
+  ],
+  "roundNum": 30
+ },
+ {
+  "_name": "badge-fetchedchars",
+  "status": "done",
+  "toolName": "fetch_url",
+  "query": "fetch x",
+  "results": [
+   {
+    "fetchedChars": 2500
+   }
+  ],
+  "roundNum": 31
+ },
+ {
+  "_name": "badge-meta-badge",
+  "status": "done",
+  "toolName": "apply_diff",
+  "query": "patch x",
+  "results": [
+   {
+    "badge": "+3/-1",
+    "writeOk": true
+   }
+  ],
+  "roundNum": 32
+ },
+ {
+  "_name": "badge-memory-ok",
+  "status": "done",
+  "toolName": "create_memory",
+  "query": "save note",
+  "results": [
+   {
+    "badge": "saved",
+    "memoryOk": true
+   }
+  ],
+  "roundNum": 33
+ },
+ {
+  "_name": "badge-await-timeout",
+  "status": "done",
+  "toolName": "await_agents",
+  "query": "wait",
+  "results": [
+   {
+    "badge": "partial",
+    "awaitTimedOut": true
+   }
+  ],
+  "roundNum": 34
+ },
+ {
+  "_name": "compaction-L1",
+  "status": "done",
+  "toolName": "fetch_url",
+  "query": "fetch x",
+  "compactionLayer": "L1",
+  "compactedFromChars": 112000,
+  "compactedToChars": 800,
+  "results": [
+   {}
+  ],
+  "roundNum": 35
+ },
+ {
+  "_name": "write-file-done",
+  "status": "done",
+  "toolName": "write_file",
+  "query": "Write x.py",
+  "toolArgs": "{\"content\":\"line1\\nline2\"}",
+  "results": [
+   {
+    "badge": "2 lines"
+   }
+  ],
+  "roundNum": 36
+ },
+ {
+  "_name": "single-diff-done",
+  "status": "done",
+  "toolName": "apply_diff",
+  "query": "Patch x.py",
+  "toolArgs": "{\"search\":\"old\",\"replace\":\"new\\nnewer\"}",
+  "results": [
+   {
+    "badge": "+2/-1"
+   }
+  ],
+  "roundNum": 37
+ },
+ {
+  "_name": "insert-content-done",
+  "status": "done",
+  "toolName": "insert_content",
+  "query": "Insert x.py",
+  "toolArgs": "{\"anchor\":\"abc\",\"content\":\"NEW\",\"position\":\"after\"}",
+  "results": [
+   {
+    "badge": "+1"
+   }
+  ],
+  "roundNum": 38
+ },
+ {
+  "_name": "batch-diffs-done",
+  "status": "done",
+  "toolName": "apply_diffs",
+  "query": "Patch x.py (2 edits)",
+  "toolArgs": "{\"edits\":[{\"search\":\"a\",\"replace\":\"b\"},{\"search\":\"c\",\"replace\":\"d\"}]}",
+  "results": [
+   {
+    "badge": "2 edits",
+    "editSummaries": [
+     {
+      "path": "x.py",
+      "status": "ok",
+      "description": "first"
+     },
+     {
+      "path": "y.py",
+      "status": "fail",
+      "description": "second",
+      "detail": "y.py: Search text not found in y.py: c"
+     }
+    ]
+   }
+  ],
+  "roundNum": 39,
+  "toolContent": "Applied 1/2 edits (1 failed)\n[1] OK x.py: 1 lines changed (3L → 3L)\n[2] FAIL y.py: Search text not found in y.py: c"
+ },
+ {
+  "_name": "batch-diffs-fail-compacted",
+  "status": "done",
+  "toolName": "apply_diffs",
+  "query": "Patch x.py (2 edits)",
+  "toolArgs": "{\"edits\":[{\"search\":\"a\",\"replace\":\"b\"},{\"search\":\"c\",\"replace\":\"d\"}]}",
+  "results": [
+   {
+    "badge": "2 edits",
+    "editSummaries": [
+     {
+      "path": "x.py",
+      "status": "ok",
+      "description": "first"
+     },
+     {
+      "path": "y.py",
+      "status": "fail",
+      "description": "second",
+      "detail": "y.py: Search text not found in y.py: c"
+     }
+    ]
+   }
+  ],
+  "roundNum": 56
+ },
+ {
+  "_name": "elapsed-done",
+  "status": "done",
+  "toolName": "list_dir",
+  "query": "ls",
+  "_elapsed": "1.2s",
+  "results": [],
+  "roundNum": 40
+ },
+ {
+  "_name": "search-orbit",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "web_search",
+  "query": "cats",
+  "results": [],
+  "roundNum": 41
+ },
+ {
+  "_name": "conv-meta-board-read",
+  "roundNum": 42,
+  "toolName": "project_board_read",
+  "status": "done",
+  "query": "Read the project board",
+  "toolContent": "# Team board\n\n- epic alpha\n- epic beta",
+  "results": [
+   {
+    "source": "Board",
+    "action": "read",
+    "items": [
+     {
+      "id": "pt_1",
+      "title": "alpha"
+     }
+    ]
+   }
+  ],
+  "toolArgs": {}
+ },
+ {
+  "_name": "conv-meta-get-conversation",
+  "roundNum": 49,
+  "toolName": "get_conversation",
+  "status": "done",
+  "query": "Open conversation msebjymx",
+  "toolContent": "# Earlier redesign discussion\n\n12 messages",
+  "results": [
+   {
+    "source": "Conversations",
+    "convDigest": {
+     "convId": "msebjymx",
+     "title": "Earlier redesign discussion",
+     "msgCount": 12,
+     "messages": [
+      {
+       "role": "user",
+       "text": "how should the panel collapse?"
+      },
+      {
+       "role": "assistant",
+       "text": "Collapse tool results by default.",
+       "tools": [
+        {
+         "name": "edit_file",
+         "arg": "tool_rounds.js"
+        }
+       ]
+      }
+     ],
+     "preset": "kimi-k3",
+     "raw": true,
+     "rev": 1124
+    }
+   }
+  ],
+  "toolArgs": {}
+ },
+ {
+  "_name": "timer-watcher-triggered",
+  "roundNum": 43,
+  "toolName": "timer_create",
+  "status": "done",
+  "query": "Watch the training log",
+  "toolArgs": {},
+  "_timerPolls": [
+   {
+    "decision": "started",
+    "at": 1700000000000
+   },
+   {
+    "decision": "wait",
+    "at": 1700000001000,
+    "reason": "no DONE marker yet"
+   },
+   {
+    "decision": "ready",
+    "at": 1700000002000,
+    "reason": "DONE marker found"
+   }
+  ],
+  "_timerTriggered": true,
+  "_timerTimerId": "timer-abcdef1234567890"
+ },
+ {
+  "_name": "cmd-done-long-collapsed",
+  "status": "done",
+  "toolName": "run_command",
+  "query": "grep -c 'jsonify(' routes/api_v1/browser.py && python3 - <<'EOF'\nimport pathlib\nprint('baseline tightened')\nEOF",
+  "toolCallId": "call-long-done-1",
+  "results": [
+   {
+    "command": "grep -c 'jsonify(' routes/api_v1/browser.py && python3 - <<'EOF'\nimport pathlib\nprint('baseline tightened')\nEOF",
+    "output": "3\nbaseline tightened",
+    "exitCode": "0",
+    "description": "count sites and run heredoc"
+   }
+  ],
+  "roundNum": 44
+ },
+ {
+  "_name": "cmd-running-long-collapsed",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "run_command",
+  "query": "python3 - <<'EOF'\nimport time\ntime.sleep(9)\nEOF",
+  "toolCallId": "call-long-run-1",
+  "toolArgs": "{\"description\":\"sleep via heredoc\"}",
+  "_partialOutput": "line1\nline2",
+  "results": [],
+  "roundNum": 45
+ },
+ {
+  "_name": "browser-click-done",
+  "status": "done",
+  "toolName": "browser_click",
+  "query": "Click current tab: 登录",
+  "results": [
+   {
+    "badge": "clicked"
+   }
+  ],
+  "roundNum": 46
+ },
+ {
+  "_name": "browser-type-searching",
+  "_isSearching": true,
+  "status": "searching",
+  "toolName": "browser_type",
+  "query": "Type into current tab: 搜索",
+  "results": [],
+  "roundNum": 47
+ },
+ {
+  "_name": "error-failed-tool",
+  "status": "error",
+  "toolName": "get_conversation",
+  "query": "Open conversation msebjymx",
+  "toolContent": "Tool execution timed out: get_conversation",
+  "results": [],
+  "roundNum": 48
+ },
+ {
+  "_name": "error-failed-tool-long-multiline",
+  "status": "error",
+  "toolName": "mcp__llm__experiment_stop",
+  "query": "llm/experiment_stop — ['359059'] · dry-run",
+  "toolCallId": "call-exp-stop-1",
+  "toolContent": "MCP Error: {\"ok\": false, \"error\": \"destructive operation requires confirm=true\", \"confirmation_required\": true, \"error_detail\": {\"type\": \"confirmation_required\", \"message\": \"destructive operation requires confirm=true\"}, \"confirmation\": {\"tool\": \"experiment_stop\", \"mis\": \"your-username\", \"target\": \"{\\\"id\\\": 359059, \\\"reason\\\": \\\"user requested stop\\\"}\", \"hint\": \"Call again with confirm=true to proceed. The dry-run shows what would be stopped: 3 running trials, 12 queued trials across 2 searchers.\"}}\nerror",
+  "results": [],
+  "roundNum": 49
+ },
+ {
+  "_name": "hg-awaiting-expired",
+  "status": "awaiting_human",
+  "toolName": "ask_human",
+  "toolCallId": "call_hg_2",
+  "_turnSettled": true,
+  "guidanceId": "hg_expired9",
+  "guidanceQuestion": "Which scope should the redesign cover?",
+  "guidanceType": "choice",
+  "guidanceOptions": [
+   {
+    "label": "Frontend only",
+    "description": "Visual + interaction, no contract change"
+   },
+   {
+    "label": "Frontend + defaults",
+    "description": "Also schema-level defaults"
+   }
+  ],
+  "results": [
+   {}
+  ],
+  "roundNum": 50
+ },
+ {
+  "_name": "search-tools-results",
+  "status": "done",
+  "toolName": "search_tools",
+  "query": "edit project documentation",
+  "toolSearchTotal": 2,
+  "results": [
+   {
+    "type": "tool_catalog_match",
+    "toolName": "mcp__docs__update",
+    "namespace": "docs",
+    "snippet": "Update a documentation page",
+    "arguments": [
+     {
+      "name": "page_id",
+      "type": "string",
+      "required": true
+     }
+    ]
+   },
+   {
+    "type": "tool_catalog_match",
+    "toolName": "mcp__docs__search",
+    "namespace": "docs"
+   }
+  ],
+  "roundNum": 100
+ },
+ {
+  "_name": "injection-inbox",
+  "_inboxInject": true,
+  "inboxCount": 2,
+  "inboxAgentIds": [
+   "agent-one",
+   "agent-two"
+  ],
+  "inboxPreviews": [
+   {
+    "agentId": "agent-one",
+    "text": "<swarm-update><agent-id>agent-one</agent-id><role>reviewer</role><status>completed</status><elapsed-seconds>4</elapsed-seconds><tokens>321</tokens><output-file>reports/review.md</output-file><preview>Review **complete**.</preview><remaining running=\"1\" pending=\"0\"/></swarm-update>"
+   },
+   {
+    "agentId": "agent-two",
+    "text": "legacy raw update"
+   }
+  ],
+  "roundNum": 101
+ },
+ {
+  "_name": "injection-peer",
+  "_peerInject": true,
+  "peerCount": 2,
+  "peerPreviews": [
+   {
+    "fromConv": "sibling-alpha",
+    "text": "Alpha sent **evidence**."
+   },
+   {
+    "fromConv": "sibling-beta",
+    "text": "Beta confirmed the gate."
+   }
+  ],
+  "roundNum": 102
+ },
+ {
+  "_name": "injection-steer",
+  "_userSteerInject": true,
+  "steerCount": 1,
+  "steerPreviews": [
+   {
+    "text": "Please preserve the public contract."
+   }
+  ],
+  "roundNum": 103
+ },
+ {
+  "_name": "injection-stall",
+  "_stallNudge": true,
+  "stallTool": "run_command",
+  "stallPrompt": "[SYSTEM: TOOL CALL DID NOT RUN] Continue with the promised action.",
+  "roundNum": 104
+ }
+,
+ {
+  "_name": "compaction-L0",
+  "status": "done",
+  "toolName": "read_files",
+  "query": "Read 1 file: zh.json L1010-2900",
+  "compactionLayer": "L0",
+  "compactedFromChars": 100069,
+  "compactedToChars": 18000,
+  "rawToolTokens": 22461,
+  "toolTokens": 4512,
+  "results": [
+   {}
+  ],
+  "roundNum": 105
+ }
+,
+ {
+  "_name": "rejected-contract-invalid",
+  "status": "rejected",
+  "toolName": "search_tool_artifact",
+  "query": "Search compacted result of R56 · Tool batch: browser_preview_page: consoleErrors",
+  "rejection": {
+   "kind": "tool_contract_invalid",
+   "tool": "search_tool_artifact",
+   "code": "missing_required_arguments",
+   "path": "$.searches[0]",
+   "reason": "ERROR: Tool call `search_tool_artifact` was NOT executed. [missing_required_arguments] Missing required arguments: artifact_ref Path: $.searches[0]. Match arguments_schema and retry. `search_tool_artifact` expects a JSON object — keys: searches(array), artifact_ref(string), query(string), cursor(string), limit(integer), offset(string), includeScore(boolean) (* = required: artifact_ref, plus one of query or searches).",
+   "retryable": true
+  },
+  "results": [
+   {}
+  ],
+  "roundNum": 106
+ }
+,
+ {
+  "_name": "rejected-hallucinated",
+  "status": "rejected",
+  "toolName": "read_fiels",
+  "rejection": {
+   "kind": "hallucinated",
+   "attempted": "read_fiels",
+   "suggestions": [
+    "read_files"
+   ],
+   "reason": "Error: `read_fiels` is not a real tool and was NOT executed. It is not in the list of tools available to you this turn. Did you mean one of: `read_files`?"
+  },
+  "results": [
+   {}
+  ],
+  "roundNum": 107
+ }
+]

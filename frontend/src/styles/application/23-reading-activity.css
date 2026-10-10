@@ -1,0 +1,248 @@
+/* Durable activity, failures and compaction receipts.
+ * Owner: ConversationSurface; tokens: 00-design-tokens.css.
+ * Delivery: ordered application manifest; neighboring content owners are independent.
+ */
+
+/* Durable activity reads as a log line, not a stack of colored banners. */
+
+.conversation-surface .conversation-block--activity-event {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.conversation-surface .activity-event {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-height: 29px;
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-1);
+  border-bottom: 1px solid color-mix(in srgb, var(--turn-rule) 70%, transparent);
+  border-radius: 0;
+  background: transparent;
+  box-sizing: border-box;
+}
+
+.conversation-surface :is(.activity-event--warning, .activity-event--error, .activity-event--failed) {
+  background: transparent;
+}
+
+.conversation-surface .activity-event__marker {
+  position: static;
+  display: inline-flex;
+  flex-shrink: 0;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-block-start: var(--space-1);
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-primary);
+  box-shadow: 0 0 0 1px var(--turn-spine);
+  color: var(--text-tertiary);
+}
+
+.conversation-surface .activity-event__marker svg {
+  width: 12px;
+  height: 12px;
+}
+
+.conversation-surface :is(.activity-event--error, .activity-event--failed) .activity-event__marker {
+  background: var(--bg-primary);
+  color: var(--error-text);
+}
+
+.conversation-surface .activity-event--warning .activity-event__marker,
+.conversation-surface :is(.activity-event--switched, .activity-event--skipped, .activity-event--aborted) .activity-event__marker {
+  background: var(--bg-primary);
+  color: var(--warning-text);
+}
+
+.conversation-surface .activity-event--succeeded .activity-event__marker {
+  background: var(--bg-primary);
+  color: var(--s-done, var(--success-text));
+}
+
+/* Diagnostic icons carry meaning inline; there is no out-of-flow gutter. */
+
+.conversation-surface details.activity-event {
+  display: block;
+}
+
+.conversation-surface .activity-event__terminal-summary {
+  grid-template-columns: var(--space-4) minmax(0, 1fr);
+  gap: var(--space-2);
+}
+
+.conversation-surface .activity-event__summary {
+  font-size: var(--conversation-font-size-meta);
+  line-height: 1.45;
+}
+
+.conversation-surface .activity-event__chips {
+  gap: var(--space-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.conversation-surface .activity-event__duration {
+  min-width: 36px;
+  text-align: right;
+}
+
+.conversation-surface .activity-event__detail,
+.conversation-surface .activity-event__facts {
+  margin-top: var(--space-1);
+  font-size: var(--conversation-font-size-caption);
+}
+
+/* Compaction is a durable context boundary, so it earns one quiet exception
+ * to the log-line treatment. The converging token rail carries the before /
+ * after accounting; accent chrome distinguishes it from failures. */
+
+.conversation-surface .activity-event--compaction {
+  margin: var(--space-1) 0;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--turn-rule));
+  border-radius: 11px;
+  background:
+    linear-gradient(105deg,
+      color-mix(in srgb, var(--accent) 8%, var(--bg-primary)) 0%,
+      color-mix(in srgb, var(--accent) 2%, var(--bg-primary)) 74%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 62%, transparent);
+}
+
+.conversation-surface .activity-event--compaction .activity-event__marker {
+  top: var(--space-2);
+  background: var(--bg-primary);
+  color: color-mix(in srgb, var(--accent) 84%, var(--text-secondary));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 38%, var(--turn-spine));
+}
+
+.conversation-surface .activity-event--compaction .activity-event__summary {
+  color: var(--text-primary, var(--text));
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-semibold);
+  letter-spacing: .003em;
+}
+
+.conversation-surface .activity-event--compaction .compaction-token-flow {
+  display: flex;
+  margin-top: var(--space-2);
+}
+
+.conversation-surface .activity-event__compaction-open {
+  min-height: 22px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--turn-rule));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  color: color-mix(in srgb, var(--accent) 76%, var(--text-secondary));
+  cursor: pointer;
+  font: 600 var(--conversation-font-size-caption)/1.2 var(--font-ui);
+  white-space: nowrap;
+}
+
+.conversation-surface .activity-event__compaction-open:hover {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--turn-rule));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.conversation-surface .activity-event__compaction-open:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, white);
+  outline-offset: 2px;
+}
+
+.conversation-surface .activity-event--compaction.activity-event--failed {
+  border-color: color-mix(in srgb, var(--warning-text) 28%, var(--turn-rule));
+  background: color-mix(in srgb, var(--warning-text) 5%, var(--bg-primary));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warning-text) 62%, transparent);
+}
+
+@media (max-width: 600px) {
+  .conversation-surface .activity-event--compaction .activity-event__line {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .conversation-surface .activity-event--compaction .activity-event__chips {
+    width: 100%;
+    margin-left: 0;
+  }
+  .conversation-surface .activity-event--compaction .compaction-token-flow {
+    flex-wrap: wrap;
+  }
+}
+
+.conversation-surface .message:not(.user-msg) .conversation-turn-blocks:has(
+  > .conversation-block:not(.conversation-block--text):not(.conversation-block--attachments):not(.conversation-block--context)
+) > .conversation-block--activity-event::before {
+  content: none;
+}
+
+.conversation-surface :is(.plan-card-icon, .msg-video-play) svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.conversation-surface :is(
+  .conversation-turn-avatar,
+  .plan-decision-indicator-icon,
+  .ig-result-actions a,
+  .vertical-meta-icon,
+  .ig-path-icon,
+  .ig-ba-arrow,
+  .ptool-turn-chev,
+  .ptool-panel-chevron,
+  .timer-poll-caret,
+  .timer-toggle,
+  .sw-tl-chev,
+  .sw-a-chevron,
+  .sw-chevron,
+  .finish-tag,
+  .cp-think
+) svg {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.conversation-surface :is(.vertical-meta-pill, .cp-think) {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.conversation-surface button.ptool-turn-head,
+.conversation-surface .timer-watcher-header[role="button"] {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  touch-action: manipulation;
+}
+
+.conversation-surface button.ptool-turn-head:focus-visible,
+.conversation-surface .timer-watcher-header[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.conversation-surface :is(.ptool-turn-chev, .timer-toggle) {
+  display: inline-flex;
+  transition: transform var(--motion-fast) ease;
+}
+
+.conversation-surface .ptool-turn.collapsed .ptool-turn-chev,
+.conversation-surface .timer-watcher-header[aria-expanded="false"] .timer-toggle {
+  transform: rotate(-90deg);
+}
+
+.conversation-surface .fc-chevron {
+  display: inline-flex;
+  transition: transform var(--motion-fast) ease;
+}
+
+.conversation-surface .conversation-file-changes[open] .fc-chevron {
+  transform: rotate(180deg);
+}

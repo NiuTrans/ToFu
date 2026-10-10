@@ -1,0 +1,457 @@
+{
+  "scope": "Observer-enabled original1000 write/replay harness augmented with same bounded metadata query probe, B-C-C-B each transport. Native observer3e9809 identical; complete frozen caller closure differs only v2_client.py. Probe changes load/cadence, not unmodified acceptance benchmark. All8 original write/replay correctness and import/source guards pass. Added queries still fail.",
+  "rows": [
+    {
+      "label": "read-turn-query-embedded-B0",
+      "correctness": true,
+      "harness_errors": 0,
+      "query_samples": 10,
+      "query_errors": 2,
+      "query_max_ms": 1505.1306337118149,
+      "write_p99_ms": {
+        "submit_to_running": 641.580231487751,
+        "stream_scheduled": 1255.2082613110542,
+        "settle": 3076.1695504188538
+      },
+      "report_path": "/path/to/your/project",
+      "probe_path": "/path/to/your/project",
+      "report_sha256": "9d87db8509c52b54f5806472e434fb769f169404b8c5259800d36f332a9ceb8a",
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 18,
+          "total_ms": 4641.703747212887,
+          "max": 513.769805431366,
+          "p50": 156.24722518287513,
+          "p99": 513.769805431366
+        },
+        "embedded_wire:conversation.list": {
+          "count": 9,
+          "total_ms": 405.1416590809822,
+          "max": 234.50235277414322,
+          "p50": 1.0,
+          "p99": 234.50235277414322
+        },
+        "attempt:conversation.list": {
+          "count": 18,
+          "total_ms": 5047.3446771502495,
+          "max": 513.794831931591,
+          "p50": 368.42278384511775,
+          "p99": 513.794831931591
+        },
+        "rpc:conversation.list": {
+          "count": 11,
+          "total_ms": 5260.249271988869,
+          "max": 1505.1155909895897,
+          "p50": 207.96505671840686,
+          "p99": 1505.1155909895897
+        }
+      },
+      "pool_attempts_by_catalog_kind": {
+        "command": 8000,
+        "query": 8018,
+        "unknown": 2
+      }
+    },
+    {
+      "label": "read-turn-query-embedded-C1",
+      "correctness": true,
+      "harness_errors": 0,
+      "query_samples": 12,
+      "query_errors": 2,
+      "query_max_ms": 1504.8807188868523,
+      "write_p99_ms": {
+        "submit_to_running": 615.7467439770699,
+        "stream_scheduled": 1266.0077214241028,
+        "settle": 3364.3812090158463
+      },
+      "report_path": "/path/to/your/project",
+      "probe_path": "/path/to/your/project",
+      "report_sha256": "fca6f4104d65a55c9b946d795027252e7a5b55b13344e948e42ec5300c8ab530",
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "1c7fb92262ce9bed453bd17f436f7fb0121d2d12e4cfe3601f5eb93aadec1706"
+      },
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 18,
+          "total_ms": 3444.0927952528,
+          "max": 559.9928498268127,
+          "p50": 9.84973267580763,
+          "p99": 559.9928498268127
+        },
+        "embedded_wire:conversation.list": {
+          "count": 11,
+          "total_ms": 269.9568420648575,
+          "max": 114.39016461372375,
+          "p50": 2.5937424601000023,
+          "p99": 114.39016461372375
+        },
+        "attempt:conversation.list": {
+          "count": 18,
+          "total_ms": 3714.547924697399,
+          "max": 560.016356408596,
+          "p50": 54.763699237493086,
+          "p99": 560.016356408596
+        },
+        "rpc:conversation.list": {
+          "count": 13,
+          "total_ms": 3876.922257244587,
+          "max": 1504.8668310046196,
+          "p50": 9.84973267580763,
+          "p99": 1504.8668310046196
+        }
+      },
+      "pool_attempts_by_catalog_kind": {
+        "command": 8000,
+        "query": 8018,
+        "unknown": 2
+      }
+    },
+    {
+      "label": "read-turn-query-embedded-C2",
+      "correctness": true,
+      "harness_errors": 0,
+      "query_samples": 12,
+      "query_errors": 2,
+      "query_max_ms": 1515.2848064899445,
+      "write_p99_ms": {
+        "submit_to_running": 627.52815335989,
+        "stream_scheduled": 1703.6209926009178,
+        "settle": 3078.442856669426
+      },
+      "report_path": "/path/to/your/project",
+      "probe_path": "/path/to/your/project",
+      "report_sha256": "375d4674ec17ac9c043d59f77297fe0704b2b8199ab169a16a6ec6027371ca01",
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "1c7fb92262ce9bed453bd17f436f7fb0121d2d12e4cfe3601f5eb93aadec1706"
+      },
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 19,
+          "total_ms": 3926.871232688427,
+          "max": 511.58223301172256,
+          "p50": 6.115909044841464,
+          "p99": 511.58223301172256
+        },
+        "embedded_wire:conversation.list": {
+          "count": 12,
+          "total_ms": 167.0287549495697,
+          "max": 75.13914257287979,
+          "p50": 1.2100000000000002,
+          "p99": 75.13914257287979
+        },
+        "attempt:conversation.list": {
+          "count": 19,
+          "total_ms": 4094.455771148205,
+          "max": 550.5474656820297,
+          "p50": 66.26407607736665,
+          "p99": 550.5474656820297
+        },
+        "rpc:conversation.list": {
+          "count": 13,
+          "total_ms": 4301.828421652317,
+          "max": 1515.271432697773,
+          "p50": 3.452271214393104,
+          "p99": 1515.271432697773
+        }
+      },
+      "pool_attempts_by_catalog_kind": {
+        "command": 8000,
+        "query": 8019,
+        "unknown": 2
+      }
+    },
+    {
+      "label": "read-turn-query-embedded-B3",
+      "correctness": true,
+      "harness_errors": 0,
+      "query_samples": 11,
+      "query_errors": 2,
+      "query_max_ms": 1500.2041161060333,
+      "write_p99_ms": {
+        "submit_to_running": 620.7545325160027,
+        "stream_scheduled": 1260.6591582298279,
+        "settle": 3733.454041182995
+      },
+      "report_path": "/path/to/your/project",
+      "probe_path": "/path/to/your/project",
+      "report_sha256": "b7623a1f1db5b28e0c7703353f9b00a9040b5206983d5259a13a1b1cc54b72d2",
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 19,
+          "total_ms": 5025.240384042263,
+          "max": 504.42149490118027,
+          "p50": 251.63771862927234,
+          "p99": 504.42149490118027
+        },
+        "embedded_wire:conversation.list": {
+          "count": 11,
+          "total_ms": 395.7701623439789,
+          "max": 116.3201630115509,
+          "p50": 1.7715610000000008,
+          "p99": 116.3201630115509
+        },
+        "attempt:conversation.list": {
+          "count": 19,
+          "total_ms": 5421.55946046114,
+          "max": 568.4249848127365,
+          "p50": 368.42278384511775,
+          "p99": 568.4249848127365
+        },
+        "rpc:conversation.list": {
+          "count": 12,
+          "total_ms": 5654.248081147671,
+          "max": 1500.1901760697365,
+          "p50": 207.96505671840686,
+          "p99": 1500.1901760697365
+        }
+      },
+      "pool_attempts_by_catalog_kind": {
+        "command": 8000,
+        "query": 8019,
+        "unknown": 2
+      }
+    },
+    {
+      "label": "read-turn-query-application-B0",
+      "correctness": true,
+      "harness_errors": 0,
+      "query_samples": 13,
+      "query_errors": 3,
+      "query_max_ms": 1502.5395825505257,
+      "write_p99_ms": {
+        "submit_to_running": 46.67934775352478,
+        "stream_scheduled": 1837.7748131752014,
+        "settle": 4170.779749751091
+      },
+      "report_path": "/path/to/your/project",
+      "probe_path": "/path/to/your/project",
+      "report_sha256": "1694b38b2ac18dac6a0b90f8e6b6ba3d026487be1cfd3ff060679afc74edf989",
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 22,
+          "total_ms": 5181.88863992691,
+          "max": 504.6952962875366,
+          "p50": 117.39085287969579,
+          "p99": 504.6952962875366
+        },
+        "wire:conversation.list": {
+          "count": 13,
+          "total_ms": 111.93065345287323,
+          "max": 34.802474081516266,
+          "p50": 2.8531167061100025,
+          "p99": 34.802474081516266
+        },
+        "attempt:conversation.list": {
+          "count": 22,
+          "total_ms": 5295.017570257187,
+          "max": 504.7188699245453,
+          "p50": 117.39085287969579,
+          "p99": 504.7188699245453
+        },
+        "rpc:conversation.list": {
+          "count": 16,
+          "total_ms": 5483.656510710716,
+          "max": 1502.5262832641602,
+          "p50": 25.54766986187666,
+          "p99": 1502.5262832641602
+        }
+      },
+      "pool_attempts_by_catalog_kind": {
+        "command": 8001,
+        "query": 8022,
+        "unknown": 2
+      }
+    },
+    {
+      "label": "read-turn-query-application-C1",
+      "correctness": true,
+      "harness_errors": 0,
+      "query_samples": 13,
+      "query_errors": 3,
+      "query_max_ms": 1502.9768571257591,
+      "write_p99_ms": {
+        "submit_to_running": 46.278685331344604,
+        "stream_scheduled": 2240.3734624385834,
+        "settle": 5130.154296755791
+      },
+      "report_path": "/path/to/your/project",
+      "probe_path": "/path/to/your/project",
+      "report_sha256": "a650f87e694b6b45a77e86a9080ca4f61c88c88db13e0c745aee69977c640d4a",
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "1c7fb92262ce9bed453bd17f436f7fb0121d2d12e4cfe3601f5eb93aadec1706"
+      },
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 23,
+          "total_ms": 5326.775908470154,
+          "max": 506.08906149864197,
+          "p50": 23.22515441988787,
+          "p99": 506.08906149864197
+        },
+        "wire:conversation.list": {
+          "count": 13,
+          "total_ms": 217.00191497802734,
+          "max": 116.14254117012024,
+          "p50": 3.452271214393104,
+          "p99": 116.14254117012024
+        },
+        "attempt:conversation.list": {
+          "count": 23,
+          "total_ms": 5547.432571649551,
+          "max": 506.10803812742233,
+          "p50": 142.04293198443193,
+          "p99": 506.10803812742233
+        },
+        "rpc:conversation.list": {
+          "count": 16,
+          "total_ms": 5760.078109800816,
+          "max": 1502.9635429382324,
+          "p50": 14.420993610649957,
+          "p99": 1502.9635429382324
+        }
+      },
+      "pool_attempts_by_catalog_kind": {
+        "command": 8000,
+        "query": 8023,
+        "unknown": 2
+      }
+    },
+    {
+      "label": "read-turn-query-application-C2",
+      "correctness": true,
+      "harness_errors": 0,
+      "query_samples": 12,
+      "query_errors": 3,
+      "query_max_ms": 1503.23735922575,
+      "write_p99_ms": {
+        "submit_to_running": 42.88329929113388,
+        "stream_scheduled": 1971.975862979889,
+        "settle": 4254.976712167263
+      },
+      "report_path": "/path/to/your/project",
+      "probe_path": "/path/to/your/project",
+      "report_sha256": "97b14a512e410727eee5c9775f44b88201b41405259f8a1df777ca0f3abfe400",
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "1c7fb92262ce9bed453bd17f436f7fb0121d2d12e4cfe3601f5eb93aadec1706"
+      },
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 21,
+          "total_ms": 4577.02062278986,
+          "max": 507.7814608812332,
+          "p50": 21.113776745352606,
+          "p99": 507.7814608812332
+        },
+        "wire:conversation.list": {
+          "count": 12,
+          "total_ms": 108.90473425388336,
+          "max": 32.613374292850494,
+          "p50": 3.138428376721003,
+          "p99": 32.613374292850494
+        },
+        "attempt:conversation.list": {
+          "count": 21,
+          "total_ms": 4687.011435627937,
+          "max": 507.80514627695084,
+          "p50": 49.78518112499371,
+          "p99": 507.80514627695084
+        },
+        "rpc:conversation.list": {
+          "count": 15,
+          "total_ms": 4866.816908121109,
+          "max": 1503.2233074307442,
+          "p50": 17.44940226888645,
+          "p99": 1503.2233074307442
+        }
+      },
+      "pool_attempts_by_catalog_kind": {
+        "command": 8000,
+        "query": 8021,
+        "unknown": 2
+      }
+    },
+    {
+      "label": "read-turn-query-application-B3",
+      "correctness": true,
+      "harness_errors": 0,
+      "query_samples": 10,
+      "query_errors": 2,
+      "query_max_ms": 1501.019112765789,
+      "write_p99_ms": {
+        "submit_to_running": 48.53292554616928,
+        "stream_scheduled": 1813.9934688806534,
+        "settle": 3854.344382882118
+      },
+      "report_path": "/path/to/your/project",
+      "probe_path": "/path/to/your/project",
+      "report_sha256": "8f75fcc87720bb3c860719353521c2694bbb4c4aa1d0ccc59b9fcf0a41c80b1b",
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 20,
+          "total_ms": 5055.384561419487,
+          "max": 514.0412151813507,
+          "p50": 207.96505671840686,
+          "p99": 514.0412151813507
+        },
+        "wire:conversation.list": {
+          "count": 11,
+          "total_ms": 67.19512492418289,
+          "max": 27.318134903907776,
+          "p50": 1.9487171000000012,
+          "p99": 27.318134903907776
+        },
+        "attempt:conversation.list": {
+          "count": 20,
+          "total_ms": 5123.568281531334,
+          "max": 514.062725007534,
+          "p50": 207.96505671840686,
+          "p99": 514.062725007534
+        },
+        "rpc:conversation.list": {
+          "count": 13,
+          "total_ms": 5351.7032861709595,
+          "max": 1501.0058283805847,
+          "p50": 21.113776745352606,
+          "p99": 1501.0058283805847
+        }
+      },
+      "pool_attempts_by_catalog_kind": {
+        "command": 8000,
+        "query": 8020,
+        "unknown": 2
+      }
+    }
+  ],
+  "decision": "Reject this read-vs-mutating fair-turn policy: does not remove bounded-query failures and some stream/settlement latency regresses. Catalog counters show approximately8000 query and8000 command pool attempts: producer traffic already contains many queries. This supports investigating finer admission grouping but does not measure pending queue composition or prove why every probe failed. Do not tune divisor alone or special-case conversation.list.",
+  "tests": "84 focused client+policy tests; final2policytests passed after mechanical constant/test cleanup",
+  "source_commit": "6359a7405",
+  "runtime_integrated": false
+}

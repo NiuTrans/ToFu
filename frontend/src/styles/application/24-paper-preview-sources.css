@@ -1,0 +1,47 @@
+/* ── Read-only paper source tree + code view (drawer) ── */
+.paper-source-tree { display: flex; flex-direction: column; gap: 1px; padding: var(--space-2) 0; }
+.paper-source-tree-dir {
+  padding: var(--space-2) var(--space-3) var(--space-1);
+  color: var(--text-secondary); font-size: var(--font-size-xs);
+  text-transform: none; letter-spacing: 0;
+}
+.paper-source-tree-file {
+  display: block; width: 100%; text-align: start;
+  padding: var(--space-1) var(--space-3);
+  padding-inline-start: var(--space-4);
+  background: none; border: 0; border-radius: var(--radius-sm, 4px);
+  color: var(--text-primary); font-family: var(--font-ui); font-size: var(--font-size-sm);
+  cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.paper-source-tree-file:hover:not(:disabled) { background: var(--bg-hover); }
+.paper-source-tree-file:disabled { color: var(--text-secondary); cursor: default; opacity: 0.6; }
+.paper-source-view { display: flex; flex-direction: column; min-height: 0; }
+.paper-source-view-header {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding-bottom: var(--space-2); border-bottom: 1px solid var(--border);
+}
+.paper-source-back {
+  background: none; border: 0; color: var(--accent); cursor: pointer;
+  font-size: var(--font-size-sm); padding: var(--space-1) var(--space-2);
+}
+.paper-source-back:hover { background: var(--bg-hover); border-radius: var(--radius-sm, 4px); }
+.paper-source-view-path {
+  color: var(--text-secondary); font-size: var(--font-size-xs);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.paper-source-code {
+  margin: 0; padding: var(--space-2) 0; overflow: auto; max-height: 60vh;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--font-size-xs); line-height: 1.55; tab-size: 2;
+}
+.paper-source-line { display: flex; min-width: max-content; }
+.paper-source-line:hover { background: var(--bg-hover); }
+.paper-source-lineno {
+  flex: 0 0 3.2em; padding-inline-end: var(--space-3);
+  color: var(--text-secondary); opacity: 0.65; text-align: end;
+  user-select: none;
+}
+.paper-source-line code { flex: 1; white-space: pre; background: none; padding: 0 var(--space-2) 0 0; }
+.paper-source-line-hit { background: var(--accent-subtle); animation: paper-source-hit-fade 2.6s ease-out forwards; }
+@keyframes paper-source-hit-fade { from { background: var(--accent-subtle); } to { background: transparent; } }
+

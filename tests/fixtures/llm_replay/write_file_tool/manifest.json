@@ -1,0 +1,5 @@
+{
+  "description": "Step 1 streams a write_file tool call (the REAL write handler runs against the tmp project root); step 2 streams the closing text. Proves streamed tool calls execute through the real pipeline under replay.",
+  "recorded_at": "2026-09-17",
+  "mode": "replay"
+}

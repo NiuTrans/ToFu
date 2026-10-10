@@ -1,0 +1,321 @@
+{
+  "format": "tofu.native-tool-policy-evidence/v1",
+  "scope": "isolated occurrence-admission wall aggregates; no application performance admission",
+  "admission": "incomplete",
+  "oracle_observations": 2400,
+  "caller_cases": 26,
+  "current": {
+    "scope": "isolated 5000-observation wall aggregates; no tails/CPU/RSS or application admission",
+    "rows": [
+      {
+        "operations": 5000,
+        "wall_ns": 22703602,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "python",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 2766788,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "rust",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 2745453,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "rust",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 22719649,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "python",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 22723922,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "python",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 2759288,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "rust",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 429281906,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "python",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 147737330,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "rust",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 145889105,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "rust",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 433381506,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "python",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 429983802,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "python",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 146583602,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "rust",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 432082024,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "python",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 125304623,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "rust",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 125676637,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "rust",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 443541138,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "python",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 429806588,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "python",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 125844925,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "rust",
+        "pair": 2
+      }
+    ],
+    "python_source_sha256": "bd1d242dafaa081f26501e14e117089a168284bad2e95352dcf37b0bf903e252",
+    "rust_source_sha256": "5003086ac57576360a54627f0d3fa4b2f597233f5b4e877b6cd096503d4dd5ac"
+  },
+  "rejected_array_hashing": {
+    "scope": "isolated 5000-observation wall aggregates; no tails/CPU/RSS or application admission",
+    "rows": [
+      {
+        "operations": 5000,
+        "wall_ns": 23044253,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "python",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 2717638,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "rust",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 2719866,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "rust",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 23611054,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "python",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 22550056,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "python",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 2726445,
+        "retained_positions": 1,
+        "profile": "short",
+        "variant": "rust",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 425938273,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "python",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 602448984,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "rust",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 675247411,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "rust",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 432764850,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "python",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 432387397,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "python",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 605697354,
+        "retained_positions": 1,
+        "profile": "wide",
+        "variant": "rust",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 428735807,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "python",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 113889340,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "rust",
+        "pair": 0
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 112987349,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "rust",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 447176961,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "python",
+        "pair": 1
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 432576334,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "python",
+        "pair": 2
+      },
+      {
+        "operations": 5000,
+        "wall_ns": 112525087,
+        "retained_positions": 1,
+        "profile": "unicode",
+        "variant": "rust",
+        "pair": 2
+      }
+    ],
+    "python_source_sha256": "bd1d242dafaa081f26501e14e117089a168284bad2e95352dcf37b0bf903e252",
+    "rust_source_sha256": "b74a21137358b62a630ae410107febad905e53bb356922ff964c8cf317be540b"
+  },
+  "environment": {
+    "effective_cpu_affinity": 63,
+    "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.17",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+  },
+  "cargo_lock_sha256": "6b2590521d0d9469cb12654bfdc6a9b61b48fd649d7082122a8293720708399a",
+  "example_binary_sha256": "7b8b13b7c1ac8f0207b71a5d79ca58f475e7f5b4b8c573ce8a30882825357941",
+  "limitations": [
+    "Aggregate wall samples do not establish P99, CPU, RSS or end-to-end improvement.",
+    "Native signature depth above 128 is rejected.",
+    "Full tool reconciliation/schema/execution remains pending."
+  ]
+}

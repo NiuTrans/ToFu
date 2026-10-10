@@ -1,0 +1,9 @@
+# libmimalloc-sys needs a C compiler newer than the base image's gcc 4.8
+# (cc-rs emits -Wno-error=date-time, which gcc 4.8 rejects). Pin the
+# devtoolset-9 toolchain for every cargo invocation in this package so
+# plain `cargo build/test` works without exporting CC/CXX by hand.
+# devtoolset-8 was the original pin but no longer exists on this host;
+# native_engine._build drops unusable absolute CC overrides the same way.
+[env]
+CC = "/opt/rh/devtoolset-9/root/usr/bin/gcc"
+CXX = "/opt/rh/devtoolset-9/root/usr/bin/g++"

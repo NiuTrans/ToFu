@@ -1,0 +1,48 @@
+{
+  "include": [
+    "lib/api_v4.py",
+    "lib/identity.py",
+    "lib/process_roles.py",
+    "lib/storage/connection_probe.py",
+    "lib/storage_sidecar/config.py",
+    "lib/storage_sidecar/migrate.py",
+    "routes",
+    "lib/storage_sidecar",
+    "lib/agent_core"
+  ],
+  "exclude": [
+    "codex",
+    "node_modules",
+    "static",
+    "frontend/src/runtime/app-runtime.js"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": "none",
+  "executionEnvironments": [
+    {
+      "root": "lib/api_v4.py",
+      "typeCheckingMode": "strict"
+    },
+    {
+      "root": "lib/identity.py",
+      "typeCheckingMode": "strict"
+    },
+    {
+      "root": "lib/process_roles.py",
+      "typeCheckingMode": "strict"
+    },
+    {
+      "root": "lib/storage/connection_probe.py",
+      "typeCheckingMode": "strict"
+    },
+    {
+      "root": "lib/storage_sidecar/config.py",
+      "typeCheckingMode": "strict"
+    },
+    {
+      "root": "lib/storage_sidecar/migrate.py",
+      "typeCheckingMode": "strict"
+    }
+  ]
+}

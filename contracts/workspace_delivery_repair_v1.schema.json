@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.workspace-delivery-repair/v1",
+  "title": "Owned conflict repair proposal",
+  "description": "An explicit retry may overlay an owned repaired checkpoint onto the pinned conflict input, confined to the original task delta paths. This proposal cannot publish without owner/outcome/registration checks and exact combined-tree gates.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "originalBaselineSha",
+    "registeredCheckpointSha",
+    "baselineSha",
+    "checkpointSha"
+  ],
+  "properties": {
+    "originalBaselineSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$"
+    },
+    "registeredCheckpointSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$"
+    },
+    "baselineSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$"
+    },
+    "checkpointSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$"
+    }
+  }
+}

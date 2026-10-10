@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.native-checkpoint-control/v1",
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "required": [
+        "owner_user_id",
+        "task_id",
+        "epoch",
+        "binding",
+        "token",
+        "header_bytes",
+        "snapshot_bytes",
+        "identity_bytes"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "epoch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "token": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "header_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "snapshot_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "identity_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
+    },
+    "create": {
+      "type": "object",
+      "required": [
+        "format",
+        "parameters"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "parameters": {
+          "$ref": "#/$defs/binding"
+        }
+      },
+      "additionalProperties": false
+    },
+    "load": {
+      "type": "object",
+      "required": [
+        "format",
+        "capability_id"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "capability_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
+    },
+    "begin": {
+      "type": "object",
+      "required": [
+        "format",
+        "capability_id",
+        "round"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "capability_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
+    },
+    "complete": {
+      "type": "object",
+      "required": [
+        "format",
+        "capability_id",
+        "state"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "capability_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "state": {
+          "$ref": "tofu.native-agent-checkpoint/v1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "seal": {
+      "type": "object",
+      "required": [
+        "format",
+        "capability_id"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "capability_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
+    },
+    "release": {
+      "type": "object",
+      "required": [
+        "format",
+        "capability_id"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "capability_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
+    },
+    "forget": {
+      "type": "object",
+      "required": [
+        "format",
+        "capability_id"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "capability_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "required": [
+        "format",
+        "accepted",
+        "capability_id",
+        "state",
+        "error"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "capability_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "state": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "error": {
+          "enum": [
+            null,
+            "invalid",
+            "conflict",
+            "ineligible",
+            "storage",
+            "poisoned",
+            "oversize"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "finish": {
+      "type": "object",
+      "required": [
+        "format",
+        "capability_id",
+        "status",
+        "suspended"
+      ],
+      "properties": {
+        "format": {
+          "const": "tofu.native-checkpoint-control/v1"
+        },
+        "capability_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "status": {
+          "enum": [
+            "done",
+            "error",
+            "aborted"
+          ]
+        },
+        "suspended": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "limits": {
+    "responseHeadroomBytes": 4096
+  },
+  "semantics": {
+    "carrier": "Separate checkpoint C ABI, existing embedded envelope/work queue/watchdog; normal storage execute grants no checkpoint access.",
+    "ownership": "Server allocated monotonic capability IDs are scoped to one live embedded handle; never reuse IDs or attach lease tokens.",
+    "buffers": "Before effects, caller capacity must cover declared snapshot bytes plus headroom; output-size refusal never executes or repeats one-shot load.",
+    "lifecycle": "Forget drops only the in-memory capability after joined callers; release is explicit durable journal action. Closing handle drops capabilities without releasing durable leases.",
+    "retry": "Create/load/begin/complete/seal/release do not automatically retry ambiguous results; caller must preserve recovery fences.",
+    "feature": "native-runtime-checkpoints opt-in; absent feature refuses before dispatch.",
+    "finish": "Frozen status/suspended terminal fence delegates the same journal helper as Task persistence. Identical retries reread durable own terminal fence; changed disposition refuses. Only committed completed plus suspended aborted preserves recovery."
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "description": "The driver trips task['aborted'] after the first recorded content chunk; the replayer mirrors the real in-loop abort check (settle client_aborted, no raise) and the loop ends aborted with no fabricated success. Invariants run with allow_open_tail=True.",
+  "recorded_at": "2026-09-17",
+  "mode": "replay"
+}

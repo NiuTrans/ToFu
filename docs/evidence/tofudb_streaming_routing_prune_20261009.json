@@ -1,0 +1,599 @@
+{
+  "status": "pending controlled function/corpus timing and current/admitted-source reconciliation; not admitted",
+  "problem": "History routing pruning materializes intermediate merged runs before filtering the final output.",
+  "decision": "Budget-admitted heap merge emits only the final retained run, applying newest-wins before source filtering. Existing two-cursor path handles insufficient configured buffer budget. History retention and existing invalid-source checks remain unchanged.",
+  "alternatives": [
+    "Unconditionally holding per-level decoded pages grows memory on lean configurations.",
+    "Keeping stale routing locations by suppressing out-of-manifest source errors weakens integrity.",
+    "Fixed level limits ignore configured machine-scaled capacity."
+  ],
+  "build": {
+    "source_sha256": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+    "binary_sha256": "c91e111877ee690afe52a5ed5c507204380b9ae101b2d2dd31ac0e677392227e",
+    "library_sha256": "2a941e6d3235898c5cce26b05177d2fd9db9c7426e8dc7d1e61f6856bb02617b",
+    "scope": "Budget-admitted streaming routing prune candidate; exported library identity and allocator verified; no deployment"
+  },
+  "parentBuild": {
+    "source_sha256": "42080a5b10df60e8704eaaeddb997ec5aa6ad72980c1f50bec9ca612fc3edf18",
+    "binary_sha256": "72c3d43c6271408c943e880dbca612ed3d8c8c04c7171ce7e197f0310fe73bc0",
+    "library_sha256": "1aa0ad7e8f7729dc98a57daaeaf81194a774cfbd1a678b116d95bffe1d304c0c",
+    "scope": "Authority release notification candidate; exported library identity and allocator verified; no deployment"
+  },
+  "tests": {
+    "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+    "terminalExitCode": 0,
+    "passed": 1696,
+    "unitPassed": 1658,
+    "processPassed": 38,
+    "ignored": 3,
+    "archiveVerified": true,
+    "status": "Correctness gate passed; performance not evaluated; not admitted.",
+    "scope": "Frozen notification source42080 and matching contracts plus budget-admitted routing-prune delta and deterministic test fixture IDs. Not a full-suite verdict on concurrent shared code."
+  },
+  "focusedIoAndFaults": {
+    "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+    "focusedPassed": 3,
+    "legacyIo": {
+      "writes": 3,
+      "reads": 5,
+      "totalOperations": 52
+    },
+    "streamingIo": {
+      "writes": 1,
+      "reads": 3,
+      "totalOperations": 22
+    },
+    "ioScope": "Actual engine code under deterministic native VFS; exact final bytes. Not an OS-storage latency or all-scenario performance result.",
+    "indexedFaultCells": 176,
+    "fixedIdMatrixRunsPassed": 3,
+    "historyCompactionPassed": 7,
+    "historyPayloadPassed": 5,
+    "maintenancePassed": 27,
+    "rotationPassed": 37,
+    "failuresRetained": [
+      "fault-tests.log: occurrence u64/usize compile mismatch",
+      "history_compaction-neighbor-tests.log: random catalog IDs changed operation counts, one armed sync fault not exercised"
+    ],
+    "fixtureCorrection": "Existing bounded checkpoint test ID source also supplies prepared promotion IDs, cfg(test) only; production remains random. No cell skipped.",
+    "fullSuite": "not yet terminal",
+    "admission": false
+  },
+  "symmetricPreflight": {
+    "candidate": "complete archive plus CLI/lib SHA checks before/after",
+    "parent": "same complete archive plus CLI/lib SHA checks before/after via owned wrapper",
+    "timing": "guards outside benchmark measurement, identical warm-read pattern for both variants",
+    "parentRuntimeSourceChanged": false,
+    "parentOriginalScriptChanged": false,
+    "parentArchiveFiles": 412
+  },
+  "performance": {
+    "application": {
+      "windows": [
+        {
+          "variant": "candidate",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 320.97090780735016,
+            "stream_scheduled": 1776.2263417243958,
+            "settle_scheduled": 3427.805297076702
+          },
+          "walPressureAttempts": 0,
+          "historyCompactions": 0,
+          "retiredHistorySegments": 0,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 0,
+          "enginePeakRssBytes": 1941508096,
+          "clientPeakRssBytes": 144089088
+        },
+        {
+          "variant": "parent",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "42080a5b10df60e8704eaaeddb997ec5aa6ad72980c1f50bec9ca612fc3edf18",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 40.471307933330536,
+            "stream_scheduled": 1785.021923482418,
+            "settle_scheduled": 4330.569036304951
+          },
+          "walPressureAttempts": 148,
+          "historyCompactions": 1,
+          "retiredHistorySegments": 102,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2042130432,
+          "clientPeakRssBytes": 142315520
+        },
+        {
+          "variant": "parent",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "42080a5b10df60e8704eaaeddb997ec5aa6ad72980c1f50bec9ca612fc3edf18",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 1203.7104815244675,
+            "stream_scheduled": 1805.2457496523857,
+            "settle_scheduled": 3556.334838271141
+          },
+          "walPressureAttempts": 0,
+          "historyCompactions": 0,
+          "retiredHistorySegments": 0,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 0,
+          "enginePeakRssBytes": 2019586048,
+          "clientPeakRssBytes": 150605824
+        },
+        {
+          "variant": "candidate",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 104.9320325255394,
+            "stream_scheduled": 1807.1569949388504,
+            "settle_scheduled": 3162.6540049910545
+          },
+          "walPressureAttempts": 0,
+          "historyCompactions": 0,
+          "retiredHistorySegments": 0,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 0,
+          "enginePeakRssBytes": 1973346304,
+          "clientPeakRssBytes": 145137664
+        },
+        {
+          "variant": "parent",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "42080a5b10df60e8704eaaeddb997ec5aa6ad72980c1f50bec9ca612fc3edf18",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 1101.2808457016945,
+            "stream_scheduled": 1861.2442761659622,
+            "settle_scheduled": 4479.537181556225
+          },
+          "walPressureAttempts": 145,
+          "historyCompactions": 1,
+          "retiredHistorySegments": 101,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2046017536,
+          "clientPeakRssBytes": 138133504
+        },
+        {
+          "variant": "candidate",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 295.3108698129654,
+            "stream_scheduled": 2253.1718611717224,
+            "settle_scheduled": 4655.518122017384
+          },
+          "walPressureAttempts": 87,
+          "historyCompactions": 2,
+          "retiredHistorySegments": 106,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2047242240,
+          "clientPeakRssBytes": 154042368
+        },
+        {
+          "variant": "candidate",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 277.82145142555237,
+            "stream_scheduled": 1789.4185930490494,
+            "settle_scheduled": 4451.587565243244
+          },
+          "walPressureAttempts": 100,
+          "historyCompactions": 1,
+          "retiredHistorySegments": 107,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2032226304,
+          "clientPeakRssBytes": 144510976
+        },
+        {
+          "variant": "parent",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "42080a5b10df60e8704eaaeddb997ec5aa6ad72980c1f50bec9ca612fc3edf18",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 201.7107456922531,
+            "stream_scheduled": 1797.9260087013245,
+            "settle_scheduled": 3538.158141076565
+          },
+          "walPressureAttempts": 0,
+          "historyCompactions": 0,
+          "retiredHistorySegments": 0,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 0,
+          "enginePeakRssBytes": 1918812160,
+          "clientPeakRssBytes": 288727040
+        }
+      ],
+      "median_of_four_window_p99_ms": {
+        "candidate": {
+          "submit_to_running": 286.5661606192589,
+          "stream_scheduled": 1798.28779399395,
+          "settle_scheduled": 3939.696431159973
+        },
+        "parent": {
+          "submit_to_running": 651.4957956969738,
+          "stream_scheduled": 1801.585879176855,
+          "settle_scheduled": 3943.451937288046
+        }
+      },
+      "scope": "Original C-B-B-C followed by B-C-C-B, four windows per variant; no all-scenario superiority claim."
+    },
+    "embedded": {
+      "windows": [
+        {
+          "variant": "candidate",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 670.8122566342354,
+            "stream_scheduled": 1236.42298579216,
+            "settle_scheduled": 4291.774459183216
+          },
+          "walPressureAttempts": 144,
+          "historyCompactions": 1,
+          "retiredHistorySegments": 102,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2211184640,
+          "clientPeakRssBytes": 2211184640
+        },
+        {
+          "variant": "parent",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "42080a5b10df60e8704eaaeddb997ec5aa6ad72980c1f50bec9ca612fc3edf18",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 673.4940633177757,
+            "stream_scheduled": 1240.4980063438416,
+            "settle_scheduled": 4565.884418785572
+          },
+          "walPressureAttempts": 158,
+          "historyCompactions": 1,
+          "retiredHistorySegments": 107,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2150359040,
+          "clientPeakRssBytes": 2150359040
+        },
+        {
+          "variant": "parent",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "42080a5b10df60e8704eaaeddb997ec5aa6ad72980c1f50bec9ca612fc3edf18",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 668.3836504817009,
+            "stream_scheduled": 1248.7476244568825,
+            "settle_scheduled": 4651.897072792053
+          },
+          "walPressureAttempts": 69,
+          "historyCompactions": 1,
+          "retiredHistorySegments": 117,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2140401664,
+          "clientPeakRssBytes": 2140401664
+        },
+        {
+          "variant": "candidate",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 681.0457706451416,
+            "stream_scheduled": 1236.05515062809,
+            "settle_scheduled": 4183.001719415188
+          },
+          "walPressureAttempts": 139,
+          "historyCompactions": 2,
+          "retiredHistorySegments": 92,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2238509056,
+          "clientPeakRssBytes": 2246766592
+        },
+        {
+          "variant": "parent",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "42080a5b10df60e8704eaaeddb997ec5aa6ad72980c1f50bec9ca612fc3edf18",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 697.7086663246155,
+            "stream_scheduled": 1294.0284609794617,
+            "settle_scheduled": 2965.9340009093285
+          },
+          "walPressureAttempts": 0,
+          "historyCompactions": 0,
+          "retiredHistorySegments": 0,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 0,
+          "enginePeakRssBytes": 2245283840,
+          "clientPeakRssBytes": 2245283840
+        },
+        {
+          "variant": "candidate",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 685.5840086936951,
+            "stream_scheduled": 1239.7859171032906,
+            "settle_scheduled": 4083.9341208338737
+          },
+          "walPressureAttempts": 150,
+          "historyCompactions": 1,
+          "retiredHistorySegments": 98,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2179043328,
+          "clientPeakRssBytes": 2169266176
+        },
+        {
+          "variant": "candidate",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "8088390a0f9ae708a62936a4cbc5a1a70aede56518a688689e9f3f1c15a71da5",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 698.0628222227097,
+            "stream_scheduled": 1222.046785056591,
+            "settle_scheduled": 2817.7719339728355
+          },
+          "walPressureAttempts": 0,
+          "historyCompactions": 0,
+          "retiredHistorySegments": 0,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 0,
+          "enginePeakRssBytes": 2235998208,
+          "clientPeakRssBytes": 2235547648
+        },
+        {
+          "variant": "parent",
+          "correct": true,
+          "errors": [],
+          "unhealthy": 0,
+          "source": "42080a5b10df60e8704eaaeddb997ec5aa6ad72980c1f50bec9ca612fc3edf18",
+          "integrity": 0,
+          "p99_ms": {
+            "submit_to_running": 681.6098466515541,
+            "stream_scheduled": 1213.6031910777092,
+            "settle_scheduled": 4536.2211763858795
+          },
+          "walPressureAttempts": 156,
+          "historyCompactions": 2,
+          "retiredHistorySegments": 115,
+          "acceptancePassed": false,
+          "configuredCheckpointBatchBytes": 33554432,
+          "historyRetentionPolicySegments": 64,
+          "lastRetainedHistorySegments": 64,
+          "enginePeakRssBytes": 2257027072,
+          "clientPeakRssBytes": 2246938624
+        }
+      ],
+      "median_of_four_window_p99_ms": {
+        "candidate": {
+          "submit_to_running": 683.3148896694183,
+          "stream_scheduled": 1236.239068210125,
+          "settle_scheduled": 4133.467920124531
+        },
+        "parent": {
+          "submit_to_running": 677.5519549846649,
+          "stream_scheduled": 1244.622815400362,
+          "settle_scheduled": 4551.052797585726
+        }
+      },
+      "scope": "Original C-B-B-C followed by B-C-C-B, four windows per variant; no all-scenario superiority claim."
+    }
+  },
+  "summary": {
+    "application": {
+      "p99Medians": {
+        "candidate": {
+          "submit_to_running": 286.5661606192589,
+          "stream_scheduled": 1798.28779399395,
+          "settle_scheduled": 3939.696431159973
+        },
+        "parent": {
+          "submit_to_running": 651.4957956969738,
+          "stream_scheduled": 1801.585879176855,
+          "settle_scheduled": 3943.451937288046
+        }
+      },
+      "resourceObservations": {
+        "candidate": {
+          "medianPeakRssBytes": 2002786304.0,
+          "compactions": [
+            0,
+            0,
+            2,
+            1
+          ],
+          "retired": [
+            0,
+            0,
+            106,
+            107
+          ]
+        },
+        "parent": {
+          "medianPeakRssBytes": 2030858240.0,
+          "compactions": [
+            1,
+            0,
+            1,
+            0
+          ],
+          "retired": [
+            102,
+            0,
+            101,
+            0
+          ]
+        }
+      }
+    },
+    "embedded": {
+      "p99Medians": {
+        "candidate": {
+          "submit_to_running": 683.3148896694183,
+          "stream_scheduled": 1236.239068210125,
+          "settle_scheduled": 4133.467920124531
+        },
+        "parent": {
+          "submit_to_running": 677.5519549846649,
+          "stream_scheduled": 1244.622815400362,
+          "settle_scheduled": 4551.052797585726
+        }
+      },
+      "resourceObservations": {
+        "candidate": {
+          "medianPeakRssBytes": 2223591424.0,
+          "compactions": [
+            1,
+            2,
+            1,
+            0
+          ],
+          "retired": [
+            102,
+            92,
+            98,
+            0
+          ]
+        },
+        "parent": {
+          "medianPeakRssBytes": 2197821440.0,
+          "compactions": [
+            1,
+            1,
+            0,
+            2
+          ],
+          "retired": [
+            107,
+            117,
+            0,
+            115
+          ]
+        }
+      }
+    }
+  },
+  "reportSha256": {
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-application-candidate-0.json": "0861b8a0be8f1cd0fb7c8e94213cd1a834a60b01a084bb46b719dd8f4b44867f",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-application-candidate-0-scope.json": "ee1695497b54cbeb217d2e7f16ab120440cd637486323ad22f299aee3dff1623",
+    ".tmp/tofudb-authority-notify-20261009/routing-application-parent-1.json": "81ade5ea39f41176caee2e882a8d24e1364d8e76e34d060cbb66a2cbe1145032",
+    ".tmp/tofudb-authority-notify-20261009/routing-application-parent-1-scope.json": "176a64731a4e9ff0866d201fe99d154d88c8cfc1570100018a4011d135041361",
+    ".tmp/tofudb-authority-notify-20261009/routing-application-parent-2.json": "e8bb094ad706606e6d8a9559f32594e3919fc186e2328a5055613c6ce72515db",
+    ".tmp/tofudb-authority-notify-20261009/routing-application-parent-2-scope.json": "176a64731a4e9ff0866d201fe99d154d88c8cfc1570100018a4011d135041361",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-application-candidate-3.json": "342b8f41dfb4d051d392ff69c621ec315f6e412a9683a9c310a4014bb304bcfa",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-application-candidate-3-scope.json": "ee1695497b54cbeb217d2e7f16ab120440cd637486323ad22f299aee3dff1623",
+    ".tmp/tofudb-authority-notify-20261009/routing-application-parent-4.json": "e219773233b429a09926e4a2248cd0864f9ea7b9dddc537ddb916a8defa73251",
+    ".tmp/tofudb-authority-notify-20261009/routing-application-parent-4-scope.json": "176a64731a4e9ff0866d201fe99d154d88c8cfc1570100018a4011d135041361",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-application-candidate-5.json": "f6bc147763bb73f9a0312debae8c437385e146e101bdd8d19fc517cf204172be",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-application-candidate-5-scope.json": "ee1695497b54cbeb217d2e7f16ab120440cd637486323ad22f299aee3dff1623",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-application-candidate-6.json": "f4edd07aca42da0655fa4a8afa9696a91f0cfec3254d511d8c409a6776b3c321",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-application-candidate-6-scope.json": "ee1695497b54cbeb217d2e7f16ab120440cd637486323ad22f299aee3dff1623",
+    ".tmp/tofudb-authority-notify-20261009/routing-application-parent-7.json": "28abecda1593d411b778d0f1ebdb062c548cd1e0dfed58d648750c3d2e08e43b",
+    ".tmp/tofudb-authority-notify-20261009/routing-application-parent-7-scope.json": "176a64731a4e9ff0866d201fe99d154d88c8cfc1570100018a4011d135041361",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-embedded-candidate-0.json": "9c432591eb7287d62a6a9a39038a710bf3642f26a110586492932d5728873cd2",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-embedded-candidate-0-scope.json": "209fc371a26fb29b0e3be565739e65690bd88a0b170c3c1d18bc0cbed4ec9d24",
+    ".tmp/tofudb-authority-notify-20261009/routing-embedded-parent-1.json": "03285eed4201d9393bbd28ce4062a470a26749b1a69ef2eb4c3058e6bb103ed1",
+    ".tmp/tofudb-authority-notify-20261009/routing-embedded-parent-1-scope.json": "df12124af1b8b01765731598a0d1342aa31f534d40f048ed24a272c23213739e",
+    ".tmp/tofudb-authority-notify-20261009/routing-embedded-parent-2.json": "40401dbdc834b98636e11a2a5f30abd3ac4d80923d2f697756d46e1849881cce",
+    ".tmp/tofudb-authority-notify-20261009/routing-embedded-parent-2-scope.json": "df12124af1b8b01765731598a0d1342aa31f534d40f048ed24a272c23213739e",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-embedded-candidate-3.json": "984d659ee49b648b816b4b6346393ee0f552168bc6d322f542b34816dd99f713",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-embedded-candidate-3-scope.json": "209fc371a26fb29b0e3be565739e65690bd88a0b170c3c1d18bc0cbed4ec9d24",
+    ".tmp/tofudb-authority-notify-20261009/routing-embedded-parent-4.json": "0f0a803e81b46b5c5fcd06a4b22995887483dc8021bf62ddb17db10bbfd0dcd5",
+    ".tmp/tofudb-authority-notify-20261009/routing-embedded-parent-4-scope.json": "df12124af1b8b01765731598a0d1342aa31f534d40f048ed24a272c23213739e",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-embedded-candidate-5.json": "ff15abdd87651f9e7e182628fc430d927b56d7173fdd55f212af9bfd06cfb27b",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-embedded-candidate-5-scope.json": "209fc371a26fb29b0e3be565739e65690bd88a0b170c3c1d18bc0cbed4ec9d24",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-embedded-candidate-6.json": "3b27c1dcdc08f3baf4ff14247f354a512a4b8b49bcc941997f6619020de7dc01",
+    ".tmp/tofudb-streaming-routing-prune-20261009/routing-embedded-candidate-6-scope.json": "209fc371a26fb29b0e3be565739e65690bd88a0b170c3c1d18bc0cbed4ec9d24",
+    ".tmp/tofudb-authority-notify-20261009/routing-embedded-parent-7.json": "94ac0cc97f5afc863dc6224220ab003a6444cf64007fc2785bfae90beec4b27f",
+    ".tmp/tofudb-authority-notify-20261009/routing-embedded-parent-7-scope.json": "df12124af1b8b01765731598a0d1342aa31f534d40f048ed24a272c23213739e"
+  },
+  "limits": [
+    "All16 windows correct/healthy/integrity0; all fail original1000ms scheduled-stream gate.",
+    "Controls are notification candidate42080, not direct SQLite, admitted55180 or current shared source.",
+    "Application candidate first two windows had historyCompactions0, so latency differences cannot be credited to routing pruning.",
+    "Compaction counts and pressure differ between paired windows; no clean causal estimate of the routing algorithm speedup.",
+    "Candidate application scheduled-stream P99 reached2253.172ms and embedded scheduled-settle reached4291.774ms. Retain all adverse windows.",
+    "Application median window scheduled-settle P993939.696(candidate)/3943.452(parent); embedded4133.468/4551.053.",
+    "Median engine peak RSS application2002786304/2030858240 bytes; embedded2223591424/2197821440. These process measurements do not isolate private cursor allocation.",
+    "Native deterministic VFS operation reduction52->22 proves avoided intermediate work on its fixture, not OS-storage latency or global superiority.",
+    "Memory admission estimates decoder/output page buffers. Output page-reference metadata and block cache retain their separate existing bounds; no whole-process RSS promise.",
+    "The earlier sync fault was explicitly unexercised and failed. Fixed test IDs now cover checkpoint/promotion inputs; all176 cells fire, no skipping; production still random.",
+    "No runtime integration, deployment, changed durability or relaxed acceptance thresholds. All-scenario SQLite superiority remains unproven."
+  ],
+  "next": "Use identical aged routing/history fixtures to compare real file IO, elapsed/CPU cost and private/resident memory; then compare admitted/current source before considering admission."
+}

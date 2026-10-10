@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tofu compaction receipt v1",
+  "description": "Bounded archive/API inspection metadata, capped at 32 KiB by storage. Never a summary body, transcript, proof of provider delivery, empirical speed/cost improvement, or subscription charge. Legacy archives may have an empty receipt instead. Additive fields absent in older v1 receipts mean unknown, never zero, complete, adopted, or free.",
+  "type": "object",
+  "required": ["schemaVersion", "status", "trigger", "strategy", "implementation", "continuation", "summary", "retention"],
+  "properties": {
+    "schemaVersion": {"const": "tofu.compaction-receipt/v1"},
+    "status": {"type": "string", "minLength": 1, "maxLength": 32},
+    "trigger": {"type": "string", "minLength": 1, "maxLength": 32},
+    "strategy": {"type": "string", "minLength": 1, "maxLength": 64},
+    "implementation": {"type": "string", "minLength": 1, "maxLength": 80},
+    "mode": {"type": "string", "maxLength": 64},
+    "outcomeReason": {"type": "string", "maxLength": 200},
+    "resumeWitness": {
+      "type": "object",
+      "description": "Optional executor-produced guard for reusing the archive's accepted postMessages. Reuse requires fresh owner-scoped history, policy, background and tool-prefix validation; this receipt never replaces transcript authority. A Continue attempt may differ from the archive attempt. Fresh non-tool messages must follow a proven unchanged input baseline and be preserved after accepted execution; an unproven baseline or media falls back to canonical replay.",
+      "required": ["version", "turnId", "policyDigest", "historyDigest", "backgroundDigest", "toolRoundCount", "toolPrefixDigest"],
+      "properties": {
+        "version": {"const": 1},
+        "turnId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "policyDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "historyDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "backgroundDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "toolRoundCount": {"type": "integer", "minimum": 0},
+        "toolPrefixDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "executionDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "continuation": {
+      "type": "object",
+      "required": ["format"],
+      "properties": {
+        "format": {"type": "string", "maxLength": 64},
+        "phase": {"enum": ["pre_turn", "mid_turn"]},
+        "placement": {"enum": ["before_latest_human", "after_retained_execution"]}
+      },
+      "description": "Automatic context_handoff phase/placement additionally follows compaction_handoff_v1.schema.json; metadata does not prove dispatch."
+    },
+    "summary": {
+      "type": "object",
+      "required": ["generated", "accepted", "chars", "durationMs", "usage", "projectedUsageTokens"],
+      "properties": {
+        "generated": {"type": "boolean", "description": "A usable summary was produced; false does not prove no paid attempt occurred."},
+        "complete": {"type": "boolean", "description": "Verified complete output, independent of adoption. Explicitly incomplete output must never be presented as usable summary text. Absent on legacy receipts means unknown, not generated/accepted."},
+        "accepted": {"type": "boolean", "description": "Adopted into the compaction result, not provider acceptance. A complete economic candidate may still be rejected."},
+        "chars": {"$ref": "#/$defs/count"},
+        "durationMs": {"$ref": "#/$defs/count", "description": "Observed duration, not a summary deadline or latency improvement."},
+        "usage": {"$ref": "#/$defs/usage"},
+        "projectedUsageTokens": {"$ref": "#/$defs/count", "description": "Pre-call usage estimate, not observed billing or a physical prompt limit."},
+        "rejectionReason": {"type": "string", "maxLength": 160},
+        "route": {"$ref": "#/$defs/route"},
+        "cost": {"$ref": "#/$defs/summaryCost"}
+      },
+      "allOf": [{
+        "if": {"required": ["complete"], "properties": {"complete": {"const": false}}},
+        "then": {"properties": {"accepted": {"const": false}}}
+      }]
+    },
+    "contextBudget": {
+      "type": "object",
+      "description": "Recorded main-route admission/decision evidence, not the summary route. Optional snapshots need not describe the post-compaction provider request. Missing values stay unknown; clients must not infer admission from the economic target or archived token reduction.",
+      "properties": {
+        "routeWindowTokens": {"$ref": "#/$defs/count", "description": "Effective physical route capacity."},
+        "hardCeilingTokens": {"$ref": "#/$defs/count", "description": "Physical prompt safety ceiling after output/safety reserve."},
+        "reserveTokens": {"$ref": "#/$defs/count", "description": "max(0, routeWindowTokens - hardCeilingTokens), only when both were recorded."},
+        "economicTargetTokens": {"$ref": "#/$defs/count", "description": "Optional economic target, never an alternate physical context limit."},
+        "renderedPromptTokens": {"$ref": "#/$defs/count", "description": "Recorded complete rendered prompt including non-message overhead, not archive tokensAfter."},
+        "messageTokens": {"$ref": "#/$defs/count"},
+        "toolSchemaTokens": {"$ref": "#/$defs/count"},
+        "decisionKind": {"type": "string", "maxLength": 40, "description": "Known values: safety, economic, manual. Empty/future values display as unknown, never as a translation key."},
+        "contextWindowSource": {"type": "string", "maxLength": 80}
+      }
+    },
+    "retention": {
+      "type": "object",
+      "properties": {
+        "summarizedMessages": {"$ref": "#/$defs/count"},
+        "preservedTurns": {"$ref": "#/$defs/count"},
+        "foldedToolRounds": {"$ref": "#/$defs/count"},
+        "objectiveAnchored": {"type": "boolean"},
+        "durableObjectiveApplied": {"type": "boolean"},
+        "retainedUserMessages": {"$ref": "#/$defs/count"},
+        "turnDiffIncluded": {"type": "boolean"},
+        "recentFiles": {"type": "array", "maxItems": 8, "uniqueItems": true, "items": {"type": "string", "maxLength": 512}}
+      }
+    },
+    "economics": {
+      "type": "object",
+      "description": "Modeled economics, not measured money saved. Display a payback estimate only with pricingKnown=true and finite nonnegative paybackRounds; explicit null then means no finite estimate, while absent/invalid values stay unknown. Missing/false pricingKnown cannot prove payback. Partial known components may coexist with unknown total costs.",
+      "properties": {
+        "droppedTokens": {"$ref": "#/$defs/count"},
+        "cacheReadTokens": {"$ref": "#/$defs/count"},
+        "cacheRewriteTokens": {"$ref": "#/$defs/count"},
+        "summaryCostTokens": {"type": ["integer", "null"], "minimum": 0, "description": "Legacy token-domain work estimate, never USD; null means unavailable."},
+        "restoredContextReserveTokens": {"$ref": "#/$defs/count"},
+        "candidateMeasurementScope": {"type": "string", "maxLength": 80},
+        "paybackRounds": {"$ref": "#/$defs/amount"},
+        "paybackLimitRounds": {"type": "number", "minimum": 0},
+        "paybackPolicy": {"type": "string", "maxLength": 80},
+        "pricingSource": {"type": "string", "maxLength": 80},
+        "pricingKnown": {"type": "boolean"},
+        "costBasis": {"const": "metered_api_equivalent"},
+        "cacheRewriteCostUsd": {"$ref": "#/$defs/amount"},
+        "summaryCostUsd": {"$ref": "#/$defs/amount"},
+        "savingsPerRoundUsd": {"$ref": "#/$defs/amount"},
+        "totalCostUsd": {"$ref": "#/$defs/amount"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "properties": {"retainedCount": {"$ref": "#/$defs/count"}, "lostCount": {"$ref": "#/$defs/count"}}
+    },
+    "execution": {"type": "object", "properties": {"reconcileAttempts": {"$ref": "#/$defs/count"}}},
+    "recovery": {
+      "type": "object",
+      "properties": {
+        "strippedImages": {"$ref": "#/$defs/count"},
+        "truncatedChars": {"$ref": "#/$defs/count"},
+        "droppedMessages": {"$ref": "#/$defs/count"},
+        "wireBytesBefore": {"$ref": "#/$defs/count"},
+        "wireBytesAfter": {"$ref": "#/$defs/count"}
+      }
+    }
+  },
+  "$defs": {
+    "count": {"type": "integer", "minimum": 0},
+    "amount": {"type": ["number", "null"], "minimum": 0, "description": "Finite nonnegative value or null for unknown/unavailable; missing is not zero."},
+    "usage": {
+      "type": "object",
+      "properties": {
+        "inputTokens": {"$ref": "#/$defs/count"},
+        "outputTokens": {"$ref": "#/$defs/count"},
+        "totalTokens": {"$ref": "#/$defs/count"},
+        "cacheReadTokens": {"$ref": "#/$defs/count"},
+        "cacheWriteTokens": {"$ref": "#/$defs/count"}
+      },
+      "description": "Normalized counters may be zero when provider usage is absent; they alone never establish known billing."
+    },
+    "route": {
+      "type": "object",
+      "properties": {
+        "modelId": {"type": "string", "maxLength": 200},
+        "providerId": {"type": "string", "maxLength": 200, "description": "Selected execution pin, not necessarily the actual billing provider. Per-call dispatch identities are recorded in summary.cost.calls."},
+        "policy": {"type": "string", "maxLength": 200},
+        "reason": {"type": "string", "maxLength": 200},
+        "costBasis": {"type": "string", "maxLength": 200, "description": "Bounded diagnostic serialization of selection-time pricing evidence. Unlike summary.cost.costBasis, this is not a billing-basis enum or proof of known spend; clients must not parse it as price evidence."},
+        "selectionBasis": {"$ref": "#/$defs/summarySelection"}
+      },
+      "description": "Recorded summary-selection route, never inferred from archive.model/taskModel. Per-call dispatch identities live in summary.cost.calls (bounded to 16), which may include retries/failures on different routes."
+    },
+    "summarySelection": {
+      "type": "object",
+      "description": "Optional selection-time AA proxy evidence, not measured summarization fidelity, latency, billed savings or authority to use a model. Absent on legacy/main-route receipts means no recorded AA selection.",
+      "required": ["source", "metric", "score", "match", "ranking", "eligibleRoutes"],
+      "properties": {
+        "source": {"const": "Artificial Analysis"},
+        "metric": {"const": "intelligence"},
+        "score": {"type": "number", "minimum": 0},
+        "match": {"const": "exact"},
+        "ranking": {"const": "cost_asc_aa_desc"},
+        "eligibleRoutes": {"type": "integer", "minimum": 1},
+        "fetchedAt": {"type": ["number", "null"], "minimum": 0},
+        "aaSlug": {"type": "string", "maxLength": 200}
+      }
+    },
+    "pricedAmount": {
+      "type": "object",
+      "required": ["known", "costUsd", "costBasis"],
+      "properties": {
+        "known": {"type": "boolean"},
+        "costUsd": {"$ref": "#/$defs/amount"},
+        "costBasis": {"const": "metered_api_equivalent"}
+      },
+      "allOf": [{
+        "if": {"properties": {"known": {"const": false}}},
+        "then": {"properties": {"costUsd": {"type": "null"}}},
+        "else": {"properties": {"costUsd": {"type": "number", "minimum": 0}}}
+      }]
+    },
+    "summaryCost": {
+      "allOf": [{"$ref": "#/$defs/pricedAmount"}],
+      "type": "object",
+      "properties": {
+        "knownCostUsd": {"$ref": "#/$defs/amount", "description": "Subtotal of known attempts only, never a substitute for an unknown full cost."},
+        "callCount": {"$ref": "#/$defs/count"},
+        "unknownCallCount": {"$ref": "#/$defs/count"},
+        "calls": {
+          "type": "array", "maxItems": 16,
+          "items": {
+            "allOf": [{"$ref": "#/$defs/pricedAmount"}],
+            "type": "object",
+            "properties": {
+              "model": {"type": "string"},
+              "providerId": {"type": "string"},
+              "reason": {"type": "string"},
+              "pricingSource": {"type": "string"},
+              "pricingSnapshot": {"type": "object", "description": "Call-time route, currency, tier and rate evidence owned by the shared billing contract."}
+            }
+          }
+        }
+      },
+      "description": "Metered API-equivalent cost of all recorded attempts, including rejected/failed work. Known total requires complete usage and price evidence for every attempt. A nonzero cost below display precision must not be rendered as free."
+    }
+  }
+}

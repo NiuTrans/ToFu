@@ -1,0 +1,165 @@
+/* Slide-deck editor overlay (A8): rail + live canvas + property bar. All
+ * values are design tokens; the overlay is a fixed layer above the chat. */
+.sled-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: color-mix(in srgb, #000 45%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+.sled-shell {
+  display: flex;
+  flex-direction: column;
+  width: min(1180px, 100%);
+  height: min(780px, 100%);
+  background: var(--bg-primary, #fff);
+  border-radius: var(--radius-md, 10px);
+  overflow: hidden;
+  box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+}
+.sled-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-color, rgba(128,128,128,0.22));
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.sled-page-indicator {
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.sled-open-raw {
+  margin-left: auto;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--accent, #3b82f6);
+  text-decoration: none;
+}
+.sled-close {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: var(--space-1) var(--space-2);
+}
+.sled-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.sled-rail {
+  flex: none;
+  width: 132px;
+  overflow-y: auto;
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-right: 1px solid var(--border-color, rgba(128,128,128,0.22));
+}
+.sled-rail-thumb {
+  position: relative;
+  border: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 0;
+  background: none;
+  cursor: pointer;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+}
+.sled-rail-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.sled-rail-thumb span {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  background: rgba(0,0,0,0.55);
+  color: #fff;
+  font-size: 9.5px;
+  border-radius: 7px;
+  padding: 0 4px;
+  line-height: 15px;
+}
+.sled-rail-thumb--active { border-color: var(--accent, #3b82f6); }
+.sled-canvas {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  padding: var(--space-3);
+}
+.sled-canvas-frame {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--border-color, rgba(128,128,128,0.22));
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+.sled-side {
+  flex: none;
+  width: 264px;
+  overflow-y: auto;
+  padding: var(--space-3);
+  border-left: 1px solid var(--border-color, rgba(128,128,128,0.22));
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+.sled-side-empty { padding: var(--space-2) 0; line-height: 1.6; }
+.sled-side-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+}
+.sled-side-type { font-weight: 500; opacity: 0.65; margin-left: var(--space-1); }
+.sled-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+  font-weight: 600;
+}
+.sled-label textarea,
+.sled-label input {
+  border: 1px solid var(--border-color, rgba(128,128,128,0.3));
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary, transparent);
+  color: var(--text-primary);
+  font-size: var(--font-size-xs);
+  padding: 6px 8px;
+  font-family: inherit;
+}
+.sled-row { display: flex; gap: var(--space-2); }
+.sled-row .sled-label { flex: 1; }
+.sled-side-note { line-height: 1.6; opacity: 0.85; }
+.sled-actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
+.sled-btn {
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color, rgba(128,128,128,0.3));
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.sled-btn--primary {
+  background: var(--accent, #3b82f6);
+  border-color: var(--accent, #3b82f6);
+  color: #fff;
+}
+.sled-errors {
+  margin-top: var(--space-2);
+  color: #ef4444;
+  line-height: 1.5;
+}

@@ -1,0 +1,482 @@
+{
+  "format": "tofu.http-pressure-measurement/v1",
+  "scope": "Real TCP/TLS slow-observer disconnect and abort/close quiescence samples.\n\nSlow-consumer setup holds an unread large stream for 50ms and witnesses bounded\nproduction. Timing starts on transport release. Cancellation times explicit\nabort plus transport close to observer quiescence. Setup/hold are outside timing;\ndiagnostic polling contributes wall/CPU. Synthetic compute is not full-agent\ninference. Existing same-connection abort/H2-reset lifecycle checks remain gates.\n",
+  "whole_system_verdict": "incomplete",
+  "production_promoted": false,
+  "instrumented": false,
+  "sources": {
+    "benchmarks/http_pressure_measure.py": "7122872384cf06186400330eba04fc4df26065f1ff46c0403cc9b7cba38872de",
+    "benchmarks/http_cpu_clock.py": "e5f71eba3b68b50e5de4596c54fc36428ee8041424e063a1421197d6fea37349",
+    "benchmarks/http_runtime.py": "c579b5fe817427140e14b51dd4bdd0935098ce11861ba9ea7240ebae178c3f22",
+    "benchmarks/http_stream_lifecycle.py": "c492cfa0598b8803fec9ca0838bb508b88f56e0be4138d60cdf3cf9de6e784fd",
+    "benchmarks/http_frame_coalescing.py": "8bfd01b17e6cc358c6d07cc4fad122d683f3d5354d2c7c923b8d4a12a1c5aca6",
+    "benchmarks/http_frame_coalescing_lifecycle.py": "b1025add446f871fd0a4c1d3ab44be301666ac161413bdf7a5eb4d50426c5aff",
+    "benchmarks/http_frame_coalescing_measure.py": "76cddabe704824c85f5a30b2957d00f67c367ca9f7c3cddecc20c0c003a5e83d",
+    "tofu_agent/server.py": "ca3f880ba023e575e6011003583818558c126511468973e0d4e69cf86c896d36",
+    "lib/hypercorn_runtime.py": "8319d68b621beed1b51f785eadbd99e029b654892ed7260da7d456d1dc08c9d1"
+  },
+  "samples": 100,
+  "required_pairs": 3,
+  "cases": [
+    {
+      "protocol": "h1",
+      "case": "slow_consumer",
+      "pairs": [
+        {
+          "reference": {
+            "loop": "reference",
+            "protocol": "h1",
+            "case": "slow_consumer",
+            "server_pid": 558920,
+            "p50_ms": 1.5768865,
+            "p95_ms": 1.740125,
+            "p99_ms": 2.349705,
+            "server_cpu_ms_per_request": 17.75,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57024512,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 560828
+          },
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h1",
+            "case": "slow_consumer",
+            "server_pid": 563573,
+            "p50_ms": 1.5714735,
+            "p95_ms": 1.724145,
+            "p99_ms": 2.098194,
+            "server_cpu_ms_per_request": 20.75,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57159680,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 565898
+          }
+        },
+        {
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h1",
+            "case": "slow_consumer",
+            "server_pid": 568599,
+            "p50_ms": 1.5697,
+            "p95_ms": 1.685932,
+            "p99_ms": 4.397942,
+            "server_cpu_ms_per_request": 20.833333333333332,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57479168,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 571646
+          },
+          "reference": {
+            "loop": "reference",
+            "protocol": "h1",
+            "case": "slow_consumer",
+            "server_pid": 573783,
+            "p50_ms": 1.5668745,
+            "p95_ms": 1.797131,
+            "p99_ms": 3.995865,
+            "server_cpu_ms_per_request": 17.916666666666668,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57110528,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 576173
+          }
+        },
+        {
+          "reference": {
+            "loop": "reference",
+            "protocol": "h1",
+            "case": "slow_consumer",
+            "server_pid": 579178,
+            "p50_ms": 1.5567195,
+            "p95_ms": 1.657219,
+            "p99_ms": 1.837247,
+            "server_cpu_ms_per_request": 17.91666666666667,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57446400,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 581501
+          },
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h1",
+            "case": "slow_consumer",
+            "server_pid": 584067,
+            "p50_ms": 1.571864,
+            "p95_ms": 1.818688,
+            "p99_ms": 3.588586,
+            "server_cpu_ms_per_request": 20.833333333333332,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57528320,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 586466
+          }
+        }
+      ]
+    },
+    {
+      "protocol": "h1",
+      "case": "cancellation",
+      "pairs": [
+        {
+          "reference": {
+            "loop": "reference",
+            "protocol": "h1",
+            "case": "cancellation",
+            "server_pid": 589317,
+            "p50_ms": 4.9768285,
+            "p95_ms": 7.145176,
+            "p99_ms": 7.932375,
+            "server_cpu_ms_per_request": 11.416666666666666,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57122816,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 590544
+          },
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h1",
+            "case": "cancellation",
+            "server_pid": 591568,
+            "p50_ms": 4.712645500000001,
+            "p95_ms": 5.643502,
+            "p99_ms": 5.939968,
+            "server_cpu_ms_per_request": 11.333333333333332,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57626624,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 593223
+          }
+        },
+        {
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h1",
+            "case": "cancellation",
+            "server_pid": 594768,
+            "p50_ms": 4.921351,
+            "p95_ms": 7.58923,
+            "p99_ms": 9.237427,
+            "server_cpu_ms_per_request": 11.083333333333332,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57573376,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 596192
+          },
+          "reference": {
+            "loop": "reference",
+            "protocol": "h1",
+            "case": "cancellation",
+            "server_pid": 597598,
+            "p50_ms": 4.715876,
+            "p95_ms": 5.355233,
+            "p99_ms": 7.076519,
+            "server_cpu_ms_per_request": 11.166666666666666,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57303040,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 599128
+          }
+        },
+        {
+          "reference": {
+            "loop": "reference",
+            "protocol": "h1",
+            "case": "cancellation",
+            "server_pid": 600121,
+            "p50_ms": 4.786624,
+            "p95_ms": 6.970131,
+            "p99_ms": 8.258275,
+            "server_cpu_ms_per_request": 11.583333333333336,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57384960,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 601639
+          },
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h1",
+            "case": "cancellation",
+            "server_pid": 603127,
+            "p50_ms": 4.8201339999999995,
+            "p95_ms": 6.070723,
+            "p99_ms": 6.397983,
+            "server_cpu_ms_per_request": 11.416666666666664,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 57421824,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 605021
+          }
+        }
+      ]
+    },
+    {
+      "protocol": "h2",
+      "case": "slow_consumer",
+      "pairs": [
+        {
+          "reference": {
+            "loop": "reference",
+            "protocol": "h2",
+            "case": "slow_consumer",
+            "server_pid": 607316,
+            "p50_ms": 2.2626619999999997,
+            "p95_ms": 2.955308,
+            "p99_ms": 4.296195,
+            "server_cpu_ms_per_request": 31.166666666666668,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 70721536,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 609816
+          },
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h2",
+            "case": "slow_consumer",
+            "server_pid": 612137,
+            "p50_ms": 2.261373,
+            "p95_ms": 2.589222,
+            "p99_ms": 3.02723,
+            "server_cpu_ms_per_request": 31.416666666666668,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 71110656,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 614243
+          }
+        },
+        {
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h2",
+            "case": "slow_consumer",
+            "server_pid": 616414,
+            "p50_ms": 2.27075,
+            "p95_ms": 2.769559,
+            "p99_ms": 3.177143,
+            "server_cpu_ms_per_request": 32.833333333333336,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 72122368,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 618439
+          },
+          "reference": {
+            "loop": "reference",
+            "protocol": "h2",
+            "case": "slow_consumer",
+            "server_pid": 620561,
+            "p50_ms": 2.2987045,
+            "p95_ms": 3.143541,
+            "p99_ms": 3.721916,
+            "server_cpu_ms_per_request": 33.16666666666667,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 71745536,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 622946
+          }
+        },
+        {
+          "reference": {
+            "loop": "reference",
+            "protocol": "h2",
+            "case": "slow_consumer",
+            "server_pid": 624871,
+            "p50_ms": 2.2909555,
+            "p95_ms": 2.640816,
+            "p99_ms": 2.93937,
+            "server_cpu_ms_per_request": 32.666666666666664,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 70946816,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 627711
+          },
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h2",
+            "case": "slow_consumer",
+            "server_pid": 630305,
+            "p50_ms": 2.485166,
+            "p95_ms": 3.031645,
+            "p99_ms": 3.601307,
+            "server_cpu_ms_per_request": 34.75000000000001,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 71229440,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 632772
+          }
+        }
+      ]
+    },
+    {
+      "protocol": "h2",
+      "case": "cancellation",
+      "pairs": [
+        {
+          "reference": {
+            "loop": "reference",
+            "protocol": "h2",
+            "case": "cancellation",
+            "server_pid": 635127,
+            "p50_ms": 4.554732,
+            "p95_ms": 4.965607,
+            "p99_ms": 5.26078,
+            "server_cpu_ms_per_request": 14.333333333333336,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 59105280,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 635781
+          },
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h2",
+            "case": "cancellation",
+            "server_pid": 636454,
+            "p50_ms": 4.599809,
+            "p95_ms": 4.75214,
+            "p99_ms": 4.806785,
+            "server_cpu_ms_per_request": 14.333333333333334,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 60346368,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 637505
+          }
+        },
+        {
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h2",
+            "case": "cancellation",
+            "server_pid": 638272,
+            "p50_ms": 4.516916999999999,
+            "p95_ms": 4.663172,
+            "p99_ms": 4.755287,
+            "server_cpu_ms_per_request": 14.0,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 59179008,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 638917
+          },
+          "reference": {
+            "loop": "reference",
+            "protocol": "h2",
+            "case": "cancellation",
+            "server_pid": 639527,
+            "p50_ms": 4.5852640000000005,
+            "p95_ms": 4.82397,
+            "p99_ms": 5.345724,
+            "server_cpu_ms_per_request": 14.166666666666668,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 58990592,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 640584
+          }
+        },
+        {
+          "reference": {
+            "loop": "reference",
+            "protocol": "h2",
+            "case": "cancellation",
+            "server_pid": 642221,
+            "p50_ms": 4.678573,
+            "p95_ms": 5.577925,
+            "p99_ms": 5.849483,
+            "server_cpu_ms_per_request": 14.749999999999998,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 58683392,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 643902
+          },
+          "coalesced": {
+            "loop": "coalesced",
+            "protocol": "h2",
+            "case": "cancellation",
+            "server_pid": 645859,
+            "p50_ms": 4.542284,
+            "p95_ms": 4.895509,
+            "p99_ms": 5.480383,
+            "server_cpu_ms_per_request": 14.583333333333334,
+            "warmup_requests": 20,
+            "rss_after_requests_bytes": 59162624,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "shutdown_exit_code": 0,
+            "shutdown_joined": true,
+            "memory_server_pid": 647112
+          }
+        }
+      ]
+    }
+  ],
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/http-pressure-full.json",
+  "raw_artifact_sha256": "df996628bbf3218c7feb4266f7305cceb1550e4282178a47722a9c4a427e6dcb",
+  "observations": 2400,
+  "independent_server_pids": 48
+}

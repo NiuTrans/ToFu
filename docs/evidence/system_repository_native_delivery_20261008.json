@@ -1,0 +1,63 @@
+{
+  "format": "tofu.native-repository-delivery/v1",
+  "changes": [
+    "Build native wheel once and install/certify all API,Worker,Headless container environments.",
+    "Retain Rust/compiler packages only in the builder; declare libgcc-s1 runtime dependency.",
+    "Certify installed native artifact without a checkout; image gates also require core native activation.",
+    "Use explicit runtime-tool rejection and fail-closed per-role install/probe loops."
+  ],
+  "verification": {
+    "initial_delivery_and_release_tests": 25,
+    "final_delivery_fault_tests": 9,
+    "clean_installed_agent_native_selected": true,
+    "clean_installed_agent_storage_imports": [],
+    "monorepo": "passed",
+    "full_docker_build": "not run; Docker CLI absent",
+    "remote_ci": "not observed"
+  },
+  "artifacts": [
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-kernel-delivery-build.log",
+      "sha256": "6b54cdfc7c4f3e774bfceaa401f55c22b8ad4801e002270e6b79a5b9a8ad281c"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-delivery-agent-wheel-build.log",
+      "sha256": "b280b1046949e3872c3b474cc1e150630ea18c964de0d07a5e4733b1d8902f4b"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-kernel-delivery-tests.log",
+      "sha256": "177620e11ba857c9f6c1ff6685292b2a6c20cfd0e6bbf901a67bcd300854ecc1"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-kernel-delivery-fault-tests.log",
+      "sha256": "1dacdcc0cc8f963453a9956f8aae240f88ba7536cd57ec39419dbaf52d7113fb"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-clean-agent-consumer.log",
+      "sha256": "e874eb49aaf0102444cb912cc17266bdf619a1087e9be5ed14bfddf343c0e36f"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-kernel-delivery-monorepo.log",
+      "sha256": "cd52b12df3546c5960cf48c3c2cdc08238c22399d171ca0585e6c395641a6524"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-kernel-delivery-docs.log",
+      "sha256": "6ced89e634d4096a9895a8aa357ea20b31713d546aa517b66511f779193c7246"
+    }
+  ],
+  "wheels": [
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-kernel-delivery-dist/tofu_repo_kernel-0.1.0-py3-none-linux_x86_64.whl",
+      "sha256": "4818def214bcff97f22416b3cb15b9608bfa9ab407da940b8e3e7344693230ff"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-delivery-agent-dist/tofu_agent-0.17.4-py3-none-any.whl",
+      "sha256": "b11976c437f43806cd054b2aa54eff892fc51558453518315fa5b56eb29d7fb2"
+    }
+  ],
+  "limits": [
+    "Installed-wheel and recipe tests do not prove a Docker image built or ran.",
+    "No runtime app restart,live backend change or external package/image publication performed.",
+    "Remaining performance goal includes events,context,Markdown,HTTP and ingestion."
+  ]
+}

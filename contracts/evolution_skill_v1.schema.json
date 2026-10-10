@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_skill_v1.schema.json",
+  "title": "Self-evolution forged skill: executable code with its own tests, sandbox receipt, and composition links",
+  "type": "object",
+  "required": ["schema_version", "skill_id", "name", "description", "language", "code", "tests", "uses", "status", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "skill_id": {"type": "string", "maxLength": 160},
+    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+    "description": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "language": {"enum": ["python"]},
+    "code": {"type": "string", "minLength": 1, "maxLength": 16000},
+    "tests": {"type": "string", "minLength": 1, "maxLength": 16000},
+    "uses": {"type": "array", "maxItems": 8, "items": {"type": "string", "maxLength": 160}, "description": "skill_ids this skill composes; every entry must be installed, and the composition graph stays acyclic."},
+    "gap_id": {"type": ["string", "null"], "maxLength": 160},
+    "status": {"enum": ["draft", "sandboxed", "proposed", "installed", "rejected"]},
+    "sandbox_receipt": {"type": ["object", "null"], "required": ["verdict", "output"], "properties": {"verdict": {"enum": ["pass", "fail"]}, "output": {"type": "string", "maxLength": 4000}}, "additionalProperties": false},
+    "lineage": {"type": "array", "maxItems": 8, "items": {"type": "string", "maxLength": 160}, "description": "Meta-goal episode ids that authored and verified this skill."},
+    "created_at": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

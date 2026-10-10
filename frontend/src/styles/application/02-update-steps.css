@@ -1,0 +1,46 @@
+
+/* Animated stepper */
+.upd-stepper{list-style:none;margin:6px 0 var(--space-1);padding:0;display:flex;flex-direction:column;gap:15px;position:relative}
+.upd-step{display:flex;align-items:center;gap:var(--space-3);position:relative;flex-wrap:wrap}
+.upd-step:not(:last-child)::before{content:'';position:absolute;left:var(--space-2);top:var(--space-5);width:2px;height:17px;background:var(--border);transition:background-color .3s ease}
+.upd-step.is-done:not(:last-child)::before{background:var(--accent)}
+.upd-step-dot{width:18px;height:18px;border-radius:50%;border:2px solid var(--border);box-sizing:border-box;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:var(--font-size-xs);font-weight:800;color:#fff;line-height:1;transition:background-color .25s ease,border-color .25s ease}
+.upd-step.is-done .upd-step-dot{background:var(--accent);border-color:var(--accent)}
+.upd-step.is-done .upd-step-dot::after{content:'✓'}
+.upd-step.is-active .upd-step-dot{border-color:var(--accent);border-top-color:transparent;animation:spin .8s linear infinite}
+.upd-step.is-error .upd-step-dot{background:var(--error-text);border-color:var(--error-text)}
+.upd-step.is-error .upd-step-dot::after{content:'✕'}
+.upd-step-label{font-size:var(--font-size-md);color:var(--text-tertiary);transition:color .25s ease}
+.upd-step.is-active .upd-step-label{color:var(--text-primary);font-weight:600}
+.upd-step.is-done .upd-step-label{color:var(--text-primary)}
+.upd-step.is-error .upd-step-label{color:var(--error-text);font-weight:600}
+.upd-step-detail{font-size:var(--font-size-xs);color:var(--text-tertiary);margin-left:auto;font-variant-numeric:tabular-nums;max-width:62%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Per-step live progress bar: full-width second line (flex-wrap), so a slow
+   download / pip install shows a determinate or animated sweep instead of a
+   frozen-looking spinner. */
+.upd-step-bar{flex:0 0 100%;width:100%;margin-left:30px;height:4px;border-radius:3px;background:var(--bg-secondary);border:1px solid var(--border);overflow:hidden;box-sizing:border-box}
+.upd-step-bar-fill{height:100%;width:0;border-radius:3px;background:linear-gradient(90deg,var(--accent),var(--accent-hover));transition:width .3s cubic-bezier(.4,0,.2,1)}
+.upd-step-bar.is-indeterminate .upd-step-bar-fill{width:40%;animation:upd-indeterminate 1.1s ease-in-out infinite}
+@keyframes upd-indeterminate{0%{margin-left:-40%}100%{margin-left:100%}}
+[data-theme="tofu"] .upd-step-bar{border:1px solid #1a1814;background:#fff}
+[data-theme="tofu"] .upd-step-bar-fill{background:#c9993f}
+/* States */
+.upd-loading,.upd-checking{display:flex;align-items:center;gap:9px;color:var(--text-tertiary);font-size:var(--font-size-lg)}
+.upd-badge{display:flex;align-items:center;justify-content:center;gap:10px;padding:14px var(--space-4);border-radius:12px;font-size:var(--font-size-lg);font-weight:700;line-height:1.4}
+.upd-badge.ok{background:rgba(34,197,94,.1);color:var(--success-color,#22c55e);border:1px solid rgba(34,197,94,.25)}
+.upd-badge.warn{background:var(--thinking-bg);color:var(--thinking-text);border:1px solid var(--thinking-border);justify-content:flex-start}
+.upd-badge.ok .upd-badge-icon{width:24px;height:24px;border-radius:50%;background:rgba(34,197,94,.18);align-items:center;justify-content:center}
+.upd-badge-icon{flex-shrink:0;display:flex}
+.upd-error{color:var(--error-text);font-size:var(--font-size-lg);line-height:1.5}
+/* Concrete check-failure card — heading + the real reason + retry */
+.upd-err-card{display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px;padding:6px var(--space-1)}
+.upd-err-head{display:flex;align-items:center;gap:9px}
+.upd-err-icon{display:flex;align-items:center;justify-content:center;color:var(--error-text);flex-shrink:0}
+.upd-err-title{font-size:15px;font-weight:700;color:var(--text-primary);letter-spacing:-0.01em}
+.upd-err-reason{margin:2px 0 var(--space-1);font-size:var(--font-size-md);line-height:1.55;color:var(--text-secondary);max-width:340px}
+.upd-err-card .upd-retry-btn{margin-top:var(--space-2);display:inline-flex;align-items:center;gap:7px}
+.upd-err-card .upd-retry-btn svg{flex-shrink:0}
+.upd-warn{color:var(--text-primary);font-size:var(--font-size-md);line-height:1.5}
+.upd-uptodate,.upd-ready{color:var(--text-primary);font-size:var(--font-size-lg);line-height:1.5}
+.upd-hint{color:var(--text-tertiary);font-size:var(--font-size-sm);margin-top:10px;line-height:1.4}
+.upd-files{margin-top:10px;padding:9px 11px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;font-size:var(--font-size-sm);font-family:var(--font-mono,monospace);color:var(--text-secondary);max-height:160px;overflow:auto;white-space:pre-wrap}

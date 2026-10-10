@@ -1,0 +1,103 @@
+/* ───────────────────────────────────────────────────────────────
+ * COMPACTED tool-row label  (per UX directive: solid colors, no opacity)
+ *
+ * When a tool result has been replaced by a server-side compaction
+ * placeholder, the row gets a SOLID-color pill on the LEFT (right
+ * after the icon) that says exactly what happened. The pill is
+ * placed inline so the user can't miss it; the pill carries the
+ * layer name and a from→to token reduction so the user knows both
+ * that compaction happened and how much was saved.
+ *
+ * Layers:
+ *   L0 (born too big — model never saw full text)  — pink/red palette
+ *   L1 (aged out of hot tail — replaced on next call) — purple palette
+ *   L3 (LLM summary in transcript archive)         — amber palette
+ *
+ * Compacted rows themselves stay at full text opacity — the LABEL
+ * carries the signal, not a faded row.
+ *
+ * Anti-flicker: pure static styling, no transitions, no animations.
+ * ─────────────────────────────────────────────────────────────── */
+.ptool-compaction-label{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  flex-shrink:0;
+  height:18px;
+  padding:0 7px 0 6px;
+  margin-right:6px;
+  border-radius:4px;
+  font-family:'JetBrains Mono', ui-monospace, monospace;
+  font-size:10px;
+  font-weight:700;
+  line-height:1;
+  letter-spacing:.04em;
+  cursor:help;
+  user-select:none;
+  /* Solid base — colors set per-layer below. No opacity on the row,
+   * no transparency on the label background. */
+  color:#ffffff;
+  background:#a78bfa;
+}
+.ptool-compaction-text{
+  /* The "COMPACTED L1" portion — kept tight and uppercase. */
+  letter-spacing:.06em;
+}
+.ptool-compaction-delta{
+  /* Token reduction pill ("280k→2k") sits in a darker inset block so
+   * the layer name and the savings number are readable as two pieces
+   * of information rather than one long string. */
+  padding:0 5px;
+  height:14px;
+  display:inline-flex;
+  align-items:center;
+  border-radius:3px;
+  font-weight:600;
+  letter-spacing:0;
+  /* Per-layer fill set below; the inner block uses a slightly darker
+   * shade of the layer color so it reads as solid even on top of the
+   * already-solid label. */
+}
+
+/* L0 — result was born too big and persisted to disk before the model
+ * ever saw the full text.  Strongest demotion → hot pink palette. */
+.ptool-compaction-l0{
+  background:#ec4899;
+  color:#ffffff;
+}
+.ptool-compaction-l0 .ptool-compaction-delta{
+  background:#be185d;
+  color:#ffffff;
+}
+
+/* L1 — was visible once, then aged out of the hot tail. Purple. */
+.ptool-compaction-l1{
+  background:#8b5cf6;
+  color:#ffffff;
+}
+.ptool-compaction-l1 .ptool-compaction-delta{
+  background:#6d28d9;
+  color:#ffffff;
+}
+
+/* L3 — replaced by an LLM-generated summary in the transcript
+ * archive (the most lossy form). Amber so the user can tell at a
+ * glance "this was rewritten, not just truncated". */
+.ptool-compaction-l3{
+  background:#f59e0b;
+  color:#1f1300;
+}
+.ptool-compaction-l3 .ptool-compaction-delta{
+  background:#b45309;
+  color:#ffffff;
+}
+
+/* The tool name on a compacted row stays at full color so the user
+ * can still read what was called.  No more dotted underline / opacity
+ * fade — the LABEL carries the signal. */
+.ptool-line .ptool-compaction-label + .ptool-text,
+.ptool-line .ptool-compaction-label ~ .ptool-text{
+  /* No-op rule, intentionally — kept as documentation that we leave
+   * the text alone on compacted rows. */
+}
+

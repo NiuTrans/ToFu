@@ -1,0 +1,76 @@
+/* Chat preview split. PDF geometry and text layers belong to the shared reader. */
+.chat-wrapper.paper-preview-open {
+  display: grid;
+  grid-template-columns: minmax(280px, var(--paper-chat-width, 40%)) 8px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+}
+.paper-preview-open > .chat-container { grid-area: 1 / 1; min-width: 0; min-height: 0; }
+.paper-preview-open > .input-area { grid-area: 2 / 1; min-width: 0; width: auto; }
+/* The chat column can be narrow on a wide screen. Wrap its controls without
+   layout containment, so fixed model and option menus keep their viewport. */
+.paper-preview-open .input-inner { min-width: 0; }
+.paper-preview-open .input-actions { flex-wrap: wrap; }
+.paper-preview-open .input-actions-scroll { flex: 1 1 96px; }
+.paper-preview-open .input-actions-right { max-width: 100%; flex-wrap: wrap; }
+/* Secondary modes already have equivalent controls in the shared More sheet. */
+.paper-preview-open .input-actions > .input-group { display: none; }
+.paper-preview-open .search-mode-toggle .sm-label { display: none; }
+.paper-preview-open .mobile-more-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs, 6px);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.paper-preview-open > .scroll-to-bottom-btn { right: calc(100% - var(--paper-chat-width, 40%) + 16px); }
+.paper-preview-panel {
+  grid-area: 1 / 3 / span 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-primary);
+  border-inline-start: 1px solid var(--border);
+  color: var(--text-primary);
+  container-type: inline-size;
+}
+.paper-reader-focus[open] {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  container-type: inline-size;
+}
+.paper-reader-focus::backdrop { background: var(--bg-primary); }
+.paper-reader-focus > .paper-preview-toolbar {
+  padding-block-start: env(safe-area-inset-top, 0px);
+  padding-inline: max(6px, env(safe-area-inset-left, 0px)) max(6px, env(safe-area-inset-right, 0px));
+}
+.paper-reader-focus > .paper-preview-viewport { padding-block-end: env(safe-area-inset-bottom, 0px); }
+.paper-preview-documents { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-inline-end: 30px; min-width: 0; }
+.paper-preview-documents select { flex: 1 1 200px; min-width: 0; max-width: 100%; min-height: 44px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 5px; font: inherit; }
+.paper-preview-documents select:focus-visible { outline: 2px solid var(--accent); }
+.paper-preview-notice { margin: 0; padding: var(--space-2) var(--space-3); font-size: var(--font-size-sm); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 100px; overflow: auto; color: var(--text-secondary); border-bottom: 1px solid var(--border); }
+.paper-preview-copy-debug { min-width: 0; min-height: 24px; padding: 0 8px; font-size: var(--font-size-xs); border: 1px solid var(--border); }
+.paper-preview-panel [hidden] { display: none; }
+.paper-preview-status { flex-shrink: 0; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-size-xs); color: var(--text-secondary); }
+.paper-preview-status[data-quiet=true] { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

@@ -1,0 +1,247 @@
+"""Regression test for the identity-invariant short-circuit (board epic
+pt_6080a12a53aa4081).
+
+Evidence (task inc-translate-89dd9bf7, 2026-07-14 18:01): auto-translating an
+assistant reply that was essentially a single absolute path (98 chars), the
+engine's no-op detector treated the model's correct verbatim echo as a
+*translation failure* and burned 9 real model attempts across two fallback
+rounds before surfacing a ValueError. Wasted spend + a surfaced error for
+content that never needed translating.
+
+The fix short-circuits legitimately identity-invariant content BEFORE the
+retry loop — accepting it verbatim with ZERO model calls:
+  (a) no translatable letters (pure symbols / digits / punctuation),
+  (b) a lone path / URL token,
+  (c) text already predominantly in the target language.
+
+Genuinely-translatable content (including a genuine echo of foreign text)
+must still enter the retry loop and be flagged.
+
+These tests patch the LLM dispatch + MT provider + cache so they run offline
+and deterministically. Run with PYTEST_DISABLE_PLUGIN_AUTOLOAD=1.
+"""
+
+import pytest
+
+import lib.translate.engine as engine
+import lib.translate.engine._engine as _engine
+
+
+pytestmark = pytest.mark.unit
+
+
+def _patch_common(monkeypatch, reply):
+    """Disable MT + cache and count how many times smart_chat is called."""
+    monkeypatch.setattr('lib.mt_provider.is_mt_configured', lambda: False)
+    monkeypatch.setattr(engine.translate_cache, 'get', lambda *a, **k: None)
+    monkeypatch.setattr(engine.translate_cache, 'put', lambda *a, **k: None)
+
+    calls = {'n': 0}
+
+    def _fake_smart_chat(messages=None, **kw):
+        calls['n'] += 1
+        return reply, {'finish_reason': 'stop',
+                       '_dispatch': {'model': 'fake-cheap', 'key': 'k1'}}
+
+    monkeypatch.setattr('lib.llm_dispatch.smart_chat', _fake_smart_chat)
+    return calls
+
+
+# ── (b) path / URL token — the reported bug ──────────────────────────────
+
+# The ~100-char absolute-path shape from task inc-translate-89dd9bf7.
+# Purely lexical: the identity invariant never touches the filesystem, so
+# this placeholder needs no machine-specific path and runs on any host.
+_ABS_PATH = ('/mnt/data/ssd_pool/docker/user/example-org/INS/'
+             'example-user01/chatui/lib/translate/engine/_engine.py')
+
+
+def test_absolute_path_accepted_verbatim_zero_model_calls(monkeypatch):
+    # The reported bug: a lone absolute path. Accepted verbatim, NO model call,
+    # NO ValueError — the whole retry-storm is skipped.
+    calls = _patch_common(monkeypatch, _ABS_PATH)
+    out, usage = engine._translate_one_chunk(
+        _ABS_PATH, system_prompt='translate', source='English',
+        target='Chinese', overall_deadline=30)
+    assert out == _ABS_PATH
+    assert calls['n'] == 0                       # ZERO model attempts
+    tr = usage.get('_translate_trace')
+    assert tr and tr['verdict'] == 'identity' and tr['path'] == 'identity'
+    assert usage.get('_identity_invariant') is True
+
+
+@pytest.mark.parametrize('token', [
+    'https://km.internal.example.com/collabpage/123456',
+    'file:///tmp/report.pdf',
+    '~/projects/tofu/server.py',
+    './static/js/main.js',
+    '../lib/text_lang/_ratios.py',
+    r'C:\Users\me\notes.txt',
+])
+def test_url_and_path_shapes_short_circuit(monkeypatch, token):
+    calls = _patch_common(monkeypatch, token)
+    out, _u = engine._translate_one_chunk(
+        token, system_prompt='translate', source='English', target='Chinese',
+        overall_deadline=30)
+    assert out == token
+    assert calls['n'] == 0
+
+
+# ── (a) no translatable letters ──────────────────────────────────────────
+
+@pytest.mark.parametrize('symbols', [
+    '=== 12345 === 67.89 ===',
+    '>>> --- +++ *** ///',
+])
+def test_pure_symbols_accepted_verbatim(monkeypatch, symbols):
+    from lib.translate.skip_policy import _HAS_LETTER_RE
+
+    assert not _HAS_LETTER_RE.search(symbols)
+    calls = _patch_common(monkeypatch, symbols)
+    out, _u = engine._translate_one_chunk(
+        symbols, system_prompt='translate', source='English', target='Chinese',
+        overall_deadline=30)
+    assert out == symbols
+    assert calls['n'] == 0
+
+
+def test_numbers_and_punctuation_only(monkeypatch):
+    content = '2026-07-14 18:01:58 (99.5%) [#42]'
+    from lib.translate.skip_policy import _HAS_LETTER_RE
+
+    assert not _HAS_LETTER_RE.search(content)
+    calls = _patch_common(monkeypatch, content)
+    out, _u = engine._translate_one_chunk(
+        content, system_prompt='translate', source='English', target='Chinese',
+        overall_deadline=30)
+    assert out == content
+    assert calls['n'] == 0
+
+
+# ── (c) already in the target language ───────────────────────────────────
+
+_CHINESE = '我是由月之暗面开发的人工智能助手，有什么可以帮你的吗？这里没有任何拉丁字母。'
+
+
+def test_already_chinese_target_chinese_short_circuits(monkeypatch):
+    calls = _patch_common(monkeypatch, _CHINESE)
+    out, _u = engine._translate_one_chunk(
+        _CHINESE, system_prompt='translate', source='Chinese', target='Chinese',
+        overall_deadline=30)
+    assert out == _CHINESE
+    assert calls['n'] == 0
+
+
+def test_already_english_target_english_short_circuits(monkeypatch):
+    english = ('This is a perfectly ordinary English paragraph that is already '
+               'in the target language and needs no translation at all.')
+    calls = _patch_common(monkeypatch, english)
+    out, _u = engine._translate_one_chunk(
+        english, system_prompt='translate', source='English', target='English',
+        overall_deadline=30)
+    assert out == english
+    assert calls['n'] == 0
+
+
+_IDENTIFIER_HEAVY_ZH = (
+    '这时你只能看到最终 `content`，看不到思考，但内部仍在推理，token 仍会计入。\n'
+    '\n'
+    '来源：https://docs.x.ai/developers/model-capabilities/text/comparison\n'
+    '\n'
+    '4. 加密思考：能拿回来，但人读不了\n'
+    '\n'
+    'Responses API 传 `include: ["reasoning.encrypted_content"]`（SDK：'
+    '`use_encrypted_content=True`）会返回加密思考，只能回传给模型做多轮续写，'
+    '不能当明文 CoT 看。\n'
+    '\n'
+    '| 你想拿的东西 | Grok 4.6 有没有 |\n'
+    '| 完整原始 thinking / `<think>` 全文 | 没有 |\n'
+    '| 可读思考摘要 `reasoning_content` | 有（Responses / xAI SDK；4.5 没有） |\n'
+    '| Chat Completions 的思考字段 | 官方说没有 |\n'
+    '\n'
+    '所以：说「Grok 4.6 不返回思考过程」——对 Chat Completions、或相对 '
+    'DeepSeek/Qwen 那种完整 CoT，基本成立。'
+)
+
+
+def test_identifier_heavy_chinese_target_chinese_short_circuits(monkeypatch):
+    # Reported case: already-Chinese technical notes with API names, inline
+    # code, URLs, and a documented `<think>` tag. Raw latin_ratio is high, but
+    # leftover prose has no English sentence glue — skip with zero model calls.
+    calls = _patch_common(monkeypatch, _IDENTIFIER_HEAVY_ZH)
+    out, usage = engine._translate_one_chunk(
+        _IDENTIFIER_HEAVY_ZH, system_prompt='translate', source='English',
+        target='Chinese', overall_deadline=30)
+    assert out == _IDENTIFIER_HEAVY_ZH.strip()
+    assert calls['n'] == 0
+    tr = usage.get('_translate_trace')
+    assert tr and tr['verdict'] == 'identity' and tr['path'] == 'identity'
+
+
+def test_chinese_with_hidden_english_sentence_is_not_identity():
+    mixed = (
+        '以上改动已经合入主分支。Please check the logs for details after '
+        'deploying the worker, then ping me.'
+    )
+    inv, _reason = _engine._is_identity_invariant(mixed, 'Chinese')
+    assert inv is False
+
+
+# ── Negative controls: genuinely-translatable content still runs the loop ─
+
+def test_genuine_english_to_chinese_echo_still_flagged(monkeypatch):
+    # Source English, target Chinese, model echoes → a GENUINE no-op. Must NOT
+    # be short-circuited (it carries translatable letters and is not a path):
+    # it enters the retry loop, exhausts it, and raises. This is the behaviour
+    # the fix must PRESERVE — proving the short-circuit didn't swallow real
+    # failures.
+    english = ('This is a sufficiently long English sentence that should be '
+               'translated into Chinese but the cheap model just echoed it.')
+    calls = _patch_common(monkeypatch, english)
+    with pytest.raises(ValueError):
+        engine._translate_one_chunk(
+            english, system_prompt='translate', source='English',
+            target='Chinese', overall_deadline=30)
+    assert calls['n'] >= 2                        # entered the retry loop
+
+
+def test_mixed_bilingual_is_not_identity_invariant(monkeypatch):
+    # A mixed EN+ZH message translating to Chinese still needs the model for
+    # its English half — it must NOT be short-circuited. The model returns a
+    # proper Chinese translation which is accepted normally (>=1 call).
+    mixed = ('Please 帮我预约 an appointment 明天上午 at the hospital 好吗？'
+             ' The doctor 王芳 recommended it.')
+    inv, _reason = _engine._is_identity_invariant(mixed.strip(), 'Chinese')
+    assert inv is False
+    good_zh = '请帮我预约明天上午医院的门诊好吗？王芳医生推荐的。'
+    calls = _patch_common(monkeypatch, good_zh)
+    out, _u = engine._translate_one_chunk(
+        mixed, system_prompt='translate', source='English', target='Chinese',
+        overall_deadline=30)
+    assert out == good_zh.strip()
+    assert calls['n'] == 1                        # translated, not short-circuited
+
+
+def test_path_with_prose_is_not_a_bare_token(monkeypatch):
+    # A sentence that MENTIONS a path is real prose — must be translated, not
+    # short-circuited (it has internal whitespace, so it's not a lone token).
+    prose = 'The config lives at /etc/tofu/config.json and must be readable.'
+    inv, _reason = _engine._is_identity_invariant(prose.strip(), 'Chinese')
+    assert inv is False
+
+
+# ── Load-bearing NEUTER control ──────────────────────────────────────────
+
+def test_NEUTER_without_short_circuit_path_burns_retries_and_raises(monkeypatch):
+    # Proves the short-circuit is load-bearing: force _is_identity_invariant to
+    # never fire, then feed the reported absolute path. Without the guard the
+    # model echoes the path → the no-op detector treats it as failure → the
+    # engine burns the retry budget and RAISES (the reported bug behaviour).
+    monkeypatch.setattr(_engine, '_is_identity_invariant',
+                        lambda *_a, **_k: (False, ''))
+    calls = _patch_common(monkeypatch, _ABS_PATH)
+    with pytest.raises(ValueError):
+        engine._translate_one_chunk(
+            _ABS_PATH, system_prompt='translate', source='English',
+            target='Chinese', overall_deadline=30)
+    assert calls['n'] >= 2                        # the retry storm we fixed

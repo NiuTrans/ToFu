@@ -1,0 +1,482 @@
+"""Meta-guard: the test suite's own health must not silently degrade.
+
+WHY THIS EXISTS
+---------------
+This project's JOURNAL records SEVEN separate incidents of one family
+("守卫过期家族"): a guard test stopped guarding anything and nobody noticed
+until it was found by accident. The charter's verdict is blunt — "守卫死了没人
+知道,比没有守卫更危险——因为它制造了『有保护』的错觉."
+
+Every one of those incidents was individually fixed. None of them was
+*prevented from recurring*, because the suite had no way to observe its own
+health: with ~1160 test files and ~320k lines, "read them one by one" is not a
+review anyone can actually perform, so the failure modes accumulated unseen.
+
+``scripts/audit_tests.py`` performs that review mechanically (AST only — no
+imports, no execution, ~6s over the whole suite). THIS test is what makes it
+binding: a one-way ratchet. Debt can be paid down; it cannot silently
+re-accumulate. When a category grows, CI names the category, the file and the
+line.
+
+WHAT IS GATED (and why these are the failure modes that matter)
+    A0  a test file that does not parse
+    A1  a test whose only exit is pytest.skip() — structurally cannot fail, so
+        it reports nothing while looking like a check
+    A2  the call under test wrapped in bare ``except Exception: pass`` — "it
+        worked" and "it exploded" produce the same green result
+    A   no assertion anywhere in the test's 1-2 level call closure
+    B   ``assert ... or True`` — green by construction
+    C   assertions swallowed by a try/except that cannot fail
+    D   unconditional skip/xfail — a dead test on life support
+    E   a source-anchor guard whose needle is absent from the file it reads:
+        THE detector for the 守卫过期家族
+    F   a reference to a repo path that no longer exists — how a scanning guard
+        degrades into scanning nothing while staying green
+
+    G   a read of shipped source text. Narrow architecture and
+        generated-artifact ratchets may remain, but every existing test/source
+        identity is grandfathered explicitly and the set may only shrink
+
+HOW TO RESPOND TO A FAILURE HERE
+    Fix the finding. Do NOT raise the baseline to make it green — that is the
+    exact move the charter forbids ("禁止:为了让数字变绿而上调 BASELINE"),
+    and it converts a real signal back into the illusion of protection.
+    A baseline may only be regenerated DOWNWARD, deliberately:
+        python3 scripts/audit_tests.py --write-baseline
+    and the commit must say which findings were fixed to earn the new number.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import importlib.util
+import os
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from lib.mcp.registry import is_opensource_build
+
+pytestmark = pytest.mark.unit
+
+# The audit baseline (tests/audit_baseline.json) is a census of the SOURCE
+# tree. The opensource export is structurally different — it deliberately
+# strips files the suite legitimately references (scripts/cache_waste_report.py
+# et al, see tests/meta/test_gitignore_covers_export_excludes.py), which shows up
+# as phantom F-category growth against a baseline those files were counted in.
+# The two baseline-comparison guards therefore self-skip on a public build.
+_OPENSOURCE = is_opensource_build()
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
+AUDIT = os.path.join(ROOT, 'scripts', 'audit_tests.py')
+BASELINE_PATH = os.path.join(HERE, '..', 'audit_baseline.json')
+
+
+def _fixture_test_path(name: str) -> str:
+    """Build a synthetic test path without declaring a repository anchor."""
+    return 'tests/' + name
+
+
+def _load_audit_module():
+    spec = importlib.util.spec_from_file_location('audit_tests_under_test', AUDIT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _census() -> dict:
+    """Run the audit tool and return its JSON census."""
+    out = os.path.join(
+        os.environ.get('TMPDIR', '/tmp'), f'tofu_census_{os.getpid()}.json')
+    r = subprocess.run([sys.executable, AUDIT, '--json', out],
+                       cwd=ROOT, capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, (
+        f'scripts/audit_tests.py failed (rc={r.returncode}):\n'
+        f'{(r.stderr or r.stdout)[-2000:]}')
+    try:
+        with open(out, encoding='utf-8') as f:
+            return json.load(f)
+    finally:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+
+
+def test_audit_tool_is_runnable():
+    """The census tool itself must work — a broken tool would make every other
+    assertion here vacuously green."""
+    assert os.path.isfile(AUDIT), 'scripts/audit_tests.py is missing'
+    census = _census()
+    assert census['files'] > 500, (
+        f"census only saw {census['files']} test files — it is not reaching the "
+        f'suite (expected >1000). A collapsed scan makes this whole guard inert.')
+    assert census['tests'] > 5000, (
+        f"census only found {census['tests']} test functions — scan collapsed")
+
+
+def test_tracked_scan_excludes_worktree_deletions(tmp_path, monkeypatch):
+    """An unstaged deletion is absent from the tree pytest will execute.
+
+    ``git ls-files`` still reports it until the deletion is staged/committed;
+    the audit must therefore filter by current filesystem state rather than
+    manufacture an A0 parse failure that disappears after commit.
+    """
+    audit = _load_audit_module()
+    live = tmp_path / 'tests' / 'test_live.py'
+    live.parent.mkdir()
+    live.write_text('def test_live():\n    assert True\n', encoding='utf-8')
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+    monkeypatch.setattr(
+        audit.subprocess,
+        'run',
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stderr='', stdout=(f'{_fixture_test_path("test_live.py")}\n'
+                    f'{_fixture_test_path("test_deleted.py")}\n'),
+        ),
+    )
+
+    assert audit._tracked('tests/test_*.py') == [
+        _fixture_test_path('test_live.py')]
+
+
+def test_tracked_scan_refuses_failed_git(monkeypatch):
+    """A failed census must never report a clean, empty suite."""
+    audit = _load_audit_module()
+    monkeypatch.setattr(
+        audit.subprocess, 'run',
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout='', stderr='git cannot launch'))
+    with pytest.raises(RuntimeError, match='git cannot launch'):
+        audit._tracked('tests/test_*.py')
+
+
+def test_census_refuses_empty_suite(monkeypatch):
+    audit = _load_audit_module()
+    monkeypatch.setattr(audit, '_tracked', lambda pattern: [])
+    monkeypatch.setattr(audit.sys, 'argv', ['audit_tests'])
+    with pytest.raises(RuntimeError, match='refusing an empty census'):
+        audit.main()
+
+
+def test_assertion_closure_follows_explicit_neighbor_test_helper(
+        tmp_path, monkeypatch):
+    """An imported behavioral driver can own the consumer's assertions."""
+    audit = _load_audit_module()
+    tests_dir = tmp_path / 'tests'
+    tests_dir.mkdir()
+    (tests_dir / 'test_driver.py').write_text(
+        'def _run_subject():\n'
+        '    observed = 2 + 2\n'
+        '    assert observed == 4\n',
+        encoding='utf-8',
+    )
+    (tests_dir / 'test_consumer.py').write_text(
+        'from tests.test_driver import _run_subject\n'
+        'def test_delegates_to_driver():\n'
+        '    _run_subject()\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(
+        _fixture_test_path('test_consumer.py'))
+
+    assert not [item for item in report.findings if item[0] == 'A']
+
+
+def test_dead_path_scan_ignores_prose_and_negative_absence_guards(
+        tmp_path, monkeypatch):
+    """F describes a dead *lookup*, not documentation or an absence pin."""
+    audit = _load_audit_module()
+    test_path = tmp_path / 'tests' / 'test_retired_owner.py'
+    test_path.parent.mkdir()
+    test_path.write_text(
+        '"""Migrated from lib/retired_owner.py."""\n'
+        'from pathlib import Path\n'
+        'def test_absent():\n'
+        '    assert not Path("lib/retired_owner.py").exists()\n'
+        '    source = "current graph"\n'
+        '    assert "static/js/retired.js" not in source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_retired_owner.py'))
+
+    assert not [item for item in report.findings if item[0] == 'F']
+
+
+def test_dead_path_scan_still_reports_positive_source_lookup(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    test_path = tmp_path / 'tests' / 'test_missing_owner.py'
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from pathlib import Path\n'
+        'def test_read():\n'
+        '    source = Path("lib/missing_owner.py").read_text()\n'
+        '    assert source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_missing_owner.py'))
+
+    assert [item for item in report.findings if item[0] == 'F'] == [
+        ('F', 0, 'references missing path lib/missing_owner.py')]
+
+
+def test_dead_path_scan_accepts_only_live_runtime_adapter_identities(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    runtime = tmp_path / 'frontend/src/runtime/app-runtime.js'
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        '/* ===== migrated source: core/live.js ===== */\nconst live = 1;\n',
+        encoding='utf-8',
+    )
+    test_path = tmp_path / _fixture_test_path('test_runtime_owner.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from tests._runtime_sections import runtime_section\n'
+        'def test_owner():\n'
+        '    assert runtime_section("core/live.js")\n'
+        '    assert runtime_section("core/missing.js")\n'
+        '    labels = ["static/js/core/live.js", '
+        '"static/js/core/missing.js"]\n'
+        '    assert labels\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_runtime_owner.py'))
+
+    assert [item for item in report.findings if item[0] == 'F'] == [
+        ('F', 0, 'references missing path static/js/core/missing.js')]
+
+
+def test_dead_path_scan_accepts_only_live_native_adapter_identities(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner = tmp_path / 'frontend/src/features/orchestration/task-mode-list.ts'
+    owner.parent.mkdir(parents=True)
+    owner.write_text('export const live = true;\n', encoding='utf-8')
+    test_path = tmp_path / _fixture_test_path('test_native_owner.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from tests._runtime_sections import orchestration_legacy_test_root\n'
+        'def test_owner():\n'
+        '    paths = ["static/js/task-mode-list.js", '
+        '"static/js/task-mode-missing.js"]\n'
+        '    assert paths\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_native_owner.py'))
+
+    assert [item for item in report.findings if item[0] == 'F'] == [
+        ('F', 0, 'references missing path static/js/task-mode-missing.js')]
+
+
+def test_shipped_source_read_is_reported_per_source_identity(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner = tmp_path / 'lib' / 'live_owner.py'
+    owner.parent.mkdir()
+    owner.write_text('def public_contract():\n    return 1\n', encoding='utf-8')
+    test_path = tmp_path / _fixture_test_path('test_source_pin.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from pathlib import Path\n'
+        'def test_source_pin():\n'
+        '    source = (Path(__file__).parents[2] / "lib" / '
+        '"live_owner.py").read_text()\n'
+        '    assert "def public_contract(" in source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_source_pin.py'))
+
+    assert [item for item in report.findings if item[0] == 'G'] == [
+        ('G', 0, 'source-text read of lib/live_owner.py')]
+    assert 'G' in audit.BLOCKING
+
+
+def test_path_shaped_business_data_is_not_a_source_read(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner = tmp_path / 'lib' / 'live_owner.py'
+    owner.parent.mkdir()
+    owner.write_text('def public_contract():\n    return 1\n', encoding='utf-8')
+    test_path = tmp_path / _fixture_test_path('test_path_data.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'def test_path_label():\n'
+        '    expected_path = "lib/live_owner.py"\n'
+        '    rendered_label = "Changed lib/live_owner.py"\n'
+        '    assert expected_path in rendered_label\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_path_data.py'))
+
+    assert not [item for item in report.findings if item[0] == 'G']
+
+
+def test_source_provenance_stays_scoped_to_each_test_function(
+        tmp_path, monkeypatch):
+    audit = _load_audit_module()
+    owner_dir = tmp_path / 'lib'
+    owner_dir.mkdir()
+    (owner_dir / 'alpha.py').write_text('ALPHA_CONTRACT = 1\n')
+    (owner_dir / 'beta.py').write_text('BETA_CONTRACT = 2\n')
+    test_path = tmp_path / _fixture_test_path('test_scoped_sources.py')
+    test_path.parent.mkdir()
+    test_path.write_text(
+        'from pathlib import Path\n'
+        'def test_alpha():\n'
+        '    source = Path("lib/alpha.py").read_text()\n'
+        '    assert "ALPHA_CONTRACT =" in source\n'
+        'def test_beta():\n'
+        '    source = Path("lib/beta.py").read_text()\n'
+        '    assert "BETA_CONTRACT =" in source\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(audit, 'REPO', str(tmp_path))
+    monkeypatch.setattr(audit, '_shared_helper_defs', lambda: {})
+
+    report = audit.analyze_file(_fixture_test_path('test_scoped_sources.py'))
+
+    assert not [item for item in report.findings if item[0] == 'E']
+    assert [item for item in report.findings if item[0] == 'G'] == [
+        ('G', 0, 'source-text read of lib/alpha.py'),
+        ('G', 0, 'source-text read of lib/beta.py'),
+    ]
+
+
+def _finding_digest(census: dict, category: str) -> str:
+    finding_keys = sorted({
+        f'{relative_path}:{detail}'
+        for relative_path, _line, detail
+        in census.get('findings', {}).get(category, ())
+    })
+    return hashlib.sha256(
+        '\n'.join(finding_keys).encode('utf-8')).hexdigest()
+
+
+@pytest.mark.skipif(_OPENSOURCE, reason='audit baseline is source-tree-specific; the export deliberately strips referenced files')
+def test_no_category_regressed():
+    """One-way ratchet over every gated failure mode."""
+    with open(BASELINE_PATH, encoding='utf-8') as f:
+        baseline_document = json.load(f)
+    baseline = baseline_document['counts']
+    census = _census()
+    counts = census['counts']
+
+    grew = []
+    for cat, base in sorted(baseline.items()):
+        now = counts.get(cat, 0)
+        if now > base:
+            grew.append((cat, base, now))
+
+    baseline_g_digest = baseline_document.get(
+        'finding_digests', {}).get('G')
+    actual_g_digest = _finding_digest(census, 'G')
+    g_identity_changed = baseline_g_digest != actual_g_digest
+
+    if grew or g_identity_changed:
+        detail = []
+        for cat, base, now in grew:
+            detail.append(f'  [{cat}] {base} → {now}  (+{now - base})')
+        if g_identity_changed:
+            detail.append(
+                '  [G] source-text read identity set changed; inspect '
+                '`python3 scripts/audit_tests.py --category G`')
+        raise AssertionError(
+            'Test-suite health regressed — new findings in these categories:\n'
+            + '\n'.join(detail)
+            + '\n\nSee the offending file:line with:\n'
+            + '\n'.join(f'  python3 scripts/audit_tests.py --category {c}'
+                        for c, _, _ in grew)
+            + '\n\nFIX THE FINDING. Do not raise tests/audit_baseline.json to '
+              'silence it (charter: 禁止为了让数字变绿而上调 BASELINE) — a '
+              'baseline may only move DOWN, and the commit must say which '
+              'findings were fixed.')
+
+
+@pytest.mark.skipif(_OPENSOURCE, reason='audit baseline is source-tree-specific; the export deliberately strips referenced files')
+def test_baseline_is_not_loose():
+    """The baseline must track reality DOWNWARD too.
+
+    Without this, a category could be cleaned up and then quietly re-dirtied
+    back to the stale (higher) baseline with CI never objecting — the ratchet
+    would only be one-way on paper. Deliberately mirrors the tightness check on
+    the frontend ratchets (which had to be fixed for exactly this reason: they
+    ``skip``ped instead of failing, so a loose baseline was unobservable).
+    """
+    with open(BASELINE_PATH, encoding='utf-8') as f:
+        baseline_document = json.load(f)
+    baseline = baseline_document['counts']
+    census = _census()
+    counts = census['counts']
+    loose = [(c, b, counts.get(c, 0)) for c, b in sorted(baseline.items())
+             if counts.get(c, 0) < b]
+    assert not loose, (
+        'tests/audit_baseline.json is LOOSE — these categories are now cleaner '
+        'than the recorded baseline, so regressions would go unnoticed up to '
+        'the stale bound:\n'
+        + '\n'.join(f'  [{c}] baseline={b}, actual={n}' for c, b, n in loose)
+        + '\n\nRegenerate: python3 scripts/audit_tests.py --write-baseline')
+
+    assert baseline_document.get('finding_digests', {}).get('G') == \
+        _finding_digest(census, 'G'), (
+            'G source-text read identities changed; inspect category G '
+            'and regenerate the baseline only after the debt shrank')
+
+
+def test_event_contract_scan_targets_resolve():
+    """Cross-check on the specific failure mode that motivated this file.
+
+    ``tests/events/test_event_registry.py`` scans a list of emit sites for SSE event
+    types. Measured 2026-07-27: 10 of its 21 listed paths had ceased to exist
+    (each split into a package), the scanner skipped missing paths silently, and
+    HALF the emit surface went unverified while the test stayed green. Its own
+    header comment documented an EARLIER instance of the same accident.
+
+    That test now fails on an unresolvable target. This assertion is the
+    independent tripwire: if someone reintroduces the silent-skip pattern there,
+    the F-category ratchet above catches the dead path, and this catches the
+    behaviour directly.
+    """
+    sys.path.insert(0, ROOT)
+    from tests.events.test_event_registry import (
+        _BACKEND_FILES, _FRONTEND_FILES, _resolve_scan_targets)
+
+    back_ok, back_bad = _resolve_scan_targets(_BACKEND_FILES)
+    front_ok, front_bad = _resolve_scan_targets(_FRONTEND_FILES)
+    assert not back_bad and not front_bad, (
+        f'event-contract scan targets do not resolve: {back_bad + front_bad}')
+    assert len(back_ok) >= 20, (
+        f'event-contract backend scan reaches only {len(back_ok)} file(s) — '
+        'it has drifted off the real emit surface')
+
+
+if __name__ == '__main__':
+    sys.exit(pytest.main([__file__, '-v']))

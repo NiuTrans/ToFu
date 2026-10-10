@@ -1,0 +1,246 @@
+
+/* ── Project-brain / conversation-meta block (board / charter /
+   peer) — collapsible card rendering the tool's full prose output. Mirrors
+   the memory block's collapse affordance with its own accent + a source chip. */
+.ptool-convmeta-block {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.ptool-convmeta-block > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--motion-fast) var(--ease-standard);
+  gap: var(--space-2);
+}
+.ptool-convmeta-header .ptool-text {
+  font-family: var(--font-ui);
+  font-size: var(--font-size-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-title);
+  color: var(--text-primary);
+  white-space: normal;
+}
+.ptool-convmeta-block > summary::-webkit-details-marker { display: none; }
+.ptool-convmeta-block > summary::marker { display: none; content: ""; }
+.ptool-convmeta-block > summary:focus-visible {
+  outline: var(--control-edge-inset) solid var(--accent);
+  outline-offset: calc(-1 * var(--control-edge-inset));
+}
+.ptool-convmeta-block > summary:hover {
+  background: var(--accent-subtle);
+}
+.ptool-convmeta-block > summary .ptool-text::after {
+  content: " ▸";
+  font-size: var(--font-size-xs);
+  opacity: 0.5;
+}
+.ptool-convmeta-block[open] > summary .ptool-text::after {
+  content: " ▾";
+}
+.ptool-convmeta-src {
+  display: inline-flex;
+  align-items: center;
+  height: var(--space-5);
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.02em;
+  line-height: 1;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  background: transparent;
+  border: var(--control-edge-inset) solid var(--border);
+  white-space: nowrap;
+}
+/* At-a-glance count chip on a COLLAPSED routine-read summary ("3 active" /
+   "5 open") — a neutral pill so the user gets the signal without expanding. */
+.ptool-convmeta-count {
+  display: inline-flex;
+  align-items: center;
+  height: var(--space-5);
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: var(--control-edge-inset) solid var(--border);
+  white-space: nowrap;
+}
+.ptool-convmeta-body {
+  margin: var(--space-1) 0 var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-3);
+  border-left: calc(2 * var(--control-edge-inset)) solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--bg-primary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+/* Plain-language "why this ran / what it means" caption above the card body —
+   turns an opaque list of conv ids + statuses into something a user (and the
+   agent) can actually interpret. Muted so it reads as an explanatory lead-in. */
+.ptool-convmeta-why {
+  margin: 0 0 var(--space-2);
+  padding-bottom: var(--space-2);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  color: var(--text-secondary);
+  border-bottom: var(--control-edge-inset) dashed color-mix(in srgb, var(--accent) 24%, transparent);
+  overflow-wrap: anywhere;
+}
+.ptool-convmeta-content {
+  font-size: var(--font-size-md);
+  line-height: 1.6;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.ptool-convmeta-content > :first-child { margin-top: 0; }
+.ptool-convmeta-content > :last-child { margin-bottom: 0; }
+.ptool-convmeta-empty {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  font-style: italic;
+}
+/* ── Structured Project-Brain tool renderers (Phase 3) ── */
+.ptool-convmeta-structured { font-size: var(--font-size-md); }
+/* Board mini-kanban */
+.ptool-board-mini { display: flex; flex-direction: column; gap: var(--space-3); }
+.ptool-board-mini-lane { display: flex; flex-direction: column; gap: var(--space-1); }
+.ptool-board-mini-head { display: flex; align-items: center; gap: var(--space-2); font-size: var(--font-size-xs); font-weight: var(--weight-bold); text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); }
+.ptool-board-mini-count { display: inline-flex; align-items: center; justify-content: center; min-width: var(--space-4); height: var(--space-4); padding: 0 var(--space-1); font-size: var(--font-size-xs); font-weight: var(--weight-bold); color: var(--text-secondary); background: var(--bg-tertiary); border: var(--control-edge-inset) solid var(--border); border-radius: var(--radius-sm); }
+.ptool-board-mini-card { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2); background: var(--bg-secondary); border: var(--control-edge-inset) solid var(--border); border-left: calc(2 * var(--control-edge-inset)) solid var(--border); border-radius: var(--radius-xs); }
+.ptool-board-mini-open { border-left-color: var(--warning-text); }
+.ptool-board-mini-claimed { border-left-color: var(--accent); }
+.ptool-board-mini-deferred { border-left-color: var(--text-tertiary); opacity: 0.85; border-left-style: dashed; }
+
+/* ── Motion-video / produce tool cards ──
+   The body reuses .ptool-convmeta-block / summary / src-chip styles; these
+   are the motion-specific internals (detail rows, dep list, scene table). */
+.ptool-motion-block > summary .ptool-convmeta-src {
+  color: var(--info-text);
+  background: color-mix(in srgb, var(--info-text) 15%, transparent);
+}
+.ptool-motion-body {
+  margin: var(--space-1) 0 var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-3);
+  border-left: calc(2 * var(--control-edge-inset)) solid var(--border);
+  background: var(--bg-primary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: var(--font-size-md);
+  line-height: var(--leading-body);
+}
+.ptool-motion-row { display: flex; align-items: baseline; gap: var(--space-2); padding: var(--space-1) 0; }
+.ptool-motion-k {
+  flex: none; min-width: var(--tool-receipt-label-width);
+  font-size: var(--font-size-xs); font-weight: var(--weight-bold); text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-secondary);
+}
+.ptool-motion-v { color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-motion-mono { font-family: var(--font-mono, monospace); font-size: var(--font-size-sm); }
+.ptool-motion-section { margin-top: var(--space-2); }
+.ptool-motion-section-title {
+  font-size: var(--font-size-xs); font-weight: var(--weight-bold); text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-secondary); margin-bottom: var(--space-1);
+}
+.ptool-motion-li { padding: var(--space-1) 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-motion-err { color: var(--error-text); }
+.ptool-motion-warn { color: var(--warning-text); }
+.ptool-motion-hint { color: var(--text-secondary); }
+.ptool-motion-more { color: var(--text-secondary); font-style: italic; }
+.ptool-motion-dep {
+  display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) 0;
+}
+.ptool-motion-dep-name { flex: none; min-width: var(--tool-receipt-label-width); font-family: var(--font-mono, monospace); font-size: var(--font-size-sm); }
+.ptool-motion-dep-ok .ptool-motion-dep-val { color: var(--text-secondary); overflow-wrap: anywhere; }
+.ptool-motion-dep-miss .ptool-motion-dep-val { color: var(--error-text); }
+.ptool-motion-scene {
+  display: flex; align-items: baseline; gap: var(--space-2); padding: var(--space-1) 0;
+  border-bottom: var(--control-edge-inset) dashed color-mix(in srgb, var(--border) 60%, transparent);
+}
+.ptool-motion-scene:last-child { border-bottom: none; }
+.ptool-motion-scene-id { flex: none; min-width: var(--tool-receipt-label-width); font-family: var(--font-mono, monospace); font-size: var(--font-size-sm); color: var(--text-secondary); }
+.ptool-motion-scene-dur { color: var(--text-primary); }
+.ptool-motion-scene-grew .ptool-motion-scene-dur { color: var(--warning-text); }
+.ptool-motion-scene-overflow { color: var(--error-text); font-size: var(--font-size-xs); }
+.ptool-board-mini-done { border-left-color: var(--success-text); opacity: 0.75; }
+.ptool-board-mini-title { flex: 1; overflow-wrap: anywhere; }
+.ptool-board-mini-owner { font-size: var(--font-size-xs); color: var(--accent); font-family: var(--font-mono); }
+.ptool-board-mini-auto { display: inline-flex; color: var(--accent); }
+.ptool-board-mini-empty { font-size: var(--font-size-xs); color: var(--text-secondary); padding: var(--space-1) var(--space-1); }
+/* Board transition card — verb+status head row, then the epic title row (the
+   epic title is the whole point of the card; the id is a small mono chip). */
+.ptool-board-transition { display: flex; flex-direction: column; gap: var(--space-2); font-size: var(--font-size-md); }
+.ptool-board-tr-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.ptool-board-tr-titlerow { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; padding: var(--space-2) var(--space-2); background: var(--bg-secondary); border: var(--control-edge-inset) solid var(--border); border-left: calc(2 * var(--control-edge-inset)) solid var(--accent); border-radius: var(--radius-xs); }
+.ptool-board-tr-verb { font-weight: var(--weight-bold); color: var(--accent); }
+.ptool-board-tr-title { flex: 1; overflow-wrap: anywhere; color: var(--text-primary); }
+.ptool-board-tr-untitled { color: var(--text-secondary); font-style: italic; }
+.ptool-board-tr-id { font-size: var(--font-size-xs); color: var(--text-secondary); font-family: var(--font-mono); white-space: nowrap; }
+.ptool-board-tr-arrow { display: inline-flex; color: var(--text-secondary); transform: rotate(-90deg); }
+.ptool-board-tr-status { font-size: var(--font-size-xs); font-weight: var(--weight-bold); padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); border: var(--control-edge-inset) solid var(--border); }
+.ptool-board-tr-failed { display: inline-flex; align-items: center; gap: var(--space-1); font-size: var(--font-size-xs); font-weight: var(--weight-bold); text-transform: uppercase; letter-spacing: 0.02em; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); color: var(--error-text); border: var(--control-edge-inset) solid color-mix(in srgb, var(--error-text) 45%, transparent); }
+.ptool-board-transition-failed .ptool-board-tr-titlerow { border-left-color: var(--error-text); }
+.ptool-board-tr-error { font-size: var(--font-size-sm); line-height: 1.5; color: var(--error-text); overflow-wrap: anywhere; padding: var(--space-1) var(--space-2); background: var(--bg-primary); border: var(--control-edge-inset) solid color-mix(in srgb, var(--error-text) 30%, transparent); border-radius: var(--radius-xs); }
+/* Peer status cards */
+.ptool-peer-list { display: flex; flex-direction: column; gap: var(--space-2); }
+.ptool-peer-card { padding: var(--space-2) var(--space-3); background: var(--bg-secondary); border: var(--control-edge-inset) solid var(--border); border-radius: var(--radius-xs); }
+.ptool-peer-who { display: flex; align-items: center; gap: var(--space-2); font-weight: var(--weight-semibold); color: var(--text-primary); }
+.ptool-peer-agent { font-size: var(--font-size-xs); font-weight: 400; color: var(--text-secondary); }
+.ptool-peer-detail { margin-top: var(--space-1); font-size: var(--font-size-sm); color: var(--text-secondary); }
+.ptool-peer-epic { margin-top: var(--space-1); display: inline-flex; align-items: center; gap: var(--space-1); font-size: var(--font-size-xs); color: var(--accent); }
+.ptool-peer-empty { font-size: var(--font-size-sm); color: var(--text-secondary); font-style: italic; }
+/* Charter proposal card */
+.ptool-charter-proposal { padding: var(--space-2) var(--space-3); background: var(--accent-subtle); border: var(--control-edge-inset) solid color-mix(in srgb, var(--accent) 26%, transparent); border-radius: var(--radius-xs); }
+.ptool-charter-prop-title { font-weight: var(--weight-bold); color: var(--text-primary); margin-bottom: var(--space-1); }
+.ptool-charter-prop-text { font-size: var(--font-size-md); line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-charter-prop-pending { margin-top: var(--space-2); display: inline-flex; align-items: center; gap: var(--space-1); font-size: var(--font-size-xs); color: var(--text-secondary); }
+/* Activity feed (project_feed_read) — chronological rows: kind chip + who + summary + time */
+.ptool-feed-list { display: flex; flex-direction: column; gap: var(--space-2); }
+.ptool-feed-row { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-2) var(--space-2); background: var(--bg-secondary); border: var(--control-edge-inset) solid var(--border); border-left: calc(2 * var(--control-edge-inset)) solid var(--border); border-radius: var(--radius-xs); }
+.ptool-feed-started { border-left-color: var(--accent); }
+.ptool-feed-completed { border-left-color: var(--success-text); }
+.ptool-feed-aborted, .ptool-feed-blocked { border-left-color: var(--error-text); }
+.ptool-feed-claimed { border-left-color: var(--warning-text); }
+.ptool-feed-decided, .ptool-feed-proposed_decision { border-left-color: var(--info-text); }
+.ptool-feed-kind { flex-shrink: 0; display: inline-flex; align-items: center; height: var(--space-4); padding: 0 var(--space-2); font-size: var(--font-size-xs); font-weight: var(--weight-bold); text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-secondary); background: var(--bg-tertiary); border-radius: var(--radius-sm); white-space: nowrap; }
+.ptool-feed-body { flex: 1; min-width: 0; }
+.ptool-feed-head { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
+.ptool-feed-who { font-size: var(--font-size-sm); font-weight: var(--weight-semibold); color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-feed-hidden { margin-top: var(--space-1); font-size: var(--font-size-xs); color: var(--text-secondary); font-style: italic; }
+.ptool-feed-when { font-size: var(--font-size-xs); color: var(--text-secondary); margin-left: auto; white-space: nowrap; }
+.ptool-feed-summary { margin-top: var(--space-1); font-size: var(--font-size-sm); line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
+.ptool-feed-empty { font-size: var(--font-size-sm); color: var(--text-secondary); font-style: italic; }
+/* Peer message / intervention delivery card */
+.ptool-peermsg { padding: var(--space-2) var(--space-3); background: var(--bg-secondary); border: var(--control-edge-inset) solid var(--border); border-left: calc(2 * var(--control-edge-inset)) solid var(--accent); border-radius: var(--radius-xs); }
+.ptool-peermsg-denied, .ptool-peermsg-failed { border-left-color: var(--error-text); }
+.ptool-peermsg-rate_limited { border-left-color: var(--warning-text); }
+.ptool-peermsg-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.ptool-peermsg-verb { font-weight: var(--weight-bold); color: var(--accent); font-size: var(--font-size-md); }
+.ptool-peermsg-arrow { display: inline-flex; color: var(--text-secondary); transform: rotate(-90deg); }
+.ptool-peermsg-target { font-family: var(--font-mono); font-size: var(--font-size-sm); color: var(--text-primary); }
+.ptool-peermsg-outcome { margin-left: auto; font-size: var(--font-size-xs); font-weight: var(--weight-bold); text-transform: uppercase; letter-spacing: 0.02em; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); border: var(--control-edge-inset) solid var(--border); color: var(--text-secondary); }
+.ptool-peermsg-outcome-delivered { color: var(--success-text); border-color: color-mix(in srgb, var(--success-text) 45%, transparent); }
+.ptool-peermsg-outcome-denied, .ptool-peermsg-outcome-failed { color: var(--error-text); border-color: color-mix(in srgb, var(--error-text) 45%, transparent); }
+.ptool-peermsg-outcome-rate_limited { color: var(--warning-text); border-color: color-mix(in srgb, var(--warning-text) 45%, transparent); }
+.ptool-peermsg-text { margin-top: var(--space-2); font-size: var(--font-size-md); line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; white-space: pre-wrap; }
+/* Commit result card (project_commit) — outcome chip + clean/held file groups */
+.ptool-commit { display: flex; flex-direction: column; gap: var(--space-2); }
+.ptool-commit-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.ptool-commit-outcome { font-size: var(--font-size-xs); font-weight: var(--weight-bold); text-transform: uppercase; letter-spacing: 0.03em; padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm); border: var(--control-edge-inset) solid var(--border); color: var(--text-secondary); }
+.ptool-commit-outcome-committed { color: var(--success-text); border-color: color-mix(in srgb, var(--success-text) 45%, transparent); }
+.ptool-commit-outcome-planned { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.ptool-commit-outcome-warn { color: var(--warning-text); border-color: color-mix(in srgb, var(--warning-text) 45%, transparent); }
+.ptool-commit-outcome-failed { color: var(--error-text); border-color: color-mix(in srgb, var(--error-text) 45%, transparent); }
+.ptool-commit-sha { font-family: var(--font-mono); font-size: var(--font-size-sm); color: var(--text-secondary); background: var(--bg-tertiary); border: var(--control-edge-inset) solid var(--border); border-radius: var(--radius-xs); padding: var(--space-1) var(--space-2); }
+.ptool-commit-err { font-size: var(--font-size-sm); line-height: 1.5; color: var(--error-text); overflow-wrap: anywhere; }
+.ptool-commit-group { display: flex; flex-direction: column; gap: var(--space-1); }
+.ptool-commit-grouphead { display: flex; align-items: center; gap: var(--space-1); font-size: var(--font-size-xs); font-weight: var(--weight-bold); text-transform: uppercase; letter-spacing: 0.04em; }
+.ptool-commit-grouphead-clean { color: var(--success-text); }
+.ptool-commit-grouphead-held { color: var(--warning-text); }
+.ptool-commit-files { display: flex; flex-direction: column; gap: var(--space-1); }
+.ptool-commit-file { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; padding: var(--space-1) var(--space-2); font-size: var(--font-size-sm); background: var(--bg-secondary); border: var(--control-edge-inset) solid var(--border); border-left: calc(2 * var(--control-edge-inset)) solid var(--success-text); border-radius: var(--radius-xs); font-family: var(--font-mono); color: var(--text-primary); overflow-wrap: anywhere; }
+.ptool-commit-file-held { border-left-color: var(--warning-text); }
+.ptool-commit-fpath { flex-shrink: 0; }
+.ptool-commit-numstat { font-size: var(--font-size-xs); color: var(--text-secondary); }
+.ptool-commit-reason { font-family: var(--font-ui); font-size: var(--font-size-xs); color: var(--text-secondary); flex: 1; min-width: 0; }
+.ptool-commit-empty { font-size: var(--font-size-sm); color: var(--text-secondary); font-style: italic; }

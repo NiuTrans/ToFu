@@ -1,0 +1,1246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.automation-storage/v1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/admit"
+    },
+    {
+      "$ref": "#/$defs/advance"
+    },
+    {
+      "$ref": "#/$defs/cancel"
+    },
+    {
+      "$ref": "#/$defs/definitionUpdate"
+    },
+    {
+      "$ref": "#/$defs/eventSettle"
+    },
+    {
+      "$ref": "#/$defs/approve"
+    },
+    {
+      "$ref": "#/$defs/projectUpdate"
+    },
+    {
+      "$ref": "#/$defs/skillSourceUpdate"
+    }
+  ],
+  "$defs": {
+    "admit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "tenant_id",
+        "run_key",
+        "run",
+        "now_ms",
+        "definition_key",
+        "definition_revision",
+        "definition_digest"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "run_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "run": {
+          "$ref": "#/$defs/run"
+        },
+        "now_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "definition_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "definition_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "definition_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "producer_fence": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "jobId",
+                "workerId",
+                "token"
+              ],
+              "properties": {
+                "jobId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "workerId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "token": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "advance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "tenant_id",
+        "run_key",
+        "run",
+        "now_ms",
+        "expected_version",
+        "worker_id",
+        "fencing_token"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "run_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "run": {
+          "$ref": "#/$defs/run"
+        },
+        "now_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "worker_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "contract",
+        "id",
+        "ownerId",
+        "tenantId",
+        "definitionId",
+        "definitionRevision",
+        "definitionDigest",
+        "status",
+        "snapshot",
+        "actions",
+        "steps",
+        "stepOrder",
+        "principal",
+        "trigger",
+        "triggerDigest",
+        "automationChain",
+        "jobId",
+        "fence",
+        "createdAt",
+        "updatedAt",
+        "deadlineAt"
+      ],
+      "properties": {
+        "contract": {
+          "const": "tofu.automation-run/v1"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}(?![\\s\\S])"
+        },
+        "ownerId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tenantId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "definitionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "definitionRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "definitionDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "waiting_agent",
+            "waiting_permission",
+            "reconciliation_required",
+            "cancelling",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "snapshot": {
+          "type": "object"
+        },
+        "actions": {
+          "type": "object"
+        },
+        "steps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "approval": {
+                "$ref": "#/$defs/approvalEvidence"
+              }
+            }
+          }
+        },
+        "stepOrder": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "string"
+          }
+        },
+        "principal": {
+          "type": "object"
+        },
+        "trigger": {
+          "type": "object"
+        },
+        "triggerDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "automationChain": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string"
+          }
+        },
+        "jobId": {
+          "type": "string",
+          "pattern": "^automation-run:[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "fence": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740
+        },
+        "updatedAt": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740
+        },
+        "deadlineAt": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740
+        }
+      }
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "tenant_id",
+        "run_key",
+        "now_ms",
+        "request_id",
+        "reason"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "run_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "now_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}(?![\\s\\S])"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\u0000]+(?![\\s\\S])"
+        }
+      }
+    },
+    "definitionUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "tenant_id",
+        "definition_key",
+        "expected_version",
+        "request_id",
+        "mode",
+        "record",
+        "first_due_ms",
+        "now_ms",
+        "definition_json",
+        "actions_json",
+        "actor_subject_id"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "definition_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}(?![\\s\\S])"
+        },
+        "mode": {
+          "enum": [
+            "publish",
+            "retire",
+            "pause"
+          ]
+        },
+        "record": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "first_due_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "now_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "definition_json": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 131072
+        },
+        "actions_json": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 524288
+        },
+        "actor_subject_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "enum": [
+                  "pause",
+                  "retire"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "record": {
+                "type": "null"
+              },
+              "first_due_ms": {
+                "type": "null"
+              },
+              "expected_version": {
+                "minimum": 1
+              },
+              "definition_json": {
+                "type": "string",
+                "minLength": 2
+              },
+              "actions_json": {
+                "type": "string",
+                "minLength": 2
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "record": {
+                "type": "object"
+              },
+              "definition_json": {
+                "type": "string",
+                "minLength": 2
+              },
+              "actions_json": {
+                "type": "string",
+                "minLength": 2
+              }
+            }
+          }
+        }
+      ]
+    },
+    "clockJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schemaVersion",
+        "definitionId",
+        "definitionRevision",
+        "definitionDigest",
+        "definitionKey",
+        "publishedAtMs",
+        "firstDueMs",
+        "principal"
+      ],
+      "properties": {
+        "contract": {
+          "const": "tofu.automation-clock/v1"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "definitionId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}(?![\\s\\S])"
+        },
+        "definitionRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "definitionDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "definitionKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "publishedAtMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "firstDueMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "principal": {
+          "type": "object"
+        }
+      }
+    },
+    "taskStartedContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tenantId",
+        "origin",
+        "automationChain"
+      ],
+      "properties": {
+        "tenantId": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "origin": {
+          "enum": [
+            "human",
+            "automation"
+          ]
+        },
+        "automationChain": {
+          "type": "array",
+          "maxItems": 15,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "taskStartedJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schemaVersion",
+        "principal",
+        "event"
+      ],
+      "properties": {
+        "contract": {
+          "const": "tofu.automation-event/v1"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "principal": {
+          "type": "object"
+        },
+        "event": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "kind",
+            "occurredAt",
+            "origin",
+            "evidence",
+            "automationChain"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^task-start:[a-f0-9]{64}$"
+            },
+            "kind": {
+              "const": "task.started"
+            },
+            "occurredAt": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740
+            },
+            "origin": {
+              "enum": [
+                "human",
+                "automation"
+              ]
+            },
+            "automationChain": {
+              "type": "array",
+              "maxItems": 15,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              }
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "evidence": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "startedAt",
+                "taskId",
+                "attemptId",
+                "turnId",
+                "conversationId"
+              ],
+              "properties": {
+                "startedAt": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740
+                },
+                "taskId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "attemptId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "turnId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "conversationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              }
+            }
+          }
+        },
+        "delivery": {
+          "$ref": "#/$defs/eventDeliveryCursor"
+        }
+      }
+    },
+    "eventDeliveryCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "afterKey",
+        "processed"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "afterKey": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "processed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "eventSettle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "tenant_id",
+        "job_id",
+        "worker_id",
+        "fencing_token",
+        "expected_payload",
+        "next_delivery",
+        "mode",
+        "error_kind",
+        "now_ms"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "job_id": {
+          "type": "string",
+          "pattern": "^automation-event:[a-f0-9]{64}$"
+        },
+        "worker_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_payload": {
+          "$ref": "#/$defs/taskStartedJob"
+        },
+        "next_delivery": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/eventDeliveryCursor"
+            }
+          ]
+        },
+        "mode": {
+          "enum": [
+            "advance",
+            "succeeded",
+            "cancelled",
+            "failed"
+          ]
+        },
+        "error_kind": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "now_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "approve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "tenant_id",
+        "run_key",
+        "now_ms",
+        "request_id",
+        "expected_version",
+        "step_id",
+        "actor_principal",
+        "arguments_json",
+        "action_json"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "run_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "now_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}(?![\\s\\S])"
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "step_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?![\\s\\S])"
+        },
+        "actor_principal": {
+          "$ref": "#/$defs/approvalActor"
+        },
+        "arguments_json": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 524288
+        },
+        "action_json": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 524288
+        }
+      }
+    },
+    "approvalEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "requestDigest",
+        "actorSubjectId",
+        "approvedAt",
+        "argumentsDigest",
+        "actionDigest",
+        "effectKey"
+      ],
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}(?![\\s\\S])"
+        },
+        "actorSubjectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "approvedAt": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "requestDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "argumentsDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "actionDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "effectKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "approvalActor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "subject_id",
+        "owner_user_id",
+        "tenant_id",
+        "scopes"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "user",
+            "system"
+          ]
+        },
+        "subject_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "scopes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "not": {
+              "const": "admin"
+            }
+          }
+        }
+      }
+    },
+    "projectUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "project_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "actor_subject_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "now_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "user_id",
+        "tenant_id",
+        "project_key",
+        "expected_version",
+        "request_id",
+        "actor_subject_id",
+        "root",
+        "label",
+        "active",
+        "now_ms"
+      ]
+    },
+    "skillSourceUpdate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "tenant_id",
+        "expected_version",
+        "request_id",
+        "actor_subject_id",
+        "now_ms",
+        "source_key",
+        "environment",
+        "active",
+        "credential_ref",
+        "credential_seal"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "tenant_id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "actor_subject_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "now_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "source_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "environment": {
+          "enum": [
+            "prod",
+            "test",
+            "dev"
+          ]
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "credential_ref": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{24}_[0-9a-f]{32}(?![\\s\\S])"
+            }
+          ]
+        },
+        "credential_seal": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "x-operations": {
+    "automation.run.admit": {
+      "input": "admit",
+      "atomic": [
+        "definition revision/digest/enabled/grant guard",
+        "occurrence insert or exact trigger replay",
+        "scheduled producer proves the published clock job current live owner/tenant/lease/fence before first admission; manual and event admissions carry no clock fence",
+        "canonical worker job enqueue",
+        "active/history pointers"
+      ],
+      "replay": "natural occurrence identity; no permanent command receipt"
+    },
+    "automation.run.advance": {
+      "input": "advance",
+      "atomic": [
+        "current live job lease/owner/tenant/fence proof",
+        "immutable evidence guard",
+        "frozen step identities, effect keys and approval proofs are immutable; external intents never regress to pending, permission waiting or skipped",
+        "preserve owner cancellation command and reason; cancelling/cancelled only; terminal cancellation has no unresolved effect",
+        "run revision CAS",
+        "active/history pointer settlement",
+        "producer-bound task.show_time success atomically publishes one owned conversation/attempt index reference to its immutable run output; canonical attempt identity and actual startedAt are proved; generic writes are forbidden"
+      ],
+      "replay": "exact expected revision + 1 and identical run; no write or authority extension"
+    },
+    "automation.run.cancel": {
+      "input": "cancel",
+      "atomic": [
+        "owner/tenant/run identity proof",
+        "preserve first cancellation id/reason/time; same id with different reason conflicts",
+        "terminal run is observational no-op; never cancel its settled job",
+        "canonical worker cancellation and wakeup",
+        "cancel pending steps; active effects remain cancelling until authoritative settlement",
+        "run CAS and active/history pointers"
+      ],
+      "replay": "first durable cancellation wins; later requests are observational no-ops; no permanent command receipt"
+    },
+    "automation.definition.update": {
+      "input": "definitionUpdate",
+      "atomic": [
+        "owner/tenant definition identity and bounded prepared-publication binding",
+        "definition revision CAS; repeat request id preserves first timestamps; changed request evidence conflicts",
+        "replace enabled event subscription pointer",
+        "delete previous pure clock document, queue/lease indexes and idempotency claim; retain bounded latest failure",
+        "enqueue one canonical automation-clock job for enabled schedule publication",
+        "first committed definition is proof of all atomic pointers/jobs"
+      ],
+      "recordAdmission": "record is compiled by the shared application prepare_definition boundary; storage checks compiled digest, closed action versions, exact grant and immutable scoped identity, not a second expression engine",
+      "replay": "stable input digest excludes clocks; exact original request/revision returns the original definition; no permanent command receipt"
+    },
+    "automation.event.settle": {
+      "input": "eventSettle",
+      "atomic": [
+        "owner/tenant/natural event/job/principal binding",
+        "current live event worker lease/fence and expected immutable payload/cursor proof",
+        "monotonic bounded cursor advance, or pure transport/index/idempotency retirement",
+        "one bounded owned diagnostic on permanent failure; accepted runs remain untouched"
+      ],
+      "replay": "exact already-applied cursor or missing retired natural transport is observational; no per-page permanent receipt"
+    },
+    "automation.project.update": {
+      "input": "projectUpdate",
+      "atomic": [
+        "immutable owner/tenant/canonical root identity",
+        "revision CAS and exact request replay",
+        "durable active/retired project binding"
+      ],
+      "replay": "exact request digest at expected revision + 1; no permanent receipt"
+    },
+    "automation.skills.source.update": {
+      "input": "skillSourceUpdate",
+      "atomic": [
+        "immutable owner/tenant/provider identity",
+        "source revision CAS and semantic replay",
+        "owned sealed credential reference selection"
+      ],
+      "replay": "exact semantic request at expected revision + 1; random staged reference is excluded and first accepted reference retained"
+    }
+  },
+  "x-limits": {
+    "recordBytes": 524288,
+    "clockSkewMs": 86400000,
+    "publicationRequestBytes": 2097152,
+    "publicationMetadataReserveBytes": 4096
+  },
+  "x-namespaces": {
+    "definition": "automation.definitions.v1",
+    "run": "automation.runs.v1",
+    "active": "automation.active.v1",
+    "history": "automation.history.v1",
+    "cursor": "automation.cursors.v1",
+    "target": "automation.targets.v1",
+    "subscription": "automation.subscriptions.v1",
+    "eventFailure": "automation.event-failures.v1",
+    "presentation": "automation.presentations.v1",
+    "skillSource": "automation.skillSources.v1"
+  },
+  "x-clock": {
+    "failureRetryMs": 1000,
+    "taskKind": "automation-clock",
+    "supersession": {
+      "effectBoundary": "atomic automation.run.admit; no external effect belongs to a clock job",
+      "obsoleteJob": "delete document, queued/lease indexes and idempotency claim in definition publication",
+      "acceptedRuns": "retain immutable run snapshots, canonical run jobs and history",
+      "failureHistory": "retain the latest bounded failed-clock summary in the definition",
+      "failureKindCharacters": 128
+    }
+  },
+  "x-reservedTaskKinds": {
+    "automation-clock": "automation.definition.update",
+    "automation-run": "automation.run.admit",
+    "automation-event": "turn.attempt.start"
+  },
+  "x-event": {
+    "priority": 200,
+    "productionBoundary": "first pending-to-running transition at physical worker entry, same transaction as attempt, turn and durable event",
+    "identity": "owner/tenant-qualified job hash; natural attempt/task producer event hash",
+    "subscriptionProbe": "at most four owner/tenant event/scope/project prefix probes, limit one; no job without matching subscription",
+    "replay": "already-running is observational; frozen first evidence and job survive lost ACK",
+    "authority": "server task principal tenant, controlled initiation origin and explicit causal lineage; never caller queue time or arbitrary browser config",
+    "retention": "no transport after typed settlement; accepted runs/history and event-failure diagnostics are durable user state",
+    "batchRows": 64,
+    "failureRetryMs": 1000,
+    "mutableCursor": "only delivery index/afterKey/processed may change, through live-fenced event.settle; event/principal stay frozen",
+    "terminal": "typed completion callback atomically retires pure transport and its indexes/idempotency; failures retain one bounded owned diagnostic",
+    "eligibility": "current subscription/grant must match and publication must not postdate the event; self-causal rules are skipped",
+    "settlementRequestBytes": 65536
+  },
+  "x-presentation": {
+    "namespace": "automation.presentations.v1",
+    "authority": "run.steps[stepId].output; index stores identity only",
+    "target": "owner/tenant + SHA256(conversationId) + SHA256(effectKey)",
+    "publication": "only canonical task-start:<SHA256(attemptId:taskId)> envelopes; output commit and pointer in one fenced run advance",
+    "retention": "one reference per successful time step; run output retained across definition retirement; deleted source attempts hide presentation; no timer or queue"
+  },
+  "x-project": {
+    "contract": "tofu.automation-project/v1",
+    "identity": "project_ + sha256(canonical absolute root UTF-8); owner/tenant isolated by existing prefix",
+    "rootCharacters": 2048,
+    "labelCharacters": 160,
+    "rootRebinding": "immutable; explicit registration creates a new binding",
+    "authority": "automation scope metadata only; never a filesystem write grant",
+    "retirement": "retains identity and history; rejects new scoped definitions/admissions; accepted runs remain frozen"
+  },
+  "x-skillSource": {
+    "contract": "tofu.automation-skill-source/v1",
+    "id": "mtskills",
+    "credentialScopeDomain": "tofu.mtskills-credential-scope/v1",
+    "credentialSealDomain": "tofu.mtskills-credential-content/v1",
+    "vaultReference": "skill.<24 hex owner/tenant scope>_<32 hex random UUID>; no plaintext token or legacy fallback",
+    "replay": "digest excludes random credential_ref and now_ms; stable credential_seal binds actual content. Exact replay returns the first accepted reference",
+    "lifecycle": "source CAS chooses one staged immutable credential reference; source retirement prevents new checks but never erases accepted snapshots",
+    "resultFields": [
+      "version",
+      "value",
+      "updated_at_ms"
+    ]
+  }
+}

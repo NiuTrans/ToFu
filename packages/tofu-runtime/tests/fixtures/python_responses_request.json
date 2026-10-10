@@ -1,0 +1,1814 @@
+[
+  {
+    "name": "text",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "system",
+          "content": "rules"
+        },
+        {
+          "role": "user",
+          "content": "你好😀"
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "input": [
+        {
+          "type": "message",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "rules"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好😀"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "image",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "look"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,AAAA",
+                "detail": "low"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "look"
+            },
+            {
+              "type": "input_image",
+              "image_url": "data:image/png;base64,AAAA",
+              "detail": "low"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "tools",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call",
+              "type": "function",
+              "function": {
+                "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call",
+          "content": "result"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具",
+            "description": "read",
+            "parameters": {
+              "type": "object"
+            },
+            "strict": true
+          }
+        }
+      ],
+      "tool_choice": {
+        "type": "function",
+        "function": {
+          "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具"
+        }
+      }
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "input": [
+        {
+          "type": "function_call",
+          "call_id": "call",
+          "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444",
+          "arguments": "{}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call",
+          "output": "result"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444",
+          "description": "read",
+          "parameters": {
+            "type": "object"
+          },
+          "strict": true
+        }
+      ],
+      "tool_choice": {
+        "type": "function",
+        "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444"
+      }
+    },
+    "reverse": {
+      "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具"
+    }
+  },
+  {
+    "name": "tool_image",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "tool",
+          "tool_call_id": "call",
+          "content": [
+            {
+              "type": "text",
+              "text": "image"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "https://example.invalid/image",
+                "detail": "original"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "input": [
+        {
+          "type": "function_call_output",
+          "call_id": "call",
+          "output": [
+            {
+              "type": "input_text",
+              "text": "image"
+            },
+            {
+              "type": "input_image",
+              "image_url": "https://example.invalid/image",
+              "detail": "original"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "schema",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [],
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "answer",
+          "schema": {
+            "type": "object"
+          },
+          "strict": true,
+          "description": "answer"
+        }
+      }
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "text": {
+        "format": {
+          "type": "json_schema",
+          "name": "answer",
+          "schema": {
+            "type": "object"
+          },
+          "strict": true,
+          "description": "answer"
+        }
+      },
+      "input": []
+    },
+    "reverse": {}
+  },
+  {
+    "name": "reasoning",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [],
+      "reasoning_effort": "high",
+      "reasoning": {
+        "summary": "concise"
+      }
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "reasoning": {
+        "summary": "concise",
+        "effort": "high"
+      },
+      "input": []
+    },
+    "reverse": {}
+  },
+  {
+    "name": "phase_concat",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "plananswer",
+          "_responses_items": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "commentary",
+              "id": "commentary",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "plan",
+                  "annotations": []
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "final_answer",
+              "id": "final_answer",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "answer",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "input": [
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "plan"
+            }
+          ],
+          "phase": "commentary"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "answer"
+            }
+          ],
+          "phase": "final_answer"
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "phase_newline",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "plan\nanswer",
+          "_responses_items": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "commentary",
+              "id": "commentary",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "plan",
+                  "annotations": []
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "final_answer",
+              "id": "final_answer",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "answer",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "input": [
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "plan"
+            }
+          ],
+          "phase": "commentary"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "answer"
+            }
+          ],
+          "phase": "final_answer"
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "phase_edited",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "edited",
+          "_responses_items": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "commentary",
+              "id": "commentary",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "plan",
+                  "annotations": []
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "final_answer",
+              "id": "final_answer",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "answer",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "input": [
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "edited"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "encrypted",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "answer",
+          "_responses_items": [
+            {
+              "type": "reasoning",
+              "id": "r",
+              "encrypted_content": "opaque"
+            }
+          ]
+        }
+      ]
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "parallel_tool_calls": true,
+      "max_output_tokens": 128,
+      "reasoning": {
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "reasoning",
+          "id": "r",
+          "encrypted_content": "opaque"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "answer"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_text",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "system",
+          "content": "rules"
+        },
+        {
+          "role": "user",
+          "content": "你好😀"
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "rules"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好😀"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_text_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "system",
+          "content": "rules"
+        },
+        {
+          "role": "user",
+          "content": "你好😀"
+        }
+      ]
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "developer",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "rules"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "你好😀"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_image",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "look"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,AAAA",
+                "detail": "low"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "look"
+            },
+            {
+              "type": "input_image",
+              "image_url": "data:image/png;base64,AAAA",
+              "detail": "low"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_image_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "look"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,AAAA",
+                "detail": "low"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "look"
+            },
+            {
+              "type": "input_image",
+              "image_url": "data:image/png;base64,AAAA",
+              "detail": "low"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_tools",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call",
+              "type": "function",
+              "function": {
+                "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call",
+          "content": "result"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具",
+            "description": "read",
+            "parameters": {
+              "type": "object"
+            },
+            "strict": true
+          }
+        }
+      ],
+      "tool_choice": {
+        "type": "function",
+        "function": {
+          "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具"
+        }
+      }
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "function_call",
+          "call_id": "call",
+          "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444",
+          "arguments": "{}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call",
+          "output": "result"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444",
+          "description": "read",
+          "parameters": {
+            "type": "object"
+          },
+          "strict": true
+        }
+      ],
+      "tool_choice": {
+        "type": "function",
+        "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444"
+      }
+    },
+    "reverse": {
+      "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具"
+    }
+  },
+  {
+    "name": "codex_tools_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call",
+              "type": "function",
+              "function": {
+                "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具",
+                "arguments": "{}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call",
+          "content": "result"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具",
+            "description": "read",
+            "parameters": {
+              "type": "object"
+            },
+            "strict": true
+          }
+        }
+      ],
+      "tool_choice": {
+        "type": "function",
+        "function": {
+          "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具"
+        }
+      }
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "function_call",
+          "call_id": "call",
+          "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444",
+          "arguments": "{}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call",
+          "output": "result"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444",
+          "description": "read",
+          "parameters": {
+            "type": "object"
+          },
+          "strict": true
+        }
+      ],
+      "tool_choice": {
+        "type": "function",
+        "name": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444"
+      }
+    },
+    "reverse": {
+      "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工_68ee67bba7bdcff5f3f1d444": "工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具工具"
+    }
+  },
+  {
+    "name": "codex_tool_image",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "tool",
+          "tool_call_id": "call",
+          "content": [
+            {
+              "type": "text",
+              "text": "image"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "https://example.invalid/image",
+                "detail": "original"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "function_call_output",
+          "call_id": "call",
+          "output": [
+            {
+              "type": "input_text",
+              "text": "image"
+            },
+            {
+              "type": "input_image",
+              "image_url": "https://example.invalid/image",
+              "detail": "original"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_tool_image_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "tool",
+          "tool_call_id": "call",
+          "content": [
+            {
+              "type": "text",
+              "text": "image"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "https://example.invalid/image",
+                "detail": "original"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "function_call_output",
+          "call_id": "call",
+          "output": [
+            {
+              "type": "input_text",
+              "text": "image"
+            },
+            {
+              "type": "input_image",
+              "image_url": "https://example.invalid/image",
+              "detail": "original"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_schema",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [],
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "answer",
+          "schema": {
+            "type": "object"
+          },
+          "strict": true,
+          "description": "answer"
+        }
+      }
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "text": {
+        "format": {
+          "type": "json_schema",
+          "name": "answer",
+          "schema": {
+            "type": "object"
+          },
+          "strict": true,
+          "description": "answer"
+        }
+      },
+      "reasoning": {
+        "summary": "auto"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": []
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_schema_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [],
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "answer",
+          "schema": {
+            "type": "object"
+          },
+          "strict": true,
+          "description": "answer"
+        }
+      }
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "text": {
+        "format": {
+          "type": "json_schema",
+          "name": "answer",
+          "schema": {
+            "type": "object"
+          },
+          "strict": true,
+          "description": "answer"
+        }
+      },
+      "reasoning": {
+        "summary": "auto",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": []
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_reasoning",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [],
+      "reasoning_effort": "high",
+      "reasoning": {
+        "summary": "concise"
+      }
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "concise",
+        "effort": "high"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": []
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_reasoning_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [],
+      "reasoning_effort": "high",
+      "reasoning": {
+        "summary": "concise"
+      }
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "concise",
+        "effort": "high",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": []
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_phase_concat",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "plananswer",
+          "_responses_items": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "commentary",
+              "id": "commentary",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "plan",
+                  "annotations": []
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "final_answer",
+              "id": "final_answer",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "answer",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "plan"
+            }
+          ],
+          "phase": "commentary"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "answer"
+            }
+          ],
+          "phase": "final_answer"
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_phase_concat_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "plananswer",
+          "_responses_items": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "commentary",
+              "id": "commentary",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "plan",
+                  "annotations": []
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "final_answer",
+              "id": "final_answer",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "answer",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "plan"
+            }
+          ],
+          "phase": "commentary"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "answer"
+            }
+          ],
+          "phase": "final_answer"
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_phase_newline",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "plan\nanswer",
+          "_responses_items": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "commentary",
+              "id": "commentary",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "plan",
+                  "annotations": []
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "final_answer",
+              "id": "final_answer",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "answer",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "plan"
+            }
+          ],
+          "phase": "commentary"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "answer"
+            }
+          ],
+          "phase": "final_answer"
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_phase_newline_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "plan\nanswer",
+          "_responses_items": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "commentary",
+              "id": "commentary",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "plan",
+                  "annotations": []
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "final_answer",
+              "id": "final_answer",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "answer",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "plan"
+            }
+          ],
+          "phase": "commentary"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "answer"
+            }
+          ],
+          "phase": "final_answer"
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_phase_edited",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "edited",
+          "_responses_items": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "commentary",
+              "id": "commentary",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "plan",
+                  "annotations": []
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "final_answer",
+              "id": "final_answer",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "answer",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "replay": false,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "edited"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_phase_edited_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "edited",
+          "_responses_items": [
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "commentary",
+              "id": "commentary",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "plan",
+                  "annotations": []
+                }
+              ]
+            },
+            {
+              "type": "message",
+              "role": "assistant",
+              "phase": "final_answer",
+              "id": "final_answer",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "answer",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "edited"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  },
+  {
+    "name": "codex_encrypted_replay",
+    "profile": "codex",
+    "body": {
+      "model": "fixture",
+      "max_tokens": 128,
+      "temperature": 0.4,
+      "top_p": 0.8,
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "answer",
+          "_responses_items": [
+            {
+              "type": "reasoning",
+              "id": "r",
+              "encrypted_content": "opaque"
+            }
+          ]
+        }
+      ]
+    },
+    "replay": true,
+    "output": {
+      "model": "fixture",
+      "store": false,
+      "stream": true,
+      "instructions": "",
+      "parallel_tool_calls": true,
+      "reasoning": {
+        "summary": "auto",
+        "context": "all_turns"
+      },
+      "include": [
+        "reasoning.encrypted_content"
+      ],
+      "input": [
+        {
+          "type": "reasoning",
+          "id": "r",
+          "encrypted_content": "opaque"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "answer"
+            }
+          ]
+        }
+      ]
+    },
+    "reverse": {}
+  }
+]

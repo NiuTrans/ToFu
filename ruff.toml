@@ -1,0 +1,47 @@
+# ═══════════════════════════════════════════════════════════
+#  Tofu (豆腐) — Ruff Linter Configuration
+# ═══════════════════════════════════════════════════════════
+#
+#  This config is used by both local development and CI.
+#  CI step: ruff check lib/ routes/ tests/
+#
+# ═══════════════════════════════════════════════════════════
+
+target-version = "py312"
+extend-exclude = ["codex"]
+
+[lint]
+# Default rule set: pyflakes (F) + pycodestyle errors (E) + bugbear (B)
+select = ["F", "E", "B"]
+
+ignore = [
+    # ── Style choices (deliberate, not bugs) ──────────────
+    "E501",   # Line too long — enforced by code review, not linter
+    "E701",   # Multiple statements on one line (colon) — compact if/elif chains
+    "E702",   # Multiple statements on one line (semicolon) — compact one-liners
+    "E731",   # Lambda assignment — used for closures with captured variables
+    "E741",   # Ambiguous variable name (l, O, I) — common in list comprehensions
+
+    # ── Structural patterns (by design) ───────────────────
+    "E402",   # Module-level import not at top — __init__.py lazy imports, sys.path in tests
+
+    # ── Bugbear debt families (inventoried 2026-09; may only shrink) ──
+    # Each entry is a deliberate grandfathering, not a rejection of the rule;
+    # new occurrences stay blocked in review until the family is un-ignored.
+    "B905",   # zip(strict=): 85 legacy sites, mostly fixed-length pairs
+    "B007",   # unused loop control variable: 52 legacy sites
+    "B023",   # function-uses-loop-variable: 46 legacy closure sites
+    "B904",   # raise-without-from: 34 sites — owned by the error-envelope migration
+    "B017",   # assertRaises(Exception): 15 legacy test sites
+]
+
+[lint.per-file-ignores]
+# Test files often manipulate sys.path before imports and use unused locals for mocking
+"tests/*" = ["F401", "F841"]
+# Package __init__.py files are facades: they re-export public + test-facing
+# private symbols by name (and by reference, so there's exactly one binding
+# per process — see e.g. lib/api_keys/__init__.py). Those re-exports are NOT
+# listed in __all__ on purpose, so F401 ("imported but unused") fires on every
+# one even though external call sites import them through the facade path.
+# This is the documented facade architecture, not dead code.
+"**/__init__.py" = ["F401"]

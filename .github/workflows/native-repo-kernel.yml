@@ -1,0 +1,60 @@
+name: Native repository kernel
+
+on:
+  pull_request:
+    paths:
+      - 'packages/tofu-repo-kernel/**'
+      - 'lib/repo_map/**'
+      - 'tests/repo_map/**'
+      - 'benchmarks/repository_index/**'
+      - '.github/workflows/native-repo-kernel.yml'
+      - '.github/workflows/publish-developer-runtime.yml'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'tests/installer/test_native_kernel_delivery.py'
+  push:
+    branches: [main, master]
+    paths:
+      - 'packages/tofu-repo-kernel/**'
+      - 'lib/repo_map/**'
+      - 'tests/repo_map/**'
+      - 'benchmarks/repository_index/**'
+      - '.github/workflows/native-repo-kernel.yml'
+      - '.github/workflows/publish-developer-runtime.yml'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'tests/installer/test_native_kernel_delivery.py'
+
+permissions:
+  contents: read
+
+jobs:
+  installed-wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare pinned Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Install build and application test dependencies
+        run: python -m pip install build==1.6.1 setuptools==80.10.2 wheel==0.48.0 pytest==9.1.1 networkx==3.6.1 scipy==1.18.1 '.[test]'
+      - name: Build and install standalone platform wheel
+        env:
+          RUSTUP_TOOLCHAIN: '1.85.1'
+        run: |
+          python -m build --no-isolation --outdir /tmp/tofu-native-dist packages/tofu-repo-kernel
+          python -m pip install --no-deps /tmp/tofu-native-dist/*.whl
+      - name: Verify native selection, graph parity and task consumer contracts
+        run: python -m pytest -q tests/repo_map tests/meta/test_repo_map.py tests/tasks_pkg/test_repo_map_handler.py tests/installer/test_native_kernel_delivery.py tests/installer/test_docker_reliability_contract.py tests/release/test_developer_runtime_distribution.py
+      - name: Verify raw native ABI oracle and failure output withholding
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, 'benchmarks/repository_index')
+          from check_native_csr import check
+          from tofu_repo_kernel import load_kernel
+          check(load_kernel().library._name)
+          PY

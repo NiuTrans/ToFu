@@ -1,0 +1,5 @@
+{
+  "description": "Two read_files calls in one batch (carried in the terminal message only, so the declared-timeout pool path executes them — streamed read-only calls would be pre-executed by the StreamingToolAccumulator, bypassing the arming seam). The slow call's declared 200ms timeout replaces its late result with the canonical sentinel; the fast call settles done. Step 2 covers the failed batch with a real notes.dat read (an uncovered failed final batch would trip the intent-stall nudge, whose continuation rounds intentionally carry no ROUND_END), then step 3 summarizes.",
+  "recorded_at": "2026-09-17",
+  "mode": "replay"
+}

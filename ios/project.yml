@@ -1,0 +1,40 @@
+# XcodeGen authority for the iOS app target. TofuClient.xcodeproj and
+# TofuClient/Info.plist are GENERATED from this file (`xcodegen generate`)
+# and never committed (see ios/.gitignore) — edit here, regenerate.
+#
+# The pure logic lives in the local SwiftPM package (Package.swift →
+# TofuClientCore) so `swift test` covers it without a simulator; this target
+# adds only the SwiftUI/WKWebView shell (TofuClient/).
+name: TofuClient
+options:
+  bundleIdPrefix: com.tofu
+packages:
+  TofuClientCore:
+    path: .
+targets:
+  TofuClient:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources: [TofuClient]
+    info:
+      path: TofuClient/Info.plist
+      properties:
+        CFBundleDisplayName: Tofu
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        # getUserMedia in the hosted SPA (voice input / photo attach).
+        NSMicrophoneUsageDescription: Tofu uses the microphone for voice input in conversations.
+        NSCameraUsageDescription: Tofu uses the camera to attach photos to conversations.
+        ITSAppUsesNonExemptEncryption: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    dependencies:
+      - package: TofuClientCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tofu.client
+        SWIFT_VERSION: "5.0"

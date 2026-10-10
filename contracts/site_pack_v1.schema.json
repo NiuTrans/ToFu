@@ -1,0 +1,326 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.dev/contracts/site_pack_v1.schema.json",
+  "title": "tofu.site-pack/v1",
+  "description": "Declarative site pack manifest (L1). One pack internalizes one site: auth projection, browser adapter operations as bounded step pipelines, and model-facing routing hints. Authority: docs/SITE_PACKS.md; engine: lib/site_packs/.",
+  "type": "object",
+  "required": ["pack", "id", "name", "domains", "operations"],
+  "additionalProperties": false,
+  "properties": {
+    "pack": {"const": "tofu.site-pack/v1"},
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "name": {"type": "string", "minLength": 1, "maxLength": 128},
+    "version": {"type": "integer", "minimum": 1, "default": 1},
+    "routing_hint": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "One short model-facing clause for tool descriptions, e.g. 'note keywords'. Packs without a hint are still discoverable via the no-site discovery call."
+    },
+    "domains": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"type": "string", "minLength": 1, "maxLength": 253},
+      "description": "Navigation allowlist. Every navigate target and detail url must resolve to one of these hosts."
+    },
+    "aliases": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"type": "string", "minLength": 1, "maxLength": 64}
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["login_url"],
+      "properties": {
+        "login_url": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "label": {"type": "string", "maxLength": 128},
+        "aliases": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {"type": "string", "minLength": 1, "maxLength": 253},
+          "description": "Extra cookie domains (e.g. link-shortener hosts), distinct from adapter aliases."
+        },
+        "access_strategy": {
+          "enum": ["browser_first", "cookies_replay", "public"],
+          "default": "browser_first"
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "description": "Auth-source catalog domain override (default: the pack's first domain). Use a parent domain when one login session serves several pack hosts."
+        },
+        "project": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set false when this auth section exists only to drive ensure_auth (login_url) and must not create an auth-source catalog entry."
+        },
+        "risk_notice": {"type": "string", "maxLength": 512},
+        "risk_note_key": {"type": "string", "maxLength": 128},
+        "fields": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "importance"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1, "maxLength": 128},
+              "importance": {"enum": ["required", "recommended", "optional"]}
+            }
+          }
+        }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/operation"}
+    }
+  },
+  "$defs": {
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "steps"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+        },
+        "description": {"type": "string", "minLength": 1, "maxLength": 512},
+        "access": {"enum": ["read", "write"], "default": "read"},
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object"},
+        "session": {"enum": ["ephemeral", "persistent"], "default": "ephemeral"},
+        "window_mode": {
+          "enum": ["background", "active", "current"],
+          "default": "background"
+        },
+        "timeout": {"type": "integer", "minimum": 1, "maximum": 300},
+        "min_interval_s": {"type": "integer", "minimum": 0, "maximum": 60},
+        "cooldown_s": {"type": "integer", "minimum": 0, "maximum": 600},
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {"$ref": "#/$defs/step"}
+        }
+      }
+    },
+    "step": {
+      "oneOf": [
+        {"$ref": "#/$defs/step_navigate"},
+        {"$ref": "#/$defs/step_ensure_auth"},
+        {"$ref": "#/$defs/step_fill"},
+        {"$ref": "#/$defs/step_press"},
+        {"$ref": "#/$defs/step_click"},
+        {"$ref": "#/$defs/step_wait"},
+        {"$ref": "#/$defs/step_paginate"},
+        {"$ref": "#/$defs/step_research"},
+        {"$ref": "#/$defs/step_extract"},
+        {"$ref": "#/$defs/step_normalize"},
+        {"$ref": "#/$defs/step_try"}
+      ]
+    },
+    "step_try": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "steps"],
+      "properties": {
+        "do": {"const": "try"},
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/step"},
+          "description": "Best-effort group: a non-adapter failure aborts the group to a debug log and the outer pipeline continues; typed adapter failures (login_required, …) always propagate."
+        }
+      }
+    },
+    "step_research": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "url"],
+      "properties": {
+        "do": {"const": "research"},
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "URL template; {param} quotes, {param|raw} interpolates verbatim, {param|floor:N} clamps an integer param to a lower bound N."
+        },
+        "max_chars": {"type": "integer", "minimum": 1000, "maximum": 200000},
+        "max_chars_from_param": {"type": "string"},
+        "max_scrolls": {"type": "integer", "minimum": 0, "maximum": 8},
+        "max_pages": {"type": "integer", "minimum": 1, "maximum": 8},
+        "max_pages_from_param": {"type": "string"},
+        "pagination": {"enum": ["auto", "none"], "default": "auto"}
+      }
+    },
+    "step_navigate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "url"],
+      "properties": {
+        "do": {"const": "navigate"},
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "description": "URL template. {param} interpolates URL-quoted; {param|raw} interpolates verbatim."
+        }
+      }
+    },
+    "step_ensure_auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do"],
+      "properties": {"do": {"const": "ensure_auth"}}
+    },
+    "step_fill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "value"],
+      "properties": {
+        "do": {"const": "fill"},
+        "value": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Value template with {param} interpolation."
+        },
+        "selector": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "step_press": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "keys"],
+      "properties": {
+        "do": {"const": "press"},
+        "keys": {"type": "string", "minLength": 1, "maxLength": 64},
+        "selector": {"type": "string", "maxLength": 512}
+      }
+    },
+    "step_click": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "selector"],
+      "properties": {
+        "do": {"const": "click"},
+        "selector": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "step_wait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "selector"],
+      "properties": {
+        "do": {"const": "wait"},
+        "selector": {"type": "string", "minLength": 1, "maxLength": 512},
+        "condition": {"enum": ["visible"], "default": "visible"},
+        "timeout": {"type": "integer", "minimum": 1, "maximum": 60},
+        "optional": {
+          "type": "boolean",
+          "default": false,
+          "description": "An optional wait degrades to a debug log and never aborts the pipeline."
+        }
+      }
+    },
+    "step_paginate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "mode"],
+      "properties": {
+        "do": {"const": "paginate"},
+        "mode": {"const": "scroll"},
+        "amount": {"type": "integer", "minimum": 100, "maximum": 5000},
+        "times_from_param": {
+          "type": "string",
+          "description": "Params field holding the desired page count; scrolls run param-1 extra times, clamped to max_times."
+        },
+        "max_times": {"type": "integer", "minimum": 1, "maximum": 8}
+      }
+    },
+    "step_extract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "js", "into"],
+      "properties": {
+        "do": {"const": "extract"},
+        "js": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "description": "Browser-side expression under the trusted_read boundary; never runs server-side."
+        },
+        "args_from_params": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "into": {"enum": ["candidates", "fields", "payload"]}
+      }
+    },
+    "step_normalize": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do", "kind"],
+      "properties": {
+        "do": {"const": "normalize"},
+        "kind": {"enum": ["search_records", "detail", "json_payload"]},
+        "query_from_param": {"type": "string"},
+        "limit_from_param": {"type": "string"},
+        "limit_max": {"type": "integer", "minimum": 1, "maximum": 100},
+        "source_name": {"type": "string", "maxLength": 128},
+        "max_chars_from_param": {"type": "string"},
+        "max_chars_default": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 200000,
+          "description": "Detail read budget when the params field is absent (legacy default: 60000)."
+        },
+        "data_field": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "json_payload: payload key holding the record list (default 'data')."
+        },
+        "coverage_scope": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "json_payload: coverage scope label (default 'requested_attributes')."
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 262144,
+          "description": "json_payload: serialized result budget; exceeding it fails with output_budget_exhausted (default 60000)."
+        },
+        "fields": {
+          "type": "object",
+          "maxProperties": 16,
+          "additionalProperties": {
+            "oneOf": [
+              {"type": "integer", "minimum": 1, "maximum": 4096},
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type"],
+                "properties": {
+                  "type": {"const": "list"},
+                  "max_items": {"type": "integer", "minimum": 1, "maximum": 100},
+                  "max_length": {"type": "integer", "minimum": 1, "maximum": 4096}
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

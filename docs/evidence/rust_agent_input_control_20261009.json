@@ -1,0 +1,31 @@
+{
+  "format": "tofu.native-agent-input-control-evidence/v1",
+  "scope": "bounded continuous native stdio control and joined input lifetime",
+  "whole_application_admission": "incomplete",
+  "runtime_tests_passed": 162,
+  "stdio_followup_tests_passed": 5,
+  "reader_tasks_per_invocation": 1,
+  "reply_slots": 1,
+  "extra_reader_os_threads": 0,
+  "verified": [
+    "cancel during silent HTTP before configured deadline",
+    "protocol failure for unissued/invalid/oversize frames during HTTP",
+    "duplicate replies cannot become future tool evidence",
+    "EOF after accepted result permits tool-free completion",
+    "original shared stdin flags restored before terminal line",
+    "actor shutdown joins and is idempotent",
+    "actor panic returns cleanup failure"
+  ],
+  "sources": {
+    "contracts/native_agent_stdio_v1.schema.json": "ef38d0c43da5b285c3f9d6f02217cd272a0ae24e08294fca62a73d39a335bd45",
+    "packages/tofu-runtime/src/cli_agent_control.rs": "87ce9754f85220b45c17335896446fcc38ff37737d1fa2be9aecc1cfc54e9a34",
+    "packages/tofu-runtime/src/cli_agent.rs": "74d67b29c08f3cb5a7735e936ac703bfa6298af55b690a104c8b25a88323b623",
+    "packages/tofu-runtime/tests/agent_stdio.rs": "c5ba8e503fd65480185b35c1383292cdd2e795f4c7fa898ff2aa42aa0490210d"
+  },
+  "limitations": [
+    "Linux native stdio entry only; production routing/approval/durable/progress adapters pending",
+    "Host still owns external tool effects and cleanup",
+    "EOF closes control carrier; pending tool waits fail without reply",
+    "No CPU, RSS, throughput or application performance admission"
+  ]
+}

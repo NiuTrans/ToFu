@@ -1,0 +1,72 @@
+
+/* ── Free-text input area ── */
+.hg-freetext-wrap {
+  padding: 0 14px 14px;
+}
+.hg-textarea {
+  width: 100%;
+  min-height: 68px;
+  max-height: 200px;
+  padding: 10px var(--space-3);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.6);
+  color: #e2e8f0;
+  font-size: var(--font-size-md);
+  font-family: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  box-sizing: border-box;
+}
+.hg-textarea:focus {
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+.hg-textarea::placeholder {
+  color: rgba(148, 163, 184, 0.5);
+}
+.hg-freetext-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+/* ── Auto-translate indicator (shown while EN→CN translation is in-flight) ── */
+.hg-translating-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 14px;
+  margin: 0 14px var(--space-1);
+  font-size: var(--font-size-sm);
+  color: #a5b4fc;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.08);
+  animation: translatePulse 1.5s ease-in-out infinite;
+}
+.hg-submit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-family: inherit;
+}
+.hg-submit-btn {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.3);
+}
+.hg-submit-btn:hover {
+  background: rgba(34, 197, 94, 0.28);
+  border-color: rgba(34, 197, 94, 0.5);
+  color: #86efac;
+  box-shadow: 0 0 12px -3px rgba(34, 197, 94, 0.25);
+}

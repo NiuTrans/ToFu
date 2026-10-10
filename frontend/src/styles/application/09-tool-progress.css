@@ -1,0 +1,300 @@
+
+/* ── Checklist block (todo_write) — collapsed-by-default row that reads like
+   the shared UI type scale (same icon slot). The header
+   shows progress WITHOUT expanding via an inline mini-bar + a done/total chip +
+   the current step's text. Expanded body is a vertical-timeline stepper: a
+   connector line threads the state glyphs. Green success accent; per the
+   tool-row NO-opacity-for-state rule, item STATE is conveyed by solid glyph
+   color + strike-through, never by fading the row. */
+/* ── Waiting on blocker card (.wait-block) ── */
+.wait-block {
+  margin: var(--space-3) 0;
+  border: var(--control-edge-inset) solid color-mix(in srgb, var(--warning-text) 35%, var(--border));
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+.wait-block > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--conversation-font-size-content);
+}
+.wait-block > summary::-webkit-details-marker { display: none; }
+.wait-block > summary::marker { display: none; content: ""; }
+.wait-block-icon {
+  color: var(--warning-text);
+  display: flex;
+  align-items: center;
+}
+.wait-block-title {
+  font-weight: var(--weight-semibold);
+  color: var(--warning-text);
+}
+.wait-block-note {
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wait-block-snapshot {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+.wait-block-agent-chip {
+  font-size: var(--conversation-font-size-meta);
+  padding: var(--control-edge-inset) var(--space-2);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--warning-text) 15%, transparent);
+  color: var(--warning-text);
+}
+.wait-block-body {
+  padding: var(--space-3) var(--space-4);
+  border-top: var(--control-edge-inset) solid color-mix(in srgb, var(--warning-text) 20%, var(--border));
+  font-size: var(--conversation-font-size-meta);
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.wait-block-agent-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-meta);
+}
+.wait-block-agent-row code {
+  color: var(--text-secondary);
+}
+.wait-block-resolved {
+  color: var(--success-text);
+  font-weight: var(--weight-semibold);
+  margin-bottom: var(--space-1);
+}
+.wait-block-live {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+.ptool-todo-block {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.ptool-todo-block > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background 0.12s ease;
+  gap: var(--space-2);
+}
+.ptool-todo-block > summary::-webkit-details-marker { display: none; }
+.ptool-todo-block > summary::marker { display: none; content: ""; }
+.ptool-todo-block > summary:hover {
+  background: color-mix(in srgb, var(--success-text) 9%, transparent);
+}
+/* The "Checklist" label stays the plain monospace tool label. */
+.ptool-todo-header .ptool-text {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.ptool-todo-header { flex-wrap: wrap; }
+.ptool-todo-header .ptool-text {
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-title);
+  color: var(--text-primary);
+  white-space: normal;
+}
+.ptool-todo-block > summary:focus-visible, .ptool-todo-history > summary:focus-visible {
+  outline: var(--control-edge-inset) solid var(--accent);
+  outline-offset: var(--space-1);
+}
+/* Header mini progress bar — fixed width, tabular, sits before the chip. */
+.ptool-todo-minibar {
+  flex-shrink: 0;
+  width: var(--space-12);
+  height: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--text-secondary) 18%, transparent);
+  overflow: hidden;
+  align-self: center;
+}
+.ptool-todo-minibar-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--success-text);
+  transition: width var(--motion-base) var(--ease-standard);
+}
+.ptool-todo-minibar-fill.ptool-todo-minibar-done { background: var(--success-text); }
+.ptool-todo-count {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  height: auto;
+  padding: 0 var(--space-2);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+  border-radius: var(--radius-pill);
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border: var(--control-edge-inset) solid var(--border);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ptool-todo-count-done {
+  color: var(--success-text);
+  background: var(--bg-primary);
+  border-color: color-mix(in srgb, var(--success-text) 30%, transparent);
+}
+.ptool-todo-revisions {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font: var(--conversation-font-size-meta)/var(--leading-body) var(--font-ui);
+  white-space: nowrap;
+}
+.ptool-todo-body {
+  margin: var(--space-1) 0 var(--space-2) var(--space-6);
+  padding: var(--space-1) 0 var(--space-1);
+}
+/* Rationale belongs in the body, not in competition with the title and
+   progress. It remains complete and readable on both desktop and mobile. */
+.ptool-todo-explanation {
+  margin: 0 0 var(--space-3);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ptool-todo-breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-2);
+  color: var(--text-secondary);
+  font: var(--conversation-font-size-meta)/var(--leading-body) var(--font-ui);
+}
+.ptool-todo-breadcrumbs i { font-style: normal; }
+.ptool-todo-breadcrumbs .is-active { color: var(--text-secondary); font-weight: var(--weight-semibold); }
+.ptool-todo-notice {
+  margin: 0 var(--space-2) var(--space-2) 0;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  font-size: var(--conversation-font-size-caption);
+}
+.ptool-todo-notice.is-rejected { color: var(--error-text); }
+
+.ptool-todo-rejection-detail {
+  margin: 0 var(--space-2) var(--space-2) 0;
+  color: var(--text-secondary);
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ptool-todo-notice.is-restored { color: var(--success-text); }
+.ptool-todo-history {
+  margin: var(--space-2) var(--space-2) 0 var(--space-8);
+  color: var(--text-secondary);
+  font: var(--conversation-font-size-meta)/var(--leading-body) var(--font-ui);
+}
+.ptool-todo-history > summary { cursor: pointer; }
+.ptool-todo-history > div { display: flex; flex-direction: column; gap: var(--space-1); padding-top: var(--space-1); }
+.ptool-todo-history code { color: var(--text-secondary); }
+/* Vertical-timeline stepper. The connector line is drawn on the list via a
+   ::before running through the glyph centers. */
+.ptool-todo-list {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.ptool-todo-list::before {
+  content: "";
+  position: absolute;
+  left: var(--space-2);
+  top: var(--space-3);
+  bottom: var(--space-3);
+  width: calc(2 * var(--control-edge-inset));
+  background: color-mix(in srgb, var(--text-secondary) 20%, transparent);
+  z-index: 0;
+}
+.ptool-todo-item {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+  color: var(--text-primary);
+}
+.ptool-todo-mark {
+  flex: 0 0 auto;
+  width: var(--space-5);
+  height: var(--space-5);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  /* Solid disc behind the glyph so the connector line reads as passing
+     BEHIND each node, not through the text. */
+  background: var(--bg-primary);
+  box-shadow: 0 0 0 var(--space-1) var(--bg-primary);
+}
+.ptool-todo-mark svg { width: var(--space-4); height: var(--space-4); }
+.ptool-todo-text {
+  min-width: 0;
+  font: inherit;
+  flex: 1 1 auto;
+  padding-top: var(--control-edge-inset);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+/* Completed — solid green tick + struck-through (state by color, not opacity). */
+.ptool-todo-completed .ptool-todo-mark { color: var(--success-text); }
+.ptool-todo-completed .ptool-todo-text {
+  min-width: 0;
+  font: inherit;
+  color: var(--text-secondary);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-secondary) 55%, transparent);
+}
+/* In progress — accent node + tinted pill + bold text; this is happening NOW. */
+.ptool-todo-in_progress .ptool-todo-mark { color: var(--success-text); }
+.ptool-todo-in_progress .ptool-todo-text {
+  min-width: 0;
+  font: inherit;
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+.ptool-todo-blocked .ptool-todo-mark { color: var(--warning-text); }
+.ptool-todo-blocked .ptool-todo-text { color: var(--warning-text); font-weight: var(--weight-semibold); }
+/* Pending — solid (not faded) neutral ring + secondary text. */
+.ptool-todo-pending .ptool-todo-mark { color: var(--text-secondary); }
+.ptool-todo-pending .ptool-todo-text { color: var(--text-secondary); }
+.ptool-todo-empty {
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-meta);
+  color: var(--text-secondary);
+  padding-left: var(--space-1);
+}

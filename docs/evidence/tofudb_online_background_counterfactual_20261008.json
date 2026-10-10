@@ -1,0 +1,179 @@
+{
+  "decision": "Do not pursue archivepacing basedonthisgate: wholeonlinebackground removal doesnotimprove originalstream tail; notproductioncandidate",
+  "native_source": "6d3e37c7cafdb1ca0ad7252c6d3613ecf9168d30d0b09eeac6d546e0e18c135e",
+  "matrix": {
+    "scope": "4originalapplicationABBA; current6d; entireonlinebackgroundgroup; notproductioncandidate",
+    "python_hashes": {
+      "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+      "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+      "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+      "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+      "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+      "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372"
+    },
+    "rows": [
+      {
+        "label": "default-0",
+        "variant": "default",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 22,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 42.6325798034668,
+          "stream_scheduled": 1797.9324907064438,
+          "settle": 3809.9335059523582
+        },
+        "gc": {
+          "deferred_epochs": 0,
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "last_epoch_duration_ms": 0,
+          "last_epoch_reclaimed_bytes": 0,
+          "marks_built": 0,
+          "total_compacted_blocks": 0,
+          "total_consolidated_victims": 0,
+          "total_consolidations": 0,
+          "total_orphan_segments_removed": 0,
+          "total_reclaimed_blocks": 0,
+          "total_reclaimed_bytes": 0,
+          "total_segments_retired": 0,
+          "total_segments_rewritten": 0,
+          "total_temporary_files_removed": 0
+        },
+        "backup": {
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "epochs_failed": 0,
+          "last_error": null,
+          "last_report": null,
+          "last_success_unix_ms": null,
+          "replicated_sequence": null,
+          "replication_interval_ms": null
+        },
+        "raw_sha256": "7f8a264a0bb7af9cb0e04623c9f4624f7a5fa63e2b166ca6ae086bde780709bf"
+      },
+      {
+        "label": "disabled-0",
+        "variant": "disabled",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 20,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 56.0058057308197,
+          "stream_scheduled": 1810.5905875563622,
+          "settle": 3831.254169344902
+        },
+        "gc": null,
+        "backup": null,
+        "raw_sha256": "5237bcfc4d3cbd5d2a290794895c329d6dbb42ff950dfbbcf04ece444b427e4c"
+      },
+      {
+        "label": "disabled-1",
+        "variant": "disabled",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 23,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 87.65937387943268,
+          "stream_scheduled": 1816.220961511135,
+          "settle": 4829.938516020775
+        },
+        "gc": null,
+        "backup": null,
+        "raw_sha256": "acefb30ba2e72b35bee9e315169c0dc40632cd321c92b248ad8c59c749eb9d17"
+      },
+      {
+        "label": "default-1",
+        "variant": "default",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 21,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 53.146570920944214,
+          "stream_scheduled": 1806.2889948487282,
+          "settle": 4274.550877511501
+        },
+        "gc": {
+          "deferred_epochs": 0,
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "last_epoch_duration_ms": 0,
+          "last_epoch_reclaimed_bytes": 0,
+          "marks_built": 0,
+          "total_compacted_blocks": 0,
+          "total_consolidated_victims": 0,
+          "total_consolidations": 0,
+          "total_orphan_segments_removed": 0,
+          "total_reclaimed_blocks": 0,
+          "total_reclaimed_bytes": 0,
+          "total_segments_retired": 0,
+          "total_segments_rewritten": 0,
+          "total_temporary_files_removed": 0
+        },
+        "backup": {
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "epochs_failed": 0,
+          "last_error": null,
+          "last_report": null,
+          "last_success_unix_ms": null,
+          "replicated_sequence": null,
+          "replication_interval_ms": null
+        },
+        "raw_sha256": "7d5c65f1842529253bda8c6e73b99cc1a97d052bd048b8067d5831a555a05c3d"
+      }
+    ]
+  },
+  "scope": "Disposableapplicationchildrenonly; existingTOFU_DB_DISABLE_ONLINE_BACKGROUND switch controlsarchiveseal+onlineGC+backup. NoRoot.env/storechange, noasync/Durabilityshortcut.",
+  "limits": [
+    "Four observations only, noCI. Not archive-only causaltest.",
+    "DefaultGC/backup completedepochs0but idlethreadsremoved too, so archiveimpactnotisolated.",
+    "Bothdisabledstream p99worse; original1s gatestillfails.",
+    "Archivevisibility/soakcoverage notoptimized or certified bydisablingbackground."
+  ],
+  "next": "Attribute originalstream scheduledlatency by frame round and callerCPU ratherthanrepeat backgroundpacing trials."
+}

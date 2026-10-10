@@ -1,0 +1,27 @@
+{
+  "format": "tofu.query-overlay-isolation/v1",
+  "decision": "preserve independent mutable overlay containers; future allocation reuse needs a read-only boundary",
+  "private_source_commit": "9620b7f04fd13204f9e125a6f14f12dc28c622ab",
+  "source": {
+    "baseline": "d8e3b6579b7fb61b9e63d596c79a9461964ab72e17c070ea20238b5cdf6dde3f",
+    "candidate_test_source": "d9ceddcdc7712a1ddff72e4db2d750331c1b270574f0a67a13838b49b70fbede",
+    "scope": "Isolation specification only; no runtime optimization or shared overlay change"
+  },
+  "verified_test_source": "fc82d052f6bf38c5e6be192840404841a28913eba58f7856839c583346362fa8",
+  "tests": {
+    "single_baseline_isolation": 1,
+    "published_related_with_counterfactual": 21,
+    "first_module_filter_selected": 0
+  },
+  "mechanism": "Private overlay retirement leaves another replica, writer and fresh view unchanged. In test-only counterfactual sharing the Arc<RwLock<...>>, private retirement removes the other replica visible value. Production code never uses the counterfactual.",
+  "reviewed_paths": [
+    "packages/tofu-db/src/entity_query_view_tests.rs"
+  ],
+  "limits": [
+    "Correctness specification only; no optimization or database speed claim",
+    "Existing old profile identifies replica cost but cannot prove current default-off savings",
+    "No release rebuild, deployment, shared runtime restart or authority switch",
+    "All-scene SQLite superiority, one-second harness gate and provider/browser/soak remain incomplete"
+  ],
+  "archive_sha256": "2f5eb010a7413680c4277efb48f1e0d61aa45a081c0859980a7c48a6c616d1c4"
+}

@@ -1,0 +1,41 @@
+
+
+/* ── Shared workflow-picker presentation (desktop Agent Mode + mobile sheet) ── */
+.submenu-flow-row{position:relative}
+.submenu-item .submenu-arrow{margin-left:auto;display:flex;align-items:center;color:var(--text-tertiary);transition:transform .15s ease}
+#flowMenuWrapper:has(.flow-menu.open) #flowToggle .submenu-arrow{transform:rotate(180deg)}
+/* Active-flow name pill shown next to the "编排流程" label on the trigger */
+.flow-active-pill{font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;line-height:1;padding:2px 6px;border-radius:7px;background:var(--accent);color:#fff;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:none}
+.flow-active-pill.visible{display:inline-flex;align-items:center}
+/* Aligned 1:1 with .submenu-dropdown so the "编排流程" popover reads as the
+ * SAME component as the Mode/Enhance/Tools sub-menus: center-anchored, caret,
+ * matching border/radius/padding/gap + scale-in animation. The ONE structural
+ * difference from .submenu-dropdown: scroll lives on the inner .flow-menu-list
+ * (the flow list can be long) — the menu itself stays overflow:visible so the
+ * bottom caret (at bottom:-5px, OUTSIDE the box) is never clipped. */
+.flow-menu{position:absolute;bottom:calc(100% + 8px);left:50%;min-width:236px;background:var(--bg-secondary);border:1px solid var(--border-light);border-radius:14px;box-shadow:var(--submenu-shadow,0 12px 40px rgba(0,0,0,0.36),0 2px 10px rgba(0,0,0,0.18));padding:5px;z-index:100;opacity:0;visibility:hidden;transform:translateX(-50%) translateY(6px) scale(.97);transform-origin:bottom center;transition:opacity .16s ease,transform .18s cubic-bezier(0.16,1,0.3,1),visibility .16s ease}
+.flow-menu.open{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0) scale(1)}
+.flow-menu::after{content:'';position:absolute;bottom:-5px;left:50%;width:10px;height:10px;background:var(--bg-secondary);border-right:1px solid var(--border-light);border-bottom:1px solid var(--border-light);border-bottom-right-radius:2px;transform:translateX(-50%) rotate(45deg);pointer-events:none}
+[data-theme="light"] .flow-menu{--submenu-shadow:0 10px 30px rgba(50,42,26,0.14),0 2px 8px rgba(50,42,26,0.08);border-color:var(--border)}
+[data-theme="light"] .flow-menu::after{border-right-color:var(--border);border-bottom-color:var(--border)}
+/* Scroll on the inner list, NOT the menu (which must stay overflow:visible
+ * for the caret). max-height preserved so long custom-flow lists scroll. */
+.flow-menu-list{max-height:300px;overflow-y:auto}
+.flow-catalog-notice{margin:2px 5px 5px;padding:7px var(--space-2);border:1px solid var(--error-border);border-radius:7px;background:var(--error-bg);color:var(--error-text);font-size:var(--font-size-xs);line-height:1.35}
+.flow-catalog-notice[data-state="loading"]{border-color:var(--border-light);background:var(--bg-tertiary);color:var(--text-secondary)}
+.flow-catalog-notice[data-state="stale"]{border-color:var(--thinking-border);background:var(--thinking-bg);color:var(--thinking-text)}
+.flow-catalog-notice[hidden]{display:none}
+.flow-menu-item{display:flex;align-items:center;gap:11px;width:100%;padding:9px 10px;border:0;border-radius:9px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:background .12s ease;user-select:none;position:relative}
+.flow-menu-item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.flow-menu-item:hover{background:var(--bg-hover)}
+.flow-menu-item:hover .flow-menu-icon{color:var(--text-primary)}
+.flow-menu-item.selected{background:var(--accent-subtle)}
+.flow-menu-item.selected .flow-menu-name{color:var(--accent)}
+.flow-menu-icon{width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:transparent;color:var(--text-tertiary);flex-shrink:0;transition:all .15s ease}
+.flow-menu-item.selected .flow-menu-icon{background:var(--accent-subtle);color:var(--accent)}
+.flow-menu-icon>svg{display:block}
+.flow-menu-text{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0}
+.flow-menu-name{font-size:var(--font-size-md);font-weight:600;color:var(--text-primary);line-height:1.2}
+.flow-menu-desc{font-size:var(--font-size-xs);color:var(--text-tertiary);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.flow-menu-check{font-size:var(--font-size-lg);font-weight:700;color:var(--accent);opacity:0;transition:opacity .15s ease;flex-shrink:0;width:18px;text-align:center}
+.flow-menu-item.selected .flow-menu-check{opacity:1}

@@ -1,0 +1,54 @@
+/* Settings Tools inventory presentation owned and loaded with
+ * tools-inventory.ts. Shared Settings chrome remains in the retained shell. */
+.tools-inv-body { display: flex; flex-direction: column; gap: 14px; }
+
+.tools-inv-group-title {
+  font-size: 12px; font-weight: 900; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--s-muted);
+  margin: 4px 2px 6px;
+}
+
+.tools-inv-family {
+  background: var(--s-white);
+  border: var(--s-border-sm);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.tools-inv-family-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.tools-inv-family-name { font-weight: 900; font-size: 13px; color: var(--s-ink); font-family: monospace; }
+.tools-inv-family-desc { font-size: 11.5px; color: var(--s-muted); flex: 1; min-width: 120px; }
+.tools-inv-family-count { font-size: 11px; font-weight: 800; color: var(--s-ink-soft); font-variant-numeric: tabular-nums; }
+
+.tools-inv-tools {
+  margin-top: 7px; display: flex; flex-direction: column; gap: 4px;
+  border-top: 1px dashed var(--s-ink-soft); padding-top: 7px;
+}
+.tools-inv-tool { padding: 3px 6px; }
+.tools-inv-tool-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tools-inv-tool-name { font-size: 12px; font-weight: 700; color: var(--s-ink); }
+.tools-inv-tool-desc { font-size: 11px; color: var(--s-muted); line-height: 1.45; margin-top: 1px; }
+.tools-inv-tool-req { font-size: 10.5px; color: var(--s-ink-soft); margin-top: 2px; }
+.tools-inv-tool-req code { font-size: 10px; }
+
+.tools-inv-badge {
+  font-size: 9.5px; font-weight: 900; letter-spacing: 0.03em;
+  padding: 1px 5px; border: var(--s-border-sm); border-radius: var(--s-radius);
+}
+.tools-inv-badge.is-write { background: var(--s-gold); color: var(--s-ink); }
+.tools-inv-badge.is-mcp { background: var(--s-cream); color: var(--s-ink-soft); }
+.tools-inv-badge.is-plugin { background: var(--s-accent); color: var(--s-white); }
+
+.tools-inv-empty { font-size: 11px; color: var(--s-muted); padding: 4px 0; }
+
+/* Preserve the Settings comfort-pass cascade without retaining a second
+ * `.tools-inv-*` owner in the eager stylesheet. */
+.settings-panel .tools-inv-family {
+  border: 1px solid rgba(26, 24, 20, .17);
+  border-radius: 9px;
+  box-shadow: none;
+  transform: none;
+}

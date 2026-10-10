@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools==80.10.2", "wheel==0.48.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tofu-repo-kernel"
+version = "0.1.0"
+description = "Standalone native weighted CSR PageRank for Tofu repository maps"
+requires-python = ">=3.10"
+license = "MIT"
+readme = "README.md"
+dependencies = []
+
+[tool.setuptools]
+packages = ["tofu_repo_kernel"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+tofu_repo_kernel = ["*.so", "*.dylib", "*.dll", "build.json"]

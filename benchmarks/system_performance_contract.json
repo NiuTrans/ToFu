@@ -1,0 +1,39 @@
+{
+  "format": "tofu.system-performance-contract/v1",
+  "scope": {
+    "events": ["append", "bounded_replay", "reconnect", "concurrent_producers", "durability_failure"],
+    "context": ["append_only_history", "edited_history", "compaction", "provider_projection", "multimodal"],
+    "markdown": ["streaming_prose", "streaming_code", "tables_and_references", "selection_and_scroll", "terminal_render"],
+    "repository": ["python_extraction", "multilingual_extraction", "ranking", "incremental_edit", "cold_scan"],
+    "http": ["short_requests", "sse_fanout", "slow_consumer", "cancellation", "authentication"],
+    "ingest": ["html", "pdf", "batch", "cancellation", "bounded_memory"]
+  },
+  "metrics": ["p50_ms", "p95_ms", "p99_ms", "throughput_per_second", "cpu_ms_per_operation", "peak_rss_bytes", "retained_bytes"],
+  "comparison": {
+    "order": "alternating_AB_BA",
+    "minimum_samples_per_variant": 100,
+    "minimum_independent_pairs": 3,
+    "steady_state_warmup_operations_per_variant": 20,
+    "warmup_operations_field": "warmup_operations",
+    "cold_start_measured_separately": true,
+    "latency_profiler": false,
+    "latency_tracemalloc": false,
+    "memory_separate_process": true,
+    "record_source_digest": true,
+    "record_hardware_and_runtime": true,
+    "raw_samples_required": true
+  },
+  "admission": {
+    "correctness_required": true,
+    "failure_and_cleanup_required": true,
+    "maximum_latency_ratio": 1.05,
+    "maximum_cpu_ratio": 1.05,
+    "maximum_peak_rss_ratio": 1.05,
+    "maximum_retained_bytes_ratio": 1.05,
+    "minimum_primary_improvement_fraction": 0.10,
+    "missing_coverage_verdict": "incomplete",
+    "nonfinite_or_nonpositive_metric_verdict": "invalid",
+    "microbenchmark_is_end_to_end_evidence": false,
+    "promotion_requires_domain_integration_evidence": true
+  }
+}

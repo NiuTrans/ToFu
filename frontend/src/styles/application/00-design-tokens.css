@@ -1,0 +1,165 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   TOFU DESIGN TOKENS — foundation layer (composed FIRST, see manifest.json)
+
+   Contract (same rule as 11-tofu-theme-foundation.css):
+   - Token NAMES are a stable contract consumed app-wide. Add new names
+     freely; NEVER rename or remove an existing name.
+   - New component/feature CSS consumes ONLY these tokens plus the legacy
+     color contract (--bg-*, --text-*, --border, --accent*, --radius*,
+     --shadow, --error-*) — no raw hex colors, no raw px margins/padding.
+     Enforcement: scripts/check_style_tokens.mjs (phase 3).
+   - Theme-specific values live in the per-theme blocks at the bottom.
+     Spacing/type/motion/z scales are theme-INVARIANT on purpose: geometry
+     must not shift when the user switches theme.
+
+   Ghost tokens discovered during the spike (used but never defined):
+   - --success-color (5 usages, all with #22c55e fallback) — left as-is.
+   - --text-muted, --text-quaternary (with fallbacks) — left as-is.
+   - --success-border (14-bridges .branch-approve-btn, NO fallback) — now
+     DEFINED below; the button finally renders its designed intent, mirroring
+     .branch-reject-btn's --error-border pattern. Deliberate, documented.
+   ══════════════════════════════════════════════════════════════════════════ */
+:root{
+  /* ── Spacing scale (4px base) ──────────────────────────────────────────
+     THE fix for misaligned UI: all margins/padding/gaps in new code come
+     from this scale. Half-steps and magic numbers are gate-rejected. */
+  --space-0:0;
+  --space-1:4px;
+  --space-2:8px;
+  --space-3:12px;
+  --space-4:16px;
+  --space-5:20px;
+  --space-6:24px;
+  --space-8:32px;
+  --space-10:40px;
+  --space-12:48px;
+  --space-16:64px;
+
+  /* ── Font-size scale ───────────────────────────────────────────────────
+     Consolidated from real usage (9–16px with half-steps); migration maps
+     9–10px→xs, 11–11.5→xs/sm, 12–12.5→sm, 13→md, 14→lg, 15–16→xl. */
+  --font-size-xs:11px;
+  --font-size-sm:12px;
+  --font-size-md:13px;
+  --font-size-lg:14px;
+  --font-size-xl:16px;
+  --font-size-2xl:18px;
+  --font-size-3xl:22px;
+  --font-size-4xl:28px;
+  --leading-tight:1.3;
+  --leading-title:1.4;
+  --leading-body:1.7;
+  /* Conversation typography API: content roles, independent of component/theme.
+     Prose remains comfortable; operational content uses a compact shared ramp. */
+  --conversation-font-size-body:var(--font-size-xl);
+  --conversation-font-size-content:var(--font-size-md);
+  --conversation-font-size-meta:var(--font-size-sm);
+  --conversation-font-size-caption:var(--font-size-xs);
+  --conversation-font-size-table:var(--font-size-lg);
+  --conversation-font-size-heading-1:var(--font-size-3xl);
+  --conversation-font-size-heading-2:var(--font-size-2xl);
+  --conversation-font-size-heading-3:var(--font-size-xl);
+  --conversation-reading-measure:720px;
+  --inspector-reading-measure:860px;
+  --weight-regular:400;
+  --weight-medium:500;
+  --weight-semibold:600;
+  --weight-bold:700;
+
+  /* ── Control geometry ──────────────────────────────────────────────────
+     Every interactive control takes its height from this ramp, so rows of
+     mixed controls align by construction instead of by manual tweaking. */
+  --control-edge-inset:1px;
+  --tool-receipt-label-width:96px;
+  --tool-source-chip-measure:360px;
+  --radius-pill:999px;
+  --control-h-sm:28px;
+  --control-h-md:34px;
+  --control-h-lg:42px;
+
+  /* ── Motion ────────────────────────────────────────────────────────────
+     --ease-standard matches the legacy --transition timing. */
+  --motion-fast:0.12s;
+  --motion-base:0.2s;
+  --motion-slow:0.3s;
+  --ease-standard:cubic-bezier(0.4,0,0.2,1);
+  --ease-spring:cubic-bezier(0.34,1.56,0.64,1);
+
+  /* ── Z-index scale (NEW code only) ─────────────────────────────────────
+     Legacy uses up to 10000; new code stays inside this ramp. Native
+     <dialog> renders in the top layer and needs no z-index at all. */
+  --z-dropdown:1000;
+  --z-sticky:1100;
+  --z-overlay:9000;
+  --z-modal:9500;
+  --z-toast:9800;
+  --z-tooltip:9900;
+
+  /* ── Unified UI font: dark/light body face; tofu overrides below ── */
+  --font-ui:var(--md-sans);
+  --font-mono:'JetBrains Mono',ui-monospace,monospace;
+
+  /* ── Text painted directly on --accent fills ──
+     Matches every existing ghost fallback (#fff) → zero visual change. */
+  --text-on-accent:#fff;
+
+  /* ── Feedback colors (dark) ────────────────────────────────────────────
+     Text values target ≥4.5:1 on --bg-primary; verified in the ui-gallery
+     spike report. --error-* already exists per theme and stays untouched. */
+  --success-text:#34D399;
+  --success-bg:rgba(16,185,129,0.12);
+  --success-border:rgba(16,185,129,0.30);
+  --warning-text:#CFB850;
+  --warning-bg:rgba(207,184,80,0.08);
+  --warning-border:rgba(207,184,80,0.28);
+  --info-text:#60A5FA;
+  --info-bg:rgba(59,130,246,0.12);
+  --info-border:rgba(59,130,246,0.30);
+
+  /* ── Shared chrome ── */
+  --backdrop:rgba(0,0,0,0.55);
+  --focus-ring:0 0 0 3px rgba(110,86,207,0.35);
+  --knob-shadow:0 1px 2px rgba(0,0,0,0.30);
+}
+
+[data-theme="light"]{
+  --success-text:#19664D;
+  --success-bg:rgba(31,122,92,0.08);
+  --success-border:rgba(31,122,92,0.25);
+  --warning-text:#80520B;
+  --warning-bg:rgba(150,98,14,0.08);
+  --warning-border:rgba(150,98,14,0.25);
+  --info-text:#385B9E;
+  --info-bg:rgba(64,104,184,0.08);
+  --info-border:rgba(64,104,184,0.25);
+  --backdrop:rgba(30,28,20,0.28);
+  --focus-ring:0 0 0 3px rgba(99,102,241,0.25);
+  --knob-shadow:0 1px 2px rgba(0,0,0,0.18);
+}
+
+[data-theme="tofu"]{
+  --font-ui:var(--sans-body);
+  /* Darkened derivatives of the tofu palette (fetch-teal / thinking amber /
+     search-blue) so text clears 4.5:1 on the cold-white canvas. */
+  --success-text:#3D7263;
+  --success-bg:rgba(94,158,140,0.12);
+  --success-border:rgba(94,158,140,0.35);
+  --warning-text:#8B560F;
+  --warning-bg:rgba(139,86,15,0.06);
+  --warning-border:rgba(139,86,15,0.25);
+  --info-text:#3F6E8C;
+  --info-bg:rgba(94,144,174,0.12);
+  --info-border:rgba(94,144,174,0.35);
+  --backdrop:rgba(74,63,47,0.35);
+  --focus-ring:0 0 0 3px rgba(201,122,29,0.25);
+  --knob-shadow:0 1px 2px rgba(19,25,31,0.16);
+}
+
+/* ── Reduced motion: the whole library honors it from day one ── */
+@media (prefers-reduced-motion:reduce){
+  :root{
+    --motion-fast:0.01s;
+    --motion-base:0.01s;
+    --motion-slow:0.01s;
+  }
+}

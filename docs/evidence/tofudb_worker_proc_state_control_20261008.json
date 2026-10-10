@@ -1,0 +1,23 @@
+{
+  "scope": "50ms approximate /proc snapshots of parent Python process native workers. wchan cannot identify pin/FIFO/idle futex ownership, snapshots not atomic. Includes startup, workload, recovery and verification; no per-phase classification. Observer overhead unmeasured.",
+  "sample_count": 148,
+  "minimum_observed_workers": 126,
+  "maximum_observed_workers": 126,
+  "maximum_observed_running": 11,
+  "state_observations": {
+    "S:futex_wait_queue_me": 18422,
+    "R:0": 184,
+    "R:futex_wait_queue_me": 8,
+    "S:0": 15,
+    "S:hrtimer_nanosleep": 15,
+    "D:expand_files": 3,
+    "D:__wait_rcu_gp": 1
+  },
+  "correctness": true,
+  "errors": 0,
+  "raw_samples": {
+    "path": ".tmp/tofudb-worker-state-20261008/samples.json",
+    "sha256": "bbbd53ea4cbc186de54b1600699dc9ac78712d0119045daea6f2389c69f36839"
+  },
+  "decision": "No worker-cap change admitted. Futex observations cannot separate idle queue from snapshot/FIFO waits, nor prove CPU starvation. Add explicit lifecycle-scoped worker-state observation before pre-worker admission design.50ms sleep is not50ms sampling cadence: per-thread reads and scheduling add time. Runtime sources unchanged."
+}

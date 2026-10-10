@@ -1,0 +1,178 @@
+"""Tests for the canonical turn-initiation vocabulary.
+
+Covers the ONE resolver (``resolve_initiator``) + the ONE write seam
+(``stamp_initiator``), and proves each of the three backend injection choke
+points stamps the right ``_initiator`` value:
+
+  * message_queue.dispatch_next_queued  → brain / peer / operator
+  * scheduler.conversation_dispatch.dispatch_scheduled_turn → proactive / timer
+  * swarm.integration._start_autocontinue_turn → swarm  (marker asserted via
+    the resolver; the DB path itself is exercised elsewhere)
+
+Pure logic — no DB / network. Run under pytest or standalone.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from lib.turn_initiation import (  # noqa: E402
+    INITIATOR_AUTOPILOT, INITIATOR_BRAIN, INITIATOR_HUMAN, INITIATOR_OPERATOR,
+    INITIATOR_PEER, INITIATOR_PROACTIVE, INITIATOR_SWARM, INITIATOR_TIMER,
+    is_auto_initiated, resolve_initiator, stamp_initiator)
+
+pytestmark = pytest.mark.unit
+
+
+# ─────────────────────────── stamp_initiator ────────────────────────────
+
+def test_stamp_sets_field():
+    m = {'role': 'user', 'content': 'x'}
+    stamp_initiator(m, INITIATOR_BRAIN)
+    assert m['_initiator'] == INITIATOR_BRAIN
+
+
+def test_stamp_human_is_noop():
+    """A human turn stays unstamped — absence of _initiator IS 'human'."""
+    m = {'role': 'user', 'content': 'x'}
+    stamp_initiator(m, INITIATOR_HUMAN)
+    assert '_initiator' not in m
+
+
+def test_stamp_unknown_value_rejected():
+    m = {'role': 'user'}
+    with pytest.raises(ValueError, match='unknown turn initiator'):
+        stamp_initiator(m, 'nonsense')
+
+
+# ─────────────────────────── resolve_initiator ──────────────────────────
+
+def test_resolve_defaults_to_human():
+    assert resolve_initiator({'role': 'user', 'content': 'hi'}) == INITIATOR_HUMAN
+    assert resolve_initiator({}) == INITIATOR_HUMAN
+    assert resolve_initiator(None) == INITIATOR_HUMAN
+
+
+def test_resolve_uses_only_explicit_initiator():
+    m = {'_initiator': INITIATOR_BRAIN, '_isVirtualUser': True}
+    assert resolve_initiator(m) == INITIATOR_BRAIN
+
+
+@pytest.mark.parametrize('feature_flag', [
+    {'_isVirtualUser': True},
+    {'_autopilotRunId': 'ar-1'},
+    {'_proactive': True},
+    {'_timer': True},
+    {'_brainDispatch': True},
+    {'_swarmAutoContinue': True},
+    {'_peerMessage': True, '_peerHuman': True},
+])
+def test_resolve_does_not_infer_identity_from_feature_flags(feature_flag):
+    assert resolve_initiator(feature_flag) == INITIATOR_HUMAN
+
+
+def test_is_auto_initiated():
+    assert not is_auto_initiated({'role': 'user', 'content': 'hi'})
+    assert is_auto_initiated({'_initiator': INITIATOR_TIMER})
+    assert not is_auto_initiated({'_proactive': True})
+
+
+# ────────────── choke point 1: message_queue.dispatch mapping ────────────
+#
+# dispatch_next_queued's marker-propagation block stamps the initiator from
+# the payload. We exercise the exact mapping logic (payload markers → stamped
+# user_msg) by reproducing the branch conditions the seam uses, then asserting
+# the resolver reads them back. This keeps the test DB-free while pinning the
+# brain/peer/operator mapping the seam commits.
+
+def _map_queue_payload(payload: dict) -> dict:
+    """Mirror of the initiator branch in dispatch_next_queued (kept in sync
+    by test_queue_seam_source_contains_stamp below)."""
+    user_msg = {'role': 'user', 'content': payload.get('text', '')}
+    if payload.get('_peerMessage'):
+        stamp_initiator(user_msg,
+                        INITIATOR_OPERATOR if payload.get('_peerHuman') else INITIATOR_PEER)
+    return user_msg
+
+
+def test_retired_brain_dispatch_marker_does_not_infer_identity():
+    m = _map_queue_payload({'_brainDispatch': True, 'text': 'do epic'})
+    assert resolve_initiator(m) == INITIATOR_HUMAN
+
+
+def test_queue_peer_stamps_peer():
+    m = _map_queue_payload({'_peerMessage': True, 'text': 'hi'})
+    assert resolve_initiator(m) == INITIATOR_PEER
+
+
+def test_queue_operator_stamps_operator():
+    m = _map_queue_payload({'_peerMessage': True, '_peerHuman': True, 'text': 'nudge'})
+    assert resolve_initiator(m) == INITIATOR_OPERATOR
+
+
+def test_shared_queue_mapper_covers_v1_and_v2_consumers():
+    from lib.message_queue import _stamp_queued_turn_initiator
+
+    retired_brain = {'role': 'user', 'content': 'do epic'}
+    _stamp_queued_turn_initiator(retired_brain, {'_brainDispatch': True})
+    assert resolve_initiator(retired_brain) == INITIATOR_HUMAN
+
+    operator = {'role': 'user', 'content': 'human nudge'}
+    _stamp_queued_turn_initiator(
+        operator, {'_peerMessage': True, '_peerHuman': True})
+    assert resolve_initiator(operator) == INITIATOR_OPERATOR
+
+
+# ─────────── source-structure pins (the real seams call stamp_initiator) ──
+#
+# The mapping tests above use a local mirror; these pins prove the SHIPPED
+# seams actually call stamp_initiator (so the mirror can't silently drift from
+# a seam that stopped stamping).
+
+def _read(path: str) -> str:
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    with open(os.path.join(root, path), encoding='utf-8') as f:
+        return f.read()
+
+
+def test_queue_seam_source_contains_stamp():
+    src = _read('lib/message_queue.py')
+    assert 'stamp_initiator' in src
+    assert 'INITIATOR_BRAIN' not in src
+    assert 'INITIATOR_PEER' in src and 'INITIATOR_OPERATOR' in src
+
+
+def test_scheduler_seam_source_contains_stamp():
+    src = _read('lib/scheduler/conversation_dispatch.py')
+    assert 'stamp_initiator' in src
+    assert 'INITIATOR_TIMER' in src and 'INITIATOR_PROACTIVE' in src
+
+
+def test_swarm_seam_source_contains_stamp():
+    src = _read('lib/swarm/integration/_autocontinue.py')
+    assert 'stamp_initiator' in src and 'INITIATOR_SWARM' in src
+
+
+if __name__ == '__main__':
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_turn_initiation.__main__')
+    sys.exit(pytest.main([__file__, '-v']))
+
+
+@pytest.mark.parametrize('value', ['unknown', 'retired-value', '', 17, False, [], {}])
+def test_malformed_explicit_initiator_is_not_upgraded_to_human(value):
+    message = {'role': 'user', '_initiator': value}
+    assert resolve_initiator(message) == 'unknown'
+    assert is_auto_initiated(message)
+
+
+def test_unknown_initiator_logs_no_unbounded_or_secret_value(caplog):
+    value = 'credential-like-private-value-' + 'x' * 10000
+    resolve_initiator({'_initiator': value})
+    assert 'credential-like-private-value' not in caplog.text
+    assert len(caplog.text) < 1000

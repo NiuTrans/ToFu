@@ -1,0 +1,624 @@
+{
+  "version": 1,
+  "responsibility": "Ordered authoring sections for the generated application stylesheet.",
+  "output": "static/styles.css",
+  "sections": [
+    {
+      "path": "00-design-tokens.css"
+    },
+    {
+      "path": "01-shell-navigation.css"
+    },
+    {
+      "path": "02-inspector-tool-anchors.css",
+      "responsibility": "inspector tool anchors",
+      "legacyTokenSha256": "bb37f0b339cf0c654e11894d578da4b3f84db0bb43e4a3bb24b3058a03672bcc"
+    },
+    {
+      "path": "02-composer-geometry.css",
+      "responsibility": "composer geometry",
+      "legacyTokenSha256": "58c9ef61debd41d24537ef4fed64c15dd1ca702ac27b6c30433852bea8ca34de"
+    },
+    {
+      "path": "02-composer-field.css",
+      "responsibility": "composer field"
+    },
+    {
+      "path": "02-composer-toolbar.css",
+      "responsibility": "composer toolbar",
+      "legacyTokenSha256": "ee129f7988313a2363c38691afb5ed2eee9face9f4e0fb538bf335909c9468c1"
+    },
+    {
+      "path": "02-shell-actions.css",
+      "responsibility": "shell actions",
+      "legacyTokenSha256": "5e8870e017e3bd7b54fddbaef739e7d25574d9c13aff83cc6b48c3a5dae794aa"
+    },
+    {
+      "path": "02-update-shell.css",
+      "responsibility": "update shell",
+      "legacyTokenSha256": "4b46ec4884064302602bb3b0ce300bc2fb8b289cb2bc748ab7398a632d227c98"
+    },
+    {
+      "path": "02-update-steps.css",
+      "responsibility": "update steps",
+      "legacyTokenSha256": "f734789cf7900517be47a8ce267d5903091591d5e9ad4e851d20e10ebe4c6938"
+    },
+    {
+      "path": "02-update-log.css",
+      "responsibility": "update log",
+      "legacyTokenSha256": "5b49dc870188df7c44026b3b167ec8f82e982d50abc66400d0cd48652532330e"
+    },
+    {
+      "path": "02-composer-controls.css",
+      "responsibility": "composer controls",
+      "legacyTokenSha256": "4dbda3360bdf0eef6044e4737b3ae4e2598b5b02e9908ead5740f8c0bcb962c3"
+    },
+    {
+      "path": "02-composer-capability.css",
+      "responsibility": "composer capability",
+      "legacyTokenSha256": "85ff4573d3302d1681cba589d9bea70fac41e8cc38d1d07045bd613f2821edd3"
+    },
+    {
+      "path": "02-composer-menus.css",
+      "responsibility": "composer menus",
+      "legacyTokenSha256": "a10184354bd0e0ce3a65f4499af12b69edbece63ab6c702842ee54dbdcd4d79f"
+    },
+    {
+      "path": "02-model-picker-layout.css",
+      "responsibility": "Native model menu control layout"
+    },
+    {
+      "path": "02-composer-workflows.css",
+      "responsibility": "composer workflows",
+      "legacyTokenSha256": "a4a8dc05ba13844c79a4d84b5d3c87dffb65b6f112d0e7518779aa2a70471e0a"
+    },
+    {
+      "path": "02-composer-footer.css",
+      "responsibility": "composer footer",
+      "legacyTokenSha256": "53fad04081d87b67a54b814141bd3ef81e80d102cd7cc1d9875babc155a70de4"
+    },
+    {
+      "path": "02-image-toolbar.css",
+      "responsibility": "image toolbar",
+      "legacyTokenSha256": "de83a52c80d4f9f28ede8fb7792b3199bec17f79f359f3d23874a1229a77d972"
+    },
+    {
+      "path": "02-image-results.css",
+      "responsibility": "image results",
+      "legacyTokenSha256": "23d87e9f975e213b3c6c50a649fa95c9aae401b4e09a41fad1ed7a624c576051"
+    },
+    {
+      "path": "02-image-batch.css",
+      "responsibility": "image batch",
+      "legacyTokenSha256": "9b21748ce9b8194bb24af81a58d9f812cc36f9629b5f93bd72c139ea2130331c"
+    },
+    {
+      "path": "02-message-residency.css",
+      "responsibility": "message residency",
+      "legacyTokenSha256": "5a413c59685fb3af3702e8ed71b6568c7b7cd6223a5fc814070daf77c701e620"
+    },
+    {
+      "path": "02-message-navigation.css",
+      "responsibility": "message navigation",
+      "legacyTokenSha256": "d2581686fd2830a8c01045fff0ca3c99288cbe85f2356d25ca5ccc676bc822eb"
+    },
+    {
+      "path": "03-paper-reader.css",
+      "responsibility": "Paper sidebar, workbench and report reading",
+      "legacyTokenSha256": "743043e1b69e41f6c65d329c3ad1910afd5fad896ef2a5250beef3f00597a7f4"
+    },
+    {
+      "path": "03-paper-reader-streaming.css"
+    },
+    {
+      "path": "03-paper-reader-responsive.css"
+    },
+    {
+      "path": "03-paper-workbench.css"
+    },
+    {
+      "path": "03-paper-evidence.css"
+    },
+    {
+      "path": "03-paper-studio.css"
+    },
+    {
+      "path": "04-paper-reader-themes.css"
+    },
+    {
+      "path": "05-paper-report-media.css"
+    },
+    {
+      "path": "06-file-changes-settings-shell.css"
+    },
+    {
+      "path": "07-settings-providers-onboarding.css"
+    },
+    {
+      "path": "08-swarm-shell.css",
+      "responsibility": "Swarm summary, status and progress",
+      "legacyTokenSha256": "4f1b170a580ce45bdf49c998dd89c9fff87dc658c7a35e36ae9ea15d6cfa92f0"
+    },
+    {
+      "path": "08-swarm-agent-cards.css",
+      "responsibility": "Agent card states, header and disclosure",
+      "legacyTokenSha256": "8f479503a793f6886742f524b21c450113203e096bee01fd0dc6e05b9b5ddd6a"
+    },
+    {
+      "path": "08-swarm-agent-activity.css",
+      "responsibility": "Agent execution timeline and outputs",
+      "legacyTokenSha256": "12f6e847d7de0a1960ab241ea83e1d28954a5382a9cf07edd85abc04978d5715"
+    },
+    {
+      "path": "08-swarm-background-status.css",
+      "responsibility": "Background, stale and inbox summary states",
+      "legacyTokenSha256": "c279c8e04ef171c712d647d13f82de3220ae7cec4985b3e2a1488b70b699344b"
+    },
+    {
+      "path": "08-injection-receipts.css",
+      "responsibility": "Sub-agent, peer and steering receipts",
+      "legacyTokenSha256": "89b57803199528972fe77d26c72b19f035f3f864f3538fe74f769c4813c9bc60"
+    },
+    {
+      "path": "08-agent-rounds.css",
+      "responsibility": "Await/result rounds, live previews and dependencies",
+      "legacyTokenSha256": "c48c73333b71ba03d3884cfcfdfead4e6b371ac7e4383ac3b17d3853ae03ece5"
+    },
+    {
+      "path": "08-preview-modal.css",
+      "responsibility": "Image and text attachment preview",
+      "legacyTokenSha256": "7d235dae07efd003da53158e71412798bae7cfd8c0f66536850e09b38709b1a6"
+    },
+    {
+      "path": "08-scheduler-panel.css",
+      "responsibility": "Scheduler badge and dropdown",
+      "legacyTokenSha256": "276d11fe4a19ae04e39a440c75edbc75b44ce90dd40779992174187dc2205c1c"
+    },
+    {
+      "path": "08-optimizer-panel.css",
+      "responsibility": "Daily optimizer badge and panel",
+      "legacyTokenSha256": "39ad33947b52c80d0794b8086aad5521127b2fcbc8d049bb16ced17b6c05c6bd"
+    },
+    {
+      "path": "08-conversation-signals.css",
+      "responsibility": "Proactive, fallback and latency signals",
+      "legacyTokenSha256": "b0ce0db4d5c20b00a6487f8f2f18f7d0bf2c7a986feebc6560ad51cfefaad3a1"
+    },
+    {
+      "path": "08-timer-panels.css",
+      "responsibility": "Timer toolbar and poll-log panel",
+      "legacyTokenSha256": "51ff096d9662048ab81ff2bc0d839ca3f3be5cea5a36e51b8c6a9856266951d2"
+    },
+    {
+      "path": "08-program-execution.css",
+      "responsibility": "Program execution status, source and output",
+      "legacyTokenSha256": "62e8a5b1269993d356fc2e27a115176d39e1e402337d5af662a22b39dcd33d20"
+    },
+    {
+      "path": "08-round-cards.css",
+      "responsibility": "Unified and parallel round cards; compact program disclosures"
+    },
+    {
+      "path": "08-timer-receipt-shell.css",
+      "responsibility": "Timer receipt state, identity and disclosures"
+    },
+    {
+      "path": "08-timer-receipt-metadata.css",
+      "responsibility": "Timer verification instruction, command and cadence"
+    },
+    {
+      "path": "08-timer-receipt-evidence.css",
+      "responsibility": "Timer checks, full failure evidence and countdown"
+    },
+    {
+      "path": "08-tool-group-timeline.css",
+      "responsibility": "Interleaved prose and theme-specific batch chrome",
+      "legacyTokenSha256": "92b2bcd8d47ba9dcb5ef5dfe79c75bf04db711898a8fe5bd2e6727ca46c59f27"
+    },
+    {
+      "path": "08-tool-group-history.css",
+      "responsibility": "Historical tool-tail disclosure",
+      "legacyTokenSha256": "bdb57413ea9c71fa12669e9e7eb125e55717bb55f0f682ee08824d306d31b2bd"
+    },
+    {
+      "path": "08-tool-row-shell.css",
+      "responsibility": "Tool row geometry and readable intent"
+    },
+    {
+      "path": "08-tool-row-attribution.css",
+      "responsibility": "Workspace root attribution",
+      "legacyTokenSha256": "69644b9464b6e9d80db3a408857da2006ba765bf69df1492bb7fbc934e77de78"
+    },
+    {
+      "path": "08-tool-row-artifacts.css",
+      "responsibility": "Token-based MCP links, result badges and intent-first saved-output continuations"
+    },
+    {
+      "path": "08-tool-row-progress.css",
+      "responsibility": "Batch item progress",
+      "legacyTokenSha256": "e2747c955f3ef20de72b2494074ea9222fdeacc39ddf3851b2ef23814e285991"
+    },
+    {
+      "path": "08-tool-row-compaction.css",
+      "responsibility": "Compaction layer and reduction evidence",
+      "legacyTokenSha256": "4db1e9126b0aeb23256d7106b2cd36afe0e639354c83624cc0bef4d9e761b23b"
+    },
+    {
+      "path": "08-tool-search-diagnostics.css",
+      "responsibility": "Empty search diagnostic evidence",
+      "legacyTokenSha256": "47dfe1274fa9480c52d788da7b94968d82b68a494d205907d8c82a91bcfb3ae6"
+    },
+    {
+      "path": "08-tool-search-catalog.css",
+      "responsibility": "Matched native tool catalog",
+      "legacyTokenSha256": "37bd2826231ca1969d11814b06b61dd82eb31c703bb162fb6e879a6796d49de7"
+    },
+    {
+      "path": "08-tool-search-results.css",
+      "responsibility": "Expandable search result bodies",
+      "legacyTokenSha256": "af00500fbbff38bba13e8086b4abf8419ee6d4482a262c68e2ed5abccbe4fc57"
+    },
+    {
+      "path": "08-tool-search-queries.css",
+      "responsibility": "Per-query search evidence groups",
+      "legacyTokenSha256": "97dcd390a6dafd20eaa391044bec5d23614034ca44cdbcecaf8955ec1a2f2ed1"
+    },
+    {
+      "path": "08-tool-search-motion.css",
+      "responsibility": "Search activity motion",
+      "legacyTokenSha256": "55543f3661e9a79fc6b7f8bad54701a1630cb3b4a3c6b28d8dbbe3437c88877d"
+    },
+    {
+      "path": "09-tool-terminal-details.css",
+      "responsibility": "Command header and outcome states",
+      "legacyTokenSha256": "54781fbdb269db8cbc400518b3bdc7128715ff5d30319c3d67ba7dc278079daa"
+    },
+    {
+      "path": "09-command-controls.css",
+      "responsibility": "Interrupt, continuation and stdin controls",
+      "legacyTokenSha256": "c65e6a4474d8733a7c2efec7015a1e1d438ee7901b61811f9c0a3097e8aa667c"
+    },
+    {
+      "path": "09-command-output.css",
+      "responsibility": "Command description, timing, output and fold controls",
+      "legacyTokenSha256": "ce4b5d2c6393457db6943b4e0d120e2786a63801eda8c6a4a34d08cbd49b52a2"
+    },
+    {
+      "path": "09-tool-approval.css",
+      "responsibility": "Manual approval and refused calls",
+      "legacyTokenSha256": "6a01b2daa1000ce2de3a6a234aad5249935440e40ed5a1b3b2951de5064826ed"
+    },
+    {
+      "path": "09-tool-diffs.css",
+      "responsibility": "Inline diff and batch result previews",
+      "legacyTokenSha256": "8053d1a0b6de98191c4fa8b0075218924ce217f7cde5f1f4c33d88b565fad13d"
+    },
+    {
+      "path": "09-tool-memory.css",
+      "responsibility": "Memory preview cards",
+      "legacyTokenSha256": "2131589421671252b020df1c34c49ea6af3dd723449f710f40b1213723dd7466"
+    },
+    {
+      "path": "09-tool-results.css",
+      "responsibility": "Generic result expansion and syntax tokens",
+      "legacyTokenSha256": "248afebbe0f4282e4185b64f44762586701226a249e2ad67d45af190c7f377c5"
+    },
+    {
+      "path": "09-tool-progress.css",
+      "responsibility": "Blocker waits and checklist progress"
+    },
+    {
+      "path": "09-tool-project.css",
+      "responsibility": "Structured project and production receipts"
+    },
+    {
+      "path": "09-diff-details.css",
+      "responsibility": "Per-edit disclosure, diff detail and approval actions",
+      "legacyTokenSha256": "94db988c6249faec48f0d1107125430c8e21d7ea63ddd70f0baf483b4b8194a3"
+    },
+    {
+      "path": "09-guidance-question.css",
+      "responsibility": "Guidance card and Markdown question",
+      "legacyTokenSha256": "aa85959b585a7ab9f89a24372926c636fc5062c6e5ce6b250254869021c974c2"
+    },
+    {
+      "path": "09-guidance-input.css",
+      "responsibility": "Free-text answer and translation states",
+      "legacyTokenSha256": "4367fe39f8d9e267e9b925160457104dfa0702c76142dd366c97374d62bd84ea"
+    },
+    {
+      "path": "09-guidance-choices.css",
+      "responsibility": "Option cards, notes and submitted answer",
+      "legacyTokenSha256": "d36f1e0927ac17b3cbe5e221997b585ec02191c89f3048df8e38c72d2ffe0e81"
+    },
+    {
+      "path": "09-guidance-batch.css",
+      "responsibility": "Batch guidance form and skipped state",
+      "legacyTokenSha256": "119710f316f309a2401a16022c42e462b3e8c73f868a161e2d08e026a3517e92"
+    },
+    {
+      "path": "09-tool-failures.css",
+      "responsibility": "Interrupted, failed and rejected tool receipts",
+      "legacyTokenSha256": "53b6ab20da61f586f8fa12cfdd7586d99ca97623dbc02c40be43c12f5a3d5148"
+    },
+    {
+      "path": "09-turn-activity.css",
+      "responsibility": "Turn activity rows and execution failures",
+      "legacyTokenSha256": "286653bdf5d93ede0066ae60f8334c4be474783b9d3d38d8e400acb287439cf1"
+    },
+    {
+      "path": "09-workunit.css",
+      "responsibility": "WorkUnit status, page gallery and motion cards",
+      "legacyTokenSha256": "dd8134612a7c8d3b0e5a306190d4530a79974f85559ab891907fa77db1caa930"
+    },
+    {
+      "path": "09-workunit-outline.css",
+      "responsibility": "Interactive slide outline review",
+      "legacyTokenSha256": "df50006d54d555d6a30b3a814c894a67663ab8f041e684f95d8e747f1cc3f488"
+    },
+    {
+      "path": "09-browser-command.css",
+      "responsibility": "Browser JavaScript command identity and narrow layout"
+    },
+    {
+      "path": "10-project-apply.css",
+      "responsibility": "Project application progress",
+      "legacyTokenSha256": "82059b6da5777fd094fb84c87ba316f1e427653310d27ca91e5f709c32a490c5"
+    },
+    {
+      "path": "10-tooltips.css",
+      "responsibility": "Shared positioned tooltip",
+      "legacyTokenSha256": "b1872eebf4f127256b32b4be1c19b1accfc8d53d204f08286fedd42372c33a09"
+    },
+    {
+      "path": "10-project-modal-shell.css",
+      "responsibility": "Project chooser shell and responsive panes",
+      "legacyTokenSha256": "f66fcc76051eab0908e0db2288c7032b9dc74d596b8fc1d64ca3addebc5980bd"
+    },
+    {
+      "path": "10-project-roots.css",
+      "responsibility": "Workspace root rows and reorder",
+      "legacyTokenSha256": "068b203e72a85742cf9bf3ecd37e01d4d91ffe5041061de07933a2182ec280e7"
+    },
+    {
+      "path": "10-project-workspace.css",
+      "responsibility": "Docked browser and add-path controls",
+      "legacyTokenSha256": "c04d12982a74f1a79a677735166044cd83055835bc3449c476644b255781efc6"
+    },
+    {
+      "path": "10-project-browser.css",
+      "responsibility": "Folder browser, breadcrumbs and row actions",
+      "legacyTokenSha256": "81b7b7b7d2364d6b82753410f32b77ca53bfafadb79842155fbf4da9a9d73639"
+    },
+    {
+      "path": "10-project-recent.css",
+      "responsibility": "Recent paths, filters and narrow-screen layouts",
+      "legacyTokenSha256": "27bdcc6e140b6acfd6cd02c7a4fad5ba4b0422870852ef0528b5950d280130b4"
+    },
+    {
+      "path": "10-file-change-modal.css",
+      "responsibility": "File-change comparison overlay",
+      "legacyTokenSha256": "7d1232d90ccfb5d660f819189abe7187d9582f57b3a8dcf93760ecc9ccfb733c"
+    },
+    {
+      "path": "10-optimizer-preview.css",
+      "responsibility": "Optimizer preview and log-clean comparison",
+      "legacyTokenSha256": "d2692e1995f7b67c89e2f5f1bd7a494fdc41ce9b8f5fe5fb7709e63be1230be8"
+    },
+    {
+      "path": "10-theme-pickers.css",
+      "responsibility": "Theme/language picker controls",
+      "legacyTokenSha256": "b5302e2c8cdae89aac3aee08f8d8fbffdf2e89f3a7b3ee336156466a443d7736"
+    },
+    {
+      "path": "10-light-foundation.css",
+      "responsibility": "Light palette, typography and syntax",
+      "legacyTokenSha256": "cc085c6a169face2dd002302e4a3188e9a0151ff44dd4e580006dc5ad618afc9"
+    },
+    {
+      "path": "10-light-activity.css",
+      "responsibility": "Light search, toolbar and project activity",
+      "legacyTokenSha256": "e5e2f76e67212f9802c416f1936dd178a7b4decd204fa8c86183b2710b5fa734"
+    },
+    {
+      "path": "10-light-tool-receipts.css",
+      "responsibility": "Light approvals and command receipts",
+      "legacyTokenSha256": "c9724eaabfe789d631a04e9a7158b16e1949e7b518c111030052419e289c646e"
+    },
+    {
+      "path": "10-light-chrome.css",
+      "responsibility": "Light presets, sidebar and finish tags",
+      "legacyTokenSha256": "222569161f2fb82a1dd1eee93eb17ab58d03490c2bb6b2858de886f112664e99"
+    },
+    {
+      "path": "10-theme-animations.css",
+      "responsibility": "Tofu motion vocabulary",
+      "legacyTokenSha256": "4d7b5b9745ba6b793745e989f0ec9dbd363f18b465fffd0503d822acf24b3854"
+    },
+    {
+      "path": "11-tofu-theme-foundation.css"
+    },
+    {
+      "path": "12-tofu-theme-project-controls.css"
+    },
+    {
+      "path": "13-tofu-theme-composer-tools.css"
+    },
+    {
+      "path": "14-bridges-memory-branches.css"
+    },
+    {
+      "path": "15-queue-mobile-my-day.css"
+    },
+    {
+      "path": "16-my-day-context-indicators.css"
+    },
+    {
+      "path": "17-compaction-context-rail.css"
+    },
+    {
+      "path": "18-artifacts-knowledge-library.css"
+    },
+    {
+      "path": "19-project-brain.css"
+    },
+    {
+      "path": "21-local-knowledge-plan-mode.css"
+    },
+    {
+      "path": "22-shell-mobile-brand.css"
+    },
+    {
+      "path": "23-turn-reading-system.css"
+    },
+    {
+      "path": "23-reading-prose.css"
+    },
+    {
+      "path": "23-reading-process.css"
+    },
+    {
+      "path": "23-reading-activity.css"
+    },
+    {
+      "path": "23-reading-evidence.css"
+    },
+    {
+      "path": "23-reading-actions.css"
+    },
+    {
+      "path": "23-reading-responsive.css"
+    },
+    {
+      "path": "23-reading-editor.css"
+    },
+    {
+      "path": "23-reading-background.css"
+    },
+    {
+      "path": "23-reading-execution.css"
+    },
+    {
+      "path": "25-conversation-bar.css"
+    },
+    {
+      "path": "28-boot-splash.css"
+    },
+    {
+      "path": "30-ui-kit.css"
+    }
+  ],
+  "deferredSections": [
+    {
+      "path": "26-evolution.css",
+      "featureEntry": "frontend/src/features/evolution.ts"
+    },
+    {
+      "path": "27-evolution-research.css",
+      "featureEntry": "frontend/src/features/evolution/research/page.ts"
+    },
+    {
+      "path": "09-slide-editor.css",
+      "responsibility": "Lazy slide editor overlay",
+      "legacyTokenSha256": "84b3740a570641aa56bb7b89f32bbc5a058dd7583303d4ff558210116d6d01eb",
+      "featureEntry": "frontend/src/features/slides.ts"
+    },
+    {
+      "path": "08-app-dialogs.css",
+      "responsibility": "Demand-loaded application dialogs and choices",
+      "legacyTokenSha256": "e918c0c311b88c2e81efbdf60c795854c58f1cc91afc146a3c4f6f6385164991",
+      "featureEntry": "frontend/src/dialog-controller.ts"
+    },
+    {
+      "path": "03-pdf-reader.css",
+      "responsibility": "Shared PDF page, text, link and highlight geometry",
+      "legacyTokenSha256": "438c292e7419afea2dc9402b37440462a0d3b57b44e94e874012486db002081d",
+      "featureEntry": "frontend/src/features/paper/pdf-reader.ts"
+    },
+    {
+      "path": "24-paper-preview-shell.css",
+      "responsibility": "Shared reader frame, focus dialog and status",
+      "legacyTokenSha256": "870298b08221f8009db78c210eafc0326c75faa9bcfe9a2385297ef5764ca25f",
+      "featureEntry": "frontend/src/features/paper/reader-controls.ts"
+    },
+    {
+      "path": "24-paper-preview-controls.css",
+      "responsibility": "Shared reader controls, navigation and drawer",
+      "legacyTokenSha256": "e7d407ccc8eccaf0985f587626ee3b74743b8ee46987f3aa6377ff279abcf459",
+      "featureEntry": "frontend/src/features/paper/reader-controls.ts"
+    },
+    {
+      "path": "24-paper-preview-responsive.css",
+      "responsibility": "Responsive shared reader and chat split",
+      "legacyTokenSha256": "21beae650d2aabbf9ba99fd4d1be0b0dce87aff1d3f9a0b3c7a7a4bdcf8635d9",
+      "featureEntry": "frontend/src/features/paper/reader-controls.ts"
+    },
+    {
+      "path": "24-paper-preview-sources.css",
+      "responsibility": "Read-only source tree and file display",
+      "legacyTokenSha256": "3806f4e96f93ba8dabb97310213febd1299882cc5e7f2977f9af79fba2b6b3ad",
+      "featureEntry": "frontend/src/features/paper/preview-panel.ts"
+    },
+    {
+      "path": "24-paper-preview-problems.css",
+      "responsibility": "Structured build diagnostics",
+      "legacyTokenSha256": "926af94d3022fd6b8b98b6721953cc2825730243d9f8be2f36bbae00a67ffd8e",
+      "featureEntry": "frontend/src/features/paper/preview-panel.ts"
+    },
+    {
+      "path": "24-paper-preview-layout.css",
+      "responsibility": "Page budget and layout evidence",
+      "legacyTokenSha256": "2567d2c3b55aa5e36211d2f05ac791487af1ebf65324be2c1f7b59c875a8350b",
+      "featureEntry": "frontend/src/features/paper/preview-panel.ts"
+    },
+    {
+      "path": "24-paper-preview-editor.css",
+      "responsibility": "CodeMirror source editor chrome",
+      "legacyTokenSha256": "f5a3d83eb813ba6ab85929a641a8e21a3ea4274e113dcb0bc3778779d9864ddf",
+      "featureEntry": "frontend/src/features/paper/preview-panel.ts"
+    },
+    {
+      "path": "24-paper-preview-selection.css",
+      "responsibility": "Selection action menu",
+      "legacyTokenSha256": "4f7f96a6985cca058b7ac1a6cb2315fd8ce1cc243655ccad5ec0cda0ee380757",
+      "featureEntry": "frontend/src/features/paper/preview-panel.ts"
+    },
+    {
+      "path": "24-paper-preview-error-assist.css",
+      "responsibility": "Diagnostic assistance",
+      "legacyTokenSha256": "f794709ef2cedb36c0cac210d29866df21c078226ab927d0f1eed1a0f2c4d2d5",
+      "featureEntry": "frontend/src/features/paper/preview-panel.ts"
+    },
+    {
+      "path": "24-paper-preview-proposal.css",
+      "responsibility": "Source-edit proposal review",
+      "legacyTokenSha256": "6dcba4599c671ea8e343a256e1f0a3a2ffde0fa7fae78615ca3bf55b56a085f9",
+      "featureEntry": "frontend/src/features/paper/preview-panel.ts"
+    },
+    {
+      "path": "02-inspector-shell.css",
+      "responsibility": "Demand-loaded inspector message shell and raw evidence",
+      "featureEntry": "frontend/src/features/diagnostics-presenters.ts"
+    },
+    {
+      "path": "02-inspector-structure.css",
+      "responsibility": "inspector structure",
+      "featureEntry": "frontend/src/features/diagnostics-presenters.ts"
+    },
+    {
+      "path": "02-inspector-drawer.css",
+      "responsibility": "inspector drawer",
+      "featureEntry": "frontend/src/features/diagnostics-presenters.ts"
+    },
+    {
+      "path": "02-inspector-inline.css",
+      "responsibility": "inspector inline",
+      "featureEntry": "frontend/src/features/diagnostics-presenters.ts"
+    },
+    {
+      "path": "02-inspector-responsive.css",
+      "responsibility": "inspector responsive",
+      "featureEntry": "frontend/src/features/diagnostics-presenters.ts"
+    }
+  ]
+}

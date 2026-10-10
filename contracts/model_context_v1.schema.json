@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.model-context.v1",
+  "description": "turn.context.read: one owner-scoped snapshot. Main-lane proofs exclude the unfinished target. Version 2 uses model-context revisions unaffected by declared display-only enrichment; terminal witnesses remain storage-minted. Completed-prefix continuation never substitutes for same-turn execution recovery.",
+  "$defs": {
+    "request": {
+      "type": "object", "required": ["user_id", "conversation_id", "turn_id"],
+      "properties": {
+        "user_id": {"type": "integer", "minimum": 1},
+        "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "turn_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "replay": {"type": "boolean", "default": true},
+        "after_turn_id": {"type": "string", "minLength": 1, "maxLength": 128}
+      }, "additionalProperties": false
+    },
+    "historyProof": {
+      "type": "object", "required": ["version", "count", "digest"],
+      "properties": {
+        "version": {"enum": [1, 2]},
+        "count": {"type": "integer", "minimum": 0, "maximum": 9999},
+        "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }, "additionalProperties": false
+    },
+    "result": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object", "required": ["supported"], "properties": {"supported": {"const": false}}, "additionalProperties": false},
+        {
+          "type": "object", "required": ["supported", "covered", "turns", "continuation", "historyProof", "proofEligible", "nextTurnId"],
+          "properties": {
+            "supported": {"const": true},
+            "covered": {"type": "integer", "minimum": 0, "maximum": 9999},
+            "turns": {"type": "array", "minItems": 1, "maxItems": 10000, "items": {"type": "object"}},
+            "continuation": {"type": ["object", "null"]},
+
+            "continuationStatus": {"type": "string", "enum": ["available", "checkpoint_missing", "replay_disabled", "legacy_checkpoint", "legacy_proof", "checkpoint_not_before_target", "history_changed", "terminal_changed"]},
+            "historyProof": {"$ref": "#/$defs/historyProof"},
+            "proofEligible": {"type": "boolean"},
+            "nextTurnId": {"type": ["string", "null"], "minLength": 1, "maxLength": 128}
+          }, "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "proofEncoding": "SHA-256 of ordered UTF-8 compact JSON arrays [turnId,parentTurnId,storedStatus,currentAttemptId,revision], each followed by LF; nulls preserved; no ASCII escaping. Version 1 uses projectionRevision. New proofs are version 2 and use modelContextRevision = projectionRevision minus the authority-maintained count of declared display-only settled projection updates. Genuine content/tool/identity/execution edits still advance or invalidate the proof. Legacy v1 checkpoints rebuild once; their proof must not be re-labelled as v2.",
+  "displayOnlyProjectionFields": ["timingTrace", "translation", "apiRounds", "usage", "cost", "lastRoundUsage", "activityTimeline", "modifiedFiles", "modifiedFileList", "fileChanges", "provenance", "translatedContent", "_showingTranslation", "_translateDone", "_translateFailed", "_translateModel"],
+  "displayOnlyRoundFields": ["_swarmSnapshot", "_swarm", "timingTrace", "translation", "usage"],
+  "roundProjectionLocations": ["toolRounds[*]", "segments[*]._round"],
+  "displayOnlySegmentFields": ["translatedText"],
+  "displayOnlySegmentTypes": ["text", "thinking"],
+
+  "terminalWitness": "The authority-minted terminal witness also binds currentAttemptId and modelContextRevision when revision metadata is available; genuine terminal edits, edit/revert and attempt replacement cannot resurrect stale summaries. Display-only CAS updates preserve this revision. Native private documents derive the same value before settlement publication.",
+  "displayExclusionBoundary": "Only the listed producer-owned projection locations are normalized. Protected JSON equality is type-sensitive, including boolean versus number and integer versus float. Arbitrary user/tool JSON and genuine tool content, model content, arguments, call identity, status, inbox/steering evidence and unknown fields remain protected. Projection CAS, storage revision and synchronization still advance on every display update. Translation overlays are excluded only at the declared projection and text/thinking segment roots, never recursively in tool arguments/results. Translation that replaces content remains a semantic edit. These lists generate both Python and Rust consumers.",
+  "budgets": {"maximumHeaders": 10000, "maximumContinuationBytes": 8388608, "maximumContextPageBytes": 58585088},
+  "pagination": "nextTurnId is the last complete returned Turn; send it as after_turn_id for the next owner-scoped page. The prefix proof, covered count, and continuation must remain identical across pages; callers discard and retry on mismatch. A single Turn exceeding the page budget fails loudly rather than truncating its model-visible tool history.",
+  "eligibility": "Main lane; no fresh-plan prefix restoration; text-only checkpoint without attachment references or opaque native media. Prefix restoration excludes same-turn recovery. Successful Continue may publish a fresh completed prefix only after atomic resume hydration and when the final model message exactly represents the delivered projection; unverified/unrepresented recovery stays cold. Ineligible requests rebuild; edits, deletion, reordering and policy mismatch cannot reuse a prefix."
+}

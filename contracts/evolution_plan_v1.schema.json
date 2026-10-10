@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_plan_v1.schema.json",
+  "title": "Self-evolution path plan: candidate paths with structured cost estimates and a confirmed selection",
+  "type": "object",
+  "required": ["schema_version", "plan_id", "goal_id", "plan_revision", "candidates", "selected_path_id", "selection_rationale", "requires_confirmation", "status", "created_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "plan_id": {"type": "string", "maxLength": 160},
+    "goal_id": {"type": "string", "maxLength": 160},
+    "plan_revision": {"type": "integer", "minimum": 1},
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["path_id", "title", "stages", "resource_refs", "cost_estimate", "utility_over_cost"],
+        "properties": {
+          "path_id": {"type": "string", "maxLength": 160},
+          "title": {"type": "string", "minLength": 1, "maxLength": 500},
+          "summary": {"type": "string", "maxLength": 2000},
+          "stages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "required": ["kind", "detail"],
+              "properties": {
+                "kind": {"type": "string", "maxLength": 80},
+                "detail": {"type": "string", "maxLength": 1000}
+              },
+              "additionalProperties": false
+            }
+          },
+          "resource_refs": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "required": ["ref_id", "indexer", "locator"],
+              "properties": {
+                "ref_id": {"type": "string", "maxLength": 320},
+                "indexer": {"enum": ["history", "project", "academic", "web"]},
+                "locator": {"type": "string", "maxLength": 2000},
+                "relevance": {"type": "number", "minimum": 0, "maximum": 1},
+                "provenance": {"type": "string", "maxLength": 500}
+              },
+              "additionalProperties": false
+            }
+          },
+          "cost_estimate": {
+            "type": "object",
+            "required": ["expected_tokens", "expected_wall_clock_seconds", "expected_tool_calls", "failure_rate_prior", "expected_information_gain", "expected_utility", "priors_source"],
+            "properties": {
+              "expected_tokens": {"type": "integer", "minimum": 0},
+              "expected_wall_clock_seconds": {"type": "integer", "minimum": 0},
+              "expected_tool_calls": {"type": "integer", "minimum": 0},
+              "failure_rate_prior": {"type": "number", "minimum": 0, "maximum": 1},
+              "expected_information_gain": {"type": "number", "minimum": 0, "maximum": 1},
+              "expected_utility": {"type": "number", "minimum": 0, "maximum": 1},
+              "priors_source": {"enum": ["measured_history", "domain_default", "exploratory_flat"], "description": "Provenance of every prior above; model prose estimates are not representable."}
+            },
+            "additionalProperties": false
+          },
+          "utility_over_cost": {"type": "number", "minimum": 0, "description": "Derived ranking key, stored so the selection is auditable without re-running the scorer."}
+        },
+        "additionalProperties": false
+      }
+    },
+    "selected_path_id": {"type": "string", "maxLength": 160},
+    "selection_rationale": {"type": "string", "maxLength": 2000},
+    "requires_confirmation": {"const": true, "description": "Path selection is never autonomous compute authorization."},
+    "status": {"enum": ["proposed", "confirmed", "rejected", "superseded"]},
+    "created_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

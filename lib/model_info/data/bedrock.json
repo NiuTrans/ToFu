@@ -1,0 +1,21 @@
+{
+  "brand": "bedrock",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "bedrock",
+  "category": "relay",
+  "name": "Amazon Bedrock (OpenAI-compatible)",
+  "base_url": "https://bedrock-mantle.us-west-2.api.aws/openai/v1",
+  "catalog_mode": "curated",
+  "catalog_source": {
+    "url": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-xai-grok-4-6.html",
+    "checked_at": "2026-09-08"
+  },
+  "offering_recipes": [
+    {
+      "model_id": "grok-4.6",
+      "request_ids": ["xai.grok-4.6"],
+      "capabilities": ["text", "thinking", "cheap"],
+      "context_window": 500000
+    }
+  ]
+}

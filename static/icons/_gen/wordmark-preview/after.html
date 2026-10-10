@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>字标落地实测 · 生产 CSS 直链</title>
+<!-- 直接 link 生产 styles.css,零复刻——这里渲染的就是线上真实规则 -->
+<link rel="stylesheet" href="/static/styles.css">
+<style>
+  /* 仅本页排版辅助,不参与字标判定 */
+  body{margin:0;padding:24px 18px 48px;font-family:'Inter','PingFang SC',sans-serif;background:#EDEAE2;color:#2E2822}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{font-size:12.5px;color:#6C6352;margin:0 0 18px}
+  .panel{border:1px solid #ddd6c8;border-radius:12px;margin:0 auto 14px;max-width:960px;overflow:hidden}
+  .panel .lbl{font-size:11px;padding:6px 14px;letter-spacing:.06em;opacity:.7}
+  .stage{padding:26px 14px;display:flex;align-items:center;justify-content:center;gap:16px}
+  .stage img{display:block}
+  /* 三个主题各自的底色,与真实页面背景一致 */
+  .bg-tofu{background:#F5F1E8}
+  .bg-light{background:#FFFFFF}
+  .bg-dark{background:#111115}
+</style>
+</head>
+<body>
+<h1>字标方案 A 落地实测(生产 styles.css 直链)</h1>
+<p class="sub">本页不复制任何字标规则——渲染全部来自 <code>/static/styles.css</code> 当前内容。左侧是线上同款 tofu-welcome.svg。期望:o 是 var(--brand-ink) 真字母、无方框;hover 字标仍有抖动。</p>
+
+<!-- tofu 主题:完整 welcome 结构,继承生产 42px 规则 -->
+<div class="panel" data-theme="tofu">
+  <div class="lbl bg-tofu">data-theme="tofu" · 桌面(生产 .welcome 尺寸)</div>
+  <div class="stage bg-tofu">
+    <div class="chat-container"><div class="chat-inner">
+      <div class="welcome">
+        <div class="welcome-icon"><img src="/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+        <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      </div>
+    </div></div>
+  </div>
+</div>
+
+<div class="panel" data-theme="light">
+  <div class="lbl bg-light">data-theme="light"</div>
+  <div class="stage bg-light">
+    <div class="chat-container"><div class="chat-inner">
+      <div class="welcome">
+        <div class="welcome-icon"><img src="/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+        <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      </div>
+    </div></div>
+  </div>
+</div>
+
+<div class="panel" data-theme="dark">
+  <div class="lbl bg-dark">data-theme="dark"</div>
+  <div class="stage bg-dark">
+    <div class="chat-container"><div class="chat-inner">
+      <div class="welcome">
+        <div class="welcome-icon"><img src="/static/icons/tofu-welcome.svg" alt="Tofu" width="64" height="64"></div>
+        <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      </div>
+    </div></div>
+  </div>
+</div>
+
+<div class="panel" data-theme="tofu">
+  <div class="lbl bg-tofu">data-theme="tofu" · 移动断点:把浏览器窗口拉窄到 &lt;768px,全页自动切到生产 20px 规则(下图即同一份字标)</div>
+  <div class="stage bg-tofu" style="max-width:390px;margin:0 auto">
+    <div class="chat-container"><div class="chat-inner">
+      <div class="welcome">
+        <div class="welcome-icon"><img src="/static/icons/tofu-welcome.svg" alt="Tofu" width="44" height="44"></div>
+        <h2 class="tofu-brand"><span class="tofu-brand-t">T</span><span class="tofu-brand-o1">o</span><span class="tofu-brand-f">f</span><span class="tofu-brand-u">u</span><small>豆腐</small></h2>
+      </div>
+    </div></div>
+  </div>
+</div>
+
+</body>
+</html>

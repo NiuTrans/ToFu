@@ -1,0 +1,54 @@
+{
+  "format": "tofu.task-event-delivery/v1",
+  "owner": "lib/tasks_pkg/event_delivery.py",
+  "admission": "managed-root-executor-after-physical-worker-entry",
+  "authority": "configured-storage-backend-only",
+  "ordering": "one-fifo-per-task-with-fair-ready-lanes",
+  "pendingOwnership": "accepted-items-retained-through-commit-or-proven-authority-revocation",
+
+  "publicationTransfer": "producer-child-fence-checked-atomically-at-root-fifo-acceptance-receiver-attempt-CAS-authority-afterward",
+  "snapshot": "detached-projection-inputs-rebased-against-committed-revision",
+  "progressStructure": "shared-only-with-detached-pending-predecessor",
+  "visibility": "commit-before-push-and-hot-replay-exclusive-cursor",
+  "barriers": {
+    "terminal": "registered-task-replay-terminal-types",
+    "interaction": "registered-response-requiring-events",
+    "backgroundCommandReceipt": "commit-before-consumption-acknowledgement",
+    "forcedCheckpoint": "explicit-forced-durability-only-sampled-round-diagnostics-queue-without-drain"
+  },
+  "capacity": {
+    "workers": "shared-demand-executor-TOFU_AGENT_WORKERS-idle-reuse-hint",
+    "itemsAndBytes": "observed-owned-residency-without-admission-quota",
+    "inFlight": "charged-until-callback-completion",
+    "overflow": "accept-immediately-independent-lanes-start-on-demand",
+    "idle": "retire-workers-and-release-detached-projection-cache",
+    "sharedStructure": "charge-once-until-last-queued-or-inflight-reference"
+  },
+  "failure": {
+    "transient": "bounded-retry-through-shared-storage-classifier",
+    "failedHead": "retain-and-block-follower-persistence-until-explicit-repair",
+    "transientAdmission": "continue-accepting-owned-memory-events-after-transient-retry-exhaustion-without-clearing-failed-head",
+    "failedBatch": "freeze-first-persistence-shape-through-ambiguous-ack-repair",
+    "staleAttempt": "revoke-publication-and-release-uncommitted-tail",
+    "terminalTimeout": "retain-exact-carrier-under-existing-terminal-maintenance-fence",
+    "pushObserver": "cannot-undo-commit-or-trigger-duplicate-persistence",
+    "providerFallback": "local-delivery-errors-propagate-with-original-cause-without-provider-retry"
+  },
+  "providerBoundary": "receipt-only-no-task-fifo-drain",
+  "shutdown": "stop-admission-and-drain-before-push-and-storage-close",
+  "otherCompositions": "birth-adopters-flow-and-child-publication-ports-retain-own-durability-boundaries",
+  "restart": "recover-from-selected-authority-committed-frontier-never-treat-memory-admission-as-durable",
+  "metrics": "tofu_task_event_delivery_*",
+  "guard": "tests/tasks_pkg/test_task_event_delivery.py",
+  "compositionHandoff": "drain-before-retarget-and-disable-root-lane-for-carrier",
+  "progressBatch": {
+    "maxFrames": 500,
+    "maxWireBytes": 1048576,
+    "eligibility": "consecutive-progress-with-identical-detached-structure-and-task-attempt",
+    "replacement": "latest-projection-only-all-canonical-frames-retained",
+    "commit": "one-turn-event-record-transaction-for-prefix-and-last-frame",
+    "acknowledgement": "exact-task-event-count-before-visibility",
+    "ownership": "queued-batches-plus-inflight-callbacks-telemetry-never-admission"
+  },
+  "generator": "scripts/gen_task_event_delivery_contract.py"
+}

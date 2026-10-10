@@ -1,0 +1,19 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "conversationId": "s",
+  "count": 1,
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "items": [],
+  "requestId": "s",
+  "seq": 1,
+  "taskId": "s",
+  "toolsAvailable": true,
+  "turnRole": "s",
+  "type": "related_conversations",
+  "vuMsgId": "s"
+}

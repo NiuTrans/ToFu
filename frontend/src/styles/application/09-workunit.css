@@ -1,0 +1,224 @@
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WorkUnit live region (docs/contracts/API_CONTRACT.md §2.18)
+   Hydrated in place by ui/workunit_tracker.js inside a produce_* card:
+   a stage stepper (done/active/skipped/failed/pending) plus ONE terminal
+   outcome line — download links for done/degraded, the failure envelope for
+   failed. The header badge speaks the same lifecycle enum via
+   .ptool-wu-badge-*.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.ptool-wu-live:empty { display: none; }
+.ptool-wu-stages {
+  margin: 2px var(--space-2) var(--space-2) var(--space-6);
+  padding: 6px 10px;
+  border: 1px solid var(--border-color, rgba(128,128,128,0.22));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, currentColor 2.5%, transparent);
+}
+.ptool-wu-stage {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+.ptool-wu-stage-icon { flex: none; display: inline-flex; width: 14px; justify-content: center; }
+.ptool-wu-stage-name { font-family: var(--font-mono, ui-monospace, monospace); font-size: var(--font-size-xs); }
+.ptool-wu-stage-done .ptool-wu-stage-icon { color: #22c55e; }
+.ptool-wu-stage-done .ptool-wu-stage-name { color: var(--text-primary); }
+.ptool-wu-stage-active .ptool-wu-stage-name { color: var(--accent, #3b82f6); font-weight: 600; }
+.ptool-wu-stage-failed .ptool-wu-stage-icon,
+.ptool-wu-stage-failed .ptool-wu-stage-name { color: #ef4444; }
+.ptool-wu-stage-skipped { opacity: 0.55; }
+.ptool-wu-stage-pending { opacity: 0.4; }
+.ptool-wu-attempt {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 6px;
+  border-radius: 7px;
+  color: #f59e0b;
+  background: rgba(245,158,11,0.13);
+}
+.ptool-wu-elapsed { font-size: 10.5px; opacity: 0.7; font-variant-numeric: tabular-nums; }
+.ptool-wu-stage-err {
+  font-size: 10.5px;
+  color: #ef4444;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.ptool-wu-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 var(--space-2) var(--space-2) var(--space-6);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+.ptool-wu-line-ok { color: #22c55e; }
+.ptool-wu-line-warn { color: #f59e0b; }
+.ptool-wu-line-err { color: #ef4444; }
+.ptool-wu-line-muted { color: var(--text-secondary); font-weight: 500; }
+.ptool-wu-line-note { font-weight: 400; color: var(--text-secondary); }
+.ptool-wu-hint {
+  margin: -4px var(--space-2) var(--space-2) 44px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.ptool-wu-download {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(34,197,94,0.4);
+  background: rgba(34,197,94,0.1);
+  color: #16a34a;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ptool-wu-download:hover { background: rgba(34,197,94,0.18); }
+/* Header badge: the WorkUnit lifecycle enum (static — no blink; a terminal
+ * state must not pulse, and a running one already has the stage spinner). */
+.ptool-wu-badge-queued,
+.ptool-wu-badge-running {
+  color: var(--accent, #3b82f6);
+  background: color-mix(in srgb, var(--accent, #3b82f6) 13%, transparent);
+}
+.ptool-wu-badge-retrying {
+  color: #f59e0b;
+  background: rgba(245,158,11,0.15);
+}
+.ptool-wu-badge-done {
+  color: #22c55e;
+  background: rgba(34,197,94,0.14);
+}
+.ptool-wu-badge-degraded {
+  color: #f59e0b;
+  background: rgba(245,158,11,0.15);
+}
+.ptool-wu-badge-failed {
+  color: #ef4444;
+  background: rgba(239,68,68,0.13);
+}
+.ptool-wu-badge-aborted {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+/* Streaming page gallery: thumbnails arrive as page_rendered events project
+ * into the workUnit; pending slots (live units only) reserve the grid so the
+ * card does not jump when a page lands. 16:9-ish cells at a fixed track keep
+ * one DOM write per snapshot — the fingerprint gate already skips unchanged
+ * polls. */
+.ptool-wu-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: var(--space-2);
+  margin: 2px var(--space-2) var(--space-2) var(--space-6);
+}
+.ptool-wu-thumb {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--border-color, rgba(128,128,128,0.22));
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+}
+.ptool-wu-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.ptool-wu-thumb-n {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: rgba(0,0,0,0.55);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.ptool-wu-thumb-pending {
+  border-style: dashed;
+  opacity: 0.45;
+}
+.ptool-wu-thumb-pending .ptool-wu-thumb-n {
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  color: var(--text-secondary);
+}
+/* Quick-action chips (C2) + motion scene grid (B4): terminal-card revision
+ * affordances. Chips send/prefill composer instructions; scene rows offer
+ * per-scene regen + edit-prefill without leaving the conversation. */
+.ptool-wu-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 var(--space-2) var(--space-2) var(--space-6);
+}
+.ptool-wu-chip {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color, rgba(128,128,128,0.3));
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.ptool-wu-chip:hover {
+  color: var(--accent, #3b82f6);
+  border-color: color-mix(in srgb, var(--accent, #3b82f6) 45%, transparent);
+  background: color-mix(in srgb, var(--accent, #3b82f6) 8%, transparent);
+}
+.ptool-wu-scenes {
+  margin: 0 var(--space-2) var(--space-2) var(--space-6);
+  border: 1px solid var(--border-color, rgba(128,128,128,0.22));
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.ptool-wu-scene {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 10px;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+}
+.ptool-wu-scene + .ptool-wu-scene {
+  border-top: 1px solid color-mix(in srgb, currentColor 7%, transparent);
+}
+.ptool-wu-scene-missing .ptool-wu-scene-id { color: #f59e0b; }
+.ptool-wu-scene-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+}
+.ptool-wu-scene-dur { opacity: 0.7; margin-left: auto; }
+.ptool-wu-scene-btn {
+  padding: 1px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border-color, rgba(128,128,128,0.3));
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ptool-wu-scene-btn:hover:not(:disabled) {
+  color: var(--accent, #3b82f6);
+  border-color: color-mix(in srgb, var(--accent, #3b82f6) 45%, transparent);
+}
+.ptool-wu-scene-btn:disabled { opacity: 0.45; cursor: default; }

@@ -1,0 +1,35 @@
+
+
+/* ── Frontend-stability hardening: native scroll anchoring + reserved media ──
+ * Root-cause primitives for the "read position lost / jumps" class. (Relocated
+ * from 19-project-brain.css, where they were stranded, 2026-09.) */
+
+/* Native browser scroll anchoring (overflow-anchor:auto is the default, but we
+ * declare it EXPLICITLY so it survives any future reset and documents intent):
+ * when content grows/reflows ABOVE the current viewport — streaming deltas,
+ * late-landing cost/finish bars, lazy-loaded older messages — the browser keeps
+ * the reader's visual position fixed instead of the content shoving down/up.
+ * This is the single highest-leverage stability primitive and needs no JS. */
+#chatContainer{overflow-anchor:auto}
+#chatInner{overflow-anchor:auto}
+#chatInner .message{overflow-anchor:auto}
+/* The live streaming bubble is the ONE element that SHOULD ride the bottom as it
+ * grows; exclude it from anchoring so its growth doesn't fight stick-to-bottom. */
+#streaming-msg{overflow-anchor:none}
+
+/* Reserved box for bare markdown-rendered chat images (the .message-body img
+ * fallback — NOT the fixed-size upload thumbnails or the image-gen cards, which
+ * already reserve space). Without a reserved aspect box a late image decode
+ * grows the bubble and shoves content under the reader mid-read. aspect-ratio +
+ * object-fit:contain reserves the height up-front without distorting the image
+ * (letterboxed within the box); it never enlarges an intrinsically small image
+ * because width is still bounded by the image's natural size + the max-width. */
+.message-body img:not(.msg-img-thumb img, .ig-result-card img, .imagegen-card img, .ig-batch-slot img, .rf-img-tile img){aspect-ratio:3 / 2;height:auto;object-fit:contain}
+
+/* Known-stale cache paint: while a background server GET verifies a cached copy
+ * we ALREADY know is outdated (the sidebar's server-issued updatedAt is newer
+ * than the cached updatedAt), mark the provisional paint visibly pending so the
+ * transient pre-correction content reads as "verifying", not as truth. Cleared
+ * the moment Phase-2 reconciles (or the fetch settles). Persisted corruption is
+ * already prevented by the rev CAS; this only closes the cosmetic stale flash. */
+#chatInner.chat-cache-verifying{opacity:.82;transition:opacity .18s ease}

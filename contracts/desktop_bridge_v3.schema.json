@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.desktop-bridge/v3",
+  "title": "Negotiated desktop bridge admission and replay lifetime",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "server_time",
+    "commands"
+  ],
+  "properties": {
+    "protocol_version": {
+      "const": 3
+    },
+    "server_time": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "commands": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/Command"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Command": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "params",
+        "target_agent_id",
+        "expires_at"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "type": "object"
+        },
+        "target_agent_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expires_at": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentRegistration": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "protocol_version",
+        "execution_slots",
+        "active_command_ids"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "protocol_version": {
+          "const": 3
+        },
+        "execution_slots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active_command_ids": {
+          "type": "array",
+          "maxItems": 65536,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "x-protocol-version": 3,
+  "x-resource-limits": {
+    "command_batch": 256,
+    "legacy_execution_ids": 65536,
+    "execution_ids_per_worker": 4096,
+    "memory_mb_per_worker": 1024,
+    "result_items_floor": 512,
+    "stream_items_floor": 256,
+    "result_bytes_floor": 16777216,
+    "stream_bytes_floor": 2097152,
+    "command_pickup_seconds": 90
+  },
+  "x-semantics": {
+    "negotiation": "Agent advertises protocol_version=3. Missing version selects legacy v2; explicit unsupported versions fail with 426 before registration or acknowledgement. Once v3 is observed, the agent refuses downgrade within that connection run.",
+    "expiry": "expires_at is the original server creation time plus pickup TTL, never extended by redelivery. Server_time anchors a monotonic agent clock; expired commands never execute even after their replay record is reclaimed. The agent conservatively charges request elapsed time when anchoring the clock so a delayed first response cannot execute expired work; extremely short pickup TTLs may be refused early.",
+    "replay": "Keep running and unacknowledged IDs. Reclaim only expired finite-deadline IDs after completion and acknowledgement. Legacy IDs remain pinned until restart without changing legacy demand-driven admission. This is process-local deduplication, not durable exactly-once execution.",
+    "flow_control": "Agent reports execution_slots on every poll. Server delivers no more normal work than those slots, counting claimed nonterminal work; cancellation bypasses execution slots. Every response stays within command_batch. Resident outboxes scale independently; wire prefixes and per-frame limits retain the result/stream floors. Uploads with output acknowledge without long-poll delay, and the agent drains a remaining prefix immediately. Slots are resource-derived advisory server delivery credits; the agent does not reject already-issued work for a local worker quota. Memory overflow spools privately, preserving output until acknowledgement or joined shutdown.",
+    "authority": "The authenticated server owner and device claim remain the settlement authority. The agent independently validates target_agent_id before acknowledging a batch or dispatching controls. Credentials never authorize a discovered route."
+  }
+}

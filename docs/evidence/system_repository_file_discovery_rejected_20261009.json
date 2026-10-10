@@ -1,0 +1,877 @@
+{
+  "format": "tofu.system-performance.experiment/v1",
+  "scope": "Conservative uncached repository Git discovery through actual transient public-tool publication.",
+  "problem": "Non-Git scans launch Git before falling back to rg; private discovery avoids that failed subprocess without caching negative decisions.",
+  "decision": "Withdraw production candidate: formalv1 retains RSS and Git-tail guard failures; allocationv2 has scoped cold-task gains but no complete repaired admission. Common audit/intern/allocator growth diagnostics do not waive historical failures. Advance separately measured task-affinity cold-start path.",
+  "alternatives_considered": [
+    "Keep existing Git/rg/walk discovery: current admitted default.",
+    "Uncached preflight and bounded negative-to-positive retry: exactmembership tests and lower plain-directory latency, but incompleteperformance admission.",
+    "Move inert environment policy to immutable module constant and eliminate nestedgenerator: exactbehavior, cold cohort passes timing but RSS differential remains.",
+    "Settle owned audit work and isolate log directories: correct measurement boundary under investigation; no productionGC or allocatorpolicy changed."
+  ],
+  "production_promoted": false,
+  "whole_system_admission": false,
+  "functional_tests_passed": 56,
+  "formal_v1": {
+    "latency_observations": 6000,
+    "independent_latency_memory_processes": 120,
+    "artifact_archive": "/tmp/tofu-system-perf-snapshot/repo-file-discovery-v1-formal-archive",
+    "verdicts": {
+      "plain": {
+        "format": "tofu.system-performance-verdict/v1",
+        "verdict": "regression",
+        "coverage": {
+          "measured": 5,
+          "required": 30
+        },
+        "issues": [
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "append_only_history"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "compaction"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "edited_history"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "multimodal"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "provider_projection"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "append"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "bounded_replay"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "concurrent_producers"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "durability_failure"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "reconnect"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "authentication"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "cancellation"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "short_requests"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "slow_consumer"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "sse_fanout"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "batch"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "bounded_memory"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "cancellation"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "html"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "pdf"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "selection_and_scroll"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "streaming_code"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "streaming_prose"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "tables_and_references"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "terminal_render"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "regression",
+            "case": [
+              "repository",
+              "cold_scan"
+            ],
+            "metric": "retained_bytes",
+            "ratios": [
+              "unbounded",
+              "unbounded",
+              1.0
+            ]
+          },
+          {
+            "kind": "regression",
+            "case": [
+              "repository",
+              "ranking"
+            ],
+            "metric": "retained_bytes",
+            "ratios": [
+              1.375,
+              1.346938775510204,
+              1.5
+            ]
+          }
+        ],
+        "improvements": [
+          {
+            "case": [
+              "repository",
+              "cold_scan"
+            ],
+            "metric": "p50_ms",
+            "ratios": [
+              0.7679759719680717,
+              0.7866228919238155,
+              0.7836365238463417
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "cold_scan"
+            ],
+            "metric": "p95_ms",
+            "ratios": [
+              0.7654898026079692,
+              0.7714057307815447,
+              0.7623298349431882
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "cold_scan"
+            ],
+            "metric": "p99_ms",
+            "ratios": [
+              0.8197767643506012,
+              0.7515370652481829,
+              0.7790352139533386
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "cold_scan"
+            ],
+            "metric": "throughput_per_second",
+            "ratios": [
+              1.3022165530065328,
+              1.2971922307169155,
+              1.2861621788592963
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "incremental_edit"
+            ],
+            "metric": "p50_ms",
+            "ratios": [
+              0.764837920098522,
+              0.7888012795265001,
+              0.7835535422141419
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "incremental_edit"
+            ],
+            "metric": "p95_ms",
+            "ratios": [
+              0.7430381940035103,
+              0.7806772855648512,
+              0.7737307775512786
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "incremental_edit"
+            ],
+            "metric": "p99_ms",
+            "ratios": [
+              0.748270308151949,
+              0.7948126986748758,
+              0.7918283303630401
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "incremental_edit"
+            ],
+            "metric": "throughput_per_second",
+            "ratios": [
+              1.3128038592944753,
+              1.2707299086455783,
+              1.2767658032836058
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "multilingual_extraction"
+            ],
+            "metric": "p50_ms",
+            "ratios": [
+              0.7786003109124624,
+              0.7819930994701232,
+              0.7837685844123381
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "multilingual_extraction"
+            ],
+            "metric": "p95_ms",
+            "ratios": [
+              0.7689701416665288,
+              0.8004158786021848,
+              0.8060610741234744
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "multilingual_extraction"
+            ],
+            "metric": "p99_ms",
+            "ratios": [
+              0.7087211867607623,
+              0.8141712218459664,
+              0.8016733639301962
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "multilingual_extraction"
+            ],
+            "metric": "throughput_per_second",
+            "ratios": [
+              1.2903777495497601,
+              1.267255605577532,
+              1.2698102143491299
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "python_extraction"
+            ],
+            "metric": "p50_ms",
+            "ratios": [
+              0.7251563098812152,
+              0.7319288673863951,
+              0.7476828486935827
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "python_extraction"
+            ],
+            "metric": "p95_ms",
+            "ratios": [
+              0.7243491802881681,
+              0.7562566207394068,
+              0.747795625439089
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "python_extraction"
+            ],
+            "metric": "p99_ms",
+            "ratios": [
+              0.7198305005717712,
+              0.7752270391708059,
+              0.7677621036112529
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "python_extraction"
+            ],
+            "metric": "throughput_per_second",
+            "ratios": [
+              1.3789915010190041,
+              1.3662842840691645,
+              1.3537660947799481
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "python_extraction"
+            ],
+            "metric": "retained_bytes",
+            "ratios": [
+              0.5689655172413793,
+              0.584070796460177,
+              0.616822429906542
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "ranking"
+            ],
+            "metric": "p50_ms",
+            "ratios": [
+              0.8307877260585325,
+              0.8420909003130375,
+              0.8379071600037211
+            ]
+          },
+          {
+            "case": [
+              "repository",
+              "ranking"
+            ],
+            "metric": "throughput_per_second",
+            "ratios": [
+              1.18997133081908,
+              1.1831392917453307,
+              1.194550017494318
+            ]
+          }
+        ]
+      },
+      "git": {
+        "format": "tofu.system-performance-verdict/v1",
+        "verdict": "regression",
+        "coverage": {
+          "measured": 5,
+          "required": 30
+        },
+        "issues": [
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "append_only_history"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "compaction"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "edited_history"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "multimodal"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "context",
+              "provider_projection"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "append"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "bounded_replay"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "concurrent_producers"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "durability_failure"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "events",
+              "reconnect"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "authentication"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "cancellation"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "short_requests"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "slow_consumer"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "http",
+              "sse_fanout"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "batch"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "bounded_memory"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "cancellation"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "html"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "ingest",
+              "pdf"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "selection_and_scroll"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "streaming_code"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "streaming_prose"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "tables_and_references"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "incomplete",
+            "case": [
+              "markdown",
+              "terminal_render"
+            ],
+            "reason": "missing comparison"
+          },
+          {
+            "kind": "regression",
+            "case": [
+              "repository",
+              "python_extraction"
+            ],
+            "metric": "p95_ms",
+            "ratios": [
+              0.9825668239659903,
+              0.9954218412710852,
+              1.0933482168566515
+            ]
+          },
+          {
+            "kind": "regression",
+            "case": [
+              "repository",
+              "python_extraction"
+            ],
+            "metric": "p99_ms",
+            "ratios": [
+              0.8244085628845134,
+              1.018360651606242,
+              1.120701726288488
+            ]
+          },
+          {
+            "kind": "regression",
+            "case": [
+              "repository",
+              "python_extraction"
+            ],
+            "metric": "cpu_ms_per_operation",
+            "ratios": [
+              0.9995520735666829,
+              0.9859267511236843,
+              1.050108415535552
+            ]
+          },
+          {
+            "kind": "regression",
+            "case": [
+              "repository",
+              "ranking"
+            ],
+            "metric": "p99_ms",
+            "ratios": [
+              1.0380401816172293,
+              1.0626964266408299,
+              0.8413346162036862
+            ]
+          },
+          {
+            "kind": "regression",
+            "case": [
+              "repository",
+              "ranking"
+            ],
+            "metric": "retained_bytes",
+            "ratios": [
+              "unbounded",
+              0.0,
+              0.9152542372881356
+            ]
+          }
+        ],
+        "improvements": []
+      }
+    }
+  },
+  "v2_cold_cohort": {
+    "raw_quantiles_source_and_outputs_verified": true,
+    "latency_observations": 600,
+    "independent_latency_memory_processes": 12,
+    "ratios": [
+      {
+        "p50_ms": 0.7996195681193662,
+        "p95_ms": 0.8230046971702761,
+        "p99_ms": 0.8817242288559078,
+        "cpu_ms_per_operation": 1.0062699049274881
+      },
+      {
+        "p50_ms": 0.7943046631960036,
+        "p95_ms": 0.7827461051944131,
+        "p99_ms": 0.7807853578726475,
+        "cpu_ms_per_operation": 0.9860093240956457
+      },
+      {
+        "p50_ms": 0.7842893253910296,
+        "p95_ms": 0.7576472006488969,
+        "p99_ms": 0.7723436770946741,
+        "cpu_ms_per_operation": 0.9711550383526382
+      }
+    ],
+    "retained_memory_guard_failure_persists": true,
+    "whole_system_admission": false
+  },
+  "memory_initial_diagnosis": {
+    "aa_reference_only_processes": 6,
+    "observer_attribution_processes": 12,
+    "unique_processes": 18,
+    "output_traces_equal": true,
+    "reference_aa_also_has_zero_vs270336_rss_delta": true,
+    "observer_drop_did_not_reclaim_positive_rss": true,
+    "malloc_trim_increased_rss_all_workers": true,
+    "allocator_attribution_inconclusive": true,
+    "production_promoted": false,
+    "whole_system_admission": false
+  },
+  "long_cohorts": {
+    "independent_processes": 2,
+    "operations_per_arm": 1000,
+    "ten_post_gc_cohorts": true,
+    "exact_output_trace": true,
+    "source_sha256": "1f2dc8ee7debeecd45ffc1b649b9d246ef7bd8d535325dce2b20e0aefd5cdd2e",
+    "reference_growth_bytes": [
+      0,
+      262144,
+      262144,
+      262144,
+      1204224,
+      1204224,
+      1204224,
+      1204224,
+      1204224,
+      1204224
+    ],
+    "candidate_growth_bytes": [
+      0,
+      258048,
+      258048,
+      258048,
+      1200128,
+      1200128,
+      1200128,
+      1200128,
+      1200128,
+      1200128
+    ],
+    "last_five_cohorts_flat_both_arms": true,
+    "whole_system_admission": false,
+    "limits": [
+      "single paired corpus,diagnosticGC between cohorts;not absence-of-leak or admission proof"
+    ]
+  },
+  "traced_live_diagnosis": {
+    "complete": true,
+    "operations": 2000,
+    "independent_processes": 2,
+    "exact_trace": true,
+    "source_sha256": "1f2dc8ee7debeecd45ffc1b649b9d246ef7bd8d535325dce2b20e0aefd5cdd2e",
+    "python_live_growth_bytes": {
+      "reference": 1943525,
+      "candidate": 1945435
+    },
+    "pathlib_intern_site_growth_bytes": {
+      "reference": 1922192,
+      "candidate": 1922192
+    },
+    "allocator_prewarmed_diagnostic_only": true,
+    "whole_system_admission": false,
+    "limits": [
+      "instrumentedRSS cannot replace uninstrumentedguard",
+      "pathlib intern site attribution needs caller traceback before product conclusion"
+    ]
+  },
+  "live_stack_site": "audit writer -> audit rotation -> pathlib._parse_path -> sys.intern; positivegrowth1922360bytes,countdelta0 in reference-only traced1000task fixture",
+  "owned_audit_settling_diagnosis": {
+    "complete": true,
+    "pendingqueue_is_part_of_cleanup": true,
+    "no_admission_override": true
+  },
+  "source_archive": {
+    "path": "/tmp/tofu-system-perf-snapshot/repo-file-discovery-rejected-complete",
+    "manifest_sha256": "3358b3051fce3a406e479bdcfcb30ee3573dda922256f597b34c17552c0f11f7"
+  },
+  "limits": [
+    "Task-recreation cold cohort excludes freshinterpreter/commonimports/firstnativeactivation.",
+    "TracemallocRSS,percohortGC and malloc_trim interventions are diagnostics; no productionpolicy adoption.",
+    "Reference-onlyAA also has zero/270336bytegrowth; no absence-of-leak or causalcandidate regression claim.",
+    "Original benchmarkcleanup did not fence auditqueue; future repaired measurements need new rawsource/runtime identities and full coverage.",
+    "No HTTP,durablechat,liveinference,scaledconcurrency or whole-system proof."
+  ]
+}

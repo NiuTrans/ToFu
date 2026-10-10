@@ -1,0 +1,46 @@
+{
+  "package": "quickjs-wasi",
+  "version": "3.6.2",
+  "source": "https://github.com/vercel-labs/quickjs-wasi",
+  "archive": "https://registry.npmjs.org/quickjs-wasi/-/quickjs-wasi-3.6.2.tgz",
+  "archiveIntegrity": "sha512-FCqGtGOrMgzUiIrMNMA2YnsOxCNwo31dzqXvclXUC6xeT35NJLKXQJsvbeCTjvoFAwZgEAPg8U6+KAPDGXn8Mg==",
+  "wasmSha256": "d4c9375f2b1ca4dc95f72c8aa2982a7a9951ac8011490d79c6582df732b4bbd9",
+  "wasmBytes": 637405,
+  "pythonRuntime": "wasmtime==49.0.0",
+  "upstreamCommit": "5a7a0eeda87c99542f8cf3095b6d61ecfa755977",
+  "quickjsNgCommit": "6d46d07d04041b40f4f49eaa7fdebe44c314c699",
+  "licenseSources": {
+    "quickjs-ng.LICENSE": {
+      "url": "https://raw.githubusercontent.com/quickjs-ng/quickjs/6d46d07d04041b40f4f49eaa7fdebe44c314c699/LICENSE",
+      "sha256": "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171"
+    },
+    "wasi-libc.LICENSE": {
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/165235bc467d5fa52d424f5d82587dfb76ed9d54/LICENSE",
+      "sha256": "2711a8b5a5cdfef0e639f96c1aca12ae23d7d64a02d0507f1bdf14d2b27bbc3a"
+    },
+    "wasi-libc-mit.LICENSE": {
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/165235bc467d5fa52d424f5d82587dfb76ed9d54/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+    },
+    "wasi-libc-apache.LICENSE": {
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/165235bc467d5fa52d424f5d82587dfb76ed9d54/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    },
+    "wasi-libc-llvm.LICENSE": {
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/165235bc467d5fa52d424f5d82587dfb76ed9d54/LICENSE-APACHE-LLVM",
+      "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+    },
+    "wasi-libc-musl.LICENSE": {
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/165235bc467d5fa52d424f5d82587dfb76ed9d54/libc-top-half/musl/COPYRIGHT",
+      "sha256": "b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b"
+    },
+    "wasi-libc-cloudlibc.LICENSE": {
+      "url": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/165235bc467d5fa52d424f5d82587dfb76ed9d54/libc-bottom-half/cloudlibc/LICENSE",
+      "sha256": "c8b789cf5a746611e6300a0cc7750dbf92b61912a709d04e639245f7290656d0"
+    },
+    "compiler-rt.LICENSE": {
+      "url": "https://raw.githubusercontent.com/llvm/llvm-project/758aa4a9246f29af8576fde6f7e8ce9a0317e13b/compiler-rt/LICENSE.TXT",
+      "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d"
+    }
+  }
+}

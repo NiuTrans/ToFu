@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="tofu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>App Scaffold · Tofu UI Kit</title>
+<!--
+  ════════════════════════════════════════════════════════════════════
+  新项目脚手架(docs/DESIGN_SYSTEM.md · .agents/skills/tofu-design-system)
+  复制本文件开始任何新页面/新项目,然后:
+  ① 换品牌 = 只改 00-design-tokens.css 的主题值,本文件零改动;
+  ② 交互控件全部改由 frontend/src/ui/ 工厂创建(见底部 script);
+  ③ 间距只出现 var(--space-*),颜色只出现 var(--*) 令牌;
+  ④ 本文件只消费 static/styles.css,主题切换零几何漂移。
+  ════════════════════════════════════════════════════════════════════
+-->
+<link rel="stylesheet" href="../../frontend/src/styles/fonts.css">
+<link rel="stylesheet" href="../../static/styles.css">
+<style>
+  /* 脚手架自身骨架:仅用令牌,不含任何业务样式 */
+  body{height:auto;overflow:auto;display:block;background:var(--bg-primary)}
+  .shell{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+  .side{border-right:1px solid var(--border);background:var(--bg-secondary);
+    padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-4)}
+  .brand{display:flex;align-items:center;gap:var(--space-2);
+    font-family:var(--font-ui);font-weight:var(--weight-bold);font-size:var(--font-size-xl)}
+  .brand-dot{width:var(--space-3);height:var(--space-3);border-radius:50%;background:var(--accent)}
+  .nav{display:flex;flex-direction:column;gap:var(--space-1)}
+  .nav a{display:flex;align-items:center;height:var(--control-h-md);
+    padding:0 var(--space-3);border-radius:var(--radius-sm);
+    color:var(--text-secondary);text-decoration:none;
+    font-family:var(--font-ui);font-size:var(--font-size-md)}
+  .nav a:hover{background:var(--bg-hover);color:var(--text-primary)}
+  .nav a.active{background:var(--accent-subtle);color:var(--accent);font-weight:var(--weight-semibold)}
+  .side-foot{margin-top:auto;color:var(--text-tertiary);font-size:var(--font-size-sm)}
+  .main{padding:var(--space-6);display:flex;flex-direction:column;gap:var(--space-5)}
+  .page-title{font-family:var(--font-ui);font-size:var(--font-size-3xl);
+    font-weight:var(--weight-bold);color:var(--text-primary);margin:0}
+  .stat-num{font-family:var(--font-ui);font-size:var(--font-size-4xl);
+    font-weight:var(--weight-bold);color:var(--text-primary)}
+  @media (max-width:720px){.shell{grid-template-columns:1fr}.side{display:none}}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ① 侧边栏:品牌 + 导航(ui-stack 节奏) -->
+  <aside class="side">
+    <div class="brand"><span class="brand-dot"></span><span>译界工作台</span></div>
+    <nav class="nav">
+      <a href="#" class="active">项目总览</a>
+      <a href="#">翻译任务</a>
+      <a href="#">术语库</a>
+      <a href="#">Agent 运行</a>
+      <a href="#">设置</a>
+    </nav>
+    <div class="side-foot">v0.1 · 设计系统驱动</div>
+  </aside>
+
+  <!-- ② 主区:工具栏 + 内容 -->
+  <main class="main">
+    <div class="ui-row ui-row--between ui-row--wrap">
+      <h1 class="page-title">项目总览</h1>
+      <!-- 工具栏:所有控件同一高度标尺,天然对齐 -->
+      <div class="ui-toolbar" id="scaffold-actions">
+        <span class="ui-badge ui-badge--success">同步正常</span>
+        <button class="ui-btn ui-btn--ghost">导出</button>
+        <button class="ui-btn ui-btn--primary" id="scaffold-new">新建翻译任务</button>
+      </div>
+    </div>
+
+    <div class="ui-alert ui-alert--info">
+      <div class="ui-alert__title">欢迎使用脚手架</div>
+      本页全部控件来自 tofu-ui 组件工厂与设计令牌;新增共享控件请先登记到组件画廊。
+    </div>
+
+    <!-- 指标卡:ui-grid 自适应 -->
+    <div class="ui-grid" style="--ui-grid-min:180px">
+      <div class="ui-card ui-stack ui-stack--tight">
+        <span class="ui-badge">本月词条</span>
+        <span class="stat-num">12,408</span>
+      </div>
+      <div class="ui-card ui-stack ui-stack--tight">
+        <span class="ui-badge ui-badge--info">进行中任务</span>
+        <span class="stat-num">3</span>
+      </div>
+      <div class="ui-card ui-stack ui-stack--tight">
+        <span class="ui-badge ui-badge--warning">待校对</span>
+        <span class="stat-num">7</span>
+      </div>
+    </div>
+
+    <div class="ui-card ui-stack">
+      <div class="ui-row ui-row--between">
+        <strong>最近任务</strong>
+        <span id="scaffold-filter"></span>
+      </div>
+      <table class="ui-table">
+        <thead><tr><th>任务</th><th>语言对</th><th>进度</th><th class="ui-table__cell--num">词条</th><th>状态</th></tr></thead>
+        <tbody id="scaffold-tasks"></tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+/* ③ 交互:全部由 frontend/src/ui 工厂构建(ui-kit.bundle.js 由
+     designs/ui-gallery/capture.py 或 verify.py 生成) */
+import * as ui from './ui-kit.bundle.js';
+
+document.getElementById('scaffold-new').addEventListener('click', () => {
+  const dialog = ui.createDialog({
+    title: '新建翻译任务',
+    body: '选择源文件与目标语言后,Agent 将自动拆分并翻译。',
+    actions: [
+      { id: 'cancel', label: '取消' },
+      { id: 'create', label: '创建任务', variant: 'primary' },
+    ],
+  });
+  document.body.appendChild(dialog.el);
+  dialog.open().then((id) => {
+    if (id === 'create') ui.toast('任务已创建,Agent 开始执行', { variant: 'success' });
+  });
+});
+
+const tasks = [
+  ['用户手册本地化', 'EN → 中文', 100, 1204, 'success', '已完成'],
+  ['API 文档翻译', 'EN → 日本語', 71, 856, 'info', '进行中'],
+  ['营销落地页', '中文 → Français', 8, 92, 'warning', '待校对'],
+];
+const tbody = document.getElementById('scaffold-tasks');
+for (const [name, pair, pct, words, variant, label] of tasks) {
+  const tr = document.createElement('tr');
+  const progress = ui.createProgress({ value: pct });
+  tr.innerHTML = `<td></td><td></td><td></td><td class="ui-table__cell--num"></td><td></td>`;
+  tr.children[0].textContent = name;
+  tr.children[1].textContent = pair;
+  tr.children[2].appendChild(progress.el);
+  tr.children[3].textContent = words.toLocaleString();
+  const badge = document.createElement('span');
+  badge.className = `ui-badge ui-badge--${variant}`;
+  badge.textContent = label;
+  tr.children[4].appendChild(badge);
+  tbody.appendChild(tr);
+}
+</script>
+</body>
+</html>

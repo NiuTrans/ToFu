@@ -1,0 +1,381 @@
+{
+  "format": "tofu.tofudb-experiment-evidence/v1",
+  "decision": "Reject fixed256 snapshot capacity production integration",
+  "runtimeChangesIntegrated": false,
+  "problem": "Native snapshot capacity waiting dominates bounded selected slow event samples; does raising64total56reader capacity improve complete original agent harness?",
+  "candidate": {
+    "totalPins": 256,
+    "readerPins": 248,
+    "writerReserve": 8,
+    "aggregateTransactionBytes": 167772160,
+    "certifiedForProduction": false
+  },
+  "originalWorkload": {
+    "conversations": 1000,
+    "rounds": 4,
+    "chunkBytes": 8192,
+    "uncoalescedStreamIntervalMs": 1000,
+    "restartWhileRunning": true,
+    "carryStreamEvents": true,
+    "durability": "strict",
+    "unchangedAcceptance": true
+  },
+  "results": {
+    "scope": "Original macros, all raw samples retained, first application baseline outliers not discarded; no automatic production admission",
+    "groups": [
+      {
+        "group": "application-first",
+        "rows": [
+          {
+            "variant": "candidate",
+            "streamP99ms": 1796.3855490088463,
+            "settleP99ms": 5145.182423293591,
+            "clientRss": 291676160,
+            "engineRss": 2054819840,
+            "nativeSource": "076c48a1e2a707c0694562da6a3bf30d8a36442d9d37b8c5f92d605023a571a9"
+          },
+          {
+            "variant": "baseline",
+            "streamP99ms": 11858.799055218697,
+            "settleP99ms": 13029.214099049568,
+            "clientRss": 127492096,
+            "engineRss": 1848504320,
+            "nativeSource": "ac2385fea6ce4bbc86a22c8a7105f34cea7ba2a11f84e2d1187093570b39f546"
+          },
+          {
+            "variant": "baseline",
+            "streamP99ms": 7995.082564651966,
+            "settleP99ms": 8376.140475273132,
+            "clientRss": 136380416,
+            "engineRss": 1758937088,
+            "nativeSource": "ac2385fea6ce4bbc86a22c8a7105f34cea7ba2a11f84e2d1187093570b39f546"
+          },
+          {
+            "variant": "candidate",
+            "streamP99ms": 1861.2059205770493,
+            "settleP99ms": 5348.219461739063,
+            "clientRss": 146030592,
+            "engineRss": 1880715264,
+            "nativeSource": "076c48a1e2a707c0694562da6a3bf30d8a36442d9d37b8c5f92d605023a571a9"
+          }
+        ],
+        "pairRatios": [
+          {
+            "candidateIndex": 0,
+            "baselineIndex": 1,
+            "stream": 0.1514812368979565,
+            "settle": 0.3948958382431456,
+            "engineRss": 1.1116121384017106
+          },
+          {
+            "candidateIndex": 3,
+            "baselineIndex": 2,
+            "stream": 0.23279383365043077,
+            "settle": 0.6385064192186517,
+            "engineRss": 1.0692339577298173
+          }
+        ]
+      },
+      {
+        "group": "application-reverse",
+        "rows": [
+          {
+            "variant": "baseline",
+            "streamP99ms": 1848.153717815876,
+            "settleP99ms": 4343.9035192132,
+            "clientRss": 290287616,
+            "engineRss": 2037166080,
+            "nativeSource": "ac2385fea6ce4bbc86a22c8a7105f34cea7ba2a11f84e2d1187093570b39f546"
+          },
+          {
+            "variant": "candidate",
+            "streamP99ms": 1835.533820092678,
+            "settleP99ms": 5246.522024273872,
+            "clientRss": 147714048,
+            "engineRss": 2109161472,
+            "nativeSource": "076c48a1e2a707c0694562da6a3bf30d8a36442d9d37b8c5f92d605023a571a9"
+          },
+          {
+            "variant": "candidate",
+            "streamP99ms": 1862.5360429286957,
+            "settleP99ms": 5118.629835546017,
+            "clientRss": 145055744,
+            "engineRss": 1979650048,
+            "nativeSource": "076c48a1e2a707c0694562da6a3bf30d8a36442d9d37b8c5f92d605023a571a9"
+          },
+          {
+            "variant": "baseline",
+            "streamP99ms": 1921.795591711998,
+            "settleP99ms": 3447.843000292778,
+            "clientRss": 145133568,
+            "engineRss": 1958805504,
+            "nativeSource": "ac2385fea6ce4bbc86a22c8a7105f34cea7ba2a11f84e2d1187093570b39f546"
+          }
+        ],
+        "pairRatios": [
+          {
+            "candidateIndex": 1,
+            "baselineIndex": 0,
+            "stream": 0.9931716190046616,
+            "settle": 1.2077897220940492,
+            "engineRss": 1.0353409536447808
+          },
+          {
+            "candidateIndex": 2,
+            "baselineIndex": 3,
+            "stream": 0.9691644891689485,
+            "settle": 1.4845890126410517,
+            "engineRss": 1.0106414567232092
+          }
+        ]
+      },
+      {
+        "group": "embedded",
+        "rows": [
+          {
+            "variant": "candidate",
+            "streamP99ms": 1249.6477663516998,
+            "settleP99ms": 2968.3389589190483,
+            "clientRss": 2185158656,
+            "engineRss": 2185158656,
+            "nativeSource": "076c48a1e2a707c0694562da6a3bf30d8a36442d9d37b8c5f92d605023a571a9"
+          },
+          {
+            "variant": "baseline",
+            "streamP99ms": 1277.5926887989044,
+            "settleP99ms": 3105.370379984379,
+            "clientRss": 2168520704,
+            "engineRss": 2174418944,
+            "nativeSource": "ac2385fea6ce4bbc86a22c8a7105f34cea7ba2a11f84e2d1187093570b39f546"
+          },
+          {
+            "variant": "baseline",
+            "streamP99ms": 1239.7858798503876,
+            "settleP99ms": 4972.411759197712,
+            "clientRss": 2260320256,
+            "engineRss": 2260320256,
+            "nativeSource": "ac2385fea6ce4bbc86a22c8a7105f34cea7ba2a11f84e2d1187093570b39f546"
+          },
+          {
+            "variant": "candidate",
+            "streamP99ms": 1275.550626218319,
+            "settleP99ms": 5188.114747405052,
+            "clientRss": 2155597824,
+            "engineRss": 2155597824,
+            "nativeSource": "076c48a1e2a707c0694562da6a3bf30d8a36442d9d37b8c5f92d605023a571a9"
+          }
+        ],
+        "pairRatios": [
+          {
+            "candidateIndex": 0,
+            "baselineIndex": 1,
+            "stream": 0.9781268923247547,
+            "settle": 0.9558727609599922,
+            "engineRss": 1.0049391181168812
+          },
+          {
+            "candidateIndex": 3,
+            "baselineIndex": 2,
+            "stream": 1.0288475187120596,
+            "settle": 1.0433799529591137,
+            "engineRss": 0.9536692060684696
+          }
+        ]
+      }
+    ]
+  },
+  "profile": {
+    "scope": "All stages from selected slow event samples; omitted stage represented zero; not population percentile or cumulative CPU attribution",
+    "rows": [
+      {
+        "label": "refreshed-profile-application-0",
+        "eventSamples": 32,
+        "stages": {
+          "parallel_snapshot_wait": {
+            "nonzeroSamples": 32,
+            "medianMs": 269.671289,
+            "maximumMs": 681.653204
+          },
+          "fifo_wait": {
+            "nonzeroSamples": 32,
+            "medianMs": 72.01706949999999,
+            "maximumMs": 502.577489
+          },
+          "turn_event_store": {
+            "nonzeroSamples": 32,
+            "medianMs": 0.3743605,
+            "maximumMs": 0.86609
+          }
+        }
+      },
+      {
+        "label": "capacity-causal-profile-application-0",
+        "eventSamples": 32,
+        "stages": {
+          "parallel_snapshot_wait": {
+            "nonzeroSamples": 0,
+            "medianMs": 0.0,
+            "maximumMs": 0.0
+          },
+          "fifo_wait": {
+            "nonzeroSamples": 32,
+            "medianMs": 321.6130675,
+            "maximumMs": 1142.354211
+          },
+          "turn_event_store": {
+            "nonzeroSamples": 32,
+            "medianMs": 0.35697749999999995,
+            "maximumMs": 0.818784
+          }
+        }
+      }
+    ]
+  },
+  "decisionDetails": {
+    "decision": "Reject fixed capacity256 production integration",
+    "reason": "Independent reverse application pairs show settlement regressions20.8percent and48.5percent with only0.7percent and3.1percent stream improvement; embeddedmixed; all1sstreamgates fail",
+    "runtimeChangesIntegrated": false,
+    "scope": "12 original macro windows correcthealthy;13pin lifecycle tests passed; no full native/fault admission because candidate rejected",
+    "next": "Reduce unnecessary authority acquisitions or permit hold time while preserving OCC and WAL acknowledgement; previous published-preparation prototype must be revalidated on current baseline, not blindly reapplied"
+  },
+  "validation": {
+    "focusedPinTestsActualPassed": 13,
+    "staleGeneratorCompileFailureRetained": true,
+    "zeroMatchedFilterRetainedAndCorrected": true,
+    "fullFaultAdmissionNotRun": "Candidate rejected by original macro regressions; no production admission claimed",
+    "allTwelveWindowsCorrectHealthy": true,
+    "allOriginalStreamGatesFailed": true
+  },
+  "sqliteCurrentWriteParity": {
+    "reports": [
+      {
+        "order": "native-first",
+        "native_source": "ac2385fea6ce4bbc86a22c8a7105f34cea7ba2a11f84e2d1187093570b39f546",
+        "binary_sha256": "5e099f44ce613fdf10f17a29a2508fd01849cdb957cbad797bb76b49c94a8f06",
+        "library_sha256": "f892f5569ffd21b70b800055bb4f53c43a456ea632540e5c3da6d0bb4972163a",
+        "rows": [
+          {
+            "backend": "native",
+            "operation": "conversation.create",
+            "count": 50,
+            "mean_ms": 0.19755661487579346,
+            "p50_ms": 0.1851394772529602,
+            "p99_ms": 0.5099177360534668,
+            "max_ms": 0.5099177360534668
+          },
+          {
+            "backend": "native",
+            "operation": "turn.append_settled",
+            "count": 2000,
+            "mean_ms": 0.2838459685444832,
+            "p50_ms": 0.2291947603225708,
+            "p99_ms": 1.5809759497642517,
+            "max_ms": 5.070827901363373
+          },
+          {
+            "backend": "sqlite",
+            "operation": "conversation.create",
+            "count": 50,
+            "mean_ms": 16.19278773665428,
+            "p50_ms": 0.3957897424697876,
+            "p99_ms": 788.8572290539742,
+            "max_ms": 788.8572290539742
+          },
+          {
+            "backend": "sqlite",
+            "operation": "turn.append_settled",
+            "count": 2000,
+            "mean_ms": 0.7798914164304733,
+            "p50_ms": 0.7641837000846863,
+            "p99_ms": 1.7468929290771484,
+            "max_ms": 5.217641592025757
+          }
+        ],
+        "exact_acknowledgements": true,
+        "exact_final_response": true
+      },
+      {
+        "order": "sqlite-first",
+        "native_source": "ac2385fea6ce4bbc86a22c8a7105f34cea7ba2a11f84e2d1187093570b39f546",
+        "binary_sha256": "5e099f44ce613fdf10f17a29a2508fd01849cdb957cbad797bb76b49c94a8f06",
+        "library_sha256": "f892f5569ffd21b70b800055bb4f53c43a456ea632540e5c3da6d0bb4972163a",
+        "rows": [
+          {
+            "backend": "native",
+            "operation": "conversation.create",
+            "count": 50,
+            "mean_ms": 0.20415574312210083,
+            "p50_ms": 0.19203126430511475,
+            "p99_ms": 0.6121546030044556,
+            "max_ms": 0.6121546030044556
+          },
+          {
+            "backend": "native",
+            "operation": "turn.append_settled",
+            "count": 2000,
+            "mean_ms": 0.301569577306509,
+            "p50_ms": 0.23602694272994995,
+            "p99_ms": 2.4077221751213074,
+            "max_ms": 5.454987287521362
+          },
+          {
+            "backend": "sqlite",
+            "operation": "conversation.create",
+            "count": 50,
+            "mean_ms": 15.781045705080032,
+            "p50_ms": 0.39505213499069214,
+            "p99_ms": 768.7652334570885,
+            "max_ms": 768.7652334570885
+          },
+          {
+            "backend": "sqlite",
+            "operation": "turn.append_settled",
+            "count": 2000,
+            "mean_ms": 0.8213215470314026,
+            "p50_ms": 0.8146017789840698,
+            "p99_ms": 1.6363784670829773,
+            "max_ms": 9.787455201148987
+          }
+        ],
+        "exact_acknowledgements": true,
+        "exact_final_response": true
+      }
+    ],
+    "decision": "Native mean append latency improves in both orders, but P99 is not consistently superior: reverse Native2.408ms versus SQLite1.636ms. Full superiority remains disproven for these windows.",
+    "scope": "50 conversations x40 settled turns, sequential public semantic calls; no concurrent/soak claim"
+  },
+  "oldVerifierSceneRecheck": {
+    "returncode": 0,
+    "binaryIdentity": {
+      "build_info": {
+        "embedded_allocator": "mimalloc",
+        "format": "tofu-db-build.v1",
+        "source_sha256": "e12af3788fcd6d76182870415a6d820e6b7b2a93e35af5c39288098f1975fbb2",
+        "version": "0.2.0"
+      },
+      "sha256": {
+        "tofu-db": "f4aacb7920cb30e57c478d4b5c7fe5e86aab955fe2c3314cb18f591cfaa40a2d",
+        "libtofu_db.so": "0e44a3f39aaa2c75350c7cd6a500b7a92c8d3f87f2f8c171aa07afbe908fb0e2"
+      }
+    },
+    "scope": "fixed verifier on hash-verified disposable scene copy; original failure preserved; no capacity latency window reclassification",
+    "summary": "format=tofu-db.verify.v1 verdict=ok control_generation=102 durable_sequence=8894 wal_records=721 wal_tail_truncated_bytes=0 payload_segments_ok=109/109 pages_verified=27119 semantic_verified=18338 history_blocks_verified=127413 wal_blocks_verified=7675 missing_blocks=0",
+    "originalSceneAllFilesUnchangedAfterCopyVerification": true,
+    "rootFixCommit": "535634c19",
+    "conclusion": "frozen E42 offline verifier scanned successor from obsolete checkpoint and omitted CONTROL-selected sealed predecessor; fixed verifier accepts complete scene; no data-loss claim supported by original verifier failure"
+  },
+  "externalArtifacts": ".tmp/tofudb-storage-admission-sweep-20261009",
+  "artifacts": {
+    "refreshed-baseline-freeze-manifest.json": "1277db2259a31e1ba4f2bc373354bf0e75ba43045c23b983acbd5e9e957777e1",
+    "capacity-causal-v2-freeze-manifest.json": "174f2d5ab75e728d035be63bc9e410e72b5ab8a6661bb8fce823d90ad1d18d3b",
+    "refreshed-baseline-pair/build.json": "2001835bf5122092374127e2726cbcdf126daafa9ea2235034956eacbc4014dd",
+    "capacity-causal-pair/build.json": "826d33eb6b864fece9b516feabde448d33f550b6e54317cf4bef552e09a8a553",
+    "capacity-causal-twelve-window-review.json": "d600ad3f153974e33d49b1250903cd855a56e988f8b14eeeffffaf2b89c0dc52",
+    "capacity-causal-profile-stage-comparison.json": "07bb3385848d8e04e93dab66b18ad0ab8b5d87abe89d327b275889066c850360",
+    "capacity-causal-rejection-decision.json": "0839a5f8ee659c0b291a33fb50787293500b682149659ef20c42ad6693ffdad2",
+    "rejected-capacity256-source-archive.json": "85e8ba14ee1c31402e122b6adfad5976390198eaab3b38dd44f21e3cfce43f11",
+    "refreshed-sqlite-write-review.json": "9f1062bcc3fb8045b5ed675787fbe8a138954ef9bf914781034935aa1bb0f909",
+    "integrity-fixed-verifier-result.json": "278d8f1278db81bd94091b4de9d5aeed8e8735336b9b261db7be0dd77377a364"
+  },
+  "next": "Reduce authority queue acquisition/hold cost without altering OCC, writer progress or WAL acknowledgement; broader SQLite coverage remains incomplete"
+}

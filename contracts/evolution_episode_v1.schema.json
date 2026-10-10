@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_episode_v1.schema.json",
+  "title": "Self-evolution episode: execution actuals, verdict against goal criteria, and applied learning deltas",
+  "type": "object",
+  "required": ["schema_version", "episode_id", "goal_id", "plan_id", "selected_path_id", "exploratory", "task_id", "status", "created_at", "updated_at", "actuals", "learning"],
+  "properties": {
+    "actuals_complete": {"type": "boolean", "description": "False excludes the observed lower bound from measured cost and efficiency learning."},
+    "schema_version": {"const": 1},
+    "episode_id": {"type": "string", "maxLength": 160},
+    "goal_id": {"type": "string", "maxLength": 160},
+    "plan_id": {"type": "string", "maxLength": 160},
+    "selected_path_id": {"type": "string", "maxLength": 160},
+    "exploratory": {"type": "boolean"},
+    "task_id": {"type": "string", "maxLength": 160, "description": "The task-engine task that executed the selected path; execution state stays there, this record carries only settlement."},
+    "status": {"enum": ["running", "success", "partial", "failure", "aborted"]},
+    "created_at": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "integer", "minimum": 0},
+    "settled_at": {"type": ["integer", "null"], "minimum": 0},
+    "actuals": {
+      "type": "object",
+      "required": ["tokens", "wall_clock_seconds", "tool_calls"],
+      "properties": {
+        "tokens": {"type": "integer", "minimum": 0},
+        "wall_clock_seconds": {"type": "integer", "minimum": 0},
+        "tool_calls": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false,
+      "description": "Measured consumption from execution receipts, never model self-report."
+    },
+    "stage_receipts": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": ["stage", "status"],
+        "properties": {
+          "stage": {"type": "string", "maxLength": 80},
+          "status": {"type": "string", "maxLength": 80},
+          "detail": {"type": "string", "maxLength": 500}
+        },
+        "additionalProperties": false
+      }
+    },
+    "verdict": {
+      "type": ["object", "null"],
+      "required": ["outcome", "assessed_by", "criterion_results"],
+      "properties": {
+        "outcome": {"enum": ["success", "partial", "failure"]},
+        "assessed_by": {"enum": ["checker", "judge_panel", "human"]},
+        "criterion_results": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "required": ["criterion_id", "outcome"],
+            "properties": {
+              "criterion_id": {"type": "string", "maxLength": 96},
+              "outcome": {"enum": ["pass", "fail", "unknown"]},
+              "evidence_ref": {"type": "string", "maxLength": 500}
+            },
+            "additionalProperties": false
+          }
+        },
+        "evidence_refs": {"type": "array", "maxItems": 16, "items": {"type": "string", "maxLength": 500}}
+      },
+      "additionalProperties": false
+    },
+    "learning": {
+      "type": "object",
+      "required": ["resource_weight_deltas", "cost_actual_vs_estimate", "strategy_outcome", "capability_gap"],
+      "properties": {
+        "resource_weight_deltas": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["ref_id", "indexer", "delta", "basis"],
+            "properties": {
+              "ref_id": {"type": "string", "maxLength": 320},
+              "indexer": {"enum": ["history", "project", "academic", "web"]},
+              "delta": {"type": "number", "minimum": -1, "maximum": 1},
+              "basis": {"enum": ["cited_in_success", "cited_in_failure", "unused"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "cost_actual_vs_estimate": {
+          "type": ["object", "null"],
+          "required": ["tokens_ratio", "wall_clock_ratio"],
+          "properties": {
+            "tokens_ratio": {"type": "number", "minimum": 0},
+            "wall_clock_ratio": {"type": "number", "minimum": 0}
+          },
+          "additionalProperties": false,
+          "description": "Actual over estimated; null only when the plan carried no estimate. Calibration input for cost priors."
+        },
+        "strategy_outcome": {
+          "type": ["object", "null"],
+          "required": ["distilled_template_id", "anti_pattern"],
+          "properties": {
+            "distilled_template_id": {"type": ["string", "null"], "maxLength": 160},
+            "anti_pattern": {"type": ["string", "null"], "maxLength": 1000}
+          },
+          "additionalProperties": false,
+          "description": "Both fields must stay null for exploratory episodes; the store layer enforces it."
+        },
+        "capability_gap": {
+          "type": ["object", "null"],
+          "required": ["gap_id", "summary", "proposed_action"],
+          "properties": {
+            "gap_id": {"type": "string", "maxLength": 160},
+            "summary": {"type": "string", "maxLength": 1000},
+            "proposed_action": {"type": "string", "maxLength": 1000}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

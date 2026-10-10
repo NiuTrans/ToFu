@@ -1,0 +1,53 @@
+/* Proactive agent message banner inside chat */
+.proactive-banner{background:linear-gradient(135deg,rgba(168,85,247,0.08),rgba(139,92,246,0.04));border:1px solid rgba(168,85,247,0.2);border-radius:8px;padding:var(--space-2) var(--space-3);margin-bottom:var(--space-2);font-size:var(--font-size-sm);display:flex;align-items:center;gap:var(--space-2)}
+.proactive-banner .pb-text{color:var(--text-secondary);font-size:var(--font-size-xs)}
+.proactive-banner .pb-name{color:#a855f7;font-weight:700}
+
+[data-theme="light"] .proactive-banner{background:rgba(124,58,237,0.07);border-color:rgba(124,58,237,0.28)}
+[data-theme="light"] .proactive-banner .pb-name{color:#6d28d9}
+[data-theme="tofu"] .proactive-banner{background:rgba(124,92,184,0.10);border-color:rgba(124,92,184,0.32)}
+[data-theme="tofu"] .proactive-banner .pb-name{color:#5b4a8a}
+/* Model-fallback banner inside the streaming bubble — painted the moment the
+   backend switches models (llm_fallback model_fallback SSE event). Amber warn
+   variant of .proactive-banner; NOT a toast. */
+.fallback-banner{background:linear-gradient(135deg,rgba(245,158,11,0.10),rgba(245,158,11,0.04));border:1px solid rgba(245,158,11,0.35);border-radius:8px;padding:var(--space-2) var(--space-3);margin-bottom:var(--space-2);font-size:var(--font-size-sm);display:flex;align-items:flex-start;gap:var(--space-2)}
+.fallback-banner .fb-icon{color:#f59e0b;display:inline-flex;align-items:center;flex:none;margin-top:1px}
+.fallback-banner .fb-text{color:var(--text-secondary);font-size:var(--font-size-xs);min-width:0}
+.fallback-banner .fb-models{color:#f59e0b;font-weight:700}
+/* Visible cause row — the reason used to live ONLY in the title attribute,
+   which is unreachable on touch and easy to miss on desktop. Wraps instead of
+   truncating with ellipsis so a long upstream message stays selectable. */
+.fallback-banner .fb-reason{display:block;margin-top:3px;line-height:1.45;overflow-wrap:anywhere}
+.fallback-banner .fb-reason-label{color:var(--text-tertiary)}
+.fallback-banner .fb-reason-label::after{content:':';margin-right:var(--space-1)}
+.fallback-banner .fb-kind{color:#f59e0b;font-weight:600;margin-right:5px}
+.fallback-banner .fb-detail{color:var(--text-secondary);font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:10.5px}
+/* ── Network-latency signal indicator ──
+   Lives INSIDE .topbar-tools, so it mirrors the .topbar-tool-btn shell
+   (height/radius/border/typography) for a consistent control group; only the
+   signal-bars + ms readout carry the semantic state colour. */
+.net-latency-badge{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:1px solid transparent;border-radius:8px;background:none;color:var(--text-secondary);font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;flex-shrink:0;user-select:none;cursor:default;transition:color .15s ease,background-color .15s ease,border-color .15s ease}
+.net-latency-badge:hover{color:var(--text-primary);background:var(--bg-hover);border-color:var(--border-light)}
+.net-latency-badge .net-bars{display:inline-flex;align-items:flex-end;gap:2px;height:14px}
+.net-latency-badge .net-bar{width:3px;border-radius:1px;background:currentColor;opacity:0.25;transition:background .2s ease,opacity .2s ease}
+.net-latency-badge .net-bar:nth-child(1){height:5px}
+.net-latency-badge .net-bar:nth-child(2){height:8px}
+.net-latency-badge .net-bar:nth-child(3){height:11px}
+.net-latency-badge .net-bar:nth-child(4){height:14px}
+.net-latency-badge .net-bar.lit{opacity:1}
+.net-latency-badge .net-ms{min-width:36px;text-align:right;font-variant-numeric:tabular-nums;font-size:var(--font-size-xs);letter-spacing:-0.2px;color:var(--text-tertiary)}
+/* State-driven colour of the lit bars + label (the semantic signal). */
+.net-latency-badge[data-state="good"] .net-bar.lit{background:#34d399}
+.net-latency-badge[data-state="good"] .net-ms{color:#34d399}
+.net-latency-badge[data-state="ok"] .net-bar.lit{background:#eab308}
+.net-latency-badge[data-state="ok"] .net-ms{color:#eab308}
+.net-latency-badge[data-state="poor"] .net-bar.lit{background:#f97316}
+.net-latency-badge[data-state="poor"] .net-ms{color:#f97316}
+.net-latency-badge[data-state="timeout"] .net-bar.lit{background:#ef4444}
+.net-latency-badge[data-state="timeout"] .net-ms{color:#ef4444}
+.net-latency-badge[data-state="offline"]{opacity:0.65}
+.net-latency-badge[data-state="offline"] .net-ms{color:var(--text-tertiary)}
+/* Planned restart owns liveness presentation through the modal progress card.
+   Preserve toolbar geometry while suppressing a competing offline badge. */
+html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden}
+/* Narrow viewports: match the tool buttons' tighter padding. */

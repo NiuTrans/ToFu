@@ -1,0 +1,17 @@
+/* ── Layout (page budget) view ── */
+.paper-preview-layout { padding: var(--space-2) 0; }
+.paper-preview-layout-head { padding: 0 var(--space-3) var(--space-2); color: var(--text-primary); font-size: var(--font-size-sm); }
+.paper-preview-layout-map { display: flex; flex-direction: column; gap: 1px; }
+.paper-preview-layout-row {
+  display: grid; grid-template-columns: 3.2em minmax(0, 1fr) auto; gap: var(--space-2);
+  align-items: baseline; width: 100%; text-align: start;
+  padding: var(--space-1) var(--space-3);
+  border: 0; background: none; color: var(--text-primary);
+  font-size: var(--font-size-xs);
+}
+button.paper-preview-layout-row { cursor: pointer; }
+button.paper-preview-layout-row:hover { background: var(--bg-hover); }
+.paper-preview-layout-page { color: var(--accent); font-variant-numeric: tabular-nums; }
+.paper-preview-layout-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.paper-preview-layout-where { color: var(--text-secondary); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+

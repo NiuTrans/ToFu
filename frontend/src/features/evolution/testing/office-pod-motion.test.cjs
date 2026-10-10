@@ -1,0 +1,53 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {JSDOM}=require('jsdom');
+const {load}=require('./office-runtime-loader.cjs');
+function harness(){
+  const dom=new JSDOM('<div id="room" hidden></div>');
+  Object.assign(global,{window:dom.window,document:dom.window.document});
+  const host=document.getElementById('room'),timers=new Map(),images=[];
+  let serial=0,now=0,intersection,preference;
+  const media={matches:false,addEventListener:(_,fn)=>preference=fn,removeEventListener(){}};
+  Object.defineProperty(document,'hidden',{configurable:true,value:false});
+  window.HTMLCanvasElement.prototype.getContext=()=>null;
+  window.matchMedia=()=>media;
+  window.setTimeout=fn=>{timers.set(++serial,fn);return serial;};window.clearTimeout=id=>timers.delete(id);
+  window.performance.now=()=>now;
+  window.Image=class{constructor(){const image=document.createElement('img');images.push(image);return image;}};
+  global.ResizeObserver=class{observe(){}disconnect(){}};
+  global.IntersectionObserver=class{constructor(fn){intersection=fn;}observe(){}disconnect(){}};
+  const step=()=>{now+=40;const pending=[...timers.values()];timers.clear();pending.forEach(fn=>fn());};
+  const drive=()=>{for(let i=0;timers.size&&i<1800;i++)step();assert.equal(timers.size,0);};
+  const pod=load('agent-pod').mountAgentPod(host,{copy:k=>k,openTask(){}});
+  const update=status=>pod.update({id:'agent-one',role:'engineer',status,objective:'Real assignment'},{sprite:6,accent:0});
+  const dispose=()=>{pod.dispose();delete global.IntersectionObserver;delete global.ResizeObserver;dom.window.close();};
+  return {host,timers,images,step,drive,pod,update,dispose,intersect:value=>intersection([{isIntersecting:value}]),reduce:value=>{media.matches=value;preference();}};
+}
+test('selected-room transitions are lazy, visible-time, bounded and stationary after arrival',()=>{
+  const h=harness();h.update('pending');
+  assert.ok(h.images.every(image=>!image.getAttribute('src')));assert.equal(h.timers.size,0);
+  h.host.hidden=false;h.pod.refreshMotion();
+  assert.ok(h.images.some(image=>image.getAttribute('src')));
+  h.update('running');assert.equal(h.timers.size,1);
+  for(let i=0;i<15;i++)h.step();
+  const actor=h.host.querySelector('.evo-person'),position=[actor.style.left,actor.style.top];
+  h.intersect(false);assert.equal(h.timers.size,0);
+  for(let i=0;i<500;i++)h.step();
+  h.intersect(true);assert.deepEqual([actor.style.left,actor.style.top],position,'hidden time does not jump');
+  h.drive();assert.equal(actor.dataset.seated,'true');assert.equal(actor.dataset.frame,'1');
+  const stationary=[actor.style.left,actor.style.top];h.update('running');
+  assert.deepEqual([actor.style.left,actor.style.top],stationary);assert.equal(h.timers.size,0);
+  h.update('done');h.drive();assert.equal(actor.dataset.seated,'false');assert.equal(actor.dataset.frame,'1');
+  h.dispose();assert.equal(h.timers.size,0);
+});
+test('selected-room reduced motion settles a live transition and teardown ignores late inputs',()=>{
+  const h=harness();h.host.hidden=false;h.update('pending');h.update('running');
+  for(let i=0;i<20;i++)h.step();
+  h.reduce(true);
+  const actor=h.host.querySelector('.evo-person');assert.equal(actor.dataset.seated,'true');assert.equal(h.timers.size,0);
+  h.reduce(false);assert.equal(h.timers.size,0);
+  const callbacks=h.images.map(image=>image.onload).filter(Boolean);
+  h.pod.dispose();callbacks.forEach(fn=>fn());h.update('done');h.pod.refreshMotion();h.pod.dispose();
+  assert.equal(h.timers.size,0);assert.equal(h.host.querySelector('canvas').width,0);
+  h.dispose();
+});

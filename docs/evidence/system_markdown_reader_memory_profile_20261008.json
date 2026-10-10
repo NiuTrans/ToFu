@@ -1,0 +1,1726 @@
+{
+  "format": "tofu.reader-memory-phase-evidence/v1",
+  "scope": "Phase-level owned-browser diagnosis, separate from performance admission.\n\nPrivate clone of the unchanged paired reader run. CDP phase queries perturb the\nfixture, so no latency/CPU numbers from this diagnostic can replace its original\npaired evidence. Forced GC occurs only after owned fixture disposal.\n",
+  "whole_system_verdict": "incomplete",
+  "performance_admission": false,
+  "candidate_verdict": "diagnosis_only_original_rss_failures_remain",
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/reader-memory-profile-full.json",
+  "raw_artifact_sha256": "9f75aff5331d637972f1f315d1c3d1ecd6ef3c511c2614b60a33f08b9440b8b2",
+  "independent_browser_processes": 12,
+  "observations_per_latency_cpu_cohort": 100,
+  "pairs_per_case": 3,
+  "sources": {
+    "benchmarks/markdown_worker/reader_memory_profile.py": "17f3c468e9f6ed7be63d99b3440726efad75f5d9dff9569bb509ba5c95509e99",
+    "benchmarks/markdown_worker/reader_measure.py": "fcf1e7bf29978a6b9725f6968b24f68611d9bb421d4cee1bda77c6cc6566f6a8",
+    "benchmarks/markdown_worker/reader_measure.js": "2c9b8348977e781d5c4101cf6123da8e6521a8d84254ea9e9e2c093363efe06b",
+    "static/styles.css": "bb22b2a06f497e5f8c1cd9f23c672364ed5d5e3138b83be310a7960b1e4d80c1"
+  },
+  "compiled_owner_graphs_sha256": {
+    "reference": "67735162cc91687ff7ba502cdcfa6d4652e32bd3b27d271b8f2311100de2fc2c",
+    "candidate": "c576ff64793674602d398adc1b3836abb7ee3dc1d4bc93947f6c8a6f8315712a",
+    "highlighter": "00dc4ef2365224de2d3f8332c95df59e5e362569d472807f7f048d856595197b",
+    "policy": "783d28fc92862b628aba7e9937719e0f90d880cef510e06a8f4cae7a14511c2b",
+    "markdown": "8934ab67c02716517c720fc75dee29aee3a5fc39426e2338f7cff9abe6f0211b"
+  },
+  "reference_sources": {
+    "stable-dom.ts": "a6463ee6088137b4caab90406bc9a634f0772abafe7fe6a8ef43160ea29ca641",
+    "text-blocks.ts": "c5f71502b7decc60bbbf189ff0358e80a0d56fdc13f7d475e043de9e15869ca6"
+  },
+  "browser": "148.0.7778.96",
+  "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+  "affinity": [
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    144,
+    148,
+    149,
+    150,
+    151,
+    152,
+    153,
+    154,
+    155,
+    156,
+    157,
+    158,
+    159,
+    160,
+    161,
+    162,
+    163,
+    164,
+    165,
+    166,
+    167,
+    168,
+    169,
+    170,
+    171,
+    172,
+    173,
+    174,
+    175,
+    176,
+    177,
+    178
+  ],
+  "cases": [
+    {
+      "case": "mixed_tail",
+      "pairs": [
+        {
+          "reference": {
+            "browser_pid": 332631,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  332659
+                ],
+                "renderer_rss_bytes": 106110976,
+                "renderer_high_water_bytes": 106979328,
+                "js_heap_used_bytes": 5877032,
+                "js_heap_total_bytes": 8966144,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  332659
+                ],
+                "renderer_rss_bytes": 147394560,
+                "renderer_high_water_bytes": 147394560,
+                "js_heap_used_bytes": 10401916,
+                "js_heap_total_bytes": 16728064,
+                "dom": {
+                  "documents": 25,
+                  "nodes": 84816,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  332659
+                ],
+                "renderer_rss_bytes": 197001216,
+                "renderer_high_water_bytes": 200364032,
+                "js_heap_used_bytes": 4478768,
+                "js_heap_total_bytes": 22781952,
+                "dom": {
+                  "documents": 36,
+                  "nodes": 147130,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  332659
+                ],
+                "renderer_rss_bytes": 191672320,
+                "renderer_high_water_bytes": 200364032,
+                "js_heap_used_bytes": 8176132,
+                "js_heap_total_bytes": 22781952,
+                "dom": {
+                  "documents": 22,
+                  "nodes": 84840,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  332659
+                ],
+                "renderer_rss_bytes": 197287936,
+                "renderer_high_water_bytes": 200364032,
+                "js_heap_used_bytes": 9391184,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 38,
+                  "nodes": 144236,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  332659
+                ],
+                "renderer_rss_bytes": 196403200,
+                "renderer_high_water_bytes": 200364032,
+                "js_heap_used_bytes": 4486424,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 16,
+                  "nodes": 54346,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  332659
+                ],
+                "renderer_rss_bytes": 189652992,
+                "renderer_high_water_bytes": 200364032,
+                "js_heap_used_bytes": 4491592,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 1510,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  332659
+                ],
+                "renderer_rss_bytes": 124571648,
+                "renderer_high_water_bytes": 200364032,
+                "js_heap_used_bytes": 3454072,
+                "js_heap_total_bytes": 4251648,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 1509,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          },
+          "candidate": {
+            "browser_pid": 332839,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  332879
+                ],
+                "renderer_rss_bytes": 106168320,
+                "renderer_high_water_bytes": 107151360,
+                "js_heap_used_bytes": 5880264,
+                "js_heap_total_bytes": 8970240,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  332879
+                ],
+                "renderer_rss_bytes": 147578880,
+                "renderer_high_water_bytes": 147640320,
+                "js_heap_used_bytes": 10463716,
+                "js_heap_total_bytes": 16203776,
+                "dom": {
+                  "documents": 25,
+                  "nodes": 84816,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  332879
+                ],
+                "renderer_rss_bytes": 196038656,
+                "renderer_high_water_bytes": 198307840,
+                "js_heap_used_bytes": 4479536,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 38,
+                  "nodes": 162911,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  332879
+                ],
+                "renderer_rss_bytes": 190287872,
+                "renderer_high_water_bytes": 198307840,
+                "js_heap_used_bytes": 8047796,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 22,
+                  "nodes": 84840,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  332879
+                ],
+                "renderer_rss_bytes": 197853184,
+                "renderer_high_water_bytes": 198307840,
+                "js_heap_used_bytes": 11905820,
+                "js_heap_total_bytes": 23306240,
+                "dom": {
+                  "documents": 38,
+                  "nodes": 152933,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  332879
+                ],
+                "renderer_rss_bytes": 190472192,
+                "renderer_high_water_bytes": 198307840,
+                "js_heap_used_bytes": 5892832,
+                "js_heap_total_bytes": 23306240,
+                "dom": {
+                  "documents": 3,
+                  "nodes": 7506,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  332879
+                ],
+                "renderer_rss_bytes": 190435328,
+                "renderer_high_water_bytes": 198307840,
+                "js_heap_used_bytes": 5897564,
+                "js_heap_total_bytes": 23306240,
+                "dom": {
+                  "documents": 3,
+                  "nodes": 7506,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  332879
+                ],
+                "renderer_rss_bytes": 124489728,
+                "renderer_high_water_bytes": 198307840,
+                "js_heap_used_bytes": 3393984,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 29,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          }
+        },
+        {
+          "reference": {
+            "browser_pid": 333132,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  333157
+                ],
+                "renderer_rss_bytes": 105742336,
+                "renderer_high_water_bytes": 106545152,
+                "js_heap_used_bytes": 5877032,
+                "js_heap_total_bytes": 8966144,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  333157
+                ],
+                "renderer_rss_bytes": 147296256,
+                "renderer_high_water_bytes": 147148800,
+                "js_heap_used_bytes": 10446016,
+                "js_heap_total_bytes": 16465920,
+                "dom": {
+                  "documents": 25,
+                  "nodes": 84816,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  333157
+                ],
+                "renderer_rss_bytes": 199815168,
+                "renderer_high_water_bytes": 200085504,
+                "js_heap_used_bytes": 9012276,
+                "js_heap_total_bytes": 23306240,
+                "dom": {
+                  "documents": 62,
+                  "nodes": 250045,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  333157
+                ],
+                "renderer_rss_bytes": 192876544,
+                "renderer_high_water_bytes": 200085504,
+                "js_heap_used_bytes": 8291808,
+                "js_heap_total_bytes": 22781952,
+                "dom": {
+                  "documents": 22,
+                  "nodes": 84840,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  333157
+                ],
+                "renderer_rss_bytes": 197439488,
+                "renderer_high_water_bytes": 200085504,
+                "js_heap_used_bytes": 10875812,
+                "js_heap_total_bytes": 22781952,
+                "dom": {
+                  "documents": 42,
+                  "nodes": 155056,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  333157
+                ],
+                "renderer_rss_bytes": 197468160,
+                "renderer_high_water_bytes": 200085504,
+                "js_heap_used_bytes": 4944432,
+                "js_heap_total_bytes": 22781952,
+                "dom": {
+                  "documents": 43,
+                  "nodes": 161052,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  333157
+                ],
+                "renderer_rss_bytes": 197603328,
+                "renderer_high_water_bytes": 200085504,
+                "js_heap_used_bytes": 4949164,
+                "js_heap_total_bytes": 22781952,
+                "dom": {
+                  "documents": 43,
+                  "nodes": 161052,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  333157
+                ],
+                "renderer_rss_bytes": 124149760,
+                "renderer_high_water_bytes": 200085504,
+                "js_heap_used_bytes": 3395560,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 29,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          },
+          "candidate": {
+            "browser_pid": 332988,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  333013
+                ],
+                "renderer_rss_bytes": 106418176,
+                "renderer_high_water_bytes": 107798528,
+                "js_heap_used_bytes": 5880708,
+                "js_heap_total_bytes": 8970240,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  333013
+                ],
+                "renderer_rss_bytes": 146800640,
+                "renderer_high_water_bytes": 146800640,
+                "js_heap_used_bytes": 10560612,
+                "js_heap_total_bytes": 16465920,
+                "dom": {
+                  "documents": 25,
+                  "nodes": 84816,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  333013
+                ],
+                "renderer_rss_bytes": 198692864,
+                "renderer_high_water_bytes": 198705152,
+                "js_heap_used_bytes": 11894332,
+                "js_heap_total_bytes": 23568384,
+                "dom": {
+                  "documents": 63,
+                  "nodes": 251646,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  333013
+                ],
+                "renderer_rss_bytes": 191062016,
+                "renderer_high_water_bytes": 198762496,
+                "js_heap_used_bytes": 8080720,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 22,
+                  "nodes": 84840,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  333013
+                ],
+                "renderer_rss_bytes": 197189632,
+                "renderer_high_water_bytes": 198762496,
+                "js_heap_used_bytes": 11609752,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 39,
+                  "nodes": 154548,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  333013
+                ],
+                "renderer_rss_bytes": 197361664,
+                "renderer_high_water_bytes": 198762496,
+                "js_heap_used_bytes": 6365164,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 40,
+                  "nodes": 160544,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  333013
+                ],
+                "renderer_rss_bytes": 189579264,
+                "renderer_high_water_bytes": 198762496,
+                "js_heap_used_bytes": 4493288,
+                "js_heap_total_bytes": 22781952,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 1510,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  333013
+                ],
+                "renderer_rss_bytes": 123961344,
+                "renderer_high_water_bytes": 198762496,
+                "js_heap_used_bytes": 3393992,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 29,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          }
+        },
+        {
+          "reference": {
+            "browser_pid": 333332,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  333373
+                ],
+                "renderer_rss_bytes": 105209856,
+                "renderer_high_water_bytes": 106635264,
+                "js_heap_used_bytes": 5877032,
+                "js_heap_total_bytes": 8966144,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  333373
+                ],
+                "renderer_rss_bytes": 146542592,
+                "renderer_high_water_bytes": 146554880,
+                "js_heap_used_bytes": 10473132,
+                "js_heap_total_bytes": 16203776,
+                "dom": {
+                  "documents": 25,
+                  "nodes": 84816,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  333373
+                ],
+                "renderer_rss_bytes": 197898240,
+                "renderer_high_water_bytes": 200396800,
+                "js_heap_used_bytes": 4480444,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 32,
+                  "nodes": 152932,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  333373
+                ],
+                "renderer_rss_bytes": 192258048,
+                "renderer_high_water_bytes": 200396800,
+                "js_heap_used_bytes": 8297300,
+                "js_heap_total_bytes": 23044096,
+                "dom": {
+                  "documents": 22,
+                  "nodes": 84840,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  333373
+                ],
+                "renderer_rss_bytes": 196210688,
+                "renderer_high_water_bytes": 200396800,
+                "js_heap_used_bytes": 4488420,
+                "js_heap_total_bytes": 23306240,
+                "dom": {
+                  "documents": 14,
+                  "nodes": 55673,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  333373
+                ],
+                "renderer_rss_bytes": 190115840,
+                "renderer_high_water_bytes": 200396800,
+                "js_heap_used_bytes": 5894748,
+                "js_heap_total_bytes": 23306240,
+                "dom": {
+                  "documents": 3,
+                  "nodes": 7506,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  333373
+                ],
+                "renderer_rss_bytes": 190115840,
+                "renderer_high_water_bytes": 200396800,
+                "js_heap_used_bytes": 5899480,
+                "js_heap_total_bytes": 23306240,
+                "dom": {
+                  "documents": 3,
+                  "nodes": 7506,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  333373
+                ],
+                "renderer_rss_bytes": 124510208,
+                "renderer_high_water_bytes": 200396800,
+                "js_heap_used_bytes": 3456792,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 1509,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          },
+          "candidate": {
+            "browser_pid": 333697,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  333722
+                ],
+                "renderer_rss_bytes": 105877504,
+                "renderer_high_water_bytes": 106790912,
+                "js_heap_used_bytes": 5880264,
+                "js_heap_total_bytes": 8970240,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  333722
+                ],
+                "renderer_rss_bytes": 147304448,
+                "renderer_high_water_bytes": 147378176,
+                "js_heap_used_bytes": 10088508,
+                "js_heap_total_bytes": 15941632,
+                "dom": {
+                  "documents": 25,
+                  "nodes": 84816,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  333722
+                ],
+                "renderer_rss_bytes": 194043904,
+                "renderer_high_water_bytes": 199241728,
+                "js_heap_used_bytes": 4487148,
+                "js_heap_total_bytes": 23306240,
+                "dom": {
+                  "documents": 14,
+                  "nodes": 42393,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  333722
+                ],
+                "renderer_rss_bytes": 191787008,
+                "renderer_high_water_bytes": 199241728,
+                "js_heap_used_bytes": 8039420,
+                "js_heap_total_bytes": 23306240,
+                "dom": {
+                  "documents": 22,
+                  "nodes": 84840,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  333722
+                ],
+                "renderer_rss_bytes": 198107136,
+                "renderer_high_water_bytes": 199241728,
+                "js_heap_used_bytes": 10036416,
+                "js_heap_total_bytes": 23830528,
+                "dom": {
+                  "documents": 38,
+                  "nodes": 147134,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  333722
+                ],
+                "renderer_rss_bytes": 198127616,
+                "renderer_high_water_bytes": 199241728,
+                "js_heap_used_bytes": 11413364,
+                "js_heap_total_bytes": 23830528,
+                "dom": {
+                  "documents": 39,
+                  "nodes": 153130,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  333722
+                ],
+                "renderer_rss_bytes": 198139904,
+                "renderer_high_water_bytes": 199241728,
+                "js_heap_used_bytes": 11418096,
+                "js_heap_total_bytes": 23830528,
+                "dom": {
+                  "documents": 39,
+                  "nodes": 153130,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  333722
+                ],
+                "renderer_rss_bytes": 124129280,
+                "renderer_high_water_bytes": 199241728,
+                "js_heap_used_bytes": 3396400,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 29,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "case": "completion",
+      "pairs": [
+        {
+          "reference": {
+            "browser_pid": 333833,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  333874
+                ],
+                "renderer_rss_bytes": 106057728,
+                "renderer_high_water_bytes": 106905600,
+                "js_heap_used_bytes": 5877008,
+                "js_heap_total_bytes": 8966144,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  333874
+                ],
+                "renderer_rss_bytes": 190201856,
+                "renderer_high_water_bytes": 190398464,
+                "js_heap_used_bytes": 7303420,
+                "js_heap_total_bytes": 14917632,
+                "dom": {
+                  "documents": 18,
+                  "nodes": 121170,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  333874
+                ],
+                "renderer_rss_bytes": 232968192,
+                "renderer_high_water_bytes": 234127360,
+                "js_heap_used_bytes": 10364276,
+                "js_heap_total_bytes": 23388160,
+                "dom": {
+                  "documents": 18,
+                  "nodes": 124238,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  333874
+                ],
+                "renderer_rss_bytes": 228851712,
+                "renderer_high_water_bytes": 234127360,
+                "js_heap_used_bytes": 9746060,
+                "js_heap_total_bytes": 22863872,
+                "dom": {
+                  "documents": 14,
+                  "nodes": 82881,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  333874
+                ],
+                "renderer_rss_bytes": 243044352,
+                "renderer_high_water_bytes": 246333440,
+                "js_heap_used_bytes": 11925300,
+                "js_heap_total_bytes": 36495360,
+                "dom": {
+                  "documents": 9,
+                  "nodes": 47512,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  333874
+                ],
+                "renderer_rss_bytes": 242499584,
+                "renderer_high_water_bytes": 246333440,
+                "js_heap_used_bytes": 13348124,
+                "js_heap_total_bytes": 36495360,
+                "dom": {
+                  "documents": 10,
+                  "nodes": 56358,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  333874
+                ],
+                "renderer_rss_bytes": 242499584,
+                "renderer_high_water_bytes": 246333440,
+                "js_heap_used_bytes": 13352856,
+                "js_heap_total_bytes": 36495360,
+                "dom": {
+                  "documents": 10,
+                  "nodes": 56358,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  333874
+                ],
+                "renderer_rss_bytes": 129892352,
+                "renderer_high_water_bytes": 246333440,
+                "js_heap_used_bytes": 3251100,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 1489,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          },
+          "candidate": {
+            "browser_pid": 334232,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  334279
+                ],
+                "renderer_rss_bytes": 105226240,
+                "renderer_high_water_bytes": 106405888,
+                "js_heap_used_bytes": 5880240,
+                "js_heap_total_bytes": 8970240,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  334279
+                ],
+                "renderer_rss_bytes": 179777536,
+                "renderer_high_water_bytes": 179777536,
+                "js_heap_used_bytes": 10411248,
+                "js_heap_total_bytes": 17252352,
+                "dom": {
+                  "documents": 45,
+                  "nodes": 241368,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  334279
+                ],
+                "renderer_rss_bytes": 226918400,
+                "renderer_high_water_bytes": 233766912,
+                "js_heap_used_bytes": 13705360,
+                "js_heap_total_bytes": 24879104,
+                "dom": {
+                  "documents": 32,
+                  "nodes": 170773,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  334279
+                ],
+                "renderer_rss_bytes": 222687232,
+                "renderer_high_water_bytes": 233766912,
+                "js_heap_used_bytes": 8475000,
+                "js_heap_total_bytes": 24354816,
+                "dom": {
+                  "documents": 23,
+                  "nodes": 126706,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  334279
+                ],
+                "renderer_rss_bytes": 239988736,
+                "renderer_high_water_bytes": 245211136,
+                "js_heap_used_bytes": 12759808,
+                "js_heap_total_bytes": 40689664,
+                "dom": {
+                  "documents": 10,
+                  "nodes": 44842,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  334279
+                ],
+                "renderer_rss_bytes": 238096384,
+                "renderer_high_water_bytes": 245211136,
+                "js_heap_used_bytes": 14192884,
+                "js_heap_total_bytes": 40689664,
+                "dom": {
+                  "documents": 11,
+                  "nodes": 53688,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  334279
+                ],
+                "renderer_rss_bytes": 238084096,
+                "renderer_high_water_bytes": 245211136,
+                "js_heap_used_bytes": 14197992,
+                "js_heap_total_bytes": 40689664,
+                "dom": {
+                  "documents": 11,
+                  "nodes": 53688,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  334279
+                ],
+                "renderer_rss_bytes": 125874176,
+                "renderer_high_water_bytes": 245211136,
+                "js_heap_used_bytes": 3253736,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 29,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          }
+        },
+        {
+          "reference": {
+            "browser_pid": 334696,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  334722
+                ],
+                "renderer_rss_bytes": 105799680,
+                "renderer_high_water_bytes": 106663936,
+                "js_heap_used_bytes": 5877008,
+                "js_heap_total_bytes": 8966144,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  334722
+                ],
+                "renderer_rss_bytes": 189194240,
+                "renderer_high_water_bytes": 189571072,
+                "js_heap_used_bytes": 7227692,
+                "js_heap_total_bytes": 15179776,
+                "dom": {
+                  "documents": 18,
+                  "nodes": 121170,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  334722
+                ],
+                "renderer_rss_bytes": 234201088,
+                "renderer_high_water_bytes": 234528768,
+                "js_heap_used_bytes": 6394908,
+                "js_heap_total_bytes": 23912448,
+                "dom": {
+                  "documents": 22,
+                  "nodes": 145152,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  334722
+                ],
+                "renderer_rss_bytes": 229285888,
+                "renderer_high_water_bytes": 234528768,
+                "js_heap_used_bytes": 9813204,
+                "js_heap_total_bytes": 22339584,
+                "dom": {
+                  "documents": 15,
+                  "nodes": 84490,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  334722
+                ],
+                "renderer_rss_bytes": 245137408,
+                "renderer_high_water_bytes": 248512512,
+                "js_heap_used_bytes": 7019592,
+                "js_heap_total_bytes": 37281792,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 19223,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  334722
+                ],
+                "renderer_rss_bytes": 243204096,
+                "renderer_high_water_bytes": 248512512,
+                "js_heap_used_bytes": 8396928,
+                "js_heap_total_bytes": 37281792,
+                "dom": {
+                  "documents": 6,
+                  "nodes": 28069,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  334722
+                ],
+                "renderer_rss_bytes": 243204096,
+                "renderer_high_water_bytes": 248512512,
+                "js_heap_used_bytes": 8401660,
+                "js_heap_total_bytes": 37281792,
+                "dom": {
+                  "documents": 6,
+                  "nodes": 28069,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  334722
+                ],
+                "renderer_rss_bytes": 130039808,
+                "renderer_high_water_bytes": 248512512,
+                "js_heap_used_bytes": 3251216,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 1489,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          },
+          "candidate": {
+            "browser_pid": 334488,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  334530
+                ],
+                "renderer_rss_bytes": 106754048,
+                "renderer_high_water_bytes": 107409408,
+                "js_heap_used_bytes": 5880240,
+                "js_heap_total_bytes": 8970240,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  334530
+                ],
+                "renderer_rss_bytes": 179621888,
+                "renderer_high_water_bytes": 179638272,
+                "js_heap_used_bytes": 10362948,
+                "js_heap_total_bytes": 16990208,
+                "dom": {
+                  "documents": 45,
+                  "nodes": 241368,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  334530
+                ],
+                "renderer_rss_bytes": 225693696,
+                "renderer_high_water_bytes": 231895040,
+                "js_heap_used_bytes": 9336392,
+                "js_heap_total_bytes": 24616960,
+                "dom": {
+                  "documents": 33,
+                  "nodes": 188224,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  334530
+                ],
+                "renderer_rss_bytes": 220991488,
+                "renderer_high_water_bytes": 231895040,
+                "js_heap_used_bytes": 5478772,
+                "js_heap_total_bytes": 24879104,
+                "dom": {
+                  "documents": 30,
+                  "nodes": 153880,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  334530
+                ],
+                "renderer_rss_bytes": 240730112,
+                "renderer_high_water_bytes": 243494912,
+                "js_heap_used_bytes": 10124832,
+                "js_heap_total_bytes": 40427520,
+                "dom": {
+                  "documents": 20,
+                  "nodes": 102990,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  334530
+                ],
+                "renderer_rss_bytes": 239890432,
+                "renderer_high_water_bytes": 243494912,
+                "js_heap_used_bytes": 11506204,
+                "js_heap_total_bytes": 40427520,
+                "dom": {
+                  "documents": 21,
+                  "nodes": 111836,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  334530
+                ],
+                "renderer_rss_bytes": 239890432,
+                "renderer_high_water_bytes": 243494912,
+                "js_heap_used_bytes": 11511312,
+                "js_heap_total_bytes": 40427520,
+                "dom": {
+                  "documents": 21,
+                  "nodes": 111836,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  334530
+                ],
+                "renderer_rss_bytes": 126410752,
+                "renderer_high_water_bytes": 243494912,
+                "js_heap_used_bytes": 3268116,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 1489,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          }
+        },
+        {
+          "reference": {
+            "browser_pid": 335315,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  335372
+                ],
+                "renderer_rss_bytes": 105619456,
+                "renderer_high_water_bytes": 106680320,
+                "js_heap_used_bytes": 5877008,
+                "js_heap_total_bytes": 8966144,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  335372
+                ],
+                "renderer_rss_bytes": 190287872,
+                "renderer_high_water_bytes": 190287872,
+                "js_heap_used_bytes": 7171172,
+                "js_heap_total_bytes": 15179776,
+                "dom": {
+                  "documents": 18,
+                  "nodes": 121170,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  335372
+                ],
+                "renderer_rss_bytes": 201691136,
+                "renderer_high_water_bytes": 204840960,
+                "js_heap_used_bytes": 7104016,
+                "js_heap_total_bytes": 23388160,
+                "dom": {
+                  "documents": 7,
+                  "nodes": 25480,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  335372
+                ],
+                "renderer_rss_bytes": 204529664,
+                "renderer_high_water_bytes": 205770752,
+                "js_heap_used_bytes": 7035168,
+                "js_heap_total_bytes": 22601728,
+                "dom": {
+                  "documents": 11,
+                  "nodes": 65235,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  335372
+                ],
+                "renderer_rss_bytes": 225206272,
+                "renderer_high_water_bytes": 225828864,
+                "js_heap_used_bytes": 12699992,
+                "js_heap_total_bytes": 37281792,
+                "dom": {
+                  "documents": 23,
+                  "nodes": 145144,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  335372
+                ],
+                "renderer_rss_bytes": 218517504,
+                "renderer_high_water_bytes": 225828864,
+                "js_heap_used_bytes": 5630332,
+                "js_heap_total_bytes": 37281792,
+                "dom": {
+                  "documents": 3,
+                  "nodes": 10336,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  335372
+                ],
+                "renderer_rss_bytes": 218509312,
+                "renderer_high_water_bytes": 225828864,
+                "js_heap_used_bytes": 5635064,
+                "js_heap_total_bytes": 37281792,
+                "dom": {
+                  "documents": 3,
+                  "nodes": 10336,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  335372
+                ],
+                "renderer_rss_bytes": 130490368,
+                "renderer_high_water_bytes": 225828864,
+                "js_heap_used_bytes": 3250292,
+                "js_heap_total_bytes": 4251648,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 1489,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          },
+          "candidate": {
+            "browser_pid": 335758,
+            "phases": [
+              {
+                "phase": "loaded",
+                "renderer_pids": [
+                  335785
+                ],
+                "renderer_rss_bytes": 106299392,
+                "renderer_high_water_bytes": 107155456,
+                "js_heap_used_bytes": 5880240,
+                "js_heap_total_bytes": 8970240,
+                "dom": {
+                  "documents": 5,
+                  "nodes": 44,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": true
+              },
+              {
+                "phase": "warm",
+                "renderer_pids": [
+                  335785
+                ],
+                "renderer_rss_bytes": 181071872,
+                "renderer_high_water_bytes": 180973568,
+                "js_heap_used_bytes": 10535672,
+                "js_heap_total_bytes": 16990208,
+                "dom": {
+                  "documents": 45,
+                  "nodes": 241368,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "latency",
+                "renderer_pids": [
+                  335785
+                ],
+                "renderer_rss_bytes": 229793792,
+                "renderer_high_water_bytes": 236560384,
+                "js_heap_used_bytes": 12442888,
+                "js_heap_total_bytes": 24616960,
+                "dom": {
+                  "documents": 33,
+                  "nodes": 189526,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu_warm",
+                "renderer_pids": [
+                  335785
+                ],
+                "renderer_rss_bytes": 224628736,
+                "renderer_high_water_bytes": 236560384,
+                "js_heap_used_bytes": 6216012,
+                "js_heap_total_bytes": 24354816,
+                "dom": {
+                  "documents": 22,
+                  "nodes": 117809,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "cpu",
+                "renderer_pids": [
+                  335785
+                ],
+                "renderer_rss_bytes": 243318784,
+                "renderer_high_water_bytes": 247975936,
+                "js_heap_used_bytes": 16990060,
+                "js_heap_total_bytes": 40951808,
+                "dom": {
+                  "documents": 13,
+                  "nodes": 61275,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "oracle",
+                "renderer_pids": [
+                  335785
+                ],
+                "renderer_rss_bytes": 241901568,
+                "renderer_high_water_bytes": 247975936,
+                "js_heap_used_bytes": 4707892,
+                "js_heap_total_bytes": 40951808,
+                "dom": {
+                  "documents": 14,
+                  "nodes": 70121,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed",
+                "renderer_pids": [
+                  335785
+                ],
+                "renderer_rss_bytes": 241901568,
+                "renderer_high_water_bytes": 247975936,
+                "js_heap_used_bytes": 4713000,
+                "js_heap_total_bytes": 40951808,
+                "dom": {
+                  "documents": 14,
+                  "nodes": 70121,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              },
+              {
+                "phase": "disposed_after_gc",
+                "renderer_pids": [
+                  335785
+                ],
+                "renderer_rss_bytes": 127942656,
+                "renderer_high_water_bytes": 247975936,
+                "js_heap_used_bytes": 3268428,
+                "js_heap_total_bytes": 3989504,
+                "dom": {
+                  "documents": 2,
+                  "nodes": 1489,
+                  "jsEventListeners": 21
+                },
+                "fixture_mounted": false
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "original_comparison_evidence": "docs/evidence/system_markdown_reader_20261008.json",
+  "limitations": [
+    "CDP phase queries perturb the original fixture; diagnosis only",
+    "Renderer VmHWM since process birth, not full application process tree",
+    "GC only after disposal; no forced-GC performance admission",
+    "Concurrent PDF/repository measurement on this host",
+    "Canonical final CPU DOM checked, no captured memory latency-frame strings.",
+    "One fixture lifetime per browser; this is not a long-run no-leak proof."
+  ],
+  "interpretation": "Post-disposal/GC JS heaps are approximately3.1\u20133.3MiB in both variants. Active phase DOM counters exceed100,000 and drop sharply after GC, pointing to transient DOM allocation pressure in this fixture. This diagnosis does not erase prior RSS failures or prove whole-app/cold/retained-memory admission."
+}

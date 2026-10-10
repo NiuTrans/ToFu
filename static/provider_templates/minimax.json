@@ -1,0 +1,21 @@
+{
+  "brand": "minimax",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "minimax",
+  "category": "official",
+  "name": "MiniMax",
+  "base_url": "https://api.minimax.io/v1",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://platform.minimax.io/docs/api-reference/text-anthropic-api", "checked_at": "2026-10-10"},
+  "offering_recipes": [
+    {"model_id": "MiniMax-M3.1-Flash-Preview", "capabilities": ["text", "vision", "video", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "MiniMax-M3", "capabilities": ["text", "vision", "video", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "MiniMax-M2.7", "capabilities": ["text", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "MiniMax-M2.7-highspeed", "capabilities": ["text", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "MiniMax-M2.5", "capabilities": ["text", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "MiniMax-M2.5-highspeed", "capabilities": ["text", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "MiniMax-M2.1", "capabilities": ["text", "thinking", "cheap"], "rpm": 30},
+    {"model_id": "MiniMax-M2.1-highspeed", "capabilities": ["text", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "MiniMax-M2", "capabilities": ["text", "thinking", "cheap"], "rpm": 30}
+  ]
+}

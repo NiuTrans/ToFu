@@ -1,0 +1,16 @@
+/* ═══════════════════════════════════════════
+   ★ Project Co-Pilot styles
+   ═══════════════════════════════════════════ */
+/* Unified project location is owned by 25-conversation-bar.css. */
+.project-badge{font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;padding:3px 9px;border-radius:20px;white-space:nowrap;display:none;align-items:center;gap:5px;border:1px solid;animation:fadeIn .3s ease;background:rgba(245,158,11,0.12);color:#f59e0b;border-color:rgba(245,158,11,0.25)}.project-badge.visible{display:flex}/* Proactive agent count indicator on scheduler badge */
+/* Scheduler dropdown panel */
+.scheduler-panel{position:absolute;top:100%;right:0;margin-top:6px;width:340px;max-height:400px;overflow-y:auto;background:var(--panel-bg,#1e1e2e);border:1px solid var(--border);border-radius:var(--radius-md,8px);box-shadow:0 8px 32px rgba(0,0,0,0.4);z-index:1000;padding:10px;display:none;font-size:var(--font-size-sm);font-family:'JetBrains Mono',monospace}
+.scheduler-panel.visible{display:block}
+.scheduler-panel-item{padding:var(--space-2);border-radius:6px;margin-bottom:6px;background:rgba(168,85,247,0.06);border:1px solid rgba(168,85,247,0.15)}
+.scheduler-panel-item .spi-name{font-weight:700;color:#a855f7;font-size:var(--font-size-xs)}
+.scheduler-panel-item .spi-meta{color:var(--text-secondary);font-size:10px;margin-top:3px}
+.scheduler-panel-item .spi-decision{display:inline-block;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;margin-left:var(--space-1)}
+.scheduler-panel-item .spi-decision.act{background:rgba(34,197,94,0.15);color:#22c55e}
+.scheduler-panel-item .spi-decision.skip{background:rgba(250,204,21,0.15);color:#facc15}
+.scheduler-panel-item .spi-decision.act_failed{background:rgba(239,68,68,0.15);color:#ef4444}
+.scheduler-panel-empty{color:var(--text-secondary);text-align:center;padding:var(--space-5) 10px;font-size:var(--font-size-xs)}

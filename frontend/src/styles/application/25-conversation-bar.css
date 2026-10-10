@@ -1,0 +1,160 @@
+/* Conversation bar: the composer card's top band, not a separate card.
+   It is the first child of .input-box — the card supplies the frame, the
+   band supplies a hairline separator. Flex reflows on pane width, never
+   viewport guesses. */
+.conv-status-strip {
+  display:flex;align-items:center;gap:0;flex-wrap:nowrap;container:conversation-bar / inline-size;
+  width:100%;min-width:0;min-height:40px;margin:0;padding:1px 6px 0;
+  /* Hairline as inset shadow, not border: a border would shrink the content
+     box and push every control 0.5px above the band's visual center. The 1px
+     top padding compensates the typeface's optical offset (glyph ink sits
+     above the em-box center at this size), so text reads truly centered. */
+  box-sizing:border-box;box-shadow:inset 0 -1px 0 var(--border);
+  color:var(--text-secondary);font:500 11px/1.4 var(--sans-body,system-ui,sans-serif);
+}
+.conv-status-strip button {
+  appearance:none;border:0;border-radius:5px;box-shadow:none;background:transparent;
+  color:inherit;font:inherit;line-height:1.4;cursor:pointer;touch-action:manipulation;
+  min-height:32px;transition:background-color .12s,color .12s;
+}
+.conv-status-strip button:hover:not(:disabled),
+.conv-status-strip button[aria-expanded="true"] {
+  background:var(--bg-hover,rgba(128,128,128,.09));color:var(--text-primary);
+}
+.conv-status-strip button:disabled {opacity:.35;cursor:default}
+.conv-status-strip button:focus-visible,
+.conversation-bar-panel button:focus-visible,
+.ctx-bar-popover button:focus-visible,.turn-jump-panel button:focus-visible {
+  outline:2px solid var(--accent);outline-offset:-2px;
+}
+.conv-status-strip [hidden],.conversation-bar-panel[hidden],.ctx-bar-popover[hidden],.turn-jump-panel[hidden],
+.ctx-bar-popover [hidden] {display:none!important}
+/* The location+Auto cluster packs to its fitted names. Leftover lives in the
+   strip (between Auto and the meter), never inside a stretched trigger that
+   clips Auto. Names grow into that leftover; they cannot shove Auto away. */
+.conv-status-strip .project-bar {
+  display:flex;align-items:center;justify-content:flex-start;gap:var(--space-1);
+  flex:0 1 auto;min-width:0;max-width:100%;flex-wrap:nowrap;
+  margin:0;padding:0;background:none;border:0;border-radius:0;box-shadow:none;
+  color:inherit;animation:none;transform:none;overflow:hidden;
+}
+.project-location {display:inline-flex;align-items:center;gap:7px;width:max-content;max-width:100%;min-width:0;overflow:hidden;padding:3px 5px}
+.conv-status-strip .project-location {flex:0 1 auto}
+.project-location > svg {flex:none;opacity:.7}
+.project-location-name {flex:0 1 auto;width:max-content;max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.project-location-count {font-size:10px;color:var(--text-tertiary);flex:none}
+.project-location-chevron {opacity:.55}
+.project-location[data-read-only="true"] .project-location-name {text-decoration:underline dotted;text-underline-offset:4px}
+.conv-status-strip .project-autoapply-toggle {
+  display:inline-flex;align-items:center;gap:5px;flex:0 0 auto;margin-left:0;padding:3px 6px;
+  border:0;border-radius:5px;background:none;box-shadow:none;font:inherit;color:var(--text-secondary);
+}
+.autoapply-dot {width:4px;height:4px;border-radius:50%;background:var(--text-tertiary)}
+.auto-mode .autoapply-dot {background:#668c63}
+/* Context usage: a literal meter replaces the ornamental glass vessel. Only
+   the fill changes with usage. Capacity and history stay in the disclosure. */
+.conv-status-strip .ctx-health-bar {
+  --ctx-zone-color:var(--text-secondary);display:inline-flex;align-items:center;gap:7px;
+  flex:0 0 auto;margin-left:auto;padding:3px 6px;white-space:nowrap;opacity:1;animation:none;
+  color:var(--text-secondary);backdrop-filter:none;box-shadow:none;
+}
+.ctx-meter-label {font-size:var(--font-size-xs)}
+.ctx-meter-track {display:block;width:44px;height:4px;background:rgba(128,128,128,.28);border-radius:2px;overflow:hidden}
+.ctx-meter-fill {display:block;width:var(--ctx-fill,0%);height:100%;background:var(--ctx-zone-color);border-radius:2px}
+.ctx-bar-pct {font-size:var(--font-size-xs);font-variant-numeric:tabular-nums;min-width:3ch;text-align:right;color:var(--text-primary);font-weight:600}
+.ctx-bar-cap {display:none}
+.ctx-health-bar[data-zone="warn"] {--ctx-zone-color:#b78a3b}
+.ctx-health-bar[data-zone="hot"] {--ctx-zone-color:#b46a3e}
+.ctx-health-bar[data-zone="crit"] {--ctx-zone-color:#c05248}
+.ctx-health-bar[data-zone="crit"] .ctx-bar-pct {color:var(--error-text,#c05248)}
+.ctx-health-bar[data-compacting] .ctx-meter-track {outline:1px dashed var(--accent);outline-offset:2px}
+/* Three fixed controls regardless of history size. */
+.conv-status-strip .turn-nav {
+  display:flex;align-items:center;gap:0;flex:0 0 auto;max-width:none;min-width:0;
+  padding:0;margin:0;border:0;border-radius:0;background:none;box-shadow:none;opacity:1;overflow:visible;
+}
+/* The ‹ › guillemets hang below the em-box center; 2px bottom padding lifts
+   their ink onto the same optical line as the neighboring 11px text. */
+.turn-nav-step {width:24px;font-size:18px!important;line-height:1;padding:0 0 2px;display:inline-flex;align-items:center;justify-content:center}
+.turn-nav-position {display:inline-flex;align-items:center;gap:6px;padding:3px 5px;white-space:nowrap}
+.turn-nav-label {font-size:var(--font-size-xs);font-weight:500;letter-spacing:0;text-transform:none}
+/* The ch slot (set by turn-navigation.ts from the total's digit count) is a
+   stabilizer, not padding: the nav's width never moves per turn, only once
+   when the total crosses a power of ten. It stays compact for small sessions. */
+.turn-nav-readout {font-variant-numeric:tabular-nums;font-size:var(--font-size-xs);white-space:nowrap;width:auto;text-align:center;color:var(--text-primary);font-weight:600}
+/* Running background work remains reachable; no luminous or pulsing badge. */
+.conv-status-strip .bg-activity-chip {
+  flex:0 1 auto;max-width:130px;min-width:32px;min-height:32px;gap:5px;padding:3px 5px;margin:0 6px;
+  border:0;border-radius:5px;background:none;box-shadow:none;opacity:1;animation:none;font-size:10px;
+}
+.conv-status-strip .bg-act-dot {width:4px;height:4px;animation:none}
+/* All secondary detail surfaces share one restrained sheet. */
+.conversation-bar-panel,.ctx-bar-popover,.turn-jump-panel {
+  box-sizing:border-box;z-index:10000;width:310px;min-width:0;overflow:auto;overscroll-behavior:contain;
+  margin:0;padding:var(--space-3);background:var(--bg-secondary);color:var(--text-primary);
+  border:1px solid var(--border);border-radius:9px;box-shadow:0 8px 28px #0002;
+  font:400 12px/1.5 var(--sans-body,system-ui,sans-serif);
+}
+.conversation-bar-panel h3,.ctx-bar-popover h3 {margin:0 0 var(--space-3);font:600 12px/1.4 var(--sans-body,system-ui,sans-serif)}
+.conversation-bar-panel button,.ctx-bar-popover button,.turn-jump-panel button {
+  font:inherit;color:var(--text-secondary);border:0;border-radius:4px;background:none;cursor:pointer;min-height:32px;
+}
+.conversation-bar-panel button:hover:not(:disabled),.ctx-bar-popover button:hover:not(:disabled),
+.turn-jump-panel button:hover:not(:disabled) {background:var(--bg-hover);color:var(--text-primary)}
+.conversation-bar-panel button:disabled,.ctx-bar-popover button:disabled,.turn-jump-panel button:disabled {opacity:.45;cursor:default}
+.project-context-root {display:flex;align-items:center;gap:var(--space-2);padding:5px 0;border-top:1px solid var(--border)}
+.project-context-path {flex:1;min-width:0;overflow-wrap:anywhere;font-size:var(--font-size-xs);font-family:var(--font-mono,ui-monospace,monospace)}
+.project-context-permission {flex:none;padding:var(--space-1) 7px;font-size:10px!important}
+.project-context-permission[aria-pressed="true"] {color:var(--accent)}
+.project-context-status {font-size:var(--font-size-xs);color:var(--text-secondary);overflow-wrap:anywhere}
+.conversation-bar-panel-actions {display:flex;justify-content:space-between;border-top:1px solid var(--border);margin-top:10px;padding-top:6px;gap:6px}
+.conversation-bar-panel-actions button {text-align:left;padding:5px 7px}
+.ctx-bar-popover dl {display:grid;grid-template-columns:1fr auto;gap:6px 14px;margin:0 0 var(--space-3);font-variant-numeric:tabular-nums}
+.ctx-bar-popover dt {color:var(--text-secondary)}
+.ctx-bar-popover dd {margin:0;text-align:right;overflow-wrap:anywhere}
+.ctx-pop-item {width:100%;text-align:left;padding:5px 7px}
+.ctx-pop-compact {border-top:1px solid var(--border)!important;border-radius:0!important}
+.turn-jump-panel {width:340px;padding:6px}
+.turn-jump-list {display:grid;gap:2px}
+.turn-jump-entry {display:block;width:100%;min-width:0;text-align:left;padding:7px var(--space-2);font-size:11px!important;overflow-wrap:anywhere}
+.turn-jump-entry[aria-current="true"] {background:var(--accent-subtle);color:var(--accent);box-shadow:inset 2px 0 var(--accent)}
+.turn-jump-page {width:100%;padding:5px var(--space-2);text-align:left;font-size:11px!important}
+
+.turn-jump-load {width:100%;text-align:left;padding:5px var(--space-2);color:var(--accent)!important}
+.turn-jump-error {font-size:var(--font-size-xs);color:var(--error-text);padding-inline:8px}
+.turn-jump-error:empty {display:none}
+@media(max-width:600px) {
+  .project-location {gap:var(--space-1);padding-inline:2px}
+  .project-location-chevron {display:none}
+  .ctx-meter-track {width:20px}
+  .conv-status-strip .ctx-health-bar {gap:var(--space-1);padding-inline:3px}
+  .ctx-meter-label {display:none}
+  .turn-nav-position {gap:3px;padding-inline:2px}
+  .turn-nav-label {display:none}
+  .turn-nav-step {width:26px}
+}
+@media(max-width:420px) {
+  .conv-status-strip .project-autoapply-toggle {display:none}
+}
+@container conversation-bar (max-width:600px) {
+  .project-location {gap:var(--space-1);padding-inline:2px}
+  .project-location-chevron,.ctx-meter-label,.turn-nav-label {display:none}
+  .ctx-meter-track {width:20px}
+  .conv-status-strip .ctx-health-bar {gap:var(--space-1);padding-inline:3px}
+  .turn-nav-position {gap:3px;padding-inline:2px}
+  .turn-nav-step {width:26px}
+}
+@container conversation-bar (max-width:420px) {
+  .conv-status-strip .project-autoapply-toggle {display:none}
+}
+@media(pointer:coarse) {
+  .conv-status-strip button {min-height:36px}
+  .turn-nav-step {width:32px}
+  .conversation-bar-panel button,.ctx-bar-popover button,.turn-jump-panel button {min-height:40px}
+}
+@media(prefers-reduced-motion:reduce) {.conv-status-strip button {transition:none}}
+@media(forced-colors:active) {
+  .ctx-meter-track {border:1px solid CanvasText}
+  .ctx-meter-fill {background:Highlight}
+  .conversation-bar-panel,.ctx-bar-popover,.turn-jump-panel {border-color:CanvasText}
+}

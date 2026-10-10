@@ -1,0 +1,19 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "badge": "s",
+  "content": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "requestId": "s",
+  "seq": 1,
+  "taskId": "s",
+  "toolName": "s",
+  "turnRole": "s",
+  "type": "tool_call_replay",
+  "vuMsgId": "s"
+}

@@ -1,0 +1,46 @@
+{{- if .Values.maintenance.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "tofu.fullname" . }}-maintenance
+  labels:
+{{ include "tofu.labels" . | indent 4 }}
+spec:
+  schedule: {{ .Values.maintenance.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.maintenance.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.maintenance.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.maintenance.activeDeadlineSeconds }}
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+{{ include "tofu.selectorLabels" (dict "root" . "role" "maintenance") | indent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "tofu.serviceAccountName" . }}
+          automountServiceAccountToken: false
+          securityContext:
+{{ include "tofu.podSecurityContext" . | indent 12 }}
+          containers:
+            - name: integrity-check
+              image: {{ include "tofu.apiImage" . }}
+              imagePullPolicy: {{ .Values.images.pullPolicy }}
+              command: ["python", "-m", "lib.storage_sidecar.cli", "integrity-check"]
+              env:
+{{ include "tofu.commonEnv" (dict "root" . "role" "scheduler") | indent 16 }}
+              securityContext:
+{{ include "tofu.containerSecurityContext" . | indent 16 }}
+              volumeMounts:
+                - {name: external-services, mountPath: /run/secrets/tofu, readOnly: true}
+                - {name: runtime-data, mountPath: /app/data}
+                - {name: runtime-logs, mountPath: /app/logs}
+                - {name: runtime-tmp, mountPath: /tmp}
+          volumes:
+{{ include "tofu.secretVolume" . | indent 12 }}
+            - {name: runtime-data, emptyDir: {}}
+            - {name: runtime-logs, emptyDir: {}}
+            - {name: runtime-tmp, emptyDir: {}}
+{{- end }}

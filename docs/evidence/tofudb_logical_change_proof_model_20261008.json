@@ -1,0 +1,81 @@
+{
+  "decision": "Promising proof mechanism for integrated diagnostic; not native admission evidence",
+  "source_observed": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+  "model_source": ".tmp/tofudb-logical-change-proof-20261008/model.py",
+  "model_source_sha256": "615797635406534369bcb4837fe9f611ac708164189de74ec3395acb21d454b0",
+  "model_result": {
+    "scope": "Pure sequential model with forced4-way fingerprints; not integrated native correctness, fault, concurrency, or performance coverage.",
+    "rows": [
+      {
+        "initial_capacity": 0,
+        "queries": 4634832,
+        "certified_unchanged": 69132,
+        "unchanged_queries_requiring_fallback": 254928
+      },
+      {
+        "initial_capacity": 1,
+        "queries": 4634832,
+        "certified_unchanged": 69840,
+        "unchanged_queries_requiring_fallback": 254220
+      },
+      {
+        "initial_capacity": 2,
+        "queries": 4634832,
+        "certified_unchanged": 69880,
+        "unchanged_queries_requiring_fallback": 254180
+      },
+      {
+        "initial_capacity": 4,
+        "queries": 4634832,
+        "certified_unchanged": 69908,
+        "unchanged_queries_requiring_fallback": 254152
+      },
+      {
+        "initial_capacity": 16,
+        "queries": 4634832,
+        "certified_unchanged": 69908,
+        "unchanged_queries_requiring_fallback": 254152
+      }
+    ],
+    "seconds": 2.11956537514925,
+    "false_unchanged_proofs": 0,
+    "cases": [
+      "capacity clears",
+      "zero capacity",
+      "sequence gaps and untracked mutations",
+      "physical no-change publications",
+      "structural invalidation",
+      "reopen reset",
+      "allocation failure reset",
+      "same-value/ABA/delete witness advances",
+      "deliberate hash collisions"
+    ],
+    "next": "Integrated Rust journal must bind database identity and exact tracked head sequence, record only successful known logical deltas, invalidate structural/reclaim/unknown publishers, and fall back on missing/poisoned proof."
+  },
+  "total_queries": 23174160,
+  "publication_boundaries": {
+    "apply_prepared_commit": "Only known successful overlay_delta keys may extend coverage; structural/non-delta root publication invalidates the proof interval.",
+    "finish_overlay_merge_and_synchronous_merge": "May preserve logical coverage only when no tombstone reclamation can alter observable versions and the exact previous sequence is tracked.",
+    "compact_tombstone_leaves": "Invalidate coverage; preserves existing version/conflict semantics.",
+    "untracked_engine_commit": "Exact tracked-through == current head requirement fails; next known publication resets coverage to its new sequence.",
+    "reopen_or_budget_reset": "Empty journal, coverage starts at current head; old snapshots cannot borrow proof.",
+    "range_witnesses": "Keep full existing range validation; this design certifies point/blind keys only."
+  },
+  "required_integration_guards": [
+    "Existing database instance and future-snapshot checks run before any proof",
+    "Never fabricate per-key versions or change OCC conflicts",
+    "Collision positive means possibly changed and takes ordinary full validation",
+    "Capacity clear moves coverage floor forward; missing keys alone do not prove unchanged",
+    "Poison, allocation failure, sequence gaps and unknown publication cause fallback",
+    "Record only successful known mutations; partial publication must not leave eligible proof",
+    "Tie reconstructible journal memory to existing launch budget and preserve total bound",
+    "Validate every prospective positive against the existing live Head/Snapshot version comparison before enabling skips"
+  ],
+  "limitations": [
+    "The model does not execute Rust, WAL, real locks, I/O faults or published query replicas.",
+    "No CPU savings or original1s gate improvement measured.",
+    "Forced fingerprint collisions and random invalidations make model positive rates unsuitable as workload hit-rate estimates.",
+    "An initial capacity0 row may later use nonzero capacity because resize actions are included; proofs are always disabled while the current capacity is0."
+  ],
+  "next": "Build a private native observer with all legacy version reads still executed; measure certified unchanged keys and compare every positive against the legacy oracle before implementing the shortcut."
+}

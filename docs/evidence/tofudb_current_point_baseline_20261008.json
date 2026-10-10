@@ -1,0 +1,1391 @@
+{
+  "format": "tofu.current-point-baseline/v1",
+  "decision": "Universal SQLite superiority contradicted; point-read optimization remains required",
+  "native_source": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+  "rows": [
+    {
+      "label": "point-forward",
+      "results": {
+        "rawsqlite": {
+          "client_peak_rss_observed_bytes": 50069504,
+          "engine_peak_rss_observed_bytes": 0,
+          "iterations": 500,
+          "max_ms": 0.015,
+          "mean_ms": 0.006,
+          "min_ms": 0.006,
+          "ops_per_sec": 157916.0,
+          "p50_ms": 0.006,
+          "p95_ms": 0.007,
+          "p99_ms": 0.009,
+          "p99_sample_count_sufficient": false,
+          "resource_sample_count": 3,
+          "resource_sample_interval_ms": 20,
+          "windows": [
+            {
+              "iterations": 50,
+              "max_ms": 0.008,
+              "mean_ms": 0.007,
+              "min_ms": 0.006,
+              "ops_per_sec": 153631.5,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.008,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 5
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.01,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 158838.1,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.01,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 55
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.014,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 154802.6,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.014,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 105
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.007,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 161703.4,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.007,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 155
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.007,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 159929.9,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.007,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 205
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.015,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 154575.3,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.015,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 255
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.007,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 159624.6,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.007,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 305
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.007,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 160649.3,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.007,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 355
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.014,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 156478.4,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.014,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 405
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.009,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 159392.0,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 455
+            }
+          ]
+        },
+        "tofudb": {
+          "client_peak_rss_observed_bytes": 49418240,
+          "engine_peak_rss_observed_bytes": 0,
+          "iterations": 500,
+          "max_ms": 0.063,
+          "mean_ms": 0.023,
+          "min_ms": 0.02,
+          "ops_per_sec": 43672.0,
+          "p50_ms": 0.022,
+          "p95_ms": 0.028,
+          "p99_ms": 0.034,
+          "p99_sample_count_sufficient": false,
+          "resource_sample_count": 19,
+          "resource_sample_interval_ms": 20,
+          "windows": [
+            {
+              "iterations": 50,
+              "max_ms": 0.034,
+              "mean_ms": 0.025,
+              "min_ms": 0.022,
+              "ops_per_sec": 40378.3,
+              "p50_ms": 0.024,
+              "p95_ms": 0.03,
+              "p99_ms": 0.034,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 5
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.038,
+              "mean_ms": 0.023,
+              "min_ms": 0.02,
+              "ops_per_sec": 42708.5,
+              "p50_ms": 0.022,
+              "p95_ms": 0.029,
+              "p99_ms": 0.038,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 55
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.033,
+              "mean_ms": 0.023,
+              "min_ms": 0.02,
+              "ops_per_sec": 43968.6,
+              "p50_ms": 0.022,
+              "p95_ms": 0.026,
+              "p99_ms": 0.033,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 105
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.034,
+              "mean_ms": 0.023,
+              "min_ms": 0.02,
+              "ops_per_sec": 42592.2,
+              "p50_ms": 0.023,
+              "p95_ms": 0.031,
+              "p99_ms": 0.034,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 155
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.023,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47859.8,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.023,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 205
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.031,
+              "mean_ms": 0.023,
+              "min_ms": 0.02,
+              "ops_per_sec": 43836.5,
+              "p50_ms": 0.022,
+              "p95_ms": 0.028,
+              "p99_ms": 0.031,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 255
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.032,
+              "mean_ms": 0.022,
+              "min_ms": 0.02,
+              "ops_per_sec": 45635.7,
+              "p50_ms": 0.021,
+              "p95_ms": 0.026,
+              "p99_ms": 0.032,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 305
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.063,
+              "mean_ms": 0.023,
+              "min_ms": 0.02,
+              "ops_per_sec": 42958.5,
+              "p50_ms": 0.022,
+              "p95_ms": 0.027,
+              "p99_ms": 0.063,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 355
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.029,
+              "mean_ms": 0.022,
+              "min_ms": 0.02,
+              "ops_per_sec": 45615.7,
+              "p50_ms": 0.022,
+              "p95_ms": 0.025,
+              "p99_ms": 0.029,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 405
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.058,
+              "mean_ms": 0.024,
+              "min_ms": 0.02,
+              "ops_per_sec": 42091.2,
+              "p50_ms": 0.023,
+              "p95_ms": 0.029,
+              "p99_ms": 0.058,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 455
+            }
+          ]
+        }
+      },
+      "measurement": {
+        "authority_dir_parent": null,
+        "benchmark_added_retries": 0,
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "checkout_source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "embedded_source_matches_checkout": true,
+        "engine_order": [
+          "tofudb",
+          "rawsqlite"
+        ],
+        "equivalent_durability": true,
+        "latency_clock": "perf_counter_ns",
+        "performance_verdict": "not_assessed",
+        "platform": "linux",
+        "python_version": "3.12.13",
+        "scope": "storage-operations-not-active-conversations",
+        "source_matches_checkout": true,
+        "temporary_directory": "/tmp",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "bytes": 19686848,
+          "path": "/tmp/tofudb-perf-binary-ulcc2goi/tofu-db",
+          "sha256": "5c2e4c5cb398aae7dfae09e9cb6dfd3299906fd40709f8d4a48cc195e798106c"
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+          "version": "0.2.0"
+        },
+        "tofudb_client_mode": "embedded",
+        "tofudb_durability": "strict",
+        "tofudb_shared_library": {
+          "build_identity": {
+            "source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229"
+          },
+          "bytes": 17919336,
+          "sha256": "2d542cce64f122357b9661f2542b2df3e547a93f386bb36bb8b7b329d03ffaec"
+        },
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "crc32c": "python",
+          "json_accelerator_version": "3.12.0",
+          "large_text_json": "orjson-compatible-subset",
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e"
+        },
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ]
+      },
+      "scope": {
+        "root_native_at_observation": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "frozen_native": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "python_hashes": {
+          "scripts/tofudb_perf_compare.py": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "tofu_db/embedded.py": "7c4026e7de9efb7f3fa238cf333d8e1b4232735429fd9eb58c9d7229cb66ed41"
+        },
+        "scope": "Root retained Python clients; frozen native build. Isolated disposable authorities; raw SQLite direct SQL comparison."
+      }
+    },
+    {
+      "label": "point-reverse",
+      "results": {
+        "rawsqlite": {
+          "client_peak_rss_observed_bytes": 45228032,
+          "engine_peak_rss_observed_bytes": 0,
+          "iterations": 500,
+          "max_ms": 0.013,
+          "mean_ms": 0.006,
+          "min_ms": 0.006,
+          "ops_per_sec": 163183.3,
+          "p50_ms": 0.006,
+          "p95_ms": 0.007,
+          "p99_ms": 0.009,
+          "p99_sample_count_sufficient": false,
+          "resource_sample_count": 2,
+          "resource_sample_interval_ms": 20,
+          "windows": [
+            {
+              "iterations": 50,
+              "max_ms": 0.008,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 158190.8,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.008,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 5
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.013,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 159484.0,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.013,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 55
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.01,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 162426.8,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.01,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 105
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.007,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 165651.8,
+              "p50_ms": 0.006,
+              "p95_ms": 0.006,
+              "p99_ms": 0.007,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 155
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.012,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 161773.6,
+              "p50_ms": 0.006,
+              "p95_ms": 0.006,
+              "p99_ms": 0.012,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 205
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.009,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 164007.0,
+              "p50_ms": 0.006,
+              "p95_ms": 0.006,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 255
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.006,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 165613.9,
+              "p50_ms": 0.006,
+              "p95_ms": 0.006,
+              "p99_ms": 0.006,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 305
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.007,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 164421.8,
+              "p50_ms": 0.006,
+              "p95_ms": 0.006,
+              "p99_ms": 0.007,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 355
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.007,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 165768.2,
+              "p50_ms": 0.006,
+              "p95_ms": 0.006,
+              "p99_ms": 0.007,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 405
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.009,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 164898.4,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 455
+            }
+          ]
+        },
+        "tofudb": {
+          "client_peak_rss_observed_bytes": 49328128,
+          "engine_peak_rss_observed_bytes": 0,
+          "iterations": 500,
+          "max_ms": 0.029,
+          "mean_ms": 0.021,
+          "min_ms": 0.02,
+          "ops_per_sec": 47973.9,
+          "p50_ms": 0.021,
+          "p95_ms": 0.022,
+          "p99_ms": 0.026,
+          "p99_sample_count_sufficient": false,
+          "resource_sample_count": 19,
+          "resource_sample_interval_ms": 20,
+          "windows": [
+            {
+              "iterations": 50,
+              "max_ms": 0.025,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47483.6,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.025,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 5
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.029,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47535.1,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.029,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 55
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.025,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 48243.6,
+              "p50_ms": 0.02,
+              "p95_ms": 0.022,
+              "p99_ms": 0.025,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 105
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.026,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47933.7,
+              "p50_ms": 0.02,
+              "p95_ms": 0.023,
+              "p99_ms": 0.026,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 155
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.029,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47720.0,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.029,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 205
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.029,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 48089.6,
+              "p50_ms": 0.02,
+              "p95_ms": 0.022,
+              "p99_ms": 0.029,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 255
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.027,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 48231.7,
+              "p50_ms": 0.021,
+              "p95_ms": 0.022,
+              "p99_ms": 0.027,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 305
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.025,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 48236.5,
+              "p50_ms": 0.021,
+              "p95_ms": 0.022,
+              "p99_ms": 0.025,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 355
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.024,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 48045.6,
+              "p50_ms": 0.02,
+              "p95_ms": 0.023,
+              "p99_ms": 0.024,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 405
+            },
+            {
+              "iterations": 50,
+              "max_ms": 0.025,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 48236.2,
+              "p50_ms": 0.02,
+              "p95_ms": 0.022,
+              "p99_ms": 0.025,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 455
+            }
+          ]
+        }
+      },
+      "measurement": {
+        "authority_dir_parent": null,
+        "benchmark_added_retries": 0,
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "checkout_source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "embedded_source_matches_checkout": true,
+        "engine_order": [
+          "rawsqlite",
+          "tofudb"
+        ],
+        "equivalent_durability": true,
+        "latency_clock": "perf_counter_ns",
+        "performance_verdict": "not_assessed",
+        "platform": "linux",
+        "python_version": "3.12.13",
+        "scope": "storage-operations-not-active-conversations",
+        "source_matches_checkout": true,
+        "temporary_directory": "/tmp",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "bytes": 19686848,
+          "path": "/tmp/tofudb-perf-binary-h55lu_0c/tofu-db",
+          "sha256": "5c2e4c5cb398aae7dfae09e9cb6dfd3299906fd40709f8d4a48cc195e798106c"
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+          "version": "0.2.0"
+        },
+        "tofudb_client_mode": "embedded",
+        "tofudb_durability": "strict",
+        "tofudb_shared_library": {
+          "build_identity": {
+            "source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229"
+          },
+          "bytes": 17919336,
+          "sha256": "2d542cce64f122357b9661f2542b2df3e547a93f386bb36bb8b7b329d03ffaec"
+        },
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "crc32c": "python",
+          "json_accelerator_version": "3.12.0",
+          "large_text_json": "orjson-compatible-subset",
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e"
+        },
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ]
+      },
+      "scope": {
+        "root_native_at_observation": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "frozen_native": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "python_hashes": {
+          "scripts/tofudb_perf_compare.py": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "tofu_db/embedded.py": "7c4026e7de9efb7f3fa238cf333d8e1b4232735429fd9eb58c9d7229cb66ed41"
+        },
+        "scope": "Root retained Python clients; frozen native build. Isolated disposable authorities; raw SQLite direct SQL comparison."
+      }
+    },
+    {
+      "label": "point-medium-forward",
+      "results": {
+        "rawsqlite": {
+          "client_peak_rss_observed_bytes": 54157312,
+          "engine_peak_rss_observed_bytes": 0,
+          "iterations": 2000,
+          "max_ms": 0.03,
+          "mean_ms": 0.006,
+          "min_ms": 0.006,
+          "ops_per_sec": 158319.8,
+          "p50_ms": 0.006,
+          "p95_ms": 0.007,
+          "p99_ms": 0.01,
+          "p99_sample_count_sufficient": true,
+          "resource_sample_count": 6,
+          "resource_sample_interval_ms": 20,
+          "windows": [
+            {
+              "iterations": 200,
+              "max_ms": 0.012,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 158123.0,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.01,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 5
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.011,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 159383.3,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.007,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 205
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.012,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 160435.5,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 405
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.01,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 158476.8,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.01,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 605
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.012,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 159128.2,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.007,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 805
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.011,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 158044.5,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.01,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1005
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.011,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 159703.0,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.008,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1205
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.011,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 159461.7,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.008,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1405
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.03,
+              "mean_ms": 0.007,
+              "min_ms": 0.006,
+              "ops_per_sec": 151668.2,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.019,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1605
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.013,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 159129.8,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.008,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1805
+            }
+          ]
+        },
+        "tofudb": {
+          "client_peak_rss_observed_bytes": 53510144,
+          "engine_peak_rss_observed_bytes": 0,
+          "iterations": 2000,
+          "max_ms": 0.06,
+          "mean_ms": 0.021,
+          "min_ms": 0.02,
+          "ops_per_sec": 46517.0,
+          "p50_ms": 0.021,
+          "p95_ms": 0.024,
+          "p99_ms": 0.028,
+          "p99_sample_count_sufficient": true,
+          "resource_sample_count": 74,
+          "resource_sample_interval_ms": 20,
+          "windows": [
+            {
+              "iterations": 200,
+              "max_ms": 0.029,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47078.0,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.026,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 5
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.029,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47272.3,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.026,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 205
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.057,
+              "mean_ms": 0.022,
+              "min_ms": 0.02,
+              "ops_per_sec": 45863.8,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.028,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 405
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.06,
+              "mean_ms": 0.022,
+              "min_ms": 0.02,
+              "ops_per_sec": 44519.5,
+              "p50_ms": 0.022,
+              "p95_ms": 0.026,
+              "p99_ms": 0.029,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 605
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.031,
+              "mean_ms": 0.022,
+              "min_ms": 0.02,
+              "ops_per_sec": 46094.9,
+              "p50_ms": 0.021,
+              "p95_ms": 0.025,
+              "p99_ms": 0.028,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 805
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.027,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 46777.6,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.026,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1005
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.029,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47064.5,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.026,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1205
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.03,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 46786.2,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.028,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1405
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.029,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47172.8,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.027,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1605
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.028,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 46681.5,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.027,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1805
+            }
+          ]
+        }
+      },
+      "measurement": {
+        "authority_dir_parent": null,
+        "benchmark_added_retries": 0,
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "checkout_source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "embedded_source_matches_checkout": true,
+        "engine_order": [
+          "tofudb",
+          "rawsqlite"
+        ],
+        "equivalent_durability": true,
+        "latency_clock": "perf_counter_ns",
+        "performance_verdict": "not_assessed",
+        "platform": "linux",
+        "python_version": "3.12.13",
+        "scope": "storage-operations-not-active-conversations",
+        "source_matches_checkout": true,
+        "temporary_directory": "/tmp",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "bytes": 19686848,
+          "path": "/tmp/tofudb-perf-binary-zv_do7yu/tofu-db",
+          "sha256": "5c2e4c5cb398aae7dfae09e9cb6dfd3299906fd40709f8d4a48cc195e798106c"
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+          "version": "0.2.0"
+        },
+        "tofudb_client_mode": "embedded",
+        "tofudb_durability": "strict",
+        "tofudb_shared_library": {
+          "build_identity": {
+            "source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229"
+          },
+          "bytes": 17919336,
+          "sha256": "2d542cce64f122357b9661f2542b2df3e547a93f386bb36bb8b7b329d03ffaec"
+        },
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "crc32c": "python",
+          "json_accelerator_version": "3.12.0",
+          "large_text_json": "orjson-compatible-subset",
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e"
+        },
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ]
+      },
+      "scope": {
+        "root_native_at_observation": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "frozen_native": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "python_hashes": {
+          "scripts/tofudb_perf_compare.py": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "tofu_db/embedded.py": "7c4026e7de9efb7f3fa238cf333d8e1b4232735429fd9eb58c9d7229cb66ed41"
+        },
+        "scope": "Root retained Python clients; frozen native build. Isolated disposable authorities; raw SQLite direct SQL comparison."
+      }
+    },
+    {
+      "label": "point-medium-reverse",
+      "results": {
+        "rawsqlite": {
+          "client_peak_rss_observed_bytes": 45162496,
+          "engine_peak_rss_observed_bytes": 0,
+          "iterations": 2000,
+          "max_ms": 0.041,
+          "mean_ms": 0.006,
+          "min_ms": 0.006,
+          "ops_per_sec": 160729.2,
+          "p50_ms": 0.006,
+          "p95_ms": 0.008,
+          "p99_ms": 0.009,
+          "p99_sample_count_sufficient": true,
+          "resource_sample_count": 6,
+          "resource_sample_interval_ms": 20,
+          "windows": [
+            {
+              "iterations": 200,
+              "max_ms": 0.012,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 160978.9,
+              "p50_ms": 0.006,
+              "p95_ms": 0.007,
+              "p99_ms": 0.011,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 5
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.013,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 160957.2,
+              "p50_ms": 0.006,
+              "p95_ms": 0.008,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 205
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.015,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 160936.4,
+              "p50_ms": 0.006,
+              "p95_ms": 0.008,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 405
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.041,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 158922.5,
+              "p50_ms": 0.006,
+              "p95_ms": 0.008,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 605
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.03,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 155336.9,
+              "p50_ms": 0.006,
+              "p95_ms": 0.008,
+              "p99_ms": 0.024,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 805
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.014,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 162314.6,
+              "p50_ms": 0.006,
+              "p95_ms": 0.008,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1005
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.011,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 161594.6,
+              "p50_ms": 0.006,
+              "p95_ms": 0.008,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1205
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.014,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 162216.8,
+              "p50_ms": 0.006,
+              "p95_ms": 0.008,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1405
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.011,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 163304.6,
+              "p50_ms": 0.006,
+              "p95_ms": 0.008,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1605
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.012,
+              "mean_ms": 0.006,
+              "min_ms": 0.006,
+              "ops_per_sec": 161012.7,
+              "p50_ms": 0.006,
+              "p95_ms": 0.008,
+              "p99_ms": 0.009,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1805
+            }
+          ]
+        },
+        "tofudb": {
+          "client_peak_rss_observed_bytes": 53792768,
+          "engine_peak_rss_observed_bytes": 0,
+          "iterations": 2000,
+          "max_ms": 0.062,
+          "mean_ms": 0.022,
+          "min_ms": 0.02,
+          "ops_per_sec": 46507.0,
+          "p50_ms": 0.021,
+          "p95_ms": 0.024,
+          "p99_ms": 0.027,
+          "p99_sample_count_sufficient": true,
+          "resource_sample_count": 24,
+          "resource_sample_interval_ms": 20,
+          "windows": [
+            {
+              "iterations": 200,
+              "max_ms": 0.03,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 46657.2,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.029,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 5
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.028,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47097.6,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.027,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 205
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.028,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47278.1,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.027,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 405
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.041,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 47032.1,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.033,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 605
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.062,
+              "mean_ms": 0.023,
+              "min_ms": 0.02,
+              "ops_per_sec": 44311.8,
+              "p50_ms": 0.022,
+              "p95_ms": 0.025,
+              "p99_ms": 0.034,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 805
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.03,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 46517.2,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.027,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1005
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.027,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 46673.3,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.026,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1205
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.029,
+              "mean_ms": 0.022,
+              "min_ms": 0.02,
+              "ops_per_sec": 46233.4,
+              "p50_ms": 0.021,
+              "p95_ms": 0.025,
+              "p99_ms": 0.027,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1405
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.03,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 46696.4,
+              "p50_ms": 0.021,
+              "p95_ms": 0.023,
+              "p99_ms": 0.027,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1605
+            },
+            {
+              "iterations": 200,
+              "max_ms": 0.028,
+              "mean_ms": 0.021,
+              "min_ms": 0.02,
+              "ops_per_sec": 46711.6,
+              "p50_ms": 0.021,
+              "p95_ms": 0.024,
+              "p99_ms": 0.026,
+              "p99_sample_count_sufficient": false,
+              "start_iteration": 1805
+            }
+          ]
+        }
+      },
+      "measurement": {
+        "authority_dir_parent": null,
+        "benchmark_added_retries": 0,
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "checkout_source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "embedded_source_matches_checkout": true,
+        "engine_order": [
+          "rawsqlite",
+          "tofudb"
+        ],
+        "equivalent_durability": true,
+        "latency_clock": "perf_counter_ns",
+        "performance_verdict": "not_assessed",
+        "platform": "linux",
+        "python_version": "3.12.13",
+        "scope": "storage-operations-not-active-conversations",
+        "source_matches_checkout": true,
+        "temporary_directory": "/tmp",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "bytes": 19686848,
+          "path": "/tmp/tofudb-perf-binary-auoqs12x/tofu-db",
+          "sha256": "5c2e4c5cb398aae7dfae09e9cb6dfd3299906fd40709f8d4a48cc195e798106c"
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+          "version": "0.2.0"
+        },
+        "tofudb_client_mode": "embedded",
+        "tofudb_durability": "strict",
+        "tofudb_shared_library": {
+          "build_identity": {
+            "source_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229"
+          },
+          "bytes": 17919336,
+          "sha256": "2d542cce64f122357b9661f2542b2df3e547a93f386bb36bb8b7b329d03ffaec"
+        },
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "crc32c": "python",
+          "json_accelerator_version": "3.12.0",
+          "large_text_json": "orjson-compatible-subset",
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e"
+        },
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ]
+      },
+      "scope": {
+        "root_native_at_observation": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "frozen_native": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+        "python_hashes": {
+          "scripts/tofudb_perf_compare.py": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "tofu_db/embedded.py": "7c4026e7de9efb7f3fa238cf333d8e1b4232735429fd9eb58c9d7229cb66ed41"
+        },
+        "scope": "Root retained Python clients; frozen native build. Isolated disposable authorities; raw SQLite direct SQL comparison."
+      }
+    }
+  ],
+  "limits": [
+    "Direct raw SQLite SQL versus full Tofu adapter; not a full harness verdict",
+    "No new optimization admitted",
+    "Small cohorts have insufficient P99 coverage; medium cohorts have 2000 reads each"
+  ],
+  "binary_sha256": "5c2e4c5cb398aae7dfae09e9cb6dfd3299906fd40709f8d4a48cc195e798106c",
+  "library_sha256": "2d542cce64f122357b9661f2542b2df3e547a93f386bb36bb8b7b329d03ffaec",
+  "build_exit_code": 0
+}

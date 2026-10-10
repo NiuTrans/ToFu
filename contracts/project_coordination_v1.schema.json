@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Project coordination binding v1",
+  "description": "An explicit owner/project binding to an existing conversation. This grants no execution or messaging permission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["projectPath", "conversationId", "revision", "availability", "capabilities"],
+  "properties": {
+    "projectPath": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "conversationId": {"type": "string", "maxLength": 256},
+    "revision": {"type": "integer", "minimum": 0},
+    "availability": {"enum": ["unbound", "available", "unavailable"]},
+    "capabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["assign", "sendMessage", "steerSubagent"],
+      "properties": {
+        "assign": {"const": false},
+        "sendMessage": {"const": false},
+        "steerSubagent": {"type": "boolean"}
+      }
+    }
+  },
+  "$defs": {
+    "bindRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "conversationId", "expectedRevision"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "conversationId": {"type": "string", "maxLength": 256},
+        "expectedRevision": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

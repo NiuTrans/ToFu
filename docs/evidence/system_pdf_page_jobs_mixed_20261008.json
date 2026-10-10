@@ -1,0 +1,346 @@
+{
+  "format": "tofu.pdf-page-job-mixed-evidence/v1",
+  "whole_system_verdict": "incomplete",
+  "candidate_verdict": "do_not_promote_page_jobs_for_current_mixed_batch",
+  "production_promoted": false,
+  "scope": "Whole rich PDF core: page jobs vs input-order document jobs, same fixed pool.\n\nMatched canonical budgets, immutable corpus, independent latency/memory processes\nand original output/error traces. No production, cold or scaled admission.\n",
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/pdf-page-jobs-full.json",
+  "raw_artifact_sha256": "da90f50849f90a13bc8db13a271289a965cf235136f333cabb01e80b89d47214",
+  "sources": {
+    "benchmarks/pdf_batch/page_jobs.py": "f9796e6dbe531761e6f86a2f3921ce399bc8f89a1edb5820e83b5338b796eb1e",
+    "benchmarks/pdf_batch/page_jobs_measure.py": "6c0f153559f35570d048940035dfdabacc67e7855f4fde65ba49e0deffaeb743",
+    "lib/pdf_parser/text.py": "4d86fb85c117bcbb1cd80aac7457f474ddc6743249e8abd86ff9d816572cea42",
+    "lib/pdf_parser/_common.py": "b81d42bed15fee1ee272f07c185742e63dc9cc1ecce3473e260d5d34b629cc6a",
+    "lib/pdf_parser/postprocess.py": "3b450ccac1aba65b60560bd4d2743b6a5f2a685a12d31f45b2e66adc39dea873",
+    "lib/pdf_parser/math.py": "b13d5b1b0b20960abac20bdf7edcc7c493d18c491778fe854ecf943331da3e92",
+    "benchmarks/pdf_batch/heterogeneous.py": "2890455e1563647dca9fe5012d0c46ff9b4debf65c0ba259728c33aecf2a1cff",
+    "benchmarks/pdf_batch/measure.py": "4e246f3b5200c4d8f9dc339e97b107d41336804edaf9bf0b82a6bb356f99a441",
+    "benchmarks/pdf_batch/experiment.py": "5db65cd433233c2ca42dc74acb5fd0f1af0aef4656057d549e19049223a1b999",
+    "lib/pdf_parser/core.py": "82d92ec1fb6895830e336d8e6b5a7fbad2a4bb8c1e193073bb2310e3b8762f54",
+    "lib/pdf_parser/policy.py": "a0d17e3ff9f9d1804094e3abb41359002a5583caede328ea3239ae142e52c62e",
+    "lib/pdf_parser/admission.py": "6041d8ebd01d39ffcdb222fb141aed404960ed6410d73063e2487d35985bb939"
+  },
+  "fixtures": [
+    {
+      "kind": "text_table",
+      "pages": 8,
+      "fixture_index": 0,
+      "sha256": "55618a99740b9fd5abbe9eeeabbd8e48c1e37ee7c49167cd958cd7e5531c3ba7",
+      "bytes": 28869
+    },
+    {
+      "kind": "short_text",
+      "pages": 1,
+      "fixture_index": 1,
+      "sha256": "ca579f6859990573674455e13edb243ab8c871356692867f82b385c6c6d173ea",
+      "bytes": 945
+    },
+    {
+      "kind": "malformed",
+      "pages": null,
+      "sha256": "4386774c23f60e62da4761894823799b0b50a3f599f18e5d1cd513107c7123a3",
+      "bytes": 25
+    },
+    {
+      "kind": "text_table",
+      "pages": 4,
+      "fixture_index": 2,
+      "sha256": "513cbff147c374e95d663aaca494b9a08bd70156a45a8d93a094eff236eb8faa",
+      "bytes": 14567
+    },
+    {
+      "kind": "short_text",
+      "pages": 1,
+      "fixture_index": 3,
+      "sha256": "9f83790123a796f34b6e003d9463c0019836853548c27c837d67436154b72876",
+      "bytes": 945
+    },
+    {
+      "kind": "text_table",
+      "pages": 2,
+      "fixture_index": 4,
+      "sha256": "421658c3606f8f835adf8e41afe9e0c1c0c7f406d605e56efcfb2c4fb1f8c8b6",
+      "bytes": 7501
+    },
+    {
+      "kind": "short_text",
+      "pages": 1,
+      "fixture_index": 5,
+      "sha256": "05e75c6a9b13c5d7a628e0991ab4e459dd1cc8ac7bff8bddaced3ade54f25f60",
+      "bytes": 945
+    },
+    {
+      "kind": "text_table",
+      "pages": 6,
+      "fixture_index": 6,
+      "sha256": "384a995044b1bcb83a3e7a95c93740656675527f128a7388e1897daec797bfab",
+      "bytes": 21720
+    },
+    {
+      "kind": "short_text",
+      "pages": 1,
+      "fixture_index": 7,
+      "sha256": "4ccf88226390ddf596f16cd323b471a709cf3708b0e64687df5f4acc6ed89435",
+      "bytes": 945
+    }
+  ],
+  "runtime": {
+    "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+    "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+    "affinity": [
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      144,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      178
+    ]
+  },
+  "observations": 600,
+  "independent_latency_memory_leader_pids": 12,
+  "budgets": {
+    "workers": 2,
+    "unfinished_capacity": 6,
+    "comparison": "same canonical resource budget in both arms"
+  },
+  "correctness": "all full core output/error traces match; source digests verified against frozen worktree",
+  "process_observation": "PID 2096597 is absent; final checkpoint contains all three pairs; terminal exit code was not observed",
+  "pairs": [
+    {
+      "pair": 0,
+      "reference": {
+        "p50_ms": 1780.684881,
+        "p95_ms": 1811.399742,
+        "p99_ms": 1853.975185,
+        "tree_cpu_ms_per_batch": 2607.3,
+        "sampled_peak_tree_rss_bytes": 223244288
+      },
+      "candidate": {
+        "p50_ms": 1927.7281965,
+        "p95_ms": 2041.993903,
+        "p99_ms": 2106.53104,
+        "tree_cpu_ms_per_batch": 2618.5000000000005,
+        "sampled_peak_tree_rss_bytes": 249708544
+      },
+      "ratios": {
+        "p50_ms": 1.0825768315713578,
+        "p95_ms": 1.1273016417377848,
+        "p99_ms": 1.1362239673127015,
+        "tree_cpu_ms_per_batch": 1.004295631496184,
+        "sampled_peak_tree_rss_bytes": 1.1185439333614664
+      },
+      "guard_violations": [
+        {
+          "metric": "p50_ms",
+          "ratio": 1.0825768315713578,
+          "allowed_ratio": 1.05
+        },
+        {
+          "metric": "p95_ms",
+          "ratio": 1.1273016417377848,
+          "allowed_ratio": 1.05
+        },
+        {
+          "metric": "p99_ms",
+          "ratio": 1.1362239673127015,
+          "allowed_ratio": 1.05
+        },
+        {
+          "metric": "sampled_peak_tree_rss_bytes",
+          "ratio": 1.1185439333614664,
+          "allowed_ratio": 1.05
+        }
+      ],
+      "exact_output_error_trace_sha256": "5e22aa949b7872331ed7b857a287e282f3e6d8fe9fa4ff332a02cfb5d0aec1ca",
+      "latency_memory_pids": {
+        "reference": [
+          2096655,
+          2159773
+        ],
+        "candidate": [
+          2204157,
+          2227332
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "reference": {
+        "p50_ms": 1765.624716,
+        "p95_ms": 1795.258371,
+        "p99_ms": 1821.018079,
+        "tree_cpu_ms_per_batch": 2600.2999999999993,
+        "sampled_peak_tree_rss_bytes": 222793728
+      },
+      "candidate": {
+        "p50_ms": 1938.555195,
+        "p95_ms": 2087.708553,
+        "p99_ms": 2177.218518,
+        "tree_cpu_ms_per_batch": 2616.6000000000004,
+        "sampled_peak_tree_rss_bytes": 250564608
+      },
+      "ratios": {
+        "p50_ms": 1.0979429419133708,
+        "p95_ms": 1.162901444563157,
+        "p99_ms": 1.1956051085421433,
+        "tree_cpu_ms_per_batch": 1.0062685074799065,
+        "sampled_peak_tree_rss_bytes": 1.1246483922563566
+      },
+      "guard_violations": [
+        {
+          "metric": "p50_ms",
+          "ratio": 1.0979429419133708,
+          "allowed_ratio": 1.05
+        },
+        {
+          "metric": "p95_ms",
+          "ratio": 1.162901444563157,
+          "allowed_ratio": 1.05
+        },
+        {
+          "metric": "p99_ms",
+          "ratio": 1.1956051085421433,
+          "allowed_ratio": 1.05
+        },
+        {
+          "metric": "sampled_peak_tree_rss_bytes",
+          "ratio": 1.1246483922563566,
+          "allowed_ratio": 1.05
+        }
+      ],
+      "exact_output_error_trace_sha256": "5e22aa949b7872331ed7b857a287e282f3e6d8fe9fa4ff332a02cfb5d0aec1ca",
+      "latency_memory_pids": {
+        "candidate": [
+          2313982,
+          2376768
+        ],
+        "reference": [
+          2401115,
+          2422046
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "reference": {
+        "p50_ms": 1780.751854,
+        "p95_ms": 1881.278435,
+        "p99_ms": 1941.389545,
+        "tree_cpu_ms_per_batch": 2611.6,
+        "sampled_peak_tree_rss_bytes": 222326784
+      },
+      "candidate": {
+        "p50_ms": 1927.073503,
+        "p95_ms": 2027.183281,
+        "p99_ms": 2039.984838,
+        "tree_cpu_ms_per_batch": 2616.499999999999,
+        "sampled_peak_tree_rss_bytes": 250617856
+      },
+      "ratios": {
+        "p50_ms": 1.0821684664661873,
+        "p95_ms": 1.0775562209641765,
+        "p99_ms": 1.0507859400262713,
+        "tree_cpu_ms_per_batch": 1.0018762444478477,
+        "sampled_peak_tree_rss_bytes": 1.127249949335839
+      },
+      "guard_violations": [
+        {
+          "metric": "p50_ms",
+          "ratio": 1.0821684664661873,
+          "allowed_ratio": 1.05
+        },
+        {
+          "metric": "p95_ms",
+          "ratio": 1.0775562209641765,
+          "allowed_ratio": 1.05
+        },
+        {
+          "metric": "p99_ms",
+          "ratio": 1.0507859400262713,
+          "allowed_ratio": 1.05
+        },
+        {
+          "metric": "sampled_peak_tree_rss_bytes",
+          "ratio": 1.127249949335839,
+          "allowed_ratio": 1.05
+        }
+      ],
+      "exact_output_error_trace_sha256": "5e22aa949b7872331ed7b857a287e282f3e6d8fe9fa4ff332a02cfb5d0aec1ca",
+      "latency_memory_pids": {
+        "reference": [
+          2436314,
+          2466438
+        ],
+        "candidate": [
+          2496820,
+          2511713
+        ]
+      }
+    }
+  ],
+  "limitations": [
+    "no web/PDF mixed application scheduler or persistence",
+    "no application cancellation/crash recovery admission",
+    "cold diagnostic only; memory tree sampled every 5ms",
+    "CPU measured in a separate repeated interval"
+  ],
+  "cpu_scope": "separate repeated process-tree CPU intervals, not raw per-operation CPU vectors; do not label complete standard-gate coverage",
+  "decision": "keep input-order document jobs; single-document page-job formal measurement remains independent and running"
+}

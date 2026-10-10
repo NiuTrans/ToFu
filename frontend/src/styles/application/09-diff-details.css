@@ -1,0 +1,250 @@
+.ptool-batch-done-summary {
+  display: flex;
+  /* Top-align so a multi-line description keeps the status glyph / index
+     pinned to the first line instead of floating to the vertical centre. */
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 5px 11px;
+  font-size: var(--font-size-sm);
+  line-height: 1.3;
+  cursor: pointer;
+  list-style: none;
+}
+.ptool-batch-done-summary::-webkit-details-marker { display: none; }
+.ptool-batch-done-summary::marker { display: none; content: ""; }
+.ptool-batch-done-summary:hover {
+  background: rgba(255,255,255,0.03);
+}
+.ptool-batch-done-summary .ptool-batch-status {
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  width: 15px;
+  height: 1.3em;
+  text-align: center;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ptool-batch-done-edit.ptool-batch-ok .ptool-batch-status { color: #34d399; }
+.ptool-batch-done-edit.ptool-batch-fail .ptool-batch-status { color: var(--accent-red, #f87171); }
+/* Monospace ordinal so a stack of edits reads as a numbered list. */
+.ptool-batch-done-summary .ptool-batch-idx {
+  flex-shrink: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  opacity: 0.65;
+  min-width: 14px;
+  height: 1.3em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+/* Per-edit operation pill — a glanceable rewrite/insert indicator on each
+   batch-edit row. Amber = replace (rewrote existing text), green = insert
+   (pure addition, anchor untouched). The label is the raw API enum value;
+   per-op detail lives on these rows, the header summary carries the edit
+   description instead. */
+.ptool-op {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 15px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1;
+}
+.ptool-op svg { flex-shrink: 0; }
+.ptool-op--replace {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.10);
+  border-color: rgba(251, 191, 36, 0.28);
+}
+.ptool-op--insert {
+  color: #34d399;
+  background: rgba(52, 211, 153, 0.10);
+  border-color: rgba(52, 211, 153, 0.28);
+}
+/* Per-kind failure chip on a settled-failed edit row. The write tools stamp
+   every edit-surface failure with a closed bracketed kind tag; the chip
+   renders that tag in a category color so the repair move is visible at a
+   glance — the full reason stays on the row tooltip / expanded detail. */
+.ptool-edit-kind {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1;
+}
+.ptool-edit-kind--missing {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.10);
+  border-color: rgba(248, 113, 113, 0.28);
+}
+.ptool-edit-kind--input {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.10);
+  border-color: rgba(251, 191, 36, 0.28);
+}
+.ptool-edit-kind--system {
+  color: #c084fc;
+  background: rgba(192, 132, 252, 0.10);
+  border-color: rgba(192, 132, 252, 0.28);
+}
+/* One-line settled detail on an applied edit row inside the failure card. */
+.ptool-edit-ok-detail {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary, #94a3b8);
+  font-size: var(--font-size-xs);
+  opacity: 0.8;
+}
+.ptool-batch-done-summary .ptool-batch-desc {
+  color: var(--text-primary, #e2e8f0);
+  /* Take all remaining width and wrap freely. min-width:0 lets it shrink
+     inside the flex row instead of overflowing. */
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+/* Only shown when a batch spans MULTIPLE files — and then it's just the
+   basename (full path on hover), pinned to the right and never wrapping,
+   so it can't starve the description column. */
+.ptool-batch-done-summary .ptool-batch-path {
+  flex-shrink: 0;
+  max-width: 45%;
+  font-size: 10.5px;
+  font-family: 'JetBrains Mono', monospace;
+  color: #93c5fd;
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: auto;
+  height: 1.3em;
+  display: inline-flex;
+  align-items: center;
+}
+/* Git-style diff block inside each batch edit */
+.bdiff-block {
+  border-top: 1px solid rgba(255,255,255,0.08);
+  padding: 6px 0;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Menlo', monospace;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  overflow-x: auto;
+  background: #0f1014;
+}
+.bdiff-line {
+  display: flex;
+  padding: 0 var(--space-3);
+  min-height: 18px;
+}
+.bdiff-sign {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  user-select: none;
+  font-weight: 600;
+  opacity: 0.7;
+}
+.bdiff-line code {
+  white-space: pre;
+  font-family: inherit;
+  font-size: inherit;
+  flex: 1;
+  min-width: 0;
+}
+/* GitHub-dark inspired: solid but quiet backgrounds, high-contrast text */
+.bdiff-del {
+  background: #2d1418;
+  color: #f0c5c5;
+}
+.bdiff-del .bdiff-sign { color: #f87171; opacity: 1; }
+.bdiff-add {
+  background: #14281a;
+  color: #c5e8c5;
+}
+.bdiff-add .bdiff-sign { color: #4ade80; opacity: 1; }
+.bdiff-ctx {
+  background: transparent;
+  color: #c8c8d0;
+}
+.bdiff-ctx .bdiff-sign { color: #6a6a7a; }
+.bdiff-sep {
+  height: 1px;
+  margin: 3px var(--space-4);
+  background: rgba(255,255,255,0.06);
+}
+
+/* Write file meta */
+.ptool-write-meta {
+  padding: 5px var(--space-3);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  border-top: 1px solid rgba(255,255,255,0.05);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Approval buttons */
+.ptool-approval-btns {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid rgba(234,179,8,0.12);
+  background: rgba(0,0,0,0.1);
+}
+.ptool-approve-btn, .ptool-reject-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: color .18s ease, background-color .18s ease;
+  font-family: inherit;
+}
+.ptool-approve-btn {
+  background: rgba(34,197,94,0.15);
+  color: #4ade80;
+  border-color: rgba(34,197,94,0.3);
+}
+.ptool-approve-btn:hover {
+  background: rgba(34,197,94,0.28);
+  border-color: rgba(34,197,94,0.5);
+  color: #86efac;
+  box-shadow: 0 0 10px -3px rgba(34,197,94,0.25);
+}
+.ptool-reject-btn {
+  background: rgba(239,68,68,0.12);
+  color: #f87171;
+  border-color: rgba(239,68,68,0.25);
+}
+.ptool-reject-btn:hover {
+  background: rgba(239,68,68,0.24);
+  border-color: rgba(239,68,68,0.45);
+  color: #fca5a5;
+  box-shadow: 0 0 10px -3px rgba(239,68,68,0.25);
+}

@@ -1,0 +1,147 @@
+{
+  "decision": "No runtime admission: consistent observer-enabled publication-hold mean reduction, but default-off full harness effects mixed and one-second stream gates all fail. This is not proof of universally harmful performance; retained as measured candidate.",
+  "holds": [
+    {
+      "label": "prefix-hold-embedded-B0",
+      "calls": 308,
+      "total_ms": 1051.021215,
+      "mean_ms": 3.4124065422077923,
+      "correct": true
+    },
+    {
+      "label": "prefix-hold-embedded-C1",
+      "calls": 332,
+      "total_ms": 1000.22381,
+      "mean_ms": 3.0127223192771084,
+      "correct": true
+    },
+    {
+      "label": "prefix-hold-embedded-C2",
+      "calls": 315,
+      "total_ms": 912.665259,
+      "mean_ms": 2.8973500285714286,
+      "correct": true
+    },
+    {
+      "label": "prefix-hold-embedded-B3",
+      "calls": 329,
+      "total_ms": 1045.062719,
+      "mean_ms": 3.1764824285714286,
+      "correct": true
+    },
+    {
+      "label": "prefix-hold-application-B0",
+      "calls": 262,
+      "total_ms": 866.057141,
+      "mean_ms": 3.3055616068702287,
+      "correct": true
+    },
+    {
+      "label": "prefix-hold-application-C1",
+      "calls": 283,
+      "total_ms": 858.458089,
+      "mean_ms": 3.033420809187279,
+      "correct": true
+    },
+    {
+      "label": "prefix-hold-application-C2",
+      "calls": 263,
+      "total_ms": 823.064798,
+      "mean_ms": 3.1295239467680607,
+      "correct": true
+    },
+    {
+      "label": "prefix-hold-application-B3",
+      "calls": 271,
+      "total_ms": 921.927712,
+      "mean_ms": 3.4019472767527676,
+      "correct": true
+    }
+  ],
+  "macro": [
+    {
+      "label": "prefix-clean-embedded-B0",
+      "correct": true,
+      "errors": 0,
+      "p99": {
+        "submit_to_running": 675.077885389328,
+        "stream_scheduled": 1212.4951407313347,
+        "settle": 4675.094440579414
+      }
+    },
+    {
+      "label": "prefix-clean-embedded-C1",
+      "correct": true,
+      "errors": 0,
+      "p99": {
+        "submit_to_running": 674.1868779063225,
+        "stream_scheduled": 1197.5823566317558,
+        "settle": 3168.3531999588013
+      }
+    },
+    {
+      "label": "prefix-clean-embedded-C2",
+      "correct": true,
+      "errors": 0,
+      "p99": {
+        "submit_to_running": 641.2769705057144,
+        "stream_scheduled": 1183.9613392949104,
+        "settle": 3233.6899414658546
+      }
+    },
+    {
+      "label": "prefix-clean-embedded-B3",
+      "correct": true,
+      "errors": 0,
+      "p99": {
+        "submit_to_running": 700.396828353405,
+        "stream_scheduled": 1220.5792143940926,
+        "settle": 2995.9811940789223
+      }
+    },
+    {
+      "label": "prefix-clean-application-B0",
+      "correct": true,
+      "errors": 0,
+      "p99": {
+        "submit_to_running": 121.90321087837219,
+        "stream_scheduled": 1798.8305985927582,
+        "settle": 3953.659363090992
+      }
+    },
+    {
+      "label": "prefix-clean-application-C1",
+      "correct": true,
+      "errors": 0,
+      "p99": {
+        "submit_to_running": 78.44360172748566,
+        "stream_scheduled": 1817.8894519805908,
+        "settle": 4186.675421893597
+      }
+    },
+    {
+      "label": "prefix-clean-application-C2",
+      "correct": true,
+      "errors": 0,
+      "p99": {
+        "submit_to_running": 68.32968443632126,
+        "stream_scheduled": 1829.2627707123756,
+        "settle": 4262.74050027132
+      }
+    },
+    {
+      "label": "prefix-clean-application-B3",
+      "correct": true,
+      "errors": 0,
+      "p99": {
+        "submit_to_running": 131.87866657972336,
+        "stream_scheduled": 1820.5915614962578,
+        "settle": 4981.554217636585
+      }
+    }
+  ],
+  "tests": "1648passed0failed3ignored;36overlaytests;2128dual-index standalone boundaries",
+  "source_commit": "729022c1a",
+  "candidate_source": "b36043c7c03a594c09263a0107caecc566668f1f408f06c3d601bff6ae70c4ad",
+  "scope": "Four observer-enabled B-C/C-B pairs across two transports, background publication work/count may differ. Earlier build-overlap baseline excluded. No change to live backend or deployment."
+}

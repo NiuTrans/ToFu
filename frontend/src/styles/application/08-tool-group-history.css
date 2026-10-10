@@ -1,0 +1,35 @@
+/* ★ Truncated tool calls "show more" bar */
+.ptool-truncated {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 6px var(--space-3);
+  margin: 2px var(--space-3) var(--space-1);
+  font-size: var(--font-size-xs); font-weight: 500;
+  font-family: 'JetBrains Mono', monospace;
+  color: rgba(234,179,8,0.65);
+  background: rgba(234,179,8,0.05);
+  border: 1px dashed rgba(234,179,8,0.18);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: all .2s ease;
+}
+.ptool-truncated:hover {
+  color: rgba(234,179,8,0.9);
+  background: rgba(234,179,8,0.1);
+  border-color: rgba(234,179,8,0.35);
+}
+.ptool-truncated svg {
+  flex-shrink: 0;
+  transition: transform .2s ease;
+}
+[data-theme="light"] .ptool-truncated {
+  color: rgba(140,100,0,0.6);
+  background: rgba(180,140,0,0.04);
+  border-color: rgba(180,140,0,0.15);
+}
+[data-theme="light"] .ptool-truncated:hover {
+  color: rgba(140,100,0,0.85);
+  background: rgba(180,140,0,0.08);
+  border-color: rgba(180,140,0,0.3);
+}
+

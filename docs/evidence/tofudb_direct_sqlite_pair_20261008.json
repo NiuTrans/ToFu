@@ -1,0 +1,588 @@
+{
+  "scope": "Four sequential S-N-N-S windows of original1000x4x8192 uncoalesced carry-stream-events full application workload; same /tmp volume and complete frozen callers. Both in-process engines gracefully close/reopen. Explicit SQLite writerqueue1024, readpool12; Native existing capacity/defaults plus admitted FIFO client handoff.",
+  "decision": "Native wins the three measured P99 dimensions in both matched pairs under this scope. Both fail the original1s stream gate; process-crash parity/full-scene superiority are not established.",
+  "rows": [
+    {
+      "label": "paired-S0",
+      "report": ".tmp/tofudb-direct-sqlite-semantics-20261008/paired-S0.json",
+      "sha256": "3c2464bfb076755c7dfd2660c929d661b9665b207bc1db57675a7c0fe54b8f2b",
+      "correctness": true,
+      "errors": 0,
+      "p99_ms": {
+        "submit_to_running": 2389.3396332859993,
+        "stream_scheduled": 2666.0487800836563,
+        "settle": 4182.4730932712555
+      },
+      "authority": {
+        "backend": "sqlite",
+        "client_mode": "direct-in-process-existing-semantic-backend",
+        "authority_directory": "/tmp/direct-sqlite-6qd6j0h7",
+        "crash_scope": "graceful-close-reopen",
+        "durability": "strict",
+        "journal": "WAL synchronous=FULL",
+        "read_pool_size": 12,
+        "writer_queue_capacity": 1024,
+        "rpc_deadline_seconds": 30.0,
+        "scope": "Retains existing semantic handlers, receipts, pools/writer and StorageClient committed-event publication; bypasses Sidecar framing/auth middleware."
+      },
+      "source_scope": {
+        "manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1",
+        "shared_project_imports": [],
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "runner_sha256": "20dd7b22646f735821e39a1c91e96d0f222cc5058bf9e79d0c2b5a801cace184",
+        "direct_port_sha256": "c8d2427140ade98870c6e39020fa80c8e1a9e0bb0d8adfbc939b1aa3803175e4"
+      },
+      "loaded_frozen_module_count": 330,
+      "acceptance": {
+        "policy": "tofu.conversation-concurrency-policy/v2",
+        "correctness_passed": true,
+        "latency_passed": false,
+        "coverage_passed": false,
+        "passed": false,
+        "metrics": {
+          "submit_to_running": {
+            "p99_ms": 2389.3396332859993,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          },
+          "stream_scheduled": {
+            "p99_ms": 2666.0487800836563,
+            "budget_ms": 1000,
+            "samples": 4000,
+            "expected_samples": 4000,
+            "passed": false
+          },
+          "settle": {
+            "p99_ms": 4182.4730932712555,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          }
+        },
+        "failures": [
+          "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+        ],
+        "coverage_gaps": [
+          "process-crash mechanism not verified"
+        ],
+        "uncovered": [
+          "real-provider-capacity",
+          "browser-send-to-visible-feedback",
+          "sustained-soak"
+        ]
+      }
+    },
+    {
+      "label": "paired-N1",
+      "report": ".tmp/tofudb-direct-sqlite-semantics-20261008/paired-N1.json",
+      "sha256": "4e858bf02fd97fc6d8f055eec47d16a79a8e103acc68891055cebae1d5812d4b",
+      "correctness": true,
+      "errors": 0,
+      "p99_ms": {
+        "submit_to_running": 690.9715905785561,
+        "stream_scheduled": 1258.1945732235909,
+        "settle": 3294.6071922779083
+      },
+      "authority": {
+        "backend": "tofudb",
+        "authority_directory": "/tmp/tofudb-perf-authority-7xp13x6g",
+        "filesystem": "xfs",
+        "durability": "strict",
+        "rpc_deadline_seconds": 30.0,
+        "crash_scope": "graceful-close-reopen",
+        "build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "source_matches_checkout": true,
+        "client_mode": "embedded",
+        "shared_library_sha256": "aff0e80251f1d4ffaf90552f0788a01de0b2b5954f7c53548d9ee51d3643c3cb",
+        "embedded_build_identity": {
+          "source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7"
+        }
+      },
+      "source_scope": {
+        "manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1",
+        "shared_project_imports": [],
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "runner_sha256": "20dd7b22646f735821e39a1c91e96d0f222cc5058bf9e79d0c2b5a801cace184",
+        "direct_port_sha256": "c8d2427140ade98870c6e39020fa80c8e1a9e0bb0d8adfbc939b1aa3803175e4"
+      },
+      "loaded_frozen_module_count": 243,
+      "acceptance": {
+        "policy": "tofu.conversation-concurrency-policy/v2",
+        "correctness_passed": true,
+        "latency_passed": false,
+        "coverage_passed": false,
+        "passed": false,
+        "metrics": {
+          "submit_to_running": {
+            "p99_ms": 690.9715905785561,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          },
+          "stream_scheduled": {
+            "p99_ms": 1258.1945732235909,
+            "budget_ms": 1000,
+            "samples": 4000,
+            "expected_samples": 4000,
+            "passed": false
+          },
+          "settle": {
+            "p99_ms": 3294.6071922779083,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          }
+        },
+        "failures": [
+          "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+        ],
+        "coverage_gaps": [
+          "process-crash mechanism not verified"
+        ],
+        "uncovered": [
+          "real-provider-capacity",
+          "browser-send-to-visible-feedback",
+          "sustained-soak"
+        ]
+      }
+    },
+    {
+      "label": "paired-N2",
+      "report": ".tmp/tofudb-direct-sqlite-semantics-20261008/paired-N2.json",
+      "sha256": "5b5d3985df353ea43680e543ff6d9e1bab10c5174f81372c4dec666d10e07e4e",
+      "correctness": true,
+      "errors": 0,
+      "p99_ms": {
+        "submit_to_running": 701.4641687273979,
+        "stream_scheduled": 1276.0696187615395,
+        "settle": 2719.579815864563
+      },
+      "authority": {
+        "backend": "tofudb",
+        "authority_directory": "/tmp/tofudb-perf-authority-n8vcpn0p",
+        "filesystem": "xfs",
+        "durability": "strict",
+        "rpc_deadline_seconds": 30.0,
+        "crash_scope": "graceful-close-reopen",
+        "build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "source_matches_checkout": true,
+        "client_mode": "embedded",
+        "shared_library_sha256": "aff0e80251f1d4ffaf90552f0788a01de0b2b5954f7c53548d9ee51d3643c3cb",
+        "embedded_build_identity": {
+          "source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7"
+        }
+      },
+      "source_scope": {
+        "manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1",
+        "shared_project_imports": [],
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "runner_sha256": "20dd7b22646f735821e39a1c91e96d0f222cc5058bf9e79d0c2b5a801cace184",
+        "direct_port_sha256": "c8d2427140ade98870c6e39020fa80c8e1a9e0bb0d8adfbc939b1aa3803175e4"
+      },
+      "loaded_frozen_module_count": 243,
+      "acceptance": {
+        "policy": "tofu.conversation-concurrency-policy/v2",
+        "correctness_passed": true,
+        "latency_passed": false,
+        "coverage_passed": false,
+        "passed": false,
+        "metrics": {
+          "submit_to_running": {
+            "p99_ms": 701.4641687273979,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          },
+          "stream_scheduled": {
+            "p99_ms": 1276.0696187615395,
+            "budget_ms": 1000,
+            "samples": 4000,
+            "expected_samples": 4000,
+            "passed": false
+          },
+          "settle": {
+            "p99_ms": 2719.579815864563,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          }
+        },
+        "failures": [
+          "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+        ],
+        "coverage_gaps": [
+          "process-crash mechanism not verified"
+        ],
+        "uncovered": [
+          "real-provider-capacity",
+          "browser-send-to-visible-feedback",
+          "sustained-soak"
+        ]
+      }
+    },
+    {
+      "label": "paired-S3",
+      "report": ".tmp/tofudb-direct-sqlite-semantics-20261008/paired-S3.json",
+      "sha256": "cf6009b9ec074f47230766de5361de3056766d61886fef72b6d529246eecf42c",
+      "correctness": true,
+      "errors": 0,
+      "p99_ms": {
+        "submit_to_running": 2384.201481938362,
+        "stream_scheduled": 2749.169409275055,
+        "settle": 4115.428492426872
+      },
+      "authority": {
+        "backend": "sqlite",
+        "client_mode": "direct-in-process-existing-semantic-backend",
+        "authority_directory": "/tmp/direct-sqlite-ah9jlegg",
+        "crash_scope": "graceful-close-reopen",
+        "durability": "strict",
+        "journal": "WAL synchronous=FULL",
+        "read_pool_size": 12,
+        "writer_queue_capacity": 1024,
+        "rpc_deadline_seconds": 30.0,
+        "scope": "Retains existing semantic handlers, receipts, pools/writer and StorageClient committed-event publication; bypasses Sidecar framing/auth middleware."
+      },
+      "source_scope": {
+        "manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1",
+        "shared_project_imports": [],
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "runner_sha256": "20dd7b22646f735821e39a1c91e96d0f222cc5058bf9e79d0c2b5a801cace184",
+        "direct_port_sha256": "c8d2427140ade98870c6e39020fa80c8e1a9e0bb0d8adfbc939b1aa3803175e4"
+      },
+      "loaded_frozen_module_count": 330,
+      "acceptance": {
+        "policy": "tofu.conversation-concurrency-policy/v2",
+        "correctness_passed": true,
+        "latency_passed": false,
+        "coverage_passed": false,
+        "passed": false,
+        "metrics": {
+          "submit_to_running": {
+            "p99_ms": 2384.201481938362,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          },
+          "stream_scheduled": {
+            "p99_ms": 2749.169409275055,
+            "budget_ms": 1000,
+            "samples": 4000,
+            "expected_samples": 4000,
+            "passed": false
+          },
+          "settle": {
+            "p99_ms": 4115.428492426872,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          }
+        },
+        "failures": [
+          "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+        ],
+        "coverage_gaps": [
+          "process-crash mechanism not verified"
+        ],
+        "uncovered": [
+          "real-provider-capacity",
+          "browser-send-to-visible-feedback",
+          "sustained-soak"
+        ]
+      }
+    }
+  ],
+  "median_window_p99_ms": {
+    "sqlite": {
+      "submit_to_running": 2386.7705576121807,
+      "stream_scheduled": 2707.6090946793556,
+      "settle": 4148.950792849064
+    },
+    "native": {
+      "submit_to_running": 696.217879652977,
+      "stream_scheduled": 1267.1320959925652,
+      "settle": 3007.0935040712357
+    }
+  },
+  "sqlite_over_native_ratio_of_window_medians": {
+    "submit_to_running": 3.428194861645672,
+    "stream_scheduled": 2.1368009722446826,
+    "settle": 1.3797212448604919
+  },
+  "summary_scope": "Two window-P99 values per engine, not pooled request percentiles or statistical confidence intervals.",
+  "direct_sqlite_port": "Existing SQLiteBackend and exact resolve_operation_contract/digest/transaction/receipt boundary. Subclass production StorageClient and override only _attempt; retain retry classification and committed-event publication. Bypasses Sidecar framing/auth. No live backend selection changed.",
+  "source_native": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+  "client_integration_commit": "704dbe1fc",
+  "lifecycle_scope_correction": "Native raw integrity_scope inherits offline-after-abandon label, but paired.py overrides freeze to call EmbeddedRuntime.close and crash_cycle to close/relaunch. Actual mechanism is graceful; no abandonment/SIGKILL recovery conclusion is valid.",
+  "prior_controls": {
+    "status": "1000 conversation run terminal0; inspect report for acceptance separately",
+    "prior_turn_classification": "progress: integrated FIFO pool handoff 704dbe1fc",
+    "checks": {
+      "create": true,
+      "receipt_replay": true,
+      "receipt_mismatch": true,
+      "owner_read": true,
+      "failed_receipt_preserves_state": true,
+      "foreign_owner_empty": true,
+      "reopen_receipt": true,
+      "integrity": true
+    },
+    "small_harness": {
+      "correctness": true,
+      "error_count": 0,
+      "authority": {
+        "backend": "sqlite",
+        "client_mode": "direct-in-process-existing-semantic-backend",
+        "authority_directory": "/path/to/your/project",
+        "crash_scope": "graceful-close-reopen",
+        "durability": "strict",
+        "journal": "WAL synchronous=FULL",
+        "read_pool_size": 12,
+        "writer_queue_capacity": 64,
+        "rpc_deadline_seconds": 30.0,
+        "scope": "Retains existing semantic handlers, receipts, pools/writer and StorageClient committed-event publication; bypasses Sidecar framing/auth middleware."
+      },
+      "latency_ms": {
+        "accept": {
+          "count": 32,
+          "p95": 364.83992636203766,
+          "total_ms": 11422.989971935749,
+          "p50": 357.80347883701324,
+          "p99": 366.4848580956459,
+          "max": 366.4848580956459
+        },
+        "bind": {
+          "count": 32,
+          "p95": 48.215724527835846,
+          "total_ms": 1440.5277594923973,
+          "p50": 44.08247023820877,
+          "p99": 70.51943242549896,
+          "max": 70.51943242549896
+        },
+        "start": {
+          "count": 32,
+          "p95": 50.22743344306946,
+          "total_ms": 1414.3664687871933,
+          "p50": 49.4270920753479,
+          "p99": 50.295598804950714,
+          "max": 50.295598804950714
+        },
+        "submit_to_running": {
+          "count": 32,
+          "p95": 458.2761749625206,
+          "total_ms": 14292.183078825474,
+          "p50": 451.23306661844254,
+          "p99": 458.9613005518913,
+          "max": 458.9613005518913
+        },
+        "stream": {
+          "count": 128,
+          "p95": 276.9281715154648,
+          "total_ms": 19706.573635339737,
+          "p50": 135.54033637046814,
+          "p99": 277.36250311136246,
+          "max": 277.9698297381401
+        },
+        "stream_scheduled": {
+          "count": 128,
+          "p95": 278.229296207428,
+          "total_ms": 20214.027501642704,
+          "p50": 143.11592280864716,
+          "p99": 278.54932099580765,
+          "max": 278.59480679035187
+        },
+        "settle": {
+          "count": 32,
+          "p95": 439.3395334482193,
+          "total_ms": 13659.354105591774,
+          "p50": 434.84482914209366,
+          "p99": 439.91775065660477,
+          "max": 439.91775065660477
+        },
+        "settle_scheduled": {
+          "count": 32,
+          "p95": 579.0819004178047,
+          "total_ms": 18052.61615663767,
+          "p50": 575.5508691072464,
+          "p99": 579.2585238814354,
+          "max": 579.2585238814354
+        }
+      }
+    },
+    "exclusions": {
+      "direct32.json": "Port omitted production StorageClient retry loop; excluded from database performance comparison.",
+      "direct32-retained-retries.json": "Production retries retained; queue24 rejects commands without request_not_dispatched, resulting24/32 completed. Resource-bound adapter result, not engine speed comparison."
+    },
+    "implementation": "Subclass production StorageClient; override _attempt only to call SQLiteBackend with exact resolve_operation_contract/digest/receipt/transaction budget. Retain inherited retry and committed-event publication. No application runtime install or live store change.",
+    "limitations": [
+      "Only graceful close/reopen verified; crash recovery parity missing.",
+      "SQLite semantic operation implementations may differ from Native normalized outputs; full cross-engine shape parity remains unproven.",
+      "No measured speedup against Native established.",
+      "Full run initial file hash guards pass; postrun source and runtime import closure still require audit."
+    ],
+    "scripts": {
+      "check.py": "88d00f4e0913b41e70a44bb0308d74aa0171a920b45d23a0adb8e00a8b5e2c57",
+      "harness.py": "fee325f21362f6a05e1fe97116ab401257e7692ed711514ce908c4baf7590a73"
+    },
+    "full_harness": {
+      "correctness_passed": true,
+      "error_count": 0,
+      "errors": [],
+      "stage_failures": {},
+      "authority": {
+        "backend": "sqlite",
+        "client_mode": "direct-in-process-existing-semantic-backend",
+        "authority_directory": "/tmp/direct-sqlite-8hnenv2s",
+        "crash_scope": "graceful-close-reopen",
+        "durability": "strict",
+        "journal": "WAL synchronous=FULL",
+        "read_pool_size": 12,
+        "writer_queue_capacity": 1024,
+        "rpc_deadline_seconds": 30.0,
+        "scope": "Retains existing semantic handlers, receipts, pools/writer and StorageClient committed-event publication; bypasses Sidecar framing/auth middleware."
+      },
+      "latency_ms": {
+        "accept": {
+          "count": 1000,
+          "p95": 1717.7968472242355,
+          "total_ms": 1367812.124878168,
+          "p50": 1370.3415915369987,
+          "p99": 1805.4429441690445,
+          "max": 1846.8101993203163
+        },
+        "bind": {
+          "count": 1000,
+          "p95": 640.9946754574776,
+          "total_ms": 483008.3844140172,
+          "p50": 486.5405783057213,
+          "p99": 656.1853140592575,
+          "max": 661.6452038288116
+        },
+        "start": {
+          "count": 1000,
+          "p95": 344.5962592959404,
+          "total_ms": 314060.7594996691,
+          "p50": 320.2638104557991,
+          "p99": 348.4054058790207,
+          "max": 612.0737940073013
+        },
+        "submit_to_running": {
+          "count": 1000,
+          "p95": 2392.86145567894,
+          "total_ms": 2165267.3642635345,
+          "p50": 2185.969926416874,
+          "p99": 2449.3031725287437,
+          "max": 2474.828317761421
+        },
+        "stream": {
+          "count": 4000,
+          "p95": 1801.661103963852,
+          "total_ms": 4653602.358549833,
+          "p50": 947.9329511523247,
+          "p99": 1884.9309533834457,
+          "max": 1904.217667877674
+        },
+        "stream_scheduled": {
+          "count": 4000,
+          "p95": 2241.317041218281,
+          "total_ms": 5912725.127056241,
+          "p50": 1441.8063685297966,
+          "p99": 2627.944014966488,
+          "max": 2638.6632472276688
+        },
+        "settle": {
+          "count": 1000,
+          "p95": 3904.7862589359283,
+          "total_ms": 2606768.2508677244,
+          "p50": 2413.5837107896805,
+          "p99": 4100.0204384326935,
+          "max": 4138.228416442871
+        },
+        "settle_scheduled": {
+          "count": 1000,
+          "p95": 6419.423148036003,
+          "total_ms": 4319531.337335706,
+          "p50": 4084.731765091419,
+          "p99": 6732.083290815353,
+          "max": 6772.809647023678
+        }
+      },
+      "acceptance": {
+        "policy": "tofu.conversation-concurrency-policy/v2",
+        "correctness_passed": true,
+        "latency_passed": false,
+        "coverage_passed": false,
+        "passed": false,
+        "metrics": {
+          "submit_to_running": {
+            "p99_ms": 2449.3031725287437,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          },
+          "stream_scheduled": {
+            "p99_ms": 2627.944014966488,
+            "budget_ms": 1000,
+            "samples": 4000,
+            "expected_samples": 4000,
+            "passed": false
+          },
+          "settle": {
+            "p99_ms": 4100.0204384326935,
+            "budget_ms": 5000,
+            "samples": 1000,
+            "expected_samples": 1000,
+            "passed": true
+          }
+        },
+        "failures": [
+          "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+        ],
+        "coverage_gaps": [
+          "process-crash mechanism not verified"
+        ],
+        "uncovered": [
+          "real-provider-capacity",
+          "browser-send-to-visible-feedback",
+          "sustained-soak"
+        ]
+      }
+    },
+    "postrun_manifest_files_verified": 3081,
+    "full_report_sha256": "da6e4be3f32be9302cb326b872a5031427ae4841f49f1e07ce876b72032fd993"
+  },
+  "limitations": [
+    "Normalized outputs for every catalog operation are not compared; current harness exact replay proves only exercised content and state.",
+    "SQLite queue1024 is an explicit override, not zero-configuration victory. Defaultqueue24 has observed rejection at32 conversations; this is adapter resource policy, not SQLite engine incapacity.",
+    "Native source is frozen014bb; this receipt does not certify arbitrary later checkout engine builds.",
+    "Read-query/search/hydration corpus gaps, real provider/browser capacity and sustained soak remain open.",
+    "Two matched pairs do not certify all workloads or all hardware."
+  ],
+  "scripts": {
+    "harness.py": "c8d2427140ade98870c6e39020fa80c8e1a9e0bb0d8adfbc939b1aa3803175e4",
+    "paired.py": "20dd7b22646f735821e39a1c91e96d0f222cc5058bf9e79d0c2b5a801cace184",
+    "run_pair.py": "c30056e2c49155be0228f629233ef1a4bd5f693bc521b18dc61812ea880c95aa"
+  }
+}

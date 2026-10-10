@@ -1,0 +1,97 @@
+
+/* ═══════════════════════════════════════════
+   ★ Pending Approval (manual project tool)
+   ═══════════════════════════════════════════ */
+.ptool-pending-wrap {
+  margin: 2px 0;
+  border: 1px solid rgba(234,179,8,0.3);
+  border-radius: var(--radius-sm);
+  background: rgba(234,179,8,0.04);
+  overflow: hidden;
+  animation: ptoolPendingPulse 2.5s ease-in-out infinite;
+}
+@keyframes ptoolPendingPulse {
+  0%, 100% { border-color: rgba(234,179,8,0.3); box-shadow: 0 0 0 0 rgba(234,179,8,0); }
+  50%      { border-color: rgba(234,179,8,0.55); box-shadow: 0 0 8px -2px rgba(234,179,8,0.12); }
+}
+.ptool-pending-wrap .ptool-line.ptool-pending {
+  color: #fbbf24;
+  background: rgba(234,179,8,0.06);
+  border-bottom: 1px solid rgba(234,179,8,0.12);
+}
+.ptool-badge-warn {
+  color: var(--chip-warn-color);
+  background: var(--chip-warn-bg);
+  border: 1px solid var(--chip-warn-border);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px var(--space-2);
+  border-radius: 8px;
+  white-space: nowrap;
+  animation: ptoolBadgeBlink 1.8s ease-in-out infinite;
+}
+
+/* ── Write-gate refusal (stale / read-first interception) ──
+ * Static amber — a terminal intercepted state, NOT a transient warning, so
+ * the header badge opts out of the warn blink via .ptool-badge-gate. The
+ * notice card explains WHY the write was intercepted and that the assistant
+ * re-reads + re-issues on its own (no user action). */
+.ptool-badge-gate { animation: none; }
+.ptool-gate-note {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 2px var(--space-2) var(--space-2) var(--space-6);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid rgba(245,158,11,0.28);
+  border-radius: var(--radius-sm);
+  background: rgba(245,158,11,0.07);
+}
+.ptool-gate-note-icon { color: #f59e0b; flex: none; margin-top: 1px; }
+.ptool-gate-note-icon > svg { display: block; }
+.ptool-gate-note-body { min-width: 0; }
+.ptool-gate-note-title { font-size: var(--font-size-sm); font-weight: 600; color: #f59e0b; margin-bottom: 3px; }
+.ptool-gate-note-text { font-size: var(--font-size-sm); line-height: 1.55; color: var(--text-secondary); }
+.ptool-gate-note-path { font-size: var(--font-size-xs); padding: 0 5px; border-radius: 4px; background: rgba(245,158,11,0.13); color: var(--text-primary); }
+
+/* ── Rejected hallucinated tool call (not a real tool, never executed) ── */
+.ptool-line.ptool-rejected {
+  opacity: 0.92;
+}
+.ptool-line.ptool-rejected .ptool-icon { opacity: 0.5; }
+.ptool-reject-name {
+  text-decoration: line-through;
+  text-decoration-color: rgba(239,68,68,0.6);
+  color: var(--text-muted, #9ca3af);
+}
+.ptool-badge-reject {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: #ef4444;
+  background: rgba(239,68,68,0.12);
+  border: 1px solid rgba(239,68,68,0.3);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px var(--space-2);
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.ptool-reject-hint {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted, #9ca3af);
+  margin-left: 2px;
+}
+.ptool-reject-sugg {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 10.5px;
+  color: var(--accent, #6ea8fe);
+  background: rgba(110,168,254,0.1);
+  border: 1px solid rgba(110,168,254,0.2);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+@keyframes ptoolBadgeBlink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.6; }
+}

@@ -1,0 +1,148 @@
+/* Conversation prose: one readable column with explicit content rhythm.
+ * Owner: typed text blocks. Scope excludes tool output, reasoning and editors.
+ * Tokens: 00-design-tokens.css; delivery: ordered application manifest.
+ */
+.conversation-surface .conversation-block--text > .md-content {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-body);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface .conversation-block--text > .md-content :is(p, ul, ol, pre, table, blockquote) {
+  margin-block: var(--space-4);
+}
+
+.conversation-surface .conversation-block--text > .md-content > :first-child {
+  margin-block-start: 0;
+}
+
+.conversation-surface .conversation-block--text > .md-content > :last-child {
+  margin-block-end: 0;
+}
+
+.conversation-surface .conversation-block--text > .md-content :is(h1, h2, h3, h4, h5, h6) {
+  margin-block: var(--space-6) var(--space-3);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-title);
+  letter-spacing: normal;
+  border: 0;
+  padding: 0;
+}
+
+.conversation-surface .conversation-block--text > .md-content h1 {
+  font-size: var(--conversation-font-size-heading-1);
+}
+
+.conversation-surface .conversation-block--text > .md-content h2 {
+  font-size: var(--conversation-font-size-heading-2);
+}
+
+.conversation-surface .conversation-block--text > .md-content :is(h3, h4, h5, h6) {
+  font-size: var(--conversation-font-size-heading-3);
+}
+
+.conversation-surface .conversation-block--text > .md-content :is(ul, ol) {
+  padding-inline-start: var(--space-6);
+}
+
+.conversation-surface .conversation-block--text > .md-content li {
+  margin-block: var(--space-2);
+  padding-inline-start: var(--space-1);
+}
+
+.conversation-surface .conversation-block--text > .md-content li::marker {
+  color: var(--text-secondary);
+}
+
+.conversation-surface .conversation-block--text > .md-content blockquote {
+  padding: var(--space-1) var(--space-4);
+  border-inline-start: 2px solid var(--border);
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.conversation-surface .conversation-block--text > .md-content pre {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.conversation-surface .conversation-block--text > .md-content pre code {
+  font-family: var(--font-mono);
+  display: block;
+  padding: var(--space-4);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow-x: auto;
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.conversation-surface .conversation-block--text > .md-content table {
+  max-width: 100%;
+  font-size: var(--conversation-font-size-table);
+  line-height: var(--leading-body);
+  border-color: var(--border);
+}
+
+.conversation-surface .conversation-block--text > .md-content .md-table-wrapper {
+  max-width: 100%;
+  margin-block: var(--space-4);
+}
+
+.conversation-surface .conversation-block--text > .md-content .md-table-wrapper > table {
+  margin: 0;
+}
+
+.conversation-surface .conversation-block--text > .md-content :is(.code-header, .table-header) {
+  min-height: var(--control-h-md);
+  padding: var(--space-1) var(--space-3);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-meta);
+}
+
+.conversation-surface .conversation-block--text > .md-content :is(.code-header, .table-header) button {
+  min-height: var(--control-h-sm);
+  font-size: var(--conversation-font-size-meta);
+  color: var(--text-secondary);
+}
+
+.conversation-surface .conversation-block--text > .md-content :is(th, td) {
+  padding: var(--space-2) var(--space-3);
+  border-color: var(--border);
+  text-align: start;
+}
+
+.conversation-surface .conversation-block--text > .md-content th {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+  background: var(--bg-secondary);
+}
+
+.conversation-surface .conversation-block--text > .md-content a {
+  color: var(--accent);
+  text-decoration-thickness: from-font;
+  text-underline-offset: .18em;
+}
+
+.conversation-surface .conversation-block--text > .md-content a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

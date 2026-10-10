@@ -1,0 +1,15 @@
+{
+  "brand": "upstage",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "upstage",
+  "category": "official",
+  "name": "Upstage (Solar)",
+  "base_url": "https://api.upstage.ai/v1",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://docs.upstage.ai", "checked_at": "2026-09-09"},
+  "offering_recipes": [
+    {"model_id": "solar-pro4", "capabilities": ["text", "thinking"], "rpm": 30},
+    {"model_id": "solar-pro-3", "capabilities": ["text", "thinking"], "rpm": 30},
+    {"model_id": "solar-mini", "capabilities": ["text", "cheap"], "rpm": 60}
+  ]
+}

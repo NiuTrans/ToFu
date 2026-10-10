@@ -1,0 +1,179 @@
+{
+  "objective": "Agent harness database performance, broad scheduling optimization",
+  "decision": "Reject read/write alternating session admission; no runtime changes admitted",
+  "source": {
+    "candidate_worktree": "/tmp/tofudb-client-admission-20261009",
+    "confirmed_tests": {
+      "client_protocol_and_replay_contracts": 146,
+      "candidate_import_path_verified": true
+    },
+    "process_boundary_gate": {
+      "status": "failed existing direct-capability inventory in migration/operator scripts",
+      "unchanged_from_head": {
+        "scripts/activate_sqlite_cutover.py": true,
+        "scripts/migrate_pg_to_sqlite.py": true
+      },
+      "log": "client-fair-neighbor-contracts.log"
+    },
+    "benchmark_scope": "Controlled historical SDK variant; one reviewed scheduling source change, no native/capacity/deadline change",
+    "source_sha256": {
+      "client": "dc3408a63f0b1871480c3ed595601eb1b349be747e68de4716155f7a28f3c667",
+      "tests": "bef5c1a452fd4ee5010f07efc7668852806d438843443d8d2229ed702cfe55ef"
+    },
+    "production_admission": false,
+    "pending_macro_session": 9514
+  },
+  "macro_review": {
+    "scope": "Eight original unprofiled 1000x4x8192 windows, controlled complete historical SDK with exactly one scheduler source change; two opposing-order pairs per native build. No current-tree admission; capacities/deadlines and strict durability unchanged.",
+    "groups": [
+      {
+        "native": "baseline",
+        "rows": [
+          {
+            "native": "baseline",
+            "index": 0,
+            "policy": "fifo",
+            "returncode": 1,
+            "report": "/path/to/your/project",
+            "streamP99ms": 1799.177773296833,
+            "settleP99ms": 4299.436815083027,
+            "engineRss": 1984520192,
+            "clientRss": 148041728
+          },
+          {
+            "native": "baseline",
+            "index": 1,
+            "policy": "fair",
+            "returncode": 1,
+            "report": "/path/to/your/project",
+            "streamP99ms": 2948.411948978901,
+            "settleP99ms": 5601.954847574234,
+            "engineRss": 2107281408,
+            "clientRss": 168435712
+          },
+          {
+            "native": "baseline",
+            "index": 2,
+            "policy": "fair",
+            "returncode": 1,
+            "report": "/path/to/your/project",
+            "streamP99ms": 1872.887335717678,
+            "settleP99ms": 4408.930145204067,
+            "engineRss": 2087456768,
+            "clientRss": 140587008
+          },
+          {
+            "native": "baseline",
+            "index": 3,
+            "policy": "fifo",
+            "returncode": 1,
+            "report": "/path/to/your/project",
+            "streamP99ms": 1897.4994495511055,
+            "settleP99ms": 3531.3994511961937,
+            "engineRss": 2094628864,
+            "clientRss": 147787776
+          }
+        ],
+        "pairs": [
+          {
+            "streamP99ms": 1.6387552095956581,
+            "settleP99ms": 1.3029508487999617,
+            "engineRss": 1.0618593937692724,
+            "clientRss": 1.1377583487812302
+          },
+          {
+            "streamP99ms": 0.9870291852578666,
+            "settleP99ms": 1.2484937504621934,
+            "engineRss": 0.9965759585751608,
+            "clientRss": 0.9512762950029101
+          }
+        ],
+        "medianFairFifoRatios": {
+          "streamP99ms": 1.3128921974267624,
+          "settleP99ms": 1.2757222996310775,
+          "engineRss": 1.0292176761722165,
+          "clientRss": 1.0445173218920702
+        }
+      },
+      {
+        "native": "selective",
+        "rows": [
+          {
+            "native": "selective",
+            "index": 0,
+            "policy": "fifo",
+            "returncode": 1,
+            "report": "/path/to/your/project",
+            "streamP99ms": 3235.489711165428,
+            "settleP99ms": 4735.214501619339,
+            "engineRss": 2325975040,
+            "clientRss": 156033024
+          },
+          {
+            "native": "selective",
+            "index": 1,
+            "policy": "fair",
+            "returncode": 1,
+            "report": "/path/to/your/project",
+            "streamP99ms": 1875.4186928272247,
+            "settleP99ms": 4095.8757996559143,
+            "engineRss": 2590515200,
+            "clientRss": 289370112
+          },
+          {
+            "native": "selective",
+            "index": 2,
+            "policy": "fair",
+            "returncode": 1,
+            "report": "/path/to/your/project",
+            "streamP99ms": 1868.9421936869621,
+            "settleP99ms": 6822.018347680569,
+            "engineRss": 2429988864,
+            "clientRss": 144633856
+          },
+          {
+            "native": "selective",
+            "index": 3,
+            "policy": "fifo",
+            "returncode": 1,
+            "report": "/path/to/your/project",
+            "streamP99ms": 1837.2901529073715,
+            "settleP99ms": 3743.478611111641,
+            "engineRss": 2307227648,
+            "clientRss": 153112576
+          }
+        ],
+        "pairs": [
+          {
+            "streamP99ms": 0.579639825883327,
+            "settleP99ms": 0.8649821033989517,
+            "engineRss": 1.113733017530575,
+            "clientRss": 1.854544022680737
+          },
+          {
+            "streamP99ms": 1.0172275678555744,
+            "settleP99ms": 1.8223740687153929,
+            "engineRss": 1.0532072403459687,
+            "clientRss": 0.9446242743639817
+          }
+        ],
+        "medianFairFifoRatios": {
+          "streamP99ms": 0.7984336968694508,
+          "settleP99ms": 1.3436780860571722,
+          "engineRss": 1.0834701289382718,
+          "clientRss": 1.3995841485223592
+        }
+      }
+    ]
+  },
+  "archive": {
+    "path": "/path/to/your/project",
+    "sha256": "00b660664c45ef8fe4b7b2a7349a3d947561a9a7fb525ae2b5342413be27cbc6",
+    "files": {
+      "lib/storage/v2_client.py": "dc3408a63f0b1871480c3ed595601eb1b349be747e68de4716155f7a28f3c667",
+      "tests/storage/test_storage_v2_client.py": "bef5c1a452fd4ee5010f07efc7668852806d438843443d8d2229ed702cfe55ef"
+    },
+    "verified": true
+  },
+  "scope": "Exactly one scheduler source change in complete historical SDK; matched frozen CLI/library, original 1000x4x8192 workload and 30s deadlines. No intrinsic SQLite superiority or full-goal completion claim."
+}

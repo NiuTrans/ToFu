@@ -1,0 +1,76 @@
+{
+  "format": "tofu.native-repository-production-admission/v1",
+  "production_selection": "Verified installed standalone wheel preferred lazily; absent or rejected artifact preserves NetworkX. No runtime compilation, durable-storage dependency or graph cache.",
+  "component_guards": "All five measured cases pass using four 100-sample cohorts and 1000-sample ranking. Earlier short-cohort regressions are retained; no claim of uniform short-cohort tail improvement.",
+  "observations": 8400,
+  "independent_processes": 60,
+  "functional_tests_passed": 54,
+  "raw_abi_checks": "300 weighted/dangling/personalized graphs,300 concurrent calls,invalid ABI shapes,withheld partial outputs",
+  "python_result_lifecycle": "Baseline recursive closure retains 2/2 result Tags after caller disposal with cyclic GC disabled; current iterator traversal releases immediately. GC policy unchanged.",
+  "artifacts": [
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-ranking-array-buffer-tests.log",
+      "sha256": "1144992d3d5253c51ad26835969c2cb949bcf8df46bc61bf9d8cb42a69da844d"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-kernel-array-buffer-abi-check.log",
+      "sha256": "79a3e9034b5623ff7e8123387edd937b4da2adb885e799501d2239ecdfd4655e"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-ranking-baseline-docs-check.log",
+      "sha256": "5ccb29ffa675e92fbd176766814f58d27b63e383c596a9816596be60fed0931b"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-ranking-current-docs-check.log",
+      "sha256": "5ccb29ffa675e92fbd176766814f58d27b63e383c596a9816596be60fed0931b"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-ranking-baseline-architecture-check.log",
+      "sha256": "4a019bef377ae219d351c6cab83c08993e8c878757226bd1ca4188b79f13e35c"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-ranking-architecture-check.log",
+      "sha256": "4a019bef377ae219d351c6cab83c08993e8c878757226bd1ca4188b79f13e35c"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-ranking-final-monorepo-check.log",
+      "sha256": "cd52b12df3546c5960cf48c3c2cdc08238c22399d171ca0585e6c395641a6524"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-ranking-ast-cycle-baseline.log",
+      "sha256": "4f3ebc2026e357507b56a99efe4a9e32d7f5931ab2d66e3a513f6483932a7a75"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-ranking-publication-gc-profile.log",
+      "sha256": "0f46a7230e013164e995842e92b49395290aa06a706edde3860213e5e2ee9f3e"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/native-ranking-after-ast-gc-profile.log",
+      "sha256": "af2b6d0b97cadf471a6e2c4a09c90d64e6df5bfd038c6ed16f44b63005eafdb4"
+    }
+  ],
+  "wheel": {
+    "path": "/tmp/tofu-system-perf-snapshot/native-kernel-array-buffer-dist/tofu_repo_kernel-0.1.0-py3-none-linux_x86_64.whl",
+    "sha256": "bc7a295c0ce77ab2fd5f022a7f1c4f4d4ee350bad12222020206da9c437b8664"
+  },
+  "gates": {
+    "monorepo": "passed",
+    "documentation": "22 failures exactly reproduce unchanged baseline",
+    "architecture": "top-level lib module debt199>194 reproduces unchanged baseline"
+  },
+  "limitations": [
+    "No whole-system or full repository suite claim.",
+    "This host Linux wheel is not manylinux certification or cross-platform runtime evidence.",
+    "CI workflow is supplied; its remote run is not locally observed.",
+    "No PyPI publication,live application restart or Docker image build performed.",
+    "Core dependency metadata is unchanged; optional component installation and process restart activate native ranking."
+  ],
+  "remaining_goal_scope": [
+    "events",
+    "context",
+    "markdown",
+    "repository deployment integration",
+    "http",
+    "ingest"
+  ]
+}

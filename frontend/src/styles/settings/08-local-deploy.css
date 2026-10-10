@@ -1,0 +1,51 @@
+/* ===== settings/08-local-deploy.css ===== */
+/* 本地部署 page: hardware probe strip, ranked recommendation cards with
+ * fit chips, the cloud escape hatch, and managed-instance rows with
+ * status chips + agent handoff actions. Scoped under .stg-local-deploy so
+ * the compact template dropdown and manager rows keep their own rules. */
+
+.stg-ld-hint{padding:10px 2px;color:var(--text-muted,#777);font-size:var(--font-size-sm)}
+
+/* ── hardware strip ── */
+.stg-ld-hw{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 var(--space-2)}
+.stg-ld-hw-item{padding:3px 9px;border:1px solid var(--s-line,rgba(26,24,20,.08));border-radius:999px;background:var(--s-cream,#f2ecda);color:var(--s-ink-soft,#3d362c);font-size:var(--font-size-xs);line-height:1.5;white-space:nowrap}
+.stg-ld-hw-item.stg-ld-hw-warn{color:#b45309;background:rgba(245,159,0,.12);border-color:rgba(245,159,0,.28)}
+
+/* ── purpose filter chips ── */
+.stg-ld-purposes{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 var(--space-2)}
+.stg-ld-purpose{padding:3px 11px;border:1px solid var(--s-line-strong,rgba(26,24,20,.15));border-radius:999px;background:var(--s-white,#faf8f3);color:var(--s-ink-soft,#3d362c);font-size:var(--font-size-xs);font-weight:600;cursor:pointer;transition:border-color .15s,background .15s}
+.stg-ld-purpose:hover{border-color:var(--s-gold,#c9993f)}
+.stg-ld-purpose.is-active{border-color:var(--s-gold,#c9993f);background:rgba(201,153,63,.12);color:var(--s-ink,#1a1814)}
+
+/* ── recommendation + cloud cards ── */
+.stg-ld-recs{display:grid;gap:var(--space-2);margin-bottom:var(--space-1)}
+.stg-ld-rec,.stg-ld-cloud{display:flex;align-items:flex-start;gap:var(--space-3);padding:var(--space-3);border:1px solid var(--s-line-strong,rgba(26,24,20,.15));border-radius:12px;background:var(--s-white,#faf8f3);box-shadow:var(--s-shadow-xs,0 1px 2px rgba(26,24,20,.05))}
+.stg-ld-cloud{border-style:dashed;border-color:rgba(201,153,63,.45)}
+.stg-ld-rec-icon{display:grid;place-items:center;flex:0 0 auto;width:40px;height:40px;border:1px solid var(--s-line,rgba(26,24,20,.08));border-radius:10px;background:var(--s-cream,#f2ecda)}
+.stg-ld-rec-main{display:flex;flex:1 1 auto;min-width:0;flex-direction:column;gap:3px}
+.stg-ld-rec-title{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);font-size:var(--font-size-md);color:var(--s-ink,#1a1814)}
+.stg-ld-rec-sub{color:var(--text-muted,#777);font-size:var(--font-size-xs);line-height:1.5}
+.stg-ld-rec-note{color:var(--s-ink-soft,#3d362c);font-size:var(--font-size-xs);line-height:1.5}
+.stg-ld-rec-cmd{display:flex;align-items:center;gap:6px;margin-top:2px;min-width:0}
+.stg-ld-rec-cmd code{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px var(--space-2);border-radius:6px;background:rgba(26,24,20,.06);color:var(--s-ink-soft,#3d362c);font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.stg-ld-copy{flex:0 0 auto;padding:2px var(--space-2);border:1px solid var(--s-line-strong,rgba(26,24,20,.15));border-radius:6px;background:transparent;color:var(--s-ink-soft,#3d362c);font-size:10px;cursor:pointer}
+.stg-ld-copy:hover{border-color:var(--s-gold,#c9993f)}
+.stg-ld-rec-go,.stg-ld-cloud-go{flex:0 0 auto;align-self:center;white-space:nowrap}
+
+/* fit chips */
+.stg-ld-fit{flex:0 0 auto;padding:1px 7px;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.05em;line-height:1.5;white-space:nowrap}
+.stg-ld-fit.is-comfortable{color:var(--s-ok,#067647);background:rgba(16,185,129,.14)}
+.stg-ld-fit.is-tight{color:#b45309;background:rgba(245,159,0,.16)}
+.stg-ld-fit.is-extreme{color:var(--s-blocked,#b42318);background:rgba(239,68,68,.12)}
+.stg-ld-fit.is-cpu{color:var(--text-muted,#777);background:rgba(26,24,20,.08)}
+
+/* ── managed instance rows ── */
+.stg-ld-instances{display:grid;gap:6px;margin-bottom:var(--space-1)}
+.stg-ld-inst{display:flex;align-items:flex-start;gap:var(--space-3);padding:10px var(--space-3);border:1px solid var(--s-line,rgba(26,24,20,.08));border-radius:10px;background:var(--s-white,#faf8f3)}
+.stg-ld-inst-main{display:flex;flex:1 1 auto;min-width:0;flex-direction:column;gap:3px}
+.stg-ld-state{flex:0 0 auto;padding:1px 7px;border-radius:999px;font-size:9px;font-weight:800;letter-spacing:.05em;line-height:1.5;white-space:nowrap}
+.stg-ld-state.is-running{color:var(--s-ok,#067647);background:rgba(16,185,129,.14)}
+.stg-ld-state.is-installing,.stg-ld-state.is-starting{color:#b45309;background:rgba(245,159,0,.16)}
+.stg-ld-state.is-failed{color:var(--s-blocked,#b42318);background:rgba(239,68,68,.12)}
+.stg-ld-state.is-stopped,.stg-ld-state.is-planned{color:var(--text-muted,#777);background:rgba(26,24,20,.08)}
+.stg-ld-inst-fix,.stg-ld-inst-start{flex:0 0 auto;align-self:center;white-space:nowrap}

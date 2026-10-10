@@ -1,0 +1,476 @@
+{
+  "decision": "Reject default combination admission: daemon streaming benefit repeats but embedded settlement regresses14%and45%, all1s stream gates remain unmet",
+  "private_source_commit": "57fe76c4c",
+  "parent_source": "6d3e37c7cafdb1ca0ad7252c6d3613ecf9168d30d0b09eeac6d546e0e18c135e",
+  "candidate_source": "5cd5348bb3df3e8d1ded6e1ded7e04a0c7dc6c73f275e0c643e2a69846fe75c5",
+  "scope": "Samecandidate native5cd for all16phases; c=contextflag andproducer, h=lightlegacyformatting; commoncurrentRootPython hash guard. No originalnative vsnewnative effect isolated here.",
+  "verification": {
+    "native_full": "1639passed3ignored121.65s",
+    "native_neighbors": "51passed18.23s",
+    "native_live_context": "1passed ownerboundary/publicTurnequivalence after correcting invalidsettlement fixture",
+    "python_focused": "82passed;51deselected6.54s",
+    "python_neighbors": "102passed +1updatedread-countassertionpassed; originalexpectsseparateTurnread, now0 withfullcontext",
+    "generator": "write andcheckpassed aftercreating declaredclockoutputdirectory",
+    "contract_guard": "isolatedIRcontract/generator guard passed with currentRoot runtime registry imports",
+    "release": "complete exit0; pair sourceverified"
+  },
+  "matrix": {
+    "scope": "16original1000x4x8192 phases; samecandidate native5cd;2factors x2orders x2transports. Originalgate unchanged, embeddedreopen notSIGKILL",
+    "python_hashes": {
+      "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+      "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+      "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+      "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+      "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+      "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+      "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+    },
+    "rows": [
+      {
+        "label": "application-forward-c0-h0",
+        "transport": "application",
+        "cohort": "forward",
+        "context": false,
+        "light": false,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 26,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 79.70388233661652,
+          "stream_scheduled": 1821.1080059409142,
+          "settle": 6209.250785410404
+        },
+        "raw_sha256": "8af5041d7f25deabd629f7391482d476aaa6e24381559367854f7cf4955c453e"
+      },
+      {
+        "label": "application-forward-c1-h0",
+        "transport": "application",
+        "cohort": "forward",
+        "context": true,
+        "light": false,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 22,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 60.01734733581543,
+          "stream_scheduled": 1963.3423537015915,
+          "settle": 4258.070133626461
+        },
+        "raw_sha256": "6c153d7d2aca5b628069360f721cd5da1e3415d02aae92d5d1e0f6cc75e77442"
+      },
+      {
+        "label": "application-forward-c0-h1",
+        "transport": "application",
+        "cohort": "forward",
+        "context": false,
+        "light": true,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 24,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 135.0494623184204,
+          "stream_scheduled": 1907.7157750725746,
+          "settle": 4906.440362334251
+        },
+        "raw_sha256": "d1d1b688118d596536cd1744527cb92a9a061136a409bea0cc31731d7c90bee1"
+      },
+      {
+        "label": "application-forward-c1-h1",
+        "transport": "application",
+        "cohort": "forward",
+        "context": true,
+        "light": true,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 22,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 75.09250193834305,
+          "stream_scheduled": 1027.8037264943123,
+          "settle": 4376.965366303921
+        },
+        "raw_sha256": "58874e8e727965608e3432b8f8e07507e376a2bbffec9613827c69cc010b2b91"
+      },
+      {
+        "label": "application-reverse-c1-h1",
+        "transport": "application",
+        "cohort": "reverse",
+        "context": true,
+        "light": true,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 20,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 73.50325584411621,
+          "stream_scheduled": 1036.8038788437843,
+          "settle": 4049.304224550724
+        },
+        "raw_sha256": "184a05d225928870aadccd3358d3ddc94f831160586f87887ffe2aa4ddc4013c"
+      },
+      {
+        "label": "application-reverse-c0-h1",
+        "transport": "application",
+        "cohort": "reverse",
+        "context": false,
+        "light": true,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 22,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 79.1221633553505,
+          "stream_scheduled": 1904.749110341072,
+          "settle": 5275.413855910301
+        },
+        "raw_sha256": "36c3eaca36e83427522f5504c4477a29dc6e115de05af7a3c7ac1ce6680a0bd8"
+      },
+      {
+        "label": "application-reverse-c1-h0",
+        "transport": "application",
+        "cohort": "reverse",
+        "context": true,
+        "light": false,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 24,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 57.02183395624161,
+          "stream_scheduled": 1915.8761575818062,
+          "settle": 5344.501256942749
+        },
+        "raw_sha256": "51d88748d8b02e0fab6fdac93e18c865656145c32cdc2b6ce9872e075882635e"
+      },
+      {
+        "label": "application-reverse-c0-h0",
+        "transport": "application",
+        "cohort": "reverse",
+        "context": false,
+        "light": false,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 21,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 62.18203902244568,
+          "stream_scheduled": 1823.181338608265,
+          "settle": 4378.568880259991
+        },
+        "raw_sha256": "4270402bc7f9bbec5a79cab56dcd72b74a98f37f84159ae6fb9453c1042f07c7"
+      },
+      {
+        "label": "embedded-forward-c0-h0",
+        "transport": "embedded",
+        "cohort": "forward",
+        "context": false,
+        "light": false,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 19,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 757.3882341384888,
+          "stream_scheduled": 1600.152127444744,
+          "settle": 3018.1569010019302
+        },
+        "raw_sha256": "6efd2a4a56919012694187c97719f61548aed69117698c177e548a46e5eae17b"
+      },
+      {
+        "label": "embedded-forward-c1-h0",
+        "transport": "embedded",
+        "cohort": "forward",
+        "context": true,
+        "light": false,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 18,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 688.9704838395119,
+          "stream_scheduled": 1357.2150766849518,
+          "settle": 2873.561941087246
+        },
+        "raw_sha256": "5346b1a08c9b6ed5a2622a6645d294838c66a6e3e2d67370940112094520cebc"
+      },
+      {
+        "label": "embedded-forward-c0-h1",
+        "transport": "embedded",
+        "cohort": "forward",
+        "context": false,
+        "light": true,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 22,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 455.2299752831459,
+          "stream_scheduled": 1153.4620523452759,
+          "settle": 2962.92794495821
+        },
+        "raw_sha256": "1f1e69b8a2aac6e84f84224f9dafb0a696f2dae1a2e1ec1f585e5ec2180a4b04"
+      },
+      {
+        "label": "embedded-forward-c1-h1",
+        "transport": "embedded",
+        "cohort": "forward",
+        "context": true,
+        "light": true,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 19,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 682.4775338172913,
+          "stream_scheduled": 1030.6064784526825,
+          "settle": 3442.543588578701
+        },
+        "raw_sha256": "fbf0dbb7adb644d2cbf514fb39f5987617f7fed00593454183beaabd5a694332"
+      },
+      {
+        "label": "embedded-reverse-c1-h1",
+        "transport": "embedded",
+        "cohort": "reverse",
+        "context": true,
+        "light": true,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 20,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 679.3346852064133,
+          "stream_scheduled": 1303.5688921809196,
+          "settle": 4355.468213558197
+        },
+        "raw_sha256": "751edca4fb9ceed47fde619446db4ffa00b389eeb9980b86c82eced392b8069d"
+      },
+      {
+        "label": "embedded-reverse-c0-h1",
+        "transport": "embedded",
+        "cohort": "reverse",
+        "context": false,
+        "light": true,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 19,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 690.58046489954,
+          "stream_scheduled": 1169.0559089183807,
+          "settle": 3660.2717339992523
+        },
+        "raw_sha256": "3df1af93c19cbe1652ed71d899da78ca60db502e58dbf329610d52ddf79336f4"
+      },
+      {
+        "label": "embedded-reverse-c1-h0",
+        "transport": "embedded",
+        "cohort": "reverse",
+        "context": true,
+        "light": false,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 18,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 678.4135550260544,
+          "stream_scheduled": 1212.3680487275124,
+          "settle": 3150.6075263023376
+        },
+        "raw_sha256": "5a9c1d929a284024ea9ecb32203a1bd32fbbcc319a9c115709c4c4338a746001"
+      },
+      {
+        "label": "embedded-reverse-c0-h0",
+        "transport": "embedded",
+        "cohort": "reverse",
+        "context": false,
+        "light": false,
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "readiness": {
+          "probes": 18,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "p99_ms": {
+          "submit_to_running": 670.61747610569,
+          "stream_scheduled": 1234.9455505609512,
+          "settle": 3001.1293813586235
+        },
+        "raw_sha256": "4817544f147e34cb8f961218b406f49b0cbc94517e13abffc4bd42f721c5e604"
+      }
+    ]
+  },
+  "findings": [
+    "Applicationcombo stream1027.8/1036.8ms vsboth-off1821.1/1823.2ms, improvesabout43–44%; singlefactors remain1904–1963ms.",
+    "Embeddedcombo stream1030.6/1303.6ms vsboth-off1600.2/1234.9ms, reverseworse5.6%.",
+    "Embeddedcombo settlement3442.5/4355.5ms vsboth-off3018.2/3001.1ms, worse14.1%/45.1%.",
+    "All16preserve4000events,1000exactcontent/replay,0errors,integrity0 andhealthyprobes. Latency gates failindependently."
+  ],
+  "limits": [
+    "Two observations perfactor/transport are notCI.",
+    "Commoncandidate native removesnative-versionconfounding betweenfactors but doesnot prove original6dneutrality.",
+    "No broad all-sceneSQLite/provider/browser/soak superiority evidence. Embedded reopen isnotSIGKILL.",
+    "Prior standalonefusionandhelperrejections remain; daemonbenefit alone doesnot certify defaultcombinedbehavior."
+  ],
+  "next": "Attribute embedded combined settlement to queryCPU/pool/nativework by terminalphase before any transport-dependent admission or further combination changes."
+}

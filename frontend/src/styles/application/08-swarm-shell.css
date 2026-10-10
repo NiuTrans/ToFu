@@ -1,0 +1,49 @@
+/* ═══════════════════════════════════════════
+   ★ Swarm Panel styles
+   ═══════════════════════════════════════════ */
+/* ── New Swarm Dashboard ── */
+/* ── Swarm panel: rendered as a row INSIDE the unified ptool-panel, so it
+   stays visually subordinate to the surrounding tool list (amber theme,
+   flat radius) instead of reading as a heavy standalone card. ── */
+.sw-panel{margin:var(--space-2) 0;border:1px solid var(--border);border-left:3px solid #eab308;border-radius:var(--radius-sm,8px);background:var(--bg-secondary);box-shadow:0 1px 3px rgba(0,0,0,0.08);overflow:hidden;transition:border-color .25s,box-shadow .25s}
+.sw-panel.sw-active{border-color:rgba(245,158,11,0.4);box-shadow:0 0 0 1px rgba(245,158,11,0.1);animation:swarmBorderPulse 2.5s ease-in-out infinite}
+.sw-panel.sw-complete{border-color:var(--border);border-left-color:#22c55e;background:var(--bg-secondary)}
+.sw-panel.sw-collapsed .sw-agent-grid,.sw-panel.sw-collapsed .sw-footer,.sw-panel.sw-collapsed .sw-progress{display:none}
+.sw-panel.sw-collapsed .sw-chevron{transform:rotate(-90deg)}
+/* ── Header ── */
+.sw-header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 14px;cursor:pointer;user-select:none;transition:background .15s}
+.sw-header:hover{background:rgba(234,179,8,0.05)}
+@keyframes swarmBorderPulse{0%,100%{border-color:rgba(245,158,11,0.3)}50%{border-color:rgba(245,158,11,0.6)}}
+@keyframes toolPulse{0%,100%{opacity:.3;transform:scale(0.8)}50%{opacity:1;transform:scale(1.2)}}
+/* ── Swarm header ── */
+.sw-header-left{display:flex;align-items:center;gap:10px;min-width:0}
+.sw-header-icon{display:inline-flex;align-items:center;justify-content:center;color:#f59e0b;flex-shrink:0}
+.sw-active .sw-header-icon{animation:swarmIconBounce 1.2s ease-in-out infinite}
+.sw-header-info{display:flex;flex-direction:column;gap:1px;min-width:0}
+.sw-header-title{font-size:var(--font-size-md);font-weight:600;color:#eab308;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sw-complete .sw-header-title{color:#4ade80}
+.sw-header-icon svg{display:block}
+.sw-complete .sw-header-icon{color:#4ade80}
+.sw-status-pill svg{display:block}
+.sw-header-subtitle{font-size:var(--font-size-xs);color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;display:flex;gap:10px;flex-wrap:wrap}
+.sw-header-subtitle .sw-cnt-running{color:#60a5fa}
+.sw-header-subtitle .sw-cnt-done{color:#4ade80}
+.sw-header-subtitle .sw-cnt-failed{color:#f87171}
+.sw-header-right{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.sw-header-timer{font-size:var(--font-size-sm);color:var(--text-tertiary);font-family:'JetBrains Mono',monospace}
+.sw-chevron{font-size:var(--font-size-sm);color:var(--text-tertiary);transition:transform .2s}
+/* ── Status pill ── */
+.sw-status-pill{display:inline-flex;align-items:center;gap:var(--space-1);padding:2px 10px;border-radius:10px;font-size:var(--font-size-xs);font-weight:600;font-family:'JetBrains Mono',monospace;letter-spacing:0.02em}
+.sw-status-pill.sw-pill-planning{color:#fbbf24;background:rgba(251,191,36,0.1)}
+.sw-status-pill.sw-pill-running{color:#60a5fa;background:rgba(96,165,250,0.1)}
+.sw-status-pill.sw-pill-done{color:#4ade80;background:rgba(74,222,128,0.1)}
+.sw-status-pill.sw-pill-error{color:#f87171;background:rgba(248,113,113,0.1)}
+/* ── Progress bar ── */
+.sw-progress{padding:0 18px 10px}
+.sw-progress-track{height:6px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden;position:relative}
+.sw-progress-fill{height:100%;border-radius:3px;transition:width .5s ease;background:linear-gradient(90deg,#fbbf24,#f59e0b)}
+.sw-complete .sw-progress-fill{background:linear-gradient(90deg,#4ade80,#22c55e)}
+.sw-progress-fill.has-errors{background:linear-gradient(90deg,#4ade80 0%,#4ade80 var(--ok-pct),#f87171 var(--ok-pct),#f87171 100%)}
+.sw-active .sw-progress-fill{animation:progressShimmer 2s ease-in-out infinite}
+@keyframes progressShimmer{0%{filter:brightness(1)}50%{filter:brightness(1.3)}100%{filter:brightness(1)}}
+.sw-progress-label{display:flex;justify-content:space-between;align-items:center;margin-top:var(--space-1);font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary)}

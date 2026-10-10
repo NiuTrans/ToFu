@@ -1,0 +1,119 @@
+{
+  "contract": "tofu.storage-harness-certification/v1",
+  "scope": "bounded application contracts and browser journeys; not universal engine certification",
+  "minimum_tail_samples": 1000,
+  "stages": [
+    {
+      "name": "contracts",
+      "backend": "sqlite",
+      "marker": "unit",
+      "tests": [
+        "tests/storage_sidecar/test_storage_certification_gate.py",
+        "tests/tofudb/test_tofudb_pre_authority.py",
+        "tests/storage/test_storage_public_boundary.py",
+        "tests/storage/test_storage_v2_client.py",
+        "tests/tofudb/test_tofudb_v2_client.py",
+        "tests/tofudb/test_tofudb_differential.py",
+        "tests/storage_sidecar/test_storage_log_audit.py",
+        "tests/storage/test_storage_maintenance_circuit.py",
+        "tests/tofudb/test_tofudb_perf_compare.py",
+        "tests/storage/test_storage_receipt_codec.py",
+        "tests/tofudb/test_tofudb_crc_accelerator.py::test_import_never_launches_a_compiler",
+        "tests/tofudb/test_tofudb_crc_accelerator.py::test_unsupported_platform_keeps_checksum_without_compiler"
+      ],
+      "required_cases": [
+        "tests/storage_sidecar/test_storage_certification_gate.py::test_complete_evidence_accepts_only_full_execution",
+        "tests/storage_sidecar/test_storage_certification_gate.py::test_differential_does_not_equate_boolean_with_number_or_arbitrary_uuid_text",
+        "tests/storage/test_storage_receipt_codec.py::test_incompressible_or_decoded_oversize_responses_keep_hard_limits",
+        "tests/tofudb/test_tofudb_differential.py::test_large_incompressible_receipt_replay_conflict_and_rollback[legacy_driver]",
+        "tests/tofudb/test_tofudb_differential.py::test_large_incompressible_receipt_replay_conflict_and_rollback[tofudb_daemon]",
+        "tests/tofudb/test_tofudb_differential.py::test_native_rpc_connection_enables_tcp_nodelay",
+        "tests/tofudb/test_tofudb_crc_accelerator.py::test_import_never_launches_a_compiler",
+        "tests/tofudb/test_tofudb_crc_accelerator.py::test_unsupported_platform_keeps_checksum_without_compiler"
+      ]
+    },
+    {
+      "name": "application",
+      "backend": "sqlite",
+      "marker": "api",
+      "tests": [
+        "tests/storage/test_storage_application_contract.py"
+      ],
+      "required_cases": [
+        "tests/storage/test_storage_application_contract.py::test_sidebar_catalog_page_uses_real_application_payload[sqlite]",
+        "tests/storage/test_storage_application_contract.py::test_sidebar_catalog_page_uses_real_application_payload[tofudb]",
+        "tests/storage/test_storage_application_contract.py::test_stream_progress_wakes_committed_event_observers[sqlite]",
+        "tests/storage/test_storage_application_contract.py::test_stream_progress_wakes_committed_event_observers[tofudb]",
+        "tests/storage/test_storage_application_contract.py::test_live_structural_event_preserves_large_projection[sqlite-False]",
+        "tests/storage/test_storage_application_contract.py::test_live_structural_event_preserves_large_projection[sqlite-True]",
+        "tests/storage/test_storage_application_contract.py::test_live_structural_event_preserves_large_projection[tofudb-False]",
+        "tests/storage/test_storage_application_contract.py::test_live_structural_event_preserves_large_projection[tofudb-True]",
+        "tests/storage/test_storage_application_contract.py::test_concurrent_agent_rounds_retain_exact_independent_state[sqlite]",
+        "tests/storage/test_storage_application_contract.py::test_concurrent_agent_rounds_retain_exact_independent_state[tofudb]",
+        "tests/storage/test_storage_application_contract.py::test_live_agent_message_snapshots_survive_replay[sqlite-16384]",
+        "tests/storage/test_storage_application_contract.py::test_live_agent_message_snapshots_survive_replay[sqlite-262144]",
+        "tests/storage/test_storage_application_contract.py::test_live_agent_message_snapshots_survive_replay[sqlite-1048576]",
+        "tests/storage/test_storage_application_contract.py::test_live_agent_message_snapshots_survive_replay[sqlite-3145728]",
+        "tests/storage/test_storage_application_contract.py::test_live_agent_message_snapshots_survive_replay[tofudb-16384]",
+        "tests/storage/test_storage_application_contract.py::test_live_agent_message_snapshots_survive_replay[tofudb-262144]",
+        "tests/storage/test_storage_application_contract.py::test_live_agent_message_snapshots_survive_replay[tofudb-1048576]",
+        "tests/storage/test_storage_application_contract.py::test_live_agent_message_snapshots_survive_replay[tofudb-3145728]",
+        "tests/storage/test_storage_application_contract.py::test_online_reclaim_reports_capability_and_preserves_conversations[sqlite]",
+        "tests/storage/test_storage_application_contract.py::test_online_reclaim_reports_capability_and_preserves_conversations[tofudb]",
+        "tests/storage/test_storage_application_contract.py::test_large_snapshot_carrier_is_atomic_replayable_and_survives_restart[sqlite]",
+        "tests/storage/test_storage_application_contract.py::test_large_snapshot_carrier_is_atomic_replayable_and_survives_restart[tofudb]",
+        "tests/storage/test_storage_application_contract.py::test_repeated_concurrent_agent_restart_keeps_every_acknowledged_round[sqlite]",
+        "tests/storage/test_storage_application_contract.py::test_repeated_concurrent_agent_restart_keeps_every_acknowledged_round[tofudb]"
+      ]
+    },
+    {
+      "name": "browser-sqlite",
+      "backend": "sqlite",
+      "marker": "visual",
+      "tests": [
+        "tests/e2e/test_e2e_smoke.py",
+        "tests/e2e/test_e2e_journeys.py::test_abort_halts_stream_and_keeps_partial",
+        "tests/e2e/test_e2e_journeys.py::test_reload_restores_active_conversation",
+        "tests/e2e/test_e2e_journeys.py::test_multi_turn_and_enter_key_render",
+        "tests/e2e/test_e2e_journeys.py::test_new_chat_control_clears_chat_view",
+        "tests/e2e/test_e2e_journeys.py::test_settings_actions_and_theme_persist",
+        "tests/e2e/test_e2e_pending_narration.py"
+      ],
+      "required_cases": [
+        "tests/e2e/test_e2e_smoke.py::test_send_message_streams_and_renders",
+        "tests/e2e/test_e2e_smoke.py::test_tool_round_renders",
+        "tests/e2e/test_e2e_journeys.py::test_abort_halts_stream_and_keeps_partial",
+        "tests/e2e/test_e2e_journeys.py::test_reload_restores_active_conversation",
+        "tests/e2e/test_e2e_journeys.py::test_multi_turn_and_enter_key_render",
+        "tests/e2e/test_e2e_journeys.py::test_new_chat_control_clears_chat_view",
+        "tests/e2e/test_e2e_journeys.py::test_settings_actions_and_theme_persist",
+        "tests/e2e/test_e2e_pending_narration.py::test_first_round_narration_is_single_while_tools_pending"
+      ]
+    },
+    {
+      "name": "browser-tofudb",
+      "backend": "tofudb",
+      "marker": "visual",
+      "tests": [
+        "tests/e2e/test_e2e_smoke.py",
+        "tests/e2e/test_e2e_journeys.py::test_abort_halts_stream_and_keeps_partial",
+        "tests/e2e/test_e2e_journeys.py::test_reload_restores_active_conversation",
+        "tests/e2e/test_e2e_journeys.py::test_multi_turn_and_enter_key_render",
+        "tests/e2e/test_e2e_journeys.py::test_new_chat_control_clears_chat_view",
+        "tests/e2e/test_e2e_journeys.py::test_settings_actions_and_theme_persist",
+        "tests/e2e/test_e2e_pending_narration.py"
+      ],
+      "required_cases": [
+        "tests/e2e/test_e2e_smoke.py::test_send_message_streams_and_renders",
+        "tests/e2e/test_e2e_smoke.py::test_tool_round_renders",
+        "tests/e2e/test_e2e_journeys.py::test_abort_halts_stream_and_keeps_partial",
+        "tests/e2e/test_e2e_journeys.py::test_reload_restores_active_conversation",
+        "tests/e2e/test_e2e_journeys.py::test_multi_turn_and_enter_key_render",
+        "tests/e2e/test_e2e_journeys.py::test_new_chat_control_clears_chat_view",
+        "tests/e2e/test_e2e_journeys.py::test_settings_actions_and_theme_persist",
+        "tests/e2e/test_e2e_pending_narration.py::test_first_round_narration_is_single_while_tools_pending"
+      ]
+    }
+  ],
+  "uncovered_claims": []
+}

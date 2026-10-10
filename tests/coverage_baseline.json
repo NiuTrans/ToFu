@@ -1,0 +1,4 @@
+{
+  "policy": "One-way coverage ratchet over the unit+api lanes. The floor may only move up; regenerate deliberately with `python3 scripts/check_coverage.py --write-baseline` and say which suites earned it. Initial floor measured on this repository's unit+api lanes (2026-09: ~78% total) with headroom for lane composition drift. Floor calibrated to 77.0 during a concurrent-WIP worktree measurement (2026-09); the first green CI run must tighten it upward via --write-baseline.",
+  "floor_percent": 77.0
+}

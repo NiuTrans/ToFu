@@ -1,0 +1,1033 @@
+"""Tests for the persistent tree index (lib/project_mod/tree_index.py) and its
+integration into grep_search / find_files (lib/project_mod/read_tools.py).
+
+The index exists to keep search tools off the live directory walk (FUSE /
+cross-DC mounts turn a full-tree walk into a >60s timeout). These tests pin:
+  * build / disk-persistence / LRU acquire semantics,
+  * find_files served from the index (format + glob parity),
+  * grep_search served from the index (match parity, include glob, count_only,
+    context lines, subdirectory scoping, hidden/ignore rules),
+  * write-hook freshness (note_write) and .gitignore invalidation,
+  * honest fallback to the live walk when the index is absent/disabled.
+"""
+
+_AUDIT_SYNTHETIC_REPO_PATHS = {'docs/guide.md', 'scripts/keep.py'}
+
+import os
+import threading
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from lib.project_mod import read_tools, tree_index
+
+pytestmark = pytest.mark.unit
+
+
+@pytest.fixture()
+def proj(tmp_path, monkeypatch):
+    """A small project tree on local disk + index disk-state redirected to tmp."""
+    idx_store = tmp_path / '.idx-store'
+    idx_store.mkdir()
+    (tmp_path / 'src' / 'pkg').mkdir(parents=True)
+    (tmp_path / 'docs').mkdir()
+    (tmp_path / 'node_modules' / 'junk').mkdir(parents=True)
+    (tmp_path / '.git').mkdir()
+    (tmp_path / 'src' / 'pkg' / 'alpha.py').write_text(
+        'def alpha():\n    return "needle-one"\n\nclass Beta:\n    pass\n')
+    (tmp_path / 'src' / 'pkg' / 'beta.py').write_text(
+        'import alpha\n\n# needle-two\nx = 1\n')
+    (tmp_path / 'src' / 'top.py').write_text('print("needle-three")\n')
+    (tmp_path / 'docs' / 'guide.md').write_text('# Guide\nneedle-four in docs\n')
+    (tmp_path / 'node_modules' / 'junk' / 'dep.js').write_text('// needle-ignored\n')
+    (tmp_path / '.hidden.py').write_text('needle-hidden\n')
+    (tmp_path / '.git' / 'config').write_text('needle-git\n')
+    monkeypatch.setattr(tree_index, '_index_dir', lambda: str(idx_store))
+    # Fresh state per test: the module keeps process-global memory.
+    monkeypatch.setattr(tree_index, '_mem', {})
+    monkeypatch.setattr(tree_index, '_building', set())
+    return str(tmp_path)
+
+
+def _build(root):
+    """Synchronously build the index for *root*."""
+    tree_index._build_sync(root)
+
+
+class TestBuildAndAcquire:
+    def test_build_indexes_expected_files(self, proj):
+        _build(proj)
+        entry = tree_index.acquire(proj)
+        assert entry is not None and entry.complete
+        paths = set(entry.paths)
+        assert 'src/pkg/alpha.py' in paths
+        assert 'docs/guide.md' in paths
+        # IGNORE_DIRS + hidden entries are excluded (rg/fd parity).
+        assert 'node_modules/junk/dep.js' not in paths
+        assert '.hidden.py' not in paths
+        assert '.git/config' not in paths
+
+    def test_disk_persistence_roundtrip(self, proj, monkeypatch):
+        _build(proj)
+        on_disk = set(tree_index.acquire(proj).paths)
+        # Drop memory; acquire must reload from the persisted blob.
+        monkeypatch.setattr(tree_index, '_mem', {})
+        entry = tree_index.acquire(proj)
+        assert entry is not None
+        assert set(entry.paths) == on_disk
+        assert list(entry.sizes) and all(isinstance(s, int) for s in entry.sizes)
+
+    def test_disk_load_restarts_from_conservative_refresh_interval(
+            self, proj, monkeypatch):
+        _build(proj)
+        _build(proj)
+        assert tree_index._mem[proj].refresh_after_s > tree_index._stale_after_s()
+
+        monkeypatch.setattr(tree_index, '_mem', {})
+        loaded = tree_index.acquire(proj)
+        assert loaded is not None
+        assert loaded.refresh_after_s == tree_index._stale_after_s()
+        assert loaded.unchanged_refreshes == 0
+
+    def test_oversized_disk_index_is_rejected_before_body_read(
+            self, monkeypatch):
+        header = tree_index.struct.pack(
+            '<8sdIH', tree_index._DISK_MAGIC, time.time(), 600_001, 0)
+        read_sizes = []
+
+        class HeaderOnlyFile:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, size=-1):
+                read_sizes.append(size)
+                if len(read_sizes) > 1:
+                    pytest.fail('oversized index body must not be read')
+                return header
+
+        monkeypatch.setenv('TOFU_DEPLOYMENT_MODE', 'distributed')
+        monkeypatch.setattr(tree_index, '_disk_path', lambda _root: '/ignored')
+        monkeypatch.setattr(
+            tree_index, 'open', lambda *_args, **_kwargs: HeaderOnlyFile(),
+            raising=False)
+
+        assert tree_index._load_disk('/project') is None
+        assert read_sizes == [len(header)]
+
+    def test_stale_entry_served_while_refresh_kicked(self, proj, monkeypatch):
+        _build(proj)
+        entry = tree_index.acquire(proj)
+        # Age the entry past STALE_AFTER but below MAX_AGE.
+        entry.built_at = time.time() - tree_index._stale_after_s() - 1
+        assert tree_index.acquire(proj) is entry  # stale-while-revalidate
+
+    def test_unchanged_snapshots_back_off_and_candidate_change_resets(
+            self, proj, monkeypatch):
+        monkeypatch.setenv('TOFU_TREE_INDEX_STABLE_REFRESH_MAX_S', '180')
+        _build(proj)
+        first = tree_index._mem[proj]
+        assert first.refresh_after_s == tree_index._stale_after_s()
+        assert first.unchanged_refreshes == 0
+
+        _build(proj)
+        second = tree_index._mem[proj]
+        assert second.refresh_after_s == 90.0
+        assert second.unchanged_refreshes == 1
+
+        _build(proj)
+        third = tree_index._mem[proj]
+        assert third.refresh_after_s == 180.0
+        assert third.unchanged_refreshes == 2
+        _build(proj)
+        assert tree_index._mem[proj].refresh_after_s == 180.0
+
+        with open(os.path.join(proj, 'src', 'top.py'), 'a') as f:
+            f.write('candidate-size-change\n')
+        _build(proj)
+        changed = tree_index._mem[proj]
+        assert changed.refresh_after_s == tree_index._stale_after_s()
+        assert changed.unchanged_refreshes == 0
+
+    def test_warm_respects_entry_specific_refresh_interval(
+            self, proj, monkeypatch):
+        _build(proj)
+        _build(proj)
+        entry = tree_index._mem[proj]
+        assert entry.refresh_after_s == 90.0
+
+        entry.built_at = time.time() - 60
+        tree_index.warm(proj)
+        assert proj not in tree_index._building
+
+        monkeypatch.setattr(tree_index, '_builder', _NullBuilder())
+        monkeypatch.setattr(tree_index, '_scanner', _NullBuilder())
+        entry.built_at = time.time() - 91
+        tree_index.warm(proj)
+        assert proj in tree_index._building
+
+    def test_ancient_entry_not_served(self, proj, monkeypatch):
+        _build(proj)
+        entry = tree_index.acquire(proj)
+        entry.built_at = time.time() - tree_index._max_age_s() - 5
+        monkeypatch.setattr(tree_index, '_building', set())
+        monkeypatch.setattr(tree_index, '_builder',
+                            _NullBuilder())  # never actually rebuilds
+        monkeypatch.setattr(tree_index, '_scanner', _NullBuilder())
+        assert tree_index.acquire(proj) is None
+
+    def test_disabled_env_shortcircuits(self, proj, monkeypatch):
+        monkeypatch.setenv('TOFU_TREE_INDEX_DISABLE', '1')
+        assert tree_index.acquire(proj) is None
+        tree_index.warm(proj)
+        assert tree_index._mem == {}
+
+
+class _NullBuilder:
+    def submit(self, *_a, **_k):
+        pass
+
+
+def test_warm_builder_retires_between_batches_and_rebuilds_capacity(
+        tmp_path, monkeypatch):
+    roots = [tmp_path / 'first', tmp_path / 'second']
+    for root in roots:
+        root.mkdir()
+
+    entered = [threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event()]
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def controlled_build(_root, *, scan_executor=None):
+        nonlocal calls
+        assert scan_executor is not None
+        with calls_lock:
+            batch = calls // 2
+            calls += 1
+            if calls % 2 == 0:
+                entered[batch].set()
+        release[batch].wait(1)
+
+    monkeypatch.setattr(tree_index, '_builder', None)
+    monkeypatch.setattr(tree_index, '_scanner', None)
+    monkeypatch.setattr(tree_index, '_building', set())
+    monkeypatch.setattr(tree_index, '_build_sync', controlled_build)
+
+    try:
+        prior_threads = None
+        for batch in range(2):
+            for root in roots:
+                tree_index.warm(str(root))
+            assert entered[batch].wait(1)
+            snapshot = tree_index.background_builder_snapshot()
+            assert snapshot['activeBuilds'] == 2
+            assert snapshot['executorActive'] is True
+            assert snapshot['residentThreads'] == 2
+            assert snapshot['scanExecutorActive'] is True
+            assert snapshot['scanResidentThreads'] == 0
+            with tree_index._lock:
+                current_builder = tree_index._builder
+                current_threads = tuple(current_builder._threads)
+            if prior_threads is not None:
+                assert not set(current_threads).intersection(prior_threads)
+
+            release[batch].set()
+            deadline = time.monotonic() + 1
+            while (tree_index.background_builder_snapshot()['activeBuilds']
+                   or tree_index.background_builder_snapshot()[
+                       'executorActive']
+                   or any(thread.is_alive() for thread in current_threads)):
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            prior_threads = current_threads
+    finally:
+        for event in release:
+            event.set()
+
+
+def test_parallel_root_builds_share_demand_scan_ownership(
+        tmp_path, monkeypatch):
+    roots = [tmp_path / 'first', tmp_path / 'second']
+    for root in roots:
+        root.mkdir()
+
+    builds_entered = threading.Event()
+    all_scans_entered = threading.Event()
+    release_scans = threading.Event()
+    state_lock = threading.Lock()
+    build_count = 0
+    active_scans = 0
+    peak_scans = 0
+    scan_thread_names = set()
+
+    def scan_work():
+        nonlocal active_scans, peak_scans
+        with state_lock:
+            active_scans += 1
+            if active_scans == 12:
+                all_scans_entered.set()
+            peak_scans = max(peak_scans, active_scans)
+            scan_thread_names.add(threading.current_thread().name)
+        try:
+            release_scans.wait(5)
+        finally:
+            with state_lock:
+                active_scans -= 1
+
+    def controlled_build(_root, *, scan_executor=None):
+        nonlocal build_count
+        assert scan_executor is not None
+        futures = [scan_executor.submit(scan_work) for _ in range(6)]
+        with state_lock:
+            build_count += 1
+            if build_count == 2:
+                builds_entered.set()
+        for future in futures:
+            future.result()
+
+    monkeypatch.setenv('TOFU_TREE_INDEX_WALK_JOBS', '3')
+    monkeypatch.setattr(tree_index, '_builder', None)
+    monkeypatch.setattr(tree_index, '_scanner', None)
+    monkeypatch.setattr(tree_index, '_building', set())
+    monkeypatch.setattr(tree_index, '_build_sync', controlled_build)
+
+    try:
+        for root in roots:
+            tree_index.warm(str(root))
+        assert builds_entered.wait(2)
+        assert all_scans_entered.wait(2)
+        snapshot = tree_index.background_builder_snapshot()
+        assert snapshot['activeBuilds'] == 2
+        assert snapshot['scanExecutorActive'] is True
+        assert snapshot['scanWorkerCapacity'] == 12
+        assert snapshot['scanIdleReuseHint'] == 3
+        assert snapshot['scanResidentThreads'] == 12
+
+        with tree_index._lock:
+            builder = tree_index._builder
+            scanner = tree_index._scanner
+            resident_threads = tuple(builder._threads) + tuple(scanner._threads)
+
+        release_scans.set()
+        deadline = time.monotonic() + 2
+        while (tree_index.background_builder_snapshot()['executorActive']
+               or tree_index.background_builder_snapshot()[
+                   'scanExecutorActive']
+               or any(thread.is_alive() for thread in resident_threads)):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        assert peak_scans == 12
+        assert len(scan_thread_names) == 12
+    finally:
+        release_scans.set()
+
+
+def test_tree_index_resource_overrides_are_hard_bounded(monkeypatch):
+    monkeypatch.setenv('TOFU_DEPLOYMENT_MODE', 'distributed')
+    monkeypatch.setenv('TOFU_TREE_INDEX_WALK_JOBS', '999999')
+    monkeypatch.setenv('TOFU_TREE_INDEX_MAX_ENTRIES', '999999999')
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '999999')
+    monkeypatch.setenv('TOFU_TREE_INDEX_MAX_AGE_S', '5000')
+    monkeypatch.setenv('TOFU_TREE_INDEX_STABLE_REFRESH_MAX_S', '999999')
+
+    assert tree_index._walk_jobs() == 16
+    assert tree_index._max_entries() == 600_000
+    assert tree_index._mem_roots() == 8
+    assert tree_index._stable_refresh_max_s() == 900.0
+
+
+def test_memory_entry_budget_is_process_wide(monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MAX_ENTRIES', '10000')
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '8')
+    monkeypatch.setattr(tree_index, '_mem', {
+        'oldest': SimpleNamespace(paths=[None] * 4_000),
+        'middle': SimpleNamespace(paths=[None] * 4_000),
+        'newest': SimpleNamespace(paths=[None] * 4_000),
+    })
+
+    tree_index._evict_mem_over_cap()
+
+    assert tuple(tree_index._mem) == ('middle', 'newest')
+    assert sum(len(entry.paths) for entry in tree_index._mem.values()) == 8_000
+
+
+def test_lru_eviction_checkpoints_write_fresh_entry(proj, monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '1')
+    _build(proj)
+    new_file = os.path.join(proj, 'src', 'fresh.py')
+    with open(new_file, 'w') as f:
+        f.write('fresh\n')
+    tree_index.note_write(new_file)
+    disk_path = tree_index._disk_path(proj)
+    assert not os.path.exists(disk_path)
+    assert (tree_index._mem[proj].mutation_revision
+            > tree_index._mem[proj].persisted_revision)
+
+    tree_index._mem['newer'] = SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+
+    assert proj not in tree_index._mem
+    assert os.path.isfile(disk_path)
+    tree_index._mem.clear()
+    loaded = tree_index.acquire(proj)
+    assert loaded is not None
+    assert 'src/fresh.py' in loaded.paths
+    assert loaded.mutation_revision == loaded.persisted_revision
+    assert proj not in tree_index._building
+
+
+def test_lru_eviction_does_not_rewrite_clean_snapshot(
+        proj, monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '1')
+    _build(proj)
+    persisted_calls = []
+    monkeypatch.setattr(
+        tree_index, '_persist', lambda entry: persisted_calls.append(entry))
+
+    tree_index._mem['newer'] = SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+
+    assert proj not in tree_index._mem
+    assert persisted_calls == []
+
+
+def test_lru_eviction_overwrites_stale_blob_when_invalidation_unlink_fails(
+        proj, monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '1')
+    _build(proj)
+    disk_path = tree_index._disk_path(proj)
+    real_unlink = tree_index.os.unlink
+
+    def fail_canonical_unlink(path):
+        if path == disk_path:
+            raise OSError('injected canonical unlink failure')
+        return real_unlink(path)
+
+    monkeypatch.setattr(tree_index.os, 'unlink', fail_canonical_unlink)
+    new_file = os.path.join(proj, 'src', 'unlink-failed.py')
+    with open(new_file, 'w') as f:
+        f.write('fresh despite stale blob\n')
+    tree_index.note_write(new_file)
+    assert os.path.isfile(disk_path)
+
+    tree_index._mem['newer'] = SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+    tree_index._mem.clear()
+    loaded = tree_index.acquire(proj)
+
+    assert loaded is not None
+    assert 'src/unlink-failed.py' in loaded.paths
+
+
+def test_async_persist_cannot_reinstall_snapshot_older_than_note_write(
+        proj, monkeypatch):
+    _build(proj)
+    entry = tree_index._mem[proj]
+    disk_path = tree_index._disk_path(proj)
+    new_file = os.path.join(proj, 'src', 'persist-race.py')
+    with open(new_file, 'w') as f:
+        f.write('newer revision\n')
+
+    real_open = open
+    temp_written = threading.Event()
+    release_persist = threading.Event()
+
+    class BlockingWrite:
+        def __init__(self, path, mode):
+            self._handle = real_open(path, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+        def write(self, data):
+            written = self._handle.write(data)
+            temp_written.set()
+            release_persist.wait(2)
+            return written
+
+    monkeypatch.setattr(
+        tree_index, 'open', lambda path, mode: BlockingWrite(path, mode),
+        raising=False,
+    )
+    persist_results = []
+    persist_thread = threading.Thread(
+        target=lambda: persist_results.append(tree_index._persist(entry)))
+    persist_thread.start()
+    try:
+        assert temp_written.wait(2)
+        tree_index.note_write(new_file)
+    finally:
+        release_persist.set()
+        persist_thread.join(2)
+
+    assert not persist_thread.is_alive()
+    assert persist_results == [False]
+    assert not os.path.exists(disk_path)
+    assert entry.mutation_revision > entry.persisted_revision
+
+
+def test_lru_eviction_preserves_rebuild_fallback_when_checkpoint_fails(
+        proj, monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MEM_ROOTS', '1')
+    _build(proj)
+    changed_file = os.path.join(proj, 'src', 'top.py')
+    with open(changed_file, 'a') as f:
+        f.write('changed\n')
+    tree_index.note_write(changed_file)
+    disk_path = tree_index._disk_path(proj)
+    monkeypatch.setattr(tree_index, '_persist', lambda _entry: False)
+
+    tree_index._mem['newer'] = SimpleNamespace(paths=[])
+    tree_index._evict_mem_over_cap()
+
+    assert proj not in tree_index._mem
+    assert not os.path.exists(disk_path)
+    monkeypatch.setattr(tree_index, '_builder', _NullBuilder())
+    monkeypatch.setattr(tree_index, '_scanner', _NullBuilder())
+    assert tree_index.acquire(proj) is None
+    assert proj in tree_index._building
+
+
+def test_lru_eviction_does_not_persist_entry_over_current_budget(monkeypatch):
+    monkeypatch.setenv('TOFU_TREE_INDEX_MAX_ENTRIES', '10000')
+    oversized = tree_index.TreeIndex(
+        '/oversized', ['path'] * 10_001,
+        tree_index.array.array('q', [0]) * 10_001,
+        tree_index.array.array('q', [0]) * 10_001,
+        time.time(), True,
+    )
+    monkeypatch.setattr(tree_index, '_mem', {'oversized': oversized})
+    persisted_calls = []
+    monkeypatch.setattr(
+        tree_index, '_persist', lambda entry: persisted_calls.append(entry))
+
+    tree_index._evict_mem_over_cap()
+
+    assert tree_index._mem == {}
+    assert persisted_calls == []
+
+
+def test_background_warm_restores_fresh_disk_without_project_walk(
+        proj, monkeypatch):
+    _build(proj)
+    tree_index._mem.clear()
+    monkeypatch.setattr(
+        tree_index, '_build_sync',
+        lambda *_args, **_kwargs: pytest.fail('fresh blob must avoid tree walk'),
+    )
+    tree_index._building.add(proj)
+
+    tree_index._run_builder_job(proj, None, None)
+
+    assert tree_index._mem.get(proj) is not None
+    assert proj not in tree_index._building
+
+
+def test_background_warm_serves_stale_disk_while_refreshing(
+        proj, monkeypatch):
+    _build(proj)
+    entry = tree_index._mem[proj]
+    entry.built_at = time.time() - tree_index._stale_after_s() - 1
+    assert tree_index._persist(entry)
+    tree_index._mem.clear()
+    build_observations = []
+
+    def observe_build(root, *, scan_executor=None):
+        build_observations.append((root, tree_index._mem.get(root)))
+
+    monkeypatch.setattr(tree_index, '_build_sync', observe_build)
+    tree_index._building.add(proj)
+
+    tree_index._run_builder_job(proj, None, None)
+
+    assert len(build_observations) == 1
+    assert build_observations[0][0] == proj
+    assert build_observations[0][1] is not None
+    assert proj not in tree_index._building
+
+
+class TestFind:
+    def test_glob_and_format(self, proj):
+        _build(proj)
+        out = read_tools.tool_find_files(proj, '*.py')
+        assert 'src/pkg/alpha.py' in out
+        assert 'src/top.py' in out
+        assert 'docs/guide.md' not in out
+        assert '3 found' in out
+        # Size annotation parity with the fd/python walkers.
+        assert 'src/pkg/alpha.py (' in out
+
+    @pytest.mark.parametrize('indexed', [True, False])
+    @pytest.mark.parametrize('pattern,expected', [
+        ('**/*', {'root.py', 'src/top.py', 'src/pkg/alpha.py', 'docs/guide.md'}),
+        ('**/*.py', {'root.py', 'src/top.py', 'src/pkg/alpha.py'}),
+        ('**/**/root.py', {'root.py'}),
+        ('**/' * 64 + 'root.py', {'root.py'}),
+        ('**/*.PY', {'root.py', 'src/top.py', 'src/pkg/alpha.py'}),
+    ])
+    def test_recursive_name_glob_keeps_root_files(self, proj, monkeypatch, indexed,
+                                                 pattern, expected):
+        from pathlib import Path
+        (Path(proj) / 'root.py').write_text('root input')
+        if indexed:
+            _build(proj)
+        else:
+            monkeypatch.setattr(read_tools, '_find_via_index', lambda *a, **kw: None)
+            monkeypatch.setattr(read_tools, '_FD_BIN', None)
+            monkeypatch.setattr(tree_index, 'warm', lambda *_: None)
+        out = read_tools.tool_find_files(proj, pattern)
+        for rel in expected:
+            assert rel + ' (' in out
+        assert 'node_modules' not in out and '.hidden.py' not in out
+        scoped = read_tools.tool_find_files(proj, pattern, rel_path='src/pkg', max_results=1)
+        assert 'root.py (' not in scoped and 'docs/guide.md (' not in scoped
+        if 'root.py' not in pattern:
+            assert 'results capped at 1' in scoped
+
+    def test_recursive_name_glob_uses_same_fd_request(self, proj, monkeypatch):
+        from pathlib import Path
+        root_file = Path(proj) / 'root.py'
+        root_file.write_text('root input')
+        monkeypatch.setattr(read_tools, '_find_via_index', lambda *a, **kw: None)
+        monkeypatch.setattr(tree_index, 'warm', lambda *_: None)
+        monkeypatch.setattr(read_tools, '_FD_BIN', '/fake/fd')
+        def fd_result(command, **kwargs):
+            assert command[:4] == ['/fake/fd', '-g', '*.py', proj]
+            return SimpleNamespace(returncode=0, stdout=str(root_file) + '\n', stderr='')
+        monkeypatch.setattr(read_tools.subprocess, 'run', fd_result)
+        assert 'root.py (' in read_tools.tool_find_files(proj, '**/*.py')
+
+    def test_shell_find_name_keeps_literal_slash_matching(self, proj, monkeypatch):
+        monkeypatch.setattr(read_tools, '_FD_BIN', None)
+        assert read_tools.tool_find_files(
+            proj, '**/*.py', case_sensitive=True, shell_output=True,
+            respect_project_ignores=False) == ''
+
+    def test_case_insensitive_basename(self, proj):
+        _build(proj)
+        out = read_tools.tool_find_files(proj, '*.PY')
+        assert 'src/pkg/alpha.py' in out
+
+    def test_explicit_case_sensitive_basename(self, proj):
+        _build(proj)
+        out = read_tools.tool_find_files(
+            proj, '*.PY', case_sensitive=True)
+        assert 'No files matching' in out
+
+    def test_subdirectory_scope(self, proj):
+        _build(proj)
+        out = read_tools.tool_find_files(proj, '*.py', rel_path='src/pkg')
+        assert 'src/pkg/alpha.py' in out
+        assert 'src/top.py' not in out
+
+    def test_relpath_glob(self, proj):
+        _build(proj)
+        out = read_tools.tool_find_files(proj, 'docs/*.md')
+        assert 'docs/guide.md' in out
+        assert 'src/top.py' not in out
+
+    def test_cap_and_no_match(self, proj):
+        _build(proj)
+        out = read_tools.tool_find_files(proj, '*.py', max_results=1)
+        assert '(1 found)' in out
+        assert 'results capped at 1' in out
+        exact = read_tools.tool_find_files(proj, '*.py', max_results=3)
+        assert '(3 found)' in exact
+        assert 'results capped' not in exact
+        assert 'No files matching' in read_tools.tool_find_files(proj, '*.rs')
+
+    def test_adaptive_snapshot_age_is_visible_even_for_no_match(self, proj):
+        _build(proj)
+        _build(proj)
+        entry = tree_index._mem[proj]
+        entry.built_at = time.time() - 60
+
+        out = read_tools.tool_find_files(proj, '*.rs')
+        assert 'tree index age ' in out and 's/90s' in out
+        assert 'external path/size changes may not yet be reflected' in out
+        assert '(0 found)' in out
+
+    def test_shell_compatible_search_does_not_use_filtered_index(
+            self, proj, monkeypatch):
+        _build(proj)
+        monkeypatch.setattr(read_tools, '_FD_BIN', None)
+        out = read_tools.tool_find_files(
+            proj,
+            '*.py',
+            max_results=20,
+            case_sensitive=True,
+            shell_output=True,
+            respect_project_ignores=False,
+        )
+        assert './.hidden.py' in out
+        assert './src/pkg/alpha.py' in out
+
+    def test_python_fallback_has_explicit_scan_budget(self, proj, monkeypatch):
+        monkeypatch.setattr(read_tools, '_FD_BIN', None)
+        monkeypatch.setattr(read_tools, '_FIND_SCAN_LIMIT', 2)
+        out = read_tools.tool_find_files(
+            proj,
+            '*',
+            max_results=20,
+            shell_output=True,
+            respect_project_ignores=False,
+        )
+        assert 'find: [search stopped after scanning 2 entries' in out
+
+    def test_python_fallback_reports_depth_budget(self, proj, monkeypatch):
+        monkeypatch.setattr(read_tools, '_FD_BIN', None)
+        monkeypatch.setattr(read_tools, '_TOOL_MAX_DEPTH', 0)
+        out = read_tools.tool_find_files(
+            proj,
+            '*',
+            max_results=20,
+            shell_output=True,
+            respect_project_ignores=False,
+        )
+        assert 'find: [search depth capped at 0' in out
+
+    def test_fd_timeout_does_not_double_scan(self, proj, monkeypatch):
+        monkeypatch.setattr(read_tools, '_FD_BIN', '/fake/fd')
+        monkeypatch.setattr(
+            read_tools.subprocess,
+            'run',
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                read_tools.subprocess.TimeoutExpired('/fake/fd', 30)),
+        )
+        monkeypatch.setattr(
+            read_tools,
+            '_python_find',
+            lambda *_args, **_kwargs: pytest.fail(
+                'fd timeout must not start a second full-tree scan'),
+        )
+        out = read_tools.tool_find_files(
+            proj,
+            '*.py',
+            shell_output=True,
+            respect_project_ignores=False,
+        )
+        assert 'find: [search timed out after' in out
+
+    def test_shell_mutation_invalidates_index(self, proj):
+        from lib.project_mod.tools import execute_standalone_command
+        _build(proj)
+        assert tree_index.acquire(proj) is not None
+        execute_standalone_command(
+            'run_command',
+            {'command': "printf 'fresh' > fresh.py"},
+            working_dir=proj,
+        )
+        assert tree_index.acquire(proj) is None
+        assert 'fresh.py' in read_tools.tool_find_files(proj, 'fresh.py')
+
+    def test_fallback_when_no_index(self, proj):
+        # No build: fd/python walker path must still answer correctly.
+        out = read_tools.tool_find_files(proj, '*.md')
+        assert 'docs/guide.md' in out
+
+
+class TestGrep:
+    def test_matches_parity_with_live_walk(self, proj):
+        indexed = read_tools.tool_grep(proj, 'needle')
+        live = read_tools.tool_grep(proj, 'needle')  # second call — also indexed
+        for out in (indexed, live):
+            assert 'src/pkg/alpha.py\n2:' in out
+            assert 'src/pkg/beta.py\n3:' in out
+            assert 'src/top.py\n1:' in out
+            assert 'docs/guide.md\n2:' in out
+            # Ignored/hidden trees stay out.
+            assert 'node_modules' not in out
+            assert '.hidden' not in out
+        _build(proj)  # now pin the explicit index path too
+        via_index = read_tools.tool_grep(proj, 'needle')
+        assert '4 matches' in via_index
+        assert 'src/pkg/alpha.py\n2:' in via_index
+
+    def test_include_glob(self, proj):
+        _build(proj)
+        out = read_tools.tool_grep(proj, 'needle', include='*.md')
+        assert 'docs/guide.md' in out
+        assert 'src/pkg/alpha.py' not in out
+
+    def test_subdirectory_scope(self, proj):
+        _build(proj)
+        out = read_tools.tool_grep(proj, 'needle', rel_path='src')
+        assert 'src/top.py' in out
+        assert 'docs/guide.md' not in out
+
+    def test_count_only(self, proj):
+        _build(proj)
+        out = read_tools.tool_grep(proj, 'needle', count_only=True)
+        assert '4 matches (count only)' in out
+
+    def test_context_lines(self, proj):
+        _build(proj)
+        out = read_tools.tool_grep(proj, 'needle-two', context_lines=2)
+        assert 'import alpha' in out  # -C 2 pulls surrounding lines
+        assert 'x = 1' in out
+
+    def test_no_matches(self, proj):
+        _build(proj)
+        out = read_tools.tool_grep(proj, 'definitely-absent-xyz')
+        assert 'No matches found' in out
+
+    def test_adaptive_snapshot_age_is_visible_while_contents_stay_live(
+            self, proj):
+        _build(proj)
+        _build(proj)
+        entry = tree_index._mem[proj]
+        entry.built_at = time.time() - 60
+
+        out = read_tools.tool_grep(proj, 'needle-one')
+        assert 'tree index age ' in out and 's/90s' in out
+        assert 'existing contents are read live' in out
+        assert 'src/pkg/alpha.py\n2:' in out
+
+    def test_case_insensitive_via_index(self, proj):
+        """Pins the rg-flag regression class: GNU `-s` (no-messages) vs rg `-s`
+        (case-SENSITIVE) — the index chunk argv must stay case-insensitive."""
+        _build(proj)
+        out = read_tools.tool_grep(proj, 'NEEDLE-ONE')
+        assert 'src/pkg/alpha.py\n2:' in out
+        out = read_tools.tool_grep(proj, 'NEEDLE', count_only=True)
+        assert '4 matches (count only)' in out
+
+    def test_single_explicit_file_uses_live_semantics(self, proj):
+        _build(proj)
+        # A hidden file is NOT in the index, but an explicit file operand must
+        # still be searched (rg single-file behavior).
+        out = read_tools.tool_grep(proj, 'needle-hidden', rel_path='.hidden.py')
+        assert 'needle-hidden' in out
+
+    def test_regex_pattern(self, proj):
+        _build(proj)
+        out = read_tools.tool_grep(proj, r'needle-(one|two)')
+        assert 'src/pkg/alpha.py' in out
+        assert 'src/pkg/beta.py' in out
+        assert 'src/top.py' not in out
+
+    def test_fallback_when_disabled(self, proj, monkeypatch):
+        monkeypatch.setenv('TOFU_TREE_INDEX_DISABLE', '1')
+        out = read_tools.tool_grep(proj, 'needle')
+        assert 'src/pkg/alpha.py\n2:' in out
+
+
+class TestFreshness:
+    def test_note_write_upserts_immediately(self, proj):
+        _build(proj)
+        assert os.path.isfile(tree_index._disk_path(proj))
+        new_file = os.path.join(proj, 'src', 'fresh.py')
+        with open(new_file, 'w') as f:
+            f.write('needle-five\n')
+        tree_index.note_write(new_file)
+        assert not os.path.exists(tree_index._disk_path(proj))
+        out = read_tools.tool_find_files(proj, 'fresh.py')
+        assert 'src/fresh.py' in out
+        out = read_tools.tool_grep(proj, 'needle-five')
+        assert 'src/fresh.py\n1:' in out
+
+    def test_note_write_removes_vanished_file(self, proj):
+        _build(proj)
+        gone = os.path.join(proj, 'src', 'top.py')
+        os.unlink(gone)
+        tree_index.note_write(gone)  # stat fails → entry removed
+        out = read_tools.tool_find_files(proj, 'top.py')
+        assert 'No files matching' in out
+
+    def test_gitignore_write_invalidates(self, proj):
+        _build(proj)
+        assert tree_index.acquire(proj) is not None
+        gi = os.path.join(proj, '.gitignore')
+        with open(gi, 'w') as f:
+            f.write('docs/\n')
+        tree_index.note_write(gi)
+        assert tree_index._mem.get(proj) is None  # invalidated
+        _build(proj)
+        entry = tree_index.acquire(proj)
+        assert 'docs/guide.md' not in set(entry.paths)
+
+    def test_write_tool_hook_fires(self, proj, monkeypatch):
+        """_record_write_freshness (the write-tools choke point) feeds the index."""
+        from lib.project_mod.write_tools import _ops
+        seen = []
+        monkeypatch.setattr(tree_index, 'note_write', seen.append)
+        _ops._record_write_freshness('conv-x', '/some/abs/file.py')
+        assert seen == ['/some/abs/file.py']
+
+
+class TestGitignoreCompile:
+    def test_dir_pattern_prunes_subtree(self, tmp_path):
+        (tmp_path / 'gen' / 'deep').mkdir(parents=True)
+        (tmp_path / 'gen' / 'deep' / 'x.py').write_text('x')
+        (tmp_path / 'keep.py').write_text('y')
+        (tmp_path / '.gitignore').write_text('gen/\n')
+        _build(str(tmp_path))
+        entry = tree_index.acquire(str(tmp_path))
+        assert set(entry.paths) == {'keep.py'}
+
+    def test_negation_keeps_file(self, tmp_path):
+        (tmp_path / 'a.log').write_text('x')
+        (tmp_path / 'keep.log').write_text('x')
+        (tmp_path / '.gitignore').write_text('*.log\n!keep.log\n')
+        _build(str(tmp_path))
+        entry = tree_index.acquire(str(tmp_path))
+        assert 'a.log' not in set(entry.paths)
+        assert 'keep.log' in set(entry.paths)
+
+    def test_contents_level_rule_does_not_prune_parent_dir(self, tmp_path):
+        """`/scripts/*` must not prune `scripts/` itself — git descends so the
+        `!/scripts/keep.py` negation can resurrect whitelisted children."""
+        (tmp_path / 'scripts').mkdir()
+        (tmp_path / 'scripts' / 'keep.py').write_text('x')
+        (tmp_path / 'scripts' / 'drop.py').write_text('x')
+        (tmp_path / '.gitignore').write_text('/scripts/*\n!/scripts/keep.py\n')
+        _build(str(tmp_path))
+        paths = set(tree_index.acquire(str(tmp_path)).paths)
+        assert 'scripts/keep.py' in paths
+        assert 'scripts/drop.py' not in paths
+
+    def test_nested_gitignore_scoped_to_subtree(self, tmp_path):
+        (tmp_path / 'shots').mkdir()
+        (tmp_path / 'shots' / '.gitignore').write_text('*.png\n')
+        (tmp_path / 'shots' / 'a.png').write_text('x')
+        (tmp_path / 'shots' / 'keep.txt').write_text('x')
+        (tmp_path / 'other.png').write_text('x')  # outside the nested scope
+        _build(str(tmp_path))
+        paths = set(tree_index.acquire(str(tmp_path)).paths)
+        assert 'shots/a.png' not in paths
+        assert 'shots/keep.txt' in paths
+        assert 'other.png' in paths
+
+    def test_hidden_whitelist_resurrected(self, tmp_path):
+        """rg parity: `!.env.example` resurrects a hidden file past the
+        hidden-filter; `.env` itself stays hidden."""
+        (tmp_path / '.env.example').write_text('x')
+        (tmp_path / '.env').write_text('secret')
+        (tmp_path / '.gitignore').write_text('.env\n.env.*\n!.env.example\n')
+        _build(str(tmp_path))
+        paths = set(tree_index.acquire(str(tmp_path)).paths)
+        assert '.env.example' in paths
+        assert '.env' not in paths
+
+    def test_git_info_exclude_honored(self, tmp_path):
+        (tmp_path / '.git' / 'info').mkdir(parents=True)
+        (tmp_path / '.git' / 'info' / 'exclude').write_text('/scratch.md\n')
+        (tmp_path / 'scratch.md').write_text('x')
+        (tmp_path / 'kept.md').write_text('x')
+        _build(str(tmp_path))
+        paths = set(tree_index.acquire(str(tmp_path)).paths)
+        assert 'scratch.md' not in paths
+        assert 'kept.md' in paths
+
+    def test_note_write_refuses_non_indexable_paths(self, proj):
+        """Writes into ignored/hidden trees must NOT become searchable via
+        the write hook (a rebuild would exclude them)."""
+        _build(proj)
+        sneaky = os.path.join(proj, 'node_modules', 'junk', 'sneaky.js')
+        with open(sneaky, 'w') as f:
+            f.write('needle-sneaky\n')
+        hidden = os.path.join(proj, '.secret.py')
+        with open(hidden, 'w') as f:
+            f.write('needle-secret\n')
+        tree_index.note_write(sneaky)
+        tree_index.note_write(hidden)
+        paths = set(tree_index.acquire(proj).paths)
+        assert 'node_modules/junk/sneaky.js' not in paths
+        assert '.secret.py' not in paths
+        out = read_tools.tool_grep(proj, 'needle-sneaky')
+        assert 'No matches found' in out
+
+
+def test_failed_scan_is_never_installed_as_complete_index(proj, monkeypatch):
+    def failed_scan(*args):
+        raise RuntimeError('scan worker failed')
+
+    monkeypatch.setattr(tree_index, '_scan_one_dir', failed_scan)
+    tree_index._build_sync(proj)
+    assert proj not in tree_index._mem
+    assert not os.path.exists(tree_index._disk_path(proj))
+
+
+def test_independent_roots_start_with_idle_reuse_hint_one(tmp_path, monkeypatch):
+    from lib.observability import InstrumentedThreadPoolExecutor
+
+    barrier = threading.Barrier(32, timeout=10)
+    pool = InstrumentedThreadPoolExecutor(max_workers=1, metric_pool='tree-index',
+                                         thread_name_prefix='tree-root-proof')
+    roots = [str(tmp_path / str(i)) for i in range(32)]
+    called = []
+    lock = threading.Lock()
+    for root in roots:
+        os.makedirs(root)
+
+    def build(root, *, scan_executor=None):
+        with lock:
+            called.append(root)
+        barrier.wait()
+
+    monkeypatch.setattr(tree_index, '_index_dir', lambda: str(tmp_path / 'cache'))
+    monkeypatch.setattr(tree_index, '_builder', None)
+    monkeypatch.setattr(tree_index, '_scanner', None)
+    monkeypatch.setattr(tree_index, '_building', set())
+    monkeypatch.setattr(tree_index, '_mem', {})
+    monkeypatch.setattr(tree_index, '_new_builder', lambda: pool)
+    monkeypatch.setattr(tree_index, '_build_sync', build)
+    started = time.monotonic()
+    try:
+        for root in roots:
+            tree_index.warm(root)
+        pool.shutdown(wait=True)
+        assert sorted(called) == sorted(roots)
+        assert tree_index.background_builder_snapshot()['activeBuilds'] == 0
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    assert not any(t.name.startswith('tree-root-proof') for t in threading.enumerate())
+    print(f'32 root builds: {(time.monotonic() - started) * 1000:.2f} ms; 0 workers')
+
+
+def test_depth_truncation_never_installs_partial_index(proj, monkeypatch):
+    monkeypatch.setattr(tree_index, '_DEPTH_CAP', 0)
+    tree_index._build_sync(proj)
+    assert proj not in tree_index._mem
+    assert not os.path.exists(tree_index._disk_path(proj))
+
+
+def test_directory_read_failure_never_installs_partial_index(proj, monkeypatch):
+    original = os.scandir
+
+    def scandir(path):
+        if path == proj:
+            raise PermissionError('injected directory read failure')
+        return original(path)
+
+    monkeypatch.setattr(os, 'scandir', scandir)
+    tree_index._build_sync(proj)
+    assert proj not in tree_index._mem
+    assert not os.path.exists(tree_index._disk_path(proj))
+
+
+def test_unstarted_root_build_failure_releases_owner_and_keeps_live_reads(proj, monkeypatch):
+    original = threading.Thread.start
+
+    def start(thread):
+        if thread.name.startswith('tree-index'):
+            raise RuntimeError('injected unstarted root build')
+        return original(thread)
+
+    monkeypatch.setattr(tree_index, '_builder', None)
+    monkeypatch.setattr(tree_index, '_scanner', None)
+    monkeypatch.setattr(threading.Thread, 'start', start)
+    tree_index.warm(proj)
+    snapshot = tree_index.background_builder_snapshot()
+    assert snapshot['activeBuilds'] == 0
+    assert not snapshot['executorActive'] and not snapshot['scanExecutorActive']
+    assert 'src/pkg/alpha.py' in read_tools.tool_find_files(proj, 'alpha.py')
+    assert not any(t.name.startswith('tree-index') for t in threading.enumerate())

@@ -1,0 +1,121 @@
+/* ★ Local Tool Search: expose the actual matched native tools instead of a
+ * generic gateway result row. Cards are always visible because the result set
+ * is already bounded (eight by default) and is itself the useful activity. */
+.ptool-tool-search-block {
+  margin: 3px var(--space-2) 7px;
+  overflow: hidden;
+  border: 1px solid rgba(129,140,248,0.2);
+  border-radius: 8px;
+  background: rgba(99,102,241,0.045);
+}
+.ptool-tool-search-header {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(129,140,248,0.13);
+}
+.ptool-tool-search-header .ptool-icon { color: #818cf8; }
+.ptool-tool-search-count,
+.ptool-tool-search-more {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.ptool-tool-search-count {
+  color: #a5b4fc;
+  background: rgba(99,102,241,0.14);
+}
+.ptool-tool-search-more { color: var(--text-tertiary); }
+.ptool-tool-search-results {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 7px;
+}
+.ptool-tool-search-card {
+  min-width: 0;
+  padding: var(--space-2) 9px;
+  border: 1px solid rgba(148,163,184,0.14);
+  border-radius: 6px;
+  background: rgba(15,23,42,0.18);
+}
+.ptool-tool-search-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.ptool-tool-search-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #c7d2fe;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ptool-tool-search-namespace {
+  margin-left: auto;
+  flex-shrink: 0;
+  max-width: 42%;
+  overflow: hidden;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  background: rgba(148,163,184,0.1);
+  font: 9px/1.45 'JetBrains Mono', monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ptool-tool-search-desc {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.ptool-tool-search-args {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: 7px;
+}
+.ptool-tool-arg {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 1px 5px;
+  border: 1px solid rgba(148,163,184,0.13);
+  border-radius: 4px;
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+  line-height: 1.45;
+}
+.ptool-tool-arg code { color: var(--text-secondary); font-size: 9px; }
+.ptool-tool-arg-required { color: #f59e0b; font-weight: 800; }
+.ptool-tool-search-empty {
+  grid-column: 1 / -1;
+  padding: var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--font-size-xs);
+  text-align: center;
+}
+[data-theme="light"] .ptool-tool-search-block {
+  border-color: rgba(79,70,229,0.16);
+  background: rgba(99,102,241,0.035);
+}
+[data-theme="light"] .ptool-tool-search-card {
+  border-color: rgba(100,116,139,0.13);
+  background: rgba(255,255,255,0.7);
+}
+[data-theme="light"] .ptool-tool-search-name { color: #4338ca; }
+@media (max-width: 680px) {
+  .ptool-tool-search-results { grid-template-columns: minmax(0, 1fr); }
+  .ptool-tool-search-more { display: none; }
+}
+

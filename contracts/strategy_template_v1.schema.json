@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/strategy_template_v1.schema.json",
+  "title": "Self-evolution distilled strategy template: a reusable path skeleton justified by episode lineage",
+  "type": "object",
+  "required": ["schema_version", "template_id", "domain", "stages", "applicability_terms", "lineage", "samples", "success_rate", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "template_id": {"type": "string", "maxLength": 160},
+    "domain": {"type": "string", "minLength": 1, "maxLength": 80},
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["kind", "detail"],
+        "properties": {
+          "kind": {"type": "string", "maxLength": 80},
+          "detail": {"type": "string", "maxLength": 1000}
+        },
+        "additionalProperties": false
+      }
+    },
+    "applicability_terms": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 64}, "description": "Normalized terms from the goal statements whose successful episodes produced this template; retrieval matches on these, never on a model's self-description."},
+    "lineage": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "maxLength": 160}, "description": "Episode ids that justify this template; a template without receipts cannot exist."},
+    "samples": {"type": "integer", "minimum": 1, "maximum": 64},
+    "success_rate": {"type": "number", "minimum": 0, "maximum": 1, "description": "Mean outcome over the same latest, at most 64 lineage episodes (success 1.0, partial 0.5, failure 0.0). Failure attempts are included in the denominator. This is observed performance, not causal improvement."},
+    "created_at": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

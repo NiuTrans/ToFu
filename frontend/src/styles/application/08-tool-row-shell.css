@@ -1,0 +1,43 @@
+/* Tool row geometry and readable intent; one theme-token vocabulary, code remains in its evidence owners. */
+.ptool-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-4);
+  min-height: var(--control-h-sm);
+  color: var(--text-secondary);
+  font-size: var(--font-size-md);
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.ptool-line:hover { background: var(--bg-hover); }
+.ptool-line.ptool-active { color: var(--text-primary); }
+.ptool-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--space-4);
+  color: var(--text-secondary);
+}
+.ptool-line.ptool-active .ptool-icon { color: var(--accent); }
+.ptool-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-md);
+  line-height: var(--leading-body);
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Requested repo-map scope is visible before opening its result evidence. */
+.ptool-repo-map-params {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.ptool-repo-map-params code { font: inherit; }

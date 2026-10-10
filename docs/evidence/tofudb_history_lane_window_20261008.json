@@ -1,0 +1,486 @@
+{
+  "decision": "Diagnostic evidence only; no optimization or production source admitted",
+  "baseline_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+  "diagnostic_source": "093252ca689aef6e57abeeb95410c5a6b98c04ce045e6218306c4899fb1ab7fc",
+  "private_source_commit": "4617f56fb",
+  "source_archive_sha256": "33b51950f31e27d097c8fffd048a26e3205abe644b7ba1bb33afa93ae92ccd7e",
+  "scratch": ".tmp/tofudb-history-lane-window-20261008",
+  "native_pair": {
+    "source": "093252ca689aef6e57abeeb95410c5a6b98c04ce045e6218306c4899fb1ab7fc",
+    "files": {
+      "libtofu_db.so": "f42a8846582799555b0e0e4c93c6ec568f83c8878bfea5efc8dba774b843147c",
+      "tofu-db": "59caa79c92bec14830c2e9ace0e602f25eaaf43747d6d432197a9643c9bf3e20"
+    }
+  },
+  "focused_tests": {
+    "history_compaction": 6,
+    "indexed_compaction": 3,
+    "failed": 0
+  },
+  "rows": [
+    {
+      "label": "history-lane-0",
+      "correctness": true,
+      "error_count": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity_returncode": 0,
+      "readiness": {
+        "probes": 21,
+        "unhealthy_probes": 0,
+        "max_consecutive_unhealthy": 0,
+        "max_contended_milliseconds": 0,
+        "failure_examples": []
+      },
+      "p99_ms": {
+        "submit_to_running": 68.0304616689682,
+        "stream_scheduled": 1839.931569993496,
+        "settle": 3786.18311136961
+      },
+      "history_compactions": 0,
+      "probe_records": [],
+      "rotation_stages": [
+        {
+          "calls": 75,
+          "components": [
+            {
+              "calls": 60,
+              "component": "foreground",
+              "totalNanos": 47714861
+            },
+            {
+              "calls": 15,
+              "component": "maintenance",
+              "totalNanos": 9166894
+            }
+          ],
+          "stage": "history_stage",
+          "totalNanos": 56881755,
+          "milliseconds": 56.881755
+        },
+        {
+          "calls": 526,
+          "components": [
+            {
+              "calls": 526,
+              "component": "rotation_driver",
+              "totalNanos": 204792949
+            }
+          ],
+          "stage": "rotation_prepare_wait",
+          "totalNanos": 204792949,
+          "milliseconds": 204.792949
+        },
+        {
+          "calls": 18,
+          "components": [
+            {
+              "calls": 18,
+              "component": "rotation_driver",
+              "totalNanos": 2688007458
+            }
+          ],
+          "stage": "rotation_prefix_encode",
+          "totalNanos": 2688007458,
+          "milliseconds": 2688.007458
+        },
+        {
+          "calls": 18,
+          "components": [
+            {
+              "calls": 18,
+              "component": "rotation_driver",
+              "totalNanos": 32622444
+            }
+          ],
+          "stage": "rotation_install_wait",
+          "totalNanos": 32622444,
+          "milliseconds": 32.622444
+        },
+        {
+          "calls": 19,
+          "components": [
+            {
+              "calls": 1,
+              "component": "foreground",
+              "totalNanos": 207215
+            },
+            {
+              "calls": 18,
+              "component": "rotation_driver",
+              "totalNanos": 4329678
+            }
+          ],
+          "stage": "rotation_install_manifest",
+          "totalNanos": 4536893,
+          "milliseconds": 4.536893
+        },
+        {
+          "calls": 19,
+          "components": [
+            {
+              "calls": 1,
+              "component": "foreground",
+              "totalNanos": 54522
+            },
+            {
+              "calls": 18,
+              "component": "rotation_driver",
+              "totalNanos": 648310
+            }
+          ],
+          "stage": "rotation_install_control",
+          "totalNanos": 702832,
+          "milliseconds": 0.702832
+        },
+        {
+          "calls": 19,
+          "components": [
+            {
+              "calls": 1,
+              "component": "foreground",
+              "totalNanos": 4267763
+            },
+            {
+              "calls": 18,
+              "component": "rotation_driver",
+              "totalNanos": 112800826
+            }
+          ],
+          "stage": "rotation_install_release",
+          "totalNanos": 117068589,
+          "milliseconds": 117.068589
+        },
+        {
+          "calls": 18,
+          "components": [
+            {
+              "calls": 18,
+              "component": "rotation_driver",
+              "totalNanos": 5818305
+            }
+          ],
+          "stage": "rotation_generation_handover",
+          "totalNanos": 5818305,
+          "milliseconds": 5.818305
+        },
+        {
+          "calls": 19,
+          "components": [
+            {
+              "calls": 1,
+              "component": "foreground",
+              "totalNanos": 4585078
+            },
+            {
+              "calls": 18,
+              "component": "rotation_driver",
+              "totalNanos": 120934451
+            }
+          ],
+          "stage": "rotation_predecessor_install",
+          "totalNanos": 125519529,
+          "milliseconds": 125.519529
+        }
+      ],
+      "publication_holds": [
+        {
+          "calls": 18,
+          "maximumNanos": 7976509,
+          "phase": "rotation.install",
+          "totalNanos": 122117033
+        },
+        {
+          "calls": 0,
+          "maximumNanos": 0,
+          "phase": "history.install",
+          "totalNanos": 0
+        }
+      ],
+      "source_guard": {
+        "python_before": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "python_after": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "source": "093252ca689aef6e57abeeb95410c5a6b98c04ce045e6218306c4899fb1ab7fc",
+        "root_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+        "variant": "candidate",
+        "mode": "cold",
+        "routing_loaded_before": false,
+        "scope": "Uninstrumented original acceptance; warm mode imports routing facade before authority startup. Diagnostic only."
+      },
+      "observer": {
+        "enabled": true,
+        "sample_every": 32,
+        "selected": 313,
+        "dropped": 0
+      },
+      "sha256": "cac8c160c08c7b8e84de95d2dc55627703e837e00c916cedb6c34d727d85f381"
+    },
+    {
+      "label": "history-lane-1",
+      "correctness": true,
+      "error_count": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity_returncode": 0,
+      "readiness": {
+        "probes": 21,
+        "unhealthy_probes": 0,
+        "max_consecutive_unhealthy": 0,
+        "max_contended_milliseconds": 0,
+        "failure_examples": []
+      },
+      "p99_ms": {
+        "submit_to_running": 53.460583090782166,
+        "stream_scheduled": 1823.2693895697594,
+        "settle": 4093.456543982029
+      },
+      "history_compactions": 1,
+      "probe_records": [
+        {
+          "phase": "encode",
+          "elapsed_us": "1979298",
+          "retired_segments": "118",
+          "result_ok": "true"
+        },
+        {
+          "phase": "reservation_end",
+          "elapsed_us": "1979332",
+          "retired_segments": "118",
+          "encode_ok": "true"
+        }
+      ],
+      "rotation_stages": [
+        {
+          "calls": 79,
+          "components": [
+            {
+              "calls": 64,
+              "component": "foreground",
+              "totalNanos": 50348826
+            },
+            {
+              "calls": 15,
+              "component": "maintenance",
+              "totalNanos": 14678300
+            }
+          ],
+          "stage": "history_stage",
+          "totalNanos": 65027126,
+          "milliseconds": 65.027126
+        },
+        {
+          "calls": 552,
+          "components": [
+            {
+              "calls": 552,
+              "component": "rotation_driver",
+              "totalNanos": 167909352
+            }
+          ],
+          "stage": "rotation_prepare_wait",
+          "totalNanos": 167909352,
+          "milliseconds": 167.909352
+        },
+        {
+          "calls": 19,
+          "components": [
+            {
+              "calls": 19,
+              "component": "rotation_driver",
+              "totalNanos": 2818365240
+            }
+          ],
+          "stage": "rotation_prefix_encode",
+          "totalNanos": 2818365240,
+          "milliseconds": 2818.36524
+        },
+        {
+          "calls": 19,
+          "components": [
+            {
+              "calls": 19,
+              "component": "rotation_driver",
+              "totalNanos": 12155951
+            }
+          ],
+          "stage": "rotation_install_wait",
+          "totalNanos": 12155951,
+          "milliseconds": 12.155951
+        },
+        {
+          "calls": 20,
+          "components": [
+            {
+              "calls": 1,
+              "component": "foreground",
+              "totalNanos": 203503
+            },
+            {
+              "calls": 19,
+              "component": "rotation_driver",
+              "totalNanos": 4259142
+            }
+          ],
+          "stage": "rotation_install_manifest",
+          "totalNanos": 4462645,
+          "milliseconds": 4.462645
+        },
+        {
+          "calls": 20,
+          "components": [
+            {
+              "calls": 1,
+              "component": "foreground",
+              "totalNanos": 54049
+            },
+            {
+              "calls": 19,
+              "component": "rotation_driver",
+              "totalNanos": 506207
+            }
+          ],
+          "stage": "rotation_install_control",
+          "totalNanos": 560256,
+          "milliseconds": 0.560256
+        },
+        {
+          "calls": 20,
+          "components": [
+            {
+              "calls": 1,
+              "component": "foreground",
+              "totalNanos": 4017174
+            },
+            {
+              "calls": 19,
+              "component": "rotation_driver",
+              "totalNanos": 118707568
+            }
+          ],
+          "stage": "rotation_install_release",
+          "totalNanos": 122724742,
+          "milliseconds": 122.724742
+        },
+        {
+          "calls": 19,
+          "components": [
+            {
+              "calls": 19,
+              "component": "rotation_driver",
+              "totalNanos": 6707840
+            }
+          ],
+          "stage": "rotation_generation_handover",
+          "totalNanos": 6707840,
+          "milliseconds": 6.70784
+        },
+        {
+          "calls": 20,
+          "components": [
+            {
+              "calls": 1,
+              "component": "foreground",
+              "totalNanos": 4326193
+            },
+            {
+              "calls": 19,
+              "component": "rotation_driver",
+              "totalNanos": 126728968
+            }
+          ],
+          "stage": "rotation_predecessor_install",
+          "totalNanos": 131055161,
+          "milliseconds": 131.055161
+        }
+      ],
+      "publication_holds": [
+        {
+          "calls": 19,
+          "maximumNanos": 8766606,
+          "phase": "rotation.install",
+          "totalNanos": 128033430
+        },
+        {
+          "calls": 1,
+          "maximumNanos": 47099329,
+          "phase": "history.install",
+          "totalNanos": 47099329
+        }
+      ],
+      "source_guard": {
+        "python_before": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "python_after": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "source": "093252ca689aef6e57abeeb95410c5a6b98c04ce045e6218306c4899fb1ab7fc",
+        "root_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+        "variant": "candidate",
+        "mode": "cold",
+        "routing_loaded_before": false,
+        "scope": "Uninstrumented original acceptance; warm mode imports routing facade before authority startup. Diagnostic only."
+      },
+      "observer": {
+        "enabled": true,
+        "sample_every": 32,
+        "selected": 313,
+        "dropped": 0
+      },
+      "sha256": "9e6b8d7367c97b7e9aa4671090790115493576db7695866957e37a4898d1868f"
+    }
+  ],
+  "findings": [
+    "One118-segment history retirement encoded for1,979,298us and reserved the physical publication lane until1,979,332us; the34us difference includes reacquisition and observer overhead.",
+    "The long interval is outside the authority mutex, but async_publication_in_flight blocks competing physical publications and defers rotation.",
+    "The other original workload run recorded zero history compactions and still failed its one-second scheduled stream gate. History compaction is therefore not necessary for the observed stream failure.",
+    "A retirement iteration is bounded in resident source memory, but currently captures every surplus history segment in one publication reservation; this measurement makes bounded scheduler retirement slices worth testing."
+  ],
+  "limitations": [
+    "Two instrumented observations are not a performance-admission comparison, effect estimate, or statistical confidence interval.",
+    "No causal overlap between a specific request wait and a history reservation was captured.",
+    "Historical one-request-profile sample and rejected split-worker ABBA have different observer/work schedules; do not combine their durations as one trace.",
+    "The runner inherited an inaccurate uninstrumented description in scope.json; actual requestProfile enabled/sampleEvery32 and diagnostic source are recorded here.",
+    "No raw user payload or IDs were added to diagnostic records.",
+    "No full-suite, broadSQLite, embedded,64KiB or realSIGKILL claim for this private observer build."
+  ],
+  "next": "Prototype scheduler-only retirement batches using existing launch-derived checkpoint materialization budget while preserving explicit operator semantics, current source verification, root fences and crash recovery; separately pursue the remaining foreground stream bottleneck."
+}

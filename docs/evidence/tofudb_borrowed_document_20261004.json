@@ -1,0 +1,1123 @@
+{
+  "status": "rejected_performance_no_runtime_integration",
+  "problem": "Ordinary inline document reads allocate namespace/key/value in decode and duplicate inline bytes before projection. Do borrow-based decode and materialization improve the complete engine and SDK?",
+  "decision": "Retain the existing runtime codec. The source prototype removes four small-read allocations but does not improve end-to-end CPU/latency consistently. Integrate rationale and evidence only.",
+  "alternatives": [
+    {
+      "name": "Replace owned point/list decoding with a validated DocumentView and borrow inline materialization",
+      "defeated_by": "SDK small/8/32/escaped/array/numeric cases regress in matched default-off controls; native results are small, mixed and include regressions."
+    },
+    {
+      "name": "Ship because allocation count is lower",
+      "defeated_by": "Observer counts drop from approximately 34 to 30 calls/read while default-off CPU changes remain near zero or regress. Allocation savings are not execution-cost proof."
+    },
+    {
+      "name": "Accept timing from the exploratory SDK run or interposed allocation run",
+      "defeated_by": "The exploratory run overlapped candidate compilation; the allocation observer modifies the malloc hot path. Neither earns performance credit."
+    }
+  ],
+  "source_snapshot": {
+    "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+    "snapshot_commit": "21cccbc96404a460c65ff7d89711a6906a8465e5",
+    "baseline_freeze": "/tmp/tofudb-borrowed-document-baseline-20261004",
+    "worktree": "/path/to/your/project",
+    "retained_files": 393
+  },
+  "prototype": {
+    "commit": "d34c579d8989c01d72f8e7c31a1c5aa5036c995a",
+    "source_sha256": "777fe919b8dc36a88abad79d67d43aee94bf4a2461de084f28337eaaffd6d839",
+    "freeze": "/tmp/tofudb-borrowed-document-candidate-20261004"
+  },
+  "artifacts": {
+    "baseline": {
+      "build_info": {
+        "format": "tofu-db-build.v1",
+        "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+        "version": "0.2.0"
+      },
+      "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+      "sha256": {
+        "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+        "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+      }
+    },
+    "candidate": {
+      "build_info": {
+        "format": "tofu-db-build.v1",
+        "source_sha256": "777fe919b8dc36a88abad79d67d43aee94bf4a2461de084f28337eaaffd6d839",
+        "version": "0.2.0"
+      },
+      "library_source_sha256": "777fe919b8dc36a88abad79d67d43aee94bf4a2461de084f28337eaaffd6d839",
+      "sha256": {
+        "tofu-db": "79599e6c299869a22940fb6018c779df9f11d33e13f25724d52e771b01a36f52",
+        "libtofu_db.so": "83d5d59ec0b50eee31d61d498227777c7b76e0eb9755bfb922f8e05a77aa5c03"
+      }
+    }
+  },
+  "verification": {
+    "focused_initial_compile": {
+      "exit_code": 101,
+      "reason": "Mechanical replacement misnamed MaterializedDocumentValue variants; corrected before tests/build."
+    },
+    "document_tests": {
+      "passed": 15,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "transaction_ir_tests": {
+      "passed": 12,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "record_semantics_tests": {
+      "passed": 2,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "full_native_gate": "not_run_for_rejected_source; targeted 29 tests are not a release gate",
+    "sdk": {
+      "legs": 8,
+      "exit_code": 0,
+      "exact_readbacks": 649600
+    },
+    "native": {
+      "legs": 8,
+      "exit_code": 0,
+      "exact_readbacks": 5248000
+    },
+    "allocation_observer": {
+      "legs": 4,
+      "exit_code": 0,
+      "exact_readbacks": 800000,
+      "performance_credit": false
+    },
+    "source_identity": "Both CLI and DSO compiled digests equal their frozen retained input digest; copied binary and library hashes checked for every performance leg.",
+    "documentation": {
+      "baseline_exit_code": 2,
+      "private_final_exit_code": 2,
+      "identical_findings": true,
+      "existing_findings": 9,
+      "introduced_findings": 0
+    }
+  },
+  "measurement": {
+    "sdk": [
+      {
+        "case": "small",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 17.883121250000002,
+          "candidate": 18.1411245625,
+          "reduction_percent": -1.442719695813715,
+          "all_legs": {
+            "baseline": [
+              17.7190224375,
+              17.5522635625,
+              18.691177500000002,
+              17.5700215
+            ],
+            "candidate": [
+              18.342890500000003,
+              18.695929875,
+              17.814440625,
+              17.71123725
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 22.75775,
+          "candidate": 23.75375,
+          "reduction_percent": -4.376531071832666,
+          "all_legs": {
+            "baseline": [
+              22.314,
+              22.348,
+              23.958,
+              22.411
+            ],
+            "candidate": [
+              25.628,
+              24.323,
+              23.011,
+              22.053
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.33006111275,
+          "candidate": 0.3361084875,
+          "reduction_percent": -1.832198497912869,
+          "all_legs": {
+            "baseline": [
+              0.32887287499999995,
+              0.32386173900000004,
+              0.342399393,
+              0.325110444
+            ],
+            "candidate": [
+              0.34038877300000003,
+              0.34639362100000004,
+              0.330498549,
+              0.32715300699999994
+            ]
+          }
+        }
+      },
+      {
+        "case": "small-8",
+        "callers": 8,
+        "mean_us": {
+          "baseline": 91.0533239375,
+          "candidate": 94.08620580208333,
+          "reduction_percent": -3.3308853904829814,
+          "all_legs": {
+            "baseline": [
+              93.6347595,
+              90.15169929166666,
+              89.07988504166667,
+              91.34695191666667
+            ],
+            "candidate": [
+              98.85159283333333,
+              90.073013625,
+              94.869246125,
+              92.550970625
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 597.453,
+          "candidate": 588.245,
+          "reduction_percent": 1.5412090992931613,
+          "all_legs": {
+            "baseline": [
+              588.612,
+              603.609,
+              603.614,
+              593.977
+            ],
+            "candidate": [
+              535.757,
+              661.072,
+              549.041,
+              607.11
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.73637291925,
+          "candidate": 0.7517252212500001,
+          "reduction_percent": -2.0848542360352478,
+          "all_legs": {
+            "baseline": [
+              0.7477043329999999,
+              0.7282352470000001,
+              0.7389419110000001,
+              0.730610186
+            ],
+            "candidate": [
+              0.776952463,
+              0.731660599,
+              0.751830246,
+              0.746457577
+            ]
+          }
+        }
+      },
+      {
+        "case": "small-32",
+        "callers": 32,
+        "mean_us": {
+          "baseline": 405.419670765625,
+          "candidate": 413.88413978125,
+          "reduction_percent": -2.0878288908971823,
+          "all_legs": {
+            "baseline": [
+              418.2331500625,
+              398.28269196875,
+              407.8346231875,
+              397.32821784375005
+            ],
+            "candidate": [
+              419.22757215625,
+              410.03425571875,
+              412.978983375,
+              413.295747875
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 2881.19175,
+          "candidate": 3155.14525,
+          "reduction_percent": -9.508339734764272,
+          "all_legs": {
+            "baseline": [
+              2912.811,
+              2925.887,
+              2869.095,
+              2816.974
+            ],
+            "candidate": [
+              3178.319,
+              3179.284,
+              3173.682,
+              3089.296
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 1.08079672675,
+          "candidate": 1.0854357860000001,
+          "reduction_percent": -0.4292258789448704,
+          "all_legs": {
+            "baseline": [
+              1.088928175,
+              1.065617497,
+              1.098493209,
+              1.0701480259999998
+            ],
+            "candidate": [
+              1.1020306700000002,
+              1.08678972,
+              1.076185395,
+              1.076737359
+            ]
+          }
+        }
+      },
+      {
+        "case": "inline-7k",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 24.185857625,
+          "candidate": 24.022410875,
+          "reduction_percent": 0.6757947248934989,
+          "all_legs": {
+            "baseline": [
+              24.0287425,
+              24.3881565,
+              24.3190665,
+              24.007465
+            ],
+            "candidate": [
+              23.620289,
+              23.940917000000002,
+              24.070885999999998,
+              24.4575515
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 29.785249999999998,
+          "candidate": 30.25025,
+          "reduction_percent": -1.5611754140052658,
+          "all_legs": {
+            "baseline": [
+              29.246,
+              31.662,
+              28.785,
+              29.448
+            ],
+            "candidate": [
+              28.774,
+              30.334,
+              30.065,
+              31.828
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.05406385325000007,
+          "candidate": 0.053895898999999914,
+          "reduction_percent": 0.3106590446365515,
+          "all_legs": {
+            "baseline": [
+              0.05358570600000023,
+              0.05438180000000026,
+              0.05432595199999968,
+              0.05396195500000012
+            ],
+            "candidate": [
+              0.053017629999999816,
+              0.05381271099999996,
+              0.054089101999999833,
+              0.05466415300000005
+            ]
+          }
+        }
+      },
+      {
+        "case": "inline-escaped",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 53.451626250000004,
+          "candidate": 54.089103375,
+          "reduction_percent": -1.1926243778223615,
+          "all_legs": {
+            "baseline": [
+              53.896457000000005,
+              53.46657,
+              54.2455435,
+              52.1979345
+            ],
+            "candidate": [
+              52.7482315,
+              55.9477415,
+              54.469195,
+              53.191245499999994
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 62.60275,
+          "candidate": 60.4335,
+          "reduction_percent": 3.465103370059619,
+          "all_legs": {
+            "baseline": [
+              58.972,
+              62.61,
+              70.819,
+              58.01
+            ],
+            "candidate": [
+              60.412,
+              62.329,
+              59.823,
+              59.17
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.11243882150000006,
+          "candidate": 0.11382256199999996,
+          "reduction_percent": -1.2306607998376222,
+          "all_legs": {
+            "baseline": [
+              0.11320065700000015,
+              0.11242195899999974,
+              0.11400286800000003,
+              0.11012980200000033
+            ],
+            "candidate": [
+              0.11121319399999985,
+              0.11770174000000022,
+              0.11444538800000004,
+              0.11192992599999974
+            ]
+          }
+        }
+      },
+      {
+        "case": "inline-array",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 63.845862499999996,
+          "candidate": 66.149662,
+          "reduction_percent": -3.6083771285884203,
+          "all_legs": {
+            "baseline": [
+              63.610695,
+              64.001685,
+              62.995638,
+              64.775432
+            ],
+            "candidate": [
+              64.933792,
+              65.33230999999999,
+              65.75964,
+              68.572906
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 70.8615,
+          "candidate": 77.3485,
+          "reduction_percent": -9.154477396047211,
+          "all_legs": {
+            "baseline": [
+              70.632,
+              70.52,
+              70.936,
+              71.358
+            ],
+            "candidate": [
+              74.924,
+              71.594,
+              72.727,
+              90.149
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.06656625650000014,
+          "candidate": 0.06895105999999995,
+          "reduction_percent": -3.5826011937441686,
+          "all_legs": {
+            "baseline": [
+              0.06626273100000013,
+              0.06673861000000025,
+              0.06571259499999993,
+              0.06755109000000026
+            ],
+            "candidate": [
+              0.06773349699999986,
+              0.06809958400000005,
+              0.06851631799999991,
+              0.07145484099999999
+            ]
+          }
+        }
+      },
+      {
+        "case": "numeric",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 18.3062685625,
+          "candidate": 18.3705885625,
+          "reduction_percent": -0.35135505512989545,
+          "all_legs": {
+            "baseline": [
+              17.996466,
+              18.130631,
+              18.669891749999998,
+              18.4280855
+            ],
+            "candidate": [
+              18.28671625,
+              18.116806,
+              18.7331465,
+              18.3456855
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 22.86175,
+          "candidate": 23.037750000000003,
+          "reduction_percent": -0.7698448281518341,
+          "all_legs": {
+            "baseline": [
+              22.44,
+              23.004,
+              22.991,
+              23.012
+            ],
+            "candidate": [
+              23.419,
+              22.26,
+              23.382,
+              23.09
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.08363989399999994,
+          "candidate": 0.08415578275000013,
+          "reduction_percent": -0.6167974698774646,
+          "all_legs": {
+            "baseline": [
+              0.0822747399999999,
+              0.08273926300000012,
+              0.08523177799999981,
+              0.08431379499999991
+            ],
+            "candidate": [
+              0.08413236599999996,
+              0.08302478100000021,
+              0.08531729900000018,
+              0.08414868500000017
+            ]
+          }
+        }
+      },
+      {
+        "case": "blob-256k",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 187.22134375000002,
+          "candidate": 186.31399375,
+          "reduction_percent": 0.48464025619408474,
+          "all_legs": {
+            "baseline": [
+              185.189375,
+              186.986005,
+              185.489165,
+              191.22082999999998
+            ],
+            "candidate": [
+              184.58361,
+              189.440025,
+              186.24314,
+              184.9892
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 197.42700000000002,
+          "candidate": 208.28449999999998,
+          "reduction_percent": -5.499501081412348,
+          "all_legs": {
+            "baseline": [
+              191.544,
+              195.386,
+              191.318,
+              211.46
+            ],
+            "candidate": [
+              192.846,
+              255.111,
+              193.182,
+              191.999
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.038113526749999904,
+          "candidate": 0.03786538174999998,
+          "reduction_percent": 0.6510680620756842,
+          "all_legs": {
+            "baseline": [
+              0.03771914799999987,
+              0.037964030999999565,
+              0.03773185000000012,
+              0.03903907800000006
+            ],
+            "candidate": [
+              0.037582040000000205,
+              0.038369823000000025,
+              0.037889594999999776,
+              0.03762006899999992
+            ]
+          }
+        }
+      }
+    ],
+    "native": [
+      {
+        "storage": "overlay",
+        "callers": 1,
+        "mean_ns": {
+          "baseline": 13307.45,
+          "candidate": 13231.0,
+          "reduction_percent": 0.5744902291573571,
+          "all_legs": {
+            "baseline": [
+              13230.9,
+              13127.9,
+              13843.3,
+              13027.7
+            ],
+            "candidate": [
+              13114.0,
+              13194.8,
+              13111.3,
+              13503.9
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 17944.75,
+          "candidate": 17704.0,
+          "reduction_percent": 1.3416180219841458,
+          "all_legs": {
+            "baseline": [
+              18023.0,
+              18220.0,
+              18459.0,
+              17077.0
+            ],
+            "candidate": [
+              17093.0,
+              18724.0,
+              17282.0,
+              17717.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 1.5966200000000002,
+          "candidate": 1.5973025,
+          "reduction_percent": -0.0427465520912878,
+          "all_legs": {
+            "baseline": [
+              1.58936,
+              1.57728,
+              1.65964,
+              1.5602
+            ],
+            "candidate": [
+              1.5819,
+              1.58542,
+              1.58362,
+              1.63827
+            ]
+          }
+        }
+      },
+      {
+        "storage": "overlay",
+        "callers": 8,
+        "mean_ns": {
+          "baseline": 19543.625,
+          "candidate": 19453.425,
+          "reduction_percent": 0.46153157359497393,
+          "all_legs": {
+            "baseline": [
+              19380.5,
+              19996.0,
+              19384.1,
+              19413.9
+            ],
+            "candidate": [
+              19367.5,
+              19973.0,
+              19410.9,
+              19062.3
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 52519.5,
+          "candidate": 53137.75,
+          "reduction_percent": -1.1771818086615446,
+          "all_legs": {
+            "baseline": [
+              50704.0,
+              55174.0,
+              51209.0,
+              52991.0
+            ],
+            "candidate": [
+              51497.0,
+              59684.0,
+              52184.0,
+              49186.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 2.1490825,
+          "candidate": 2.13638,
+          "reduction_percent": 0.5910661875474795,
+          "all_legs": {
+            "baseline": [
+              2.17193,
+              2.16271,
+              2.13147,
+              2.13022
+            ],
+            "candidate": [
+              2.14486,
+              2.11939,
+              2.15443,
+              2.12684
+            ]
+          }
+        }
+      },
+      {
+        "storage": "overlay",
+        "callers": 32,
+        "mean_ns": {
+          "baseline": 79724.225,
+          "candidate": 79788.175,
+          "reduction_percent": -0.08021401274204558,
+          "all_legs": {
+            "baseline": [
+              78776.6,
+              80746.7,
+              79495.0,
+              79878.6
+            ],
+            "candidate": [
+              81186.2,
+              78948.0,
+              79092.9,
+              79925.6
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 428207.25,
+          "candidate": 429702.5,
+          "reduction_percent": -0.34918838950064485,
+          "all_legs": {
+            "baseline": [
+              422823.0,
+              430321.0,
+              426673.0,
+              433012.0
+            ],
+            "candidate": [
+              436831.0,
+              427445.0,
+              429543.0,
+              424991.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 2.8947599999999998,
+          "candidate": 2.8960375000000003,
+          "reduction_percent": -0.044131465130113956,
+          "all_legs": {
+            "baseline": [
+              2.92984,
+              2.86823,
+              2.88887,
+              2.8921
+            ],
+            "candidate": [
+              2.92689,
+              2.89333,
+              2.85794,
+              2.90599
+            ]
+          }
+        }
+      },
+      {
+        "storage": "materialized",
+        "callers": 1,
+        "mean_ns": {
+          "baseline": 13358.9,
+          "candidate": 13138.65,
+          "reduction_percent": 1.6487135916879385,
+          "all_legs": {
+            "baseline": [
+              13321.9,
+              13134.3,
+              13303.5,
+              13675.9
+            ],
+            "candidate": [
+              13174.7,
+              13127.5,
+              13187.0,
+              13065.4
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 17860.25,
+          "candidate": 17514.5,
+          "reduction_percent": 1.935863159810193,
+          "all_legs": {
+            "baseline": [
+              18047.0,
+              17380.0,
+              17609.0,
+              18405.0
+            ],
+            "candidate": [
+              17753.0,
+              17725.0,
+              17286.0,
+              17294.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 1.589915,
+          "candidate": 1.5699174999999999,
+          "reduction_percent": 1.2577716418802334,
+          "all_legs": {
+            "baseline": [
+              1.58976,
+              1.56293,
+              1.58048,
+              1.62649
+            ],
+            "candidate": [
+              1.57805,
+              1.57205,
+              1.56635,
+              1.56322
+            ]
+          }
+        }
+      },
+      {
+        "storage": "materialized",
+        "callers": 8,
+        "mean_ns": {
+          "baseline": 19657.0,
+          "candidate": 19985.375,
+          "reduction_percent": -1.6705244950908074,
+          "all_legs": {
+            "baseline": [
+              19857.6,
+              19522.9,
+              19661.1,
+              19586.4
+            ],
+            "candidate": [
+              19620.1,
+              21030.3,
+              19444.4,
+              19846.7
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 52420.0,
+          "candidate": 55286.0,
+          "reduction_percent": -5.467378863029378,
+          "all_legs": {
+            "baseline": [
+              53919.0,
+              52224.0,
+              53712.0,
+              49825.0
+            ],
+            "candidate": [
+              53135.0,
+              62548.0,
+              50929.0,
+              54532.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 2.148315,
+          "candidate": 2.1663175,
+          "reduction_percent": -0.8379823256831376,
+          "all_legs": {
+            "baseline": [
+              2.14153,
+              2.1326,
+              2.12629,
+              2.19284
+            ],
+            "candidate": [
+              2.14305,
+              2.21318,
+              2.15484,
+              2.1542
+            ]
+          }
+        }
+      },
+      {
+        "storage": "materialized",
+        "callers": 32,
+        "mean_ns": {
+          "baseline": 82837.5,
+          "candidate": 81410.25,
+          "reduction_percent": 1.7229515617926663,
+          "all_legs": {
+            "baseline": [
+              82585.6,
+              84033.0,
+              81852.4,
+              82879.0
+            ],
+            "candidate": [
+              81572.6,
+              84318.3,
+              79528.7,
+              80221.4
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 444108.5,
+          "candidate": 436283.0,
+          "reduction_percent": 1.762069404210908,
+          "all_legs": {
+            "baseline": [
+              444111.0,
+              451858.0,
+              441995.0,
+              438470.0
+            ],
+            "candidate": [
+              433718.0,
+              456257.0,
+              423568.0,
+              431589.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 2.8941,
+          "candidate": 2.9038575,
+          "reduction_percent": -0.3371514460454057,
+          "all_legs": {
+            "baseline": [
+              2.89028,
+              2.9035,
+              2.90385,
+              2.87877
+            ],
+            "candidate": [
+              2.91642,
+              2.89755,
+              2.92822,
+              2.87324
+            ]
+          }
+        }
+      }
+    ],
+    "exploratory_sdk_leg_excluded": {
+      "index": 0,
+      "reason": "Driver validation overlapped candidate compilation; not used for selection."
+    },
+    "scope": "Four matched baseline and four candidate legs each. Positive percentages mean reductions. Finite pinned TofuDB comparisons; no universal SQLite claim.",
+    "input_sha256": {
+      "sdk-manifest.json": "ee12532cdf1bc6bde46442df08213117d0b1944bacdf7c3b7b1879ac16217971",
+      "native-abba.json": "b0f559ae1beb631c4fb291e0fa64373b687d6128ea58f9255eb3c859b7000ce2"
+    }
+  },
+  "allocation_observer": {
+    "rows": [
+      {
+        "index": 1,
+        "role": "baseline",
+        "storage": "overlay",
+        "malloc_calloc_realloc_calls": 3402279,
+        "requested_bytes": 429090708,
+        "free_calls": 3402251,
+        "exact_readbacks": 100000,
+        "calls_per_read": 34.02279,
+        "bytes_per_read": 4290.90708
+      },
+      {
+        "index": 1,
+        "role": "baseline",
+        "storage": "materialized",
+        "malloc_calloc_realloc_calls": 3402320,
+        "requested_bytes": 429120910,
+        "free_calls": 3402302,
+        "exact_readbacks": 100000,
+        "calls_per_read": 34.0232,
+        "bytes_per_read": 4291.2091
+      },
+      {
+        "index": 2,
+        "role": "candidate",
+        "storage": "overlay",
+        "malloc_calloc_realloc_calls": 3002318,
+        "requested_bytes": 427197783,
+        "free_calls": 3002290,
+        "exact_readbacks": 100000,
+        "calls_per_read": 30.02318,
+        "bytes_per_read": 4271.97783
+      },
+      {
+        "index": 2,
+        "role": "candidate",
+        "storage": "materialized",
+        "malloc_calloc_realloc_calls": 3002246,
+        "requested_bytes": 427224007,
+        "free_calls": 3002228,
+        "exact_readbacks": 100000,
+        "calls_per_read": 30.02246,
+        "bytes_per_read": 4272.24007
+      },
+      {
+        "index": 3,
+        "role": "candidate",
+        "storage": "overlay",
+        "malloc_calloc_realloc_calls": 3002382,
+        "requested_bytes": 427207697,
+        "free_calls": 3002354,
+        "exact_readbacks": 100000,
+        "calls_per_read": 30.02382,
+        "bytes_per_read": 4272.07697
+      },
+      {
+        "index": 3,
+        "role": "candidate",
+        "storage": "materialized",
+        "malloc_calloc_realloc_calls": 3002290,
+        "requested_bytes": 427217120,
+        "free_calls": 3002272,
+        "exact_readbacks": 100000,
+        "calls_per_read": 30.0229,
+        "bytes_per_read": 4272.1712
+      },
+      {
+        "index": 4,
+        "role": "baseline",
+        "storage": "overlay",
+        "malloc_calloc_realloc_calls": 3402346,
+        "requested_bytes": 429100781,
+        "free_calls": 3402318,
+        "exact_readbacks": 100000,
+        "calls_per_read": 34.02346,
+        "bytes_per_read": 4291.00781
+      },
+      {
+        "index": 4,
+        "role": "baseline",
+        "storage": "materialized",
+        "malloc_calloc_realloc_calls": 3402280,
+        "requested_bytes": 429114174,
+        "free_calls": 3402263,
+        "exact_readbacks": 100000,
+        "calls_per_read": 34.0228,
+        "bytes_per_read": 4291.14174
+      }
+    ],
+    "performance_credit": false,
+    "scope": "Observer-only whole-process successful malloc/calloc/realloc requests and frees during 100000 exact single-caller C ABI reads per overlay/materialized phase. Aligned allocator families and libc internals are excluded; thread teardown and asynchronous cleanup may affect boundary counts. Timings are excluded from performance selection.",
+    "probe_sha256": "15058638f8167c68cd841372c88b59112f1de2e89a17e769c42273659e88fea9",
+    "harness_sha256": "ee1dda9be2d15058f29c27eb4a7c780b80acd610e3f01a761df7dae95bdb0bc1"
+  },
+  "allocation_interpretation": "Observer covers successful malloc/calloc/realloc and frees, not aligned allocator families or internal libc allocations. Counters include bounded process background/teardown at the edges. Two matched legs each replicate approximately four fewer allocations/read for both overlay and materialized sources. Approximately 19 fewer requested bytes/read on scalar value 1 is not evidence for total memory improvement on all corpora.",
+  "preserved_boundaries": [
+    "Single complete format decoder including all prefix/trailing/UTF-8 checks.",
+    "Owned mutation decoding remains independent of source bytes.",
+    "Read projection output remains owned, strict JSON/depth/identity/size validation remains.",
+    "Blob witnesses/current-source verification, snapshot/reader quotas, scopes, detached worker/watchdog, panic and late-result handling remain."
+  ],
+  "next_action": "Stop treating inline allocation count as the dominant point-read cost. Measure shared compile/parse and worker-delivery costs with profiling off controls; investigate amortizing repeated semantic request setup/round trips without bypassing admission or timeout ownership.",
+  "raw": {
+    "focused.log": {
+      "path": "/path/to/your/project",
+      "sha256": "e500873b279bd8adcf7e83a165481e038a223687cce3a558153e8fcfa0891538"
+    },
+    "focused-fixed.log": {
+      "path": "/path/to/your/project",
+      "sha256": "5c43465b9377d570f78c978c7ee35d9fe464a1a26f4ffa5e59fecb1f4d4aebf1"
+    },
+    "neighbor-ir.log": {
+      "path": "/path/to/your/project",
+      "sha256": "97c8a1153bb264d27a184f2fb85164c409dabe419812c8e0217b224e1a9c3d39"
+    },
+    "neighbor-record.log": {
+      "path": "/path/to/your/project",
+      "sha256": "bb2065959c0259f0d1e4c4a07f9942908d044a1a7631e82deeab076b660f19b2"
+    },
+    "sdk-driver.log": {
+      "path": "/path/to/your/project",
+      "sha256": "1f1273424a71a16705aa601d8b91b4679f56f74af7a7ead395134812a2aa2aa2"
+    },
+    "native-driver.log": {
+      "path": "/path/to/your/project",
+      "sha256": "3149103c97bb2bf6f07e965122342fc6e54fd3ad573cd66901d4fe436965cf74"
+    },
+    "allocation-driver.log": {
+      "path": "/path/to/your/project",
+      "sha256": "484067603d01d46f2547194b49ae872ba5168aa0c29aa5fb18322051e77f2c68"
+    },
+    "comparison.json": {
+      "path": "/path/to/your/project",
+      "sha256": "15350c6162cfc18743fe29849c19352e6073bc9f6ec16d7c72b5c87c65afcc32"
+    },
+    "allocation-comparison.json": {
+      "path": "/path/to/your/project",
+      "sha256": "cb7238286cc0b19a97a37f60afe4ab53a1b7cafc25f9c48bbac6eaf3c6bb0401"
+    },
+    "build-baseline.log": {
+      "path": "/path/to/your/project",
+      "sha256": "646d1c5d2ca6b939c3dcebd688e02116b32b81287e609d57a8fc4374dcb0eb54"
+    },
+    "build-candidate.log": {
+      "path": "/path/to/your/project",
+      "sha256": "90e0353c7eb12c711af2bd80b076d69b5642302abeed55215fde0e44e71402b2"
+    }
+  },
+  "universal_sqlite_goal": "active_unproven; no new SQLite comparison or universal certification in this experiment"
+}

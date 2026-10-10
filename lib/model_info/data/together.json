@@ -1,0 +1,16 @@
+{
+  "brand": "together",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "together",
+  "category": "relay",
+  "name": "Together AI",
+  "base_url": "https://api.together.ai/v1",
+  "catalog_source": {"url": "https://docs.together.ai/docs/inference/recommended-models", "checked_at": "2026-09-08"},
+  "catalog_mode": "curated",
+  "offering_recipes": [
+    {"model_id": "moonshotai/Kimi-K3", "capabilities": ["text"]},
+    {"model_id": "zai-org/GLM-5.3", "capabilities": ["text", "thinking"]},
+    {"model_id": "Qwen/Qwen3.8-27B", "capabilities": ["text"]},
+    {"model_id": "deepseek-ai/DeepSeek-V4-Flash-0731", "capabilities": ["text"]}
+  ]
+}

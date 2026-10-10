@@ -1,0 +1,9 @@
+{
+  "policy": "One-way typing ratchet for the pyright include scopes. Counts may only move down; regenerate deliberately with --write-baseline and name the fixed diagnostics in the commit.",
+  "counts": {
+    "routes": 261,
+    "lib/storage_sidecar": 281,
+    "lib/agent_core": 35,
+    "lib-strict-files": 5
+  }
+}

@@ -1,0 +1,61 @@
+[package]
+name = "tofu-db"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Pre-authority storage engine for Tofu's personal workload"
+
+[lib]
+# cdylib: the embedded in-process transport (src/embed_ffi.rs) loads the
+# same crate as a shared library for cffi callers; rlib stays the default
+# for the binary and test targets.
+crate-type = ["rlib", "cdylib"]
+
+[features]
+native-runtime-checkpoints = ["dep:tofu-runtime"]
+# Explicit opt-in only: default rlib consumers retain their allocator choice.
+# A late-loaded cdylib needs dynamic TLS instead of executable-only TLS.
+embedded-mimalloc = ["mimalloc/local_dynamic_tls"]
+# Experimental local allocator attribution; absent from normal release builds.
+allocator-diagnostics = ["embedded-mimalloc"]
+
+[dependencies]
+tofu-runtime = { path = "../tofu-runtime", optional = true, default-features = false }
+memmap2 = "=0.9.9"
+tempfile = "3"
+aes-gcm = "0.10"
+base64 = "0.22"
+blake3 = "1"
+crc32c = "0.6"
+# Signed release packaging: Ed25519 detached signatures over the release
+# checksum manifest (default-features off; no pkcs8/serde/std extras needed).
+ed25519-dalek = { version = "2", default-features = false, features = ["rand_core", "zeroize"] }
+fs2 = "0.4"
+flate2 = "1"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+subtle = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+memchr = "2"
+uuid = { version = "1", features = ["v4", "v5"] }
+zeroize = "1"
+zstd = { version = "0.13", default-features = false }
+libc = "0.2"
+mimalloc = "0.1.52"
+# TofuSQL read-only SQL front: bundled SQLite (no system dependency) provides
+# the statement evaluator over virtual tables backed by the entity B+Tree.
+# Read-only is enforced by the authorizer in tofusql.rs, never by convention.
+rusqlite = { version = "0.32.1", features = ["bundled", "functions", "hooks", "vtab"] }
+
+[build-dependencies]
+sha2 = "0.10"
+toml = "1.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+# Link-time --strip-all reproducibly zeroed initialized .data for one native
+# layout with the build host's GNU linker. Keep symbols while linking; a
+# validated distribution copy may be stripped afterwards (see README).
+strip = false

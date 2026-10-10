@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_anti_pattern_v1.schema.json",
+  "title": "Self-evolution anti-pattern: a repeated failure signature distilled into a planning constraint",
+  "type": "object",
+  "required": ["schema_version", "pattern_id", "domain", "signature", "advice", "lineage", "samples", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "failure_evidence_version": {"type": "integer", "const": 1, "description": "Generated only from named stages with explicit terminal failure receipts; absent legacy records are not planning advice."},
+    "pattern_id": {"type": "string", "maxLength": 160},
+    "domain": {"type": "string", "minLength": 1, "maxLength": 80},
+    "signature": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Machine-computed failure signature (domain + failed stage kind), never model prose."},
+    "advice": {"type": "string", "minLength": 1, "maxLength": 1000, "description": "The distilled constraint injected at planning time."},
+    "lineage": {"type": "array", "minItems": 2, "maxItems": 64, "items": {"type": "string", "maxLength": 160}, "description": "A single failure is an incident, not a pattern; two or more make one."},
+    "samples": {"type": "integer", "minimum": 2, "maximum": 64},
+    "created_at": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

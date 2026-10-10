@@ -1,0 +1,15 @@
+{
+  "brand": "siliconflow",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "siliconflow",
+  "category": "relay",
+  "name": "SiliconFlow",
+  "base_url": "https://api.siliconflow.cn/v1",
+  "catalog_source": {"url": "https://docs.siliconflow.cn/en/api-reference/chat-completions/chat-completions", "checked_at": "2026-09-08"},
+  "catalog_mode": "curated",
+  "offering_recipes": [
+    {"model_id": "deepseek-ai/DeepSeek-V4-Flash", "capabilities": ["text"]},
+    {"model_id": "moonshotai/Kimi-K2.7-Code", "capabilities": ["text", "vision"]},
+    {"model_id": "GLM-5.2", "request_ids": ["Pro/zai-org/GLM-5.2"], "capabilities": ["text"]}
+  ]
+}

@@ -1,0 +1,15 @@
+# ── Core (required) ──
+requests>=2.32.4
+trafilatura>=1.6
+beautifulsoup4>=4.13.4
+python-dateutil>=2.8
+urllib3>=2.5
+lxml>=5.3
+
+# ── Optional extras (install via pip extras or ./install.sh) ──
+# SPA / JS-rendered + bot-protection page support:
+#   pip install "tofu-search[playwright]"  &&  python -m playwright install chromium
+# PDF extraction:
+#   pip install "tofu-search[pdf]"          # pymupdf>=1.23, pymupdf4llm>=0.0.5
+# Everything:
+#   pip install "tofu-search[all]"

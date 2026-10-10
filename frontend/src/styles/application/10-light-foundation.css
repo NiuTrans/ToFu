@@ -1,0 +1,157 @@
+/* ═══════════════════════════════════════════
+   ★ Light Theme
+   ═══════════════════════════════════════════ */
+[data-theme="light"]{
+  --bg-primary:#f4f2ed;
+  --bg-secondary:#eceae4;
+  --bg-tertiary:#e3e1da;
+  --bg-hover:#d9d7cf;
+  --bg-active:#d0cdc4;
+  --border:#c2beb3;
+  --border-light:#ada89c;
+  --text-primary:#272732;
+  --text-secondary:#504f5b;
+  --text-tertiary:#868490;
+  --accent:#6366f1;
+  --accent-hover:#4f46e5;
+  --accent-subtle:rgba(99,102,241,0.09);
+  --thinking-bg:rgba(174,118,0,0.06);
+  --thinking-border:rgba(174,118,0,0.22);
+  --thinking-text:#96620e;
+  --error-bg:rgba(200,50,50,0.06);
+  --error-border:rgba(200,50,50,0.18);
+  --error-text:#b82020;
+  /* Status chips (light) — same contract as the dark block in
+     01-shell-navigation.css; values re-tuned for the cold canvas. */
+  --chip-ok-color:#1F7A5C;
+  --chip-ok-bg:rgba(31,122,92,0.10);
+  --chip-ok-border:rgba(31,122,92,0.26);
+  --chip-warn-color:#a06e00;
+  --chip-warn-bg:rgba(180,120,0,0.10);
+  --chip-warn-border:rgba(180,120,0,0.25);
+  --chip-err-color:var(--error-text);
+  --chip-err-bg:var(--error-bg);
+  --chip-err-border:var(--error-border);
+  --chip-info-color:#475569;
+  --chip-info-bg:rgba(100,116,139,0.08);
+  --chip-info-border:rgba(100,116,139,0.18);
+  --chip-neutral-color:var(--text-tertiary);
+  --chip-neutral-bg:var(--bg-tertiary);
+  --chip-neutral-border:var(--border);
+  --user-bubble:#e2def0;
+  --shadow:0 1px 4px rgba(0,0,0,0.06),0 1px 2px rgba(0,0,0,0.03);
+  --search-blue:#4068b8;
+  --search-cyan:#1990a8;
+  --search-purple:#7a5cbd;
+  --fetch-green:#1f7a5c;
+  --fetch-teal:#28857a
+}
+
+/* Light: structural overrides */
+[data-theme="light"] .welcome-icon{background:transparent;box-shadow:none}
+/* 字标在 light 下必须加深 —— 共用的奶油-琥珀金系是为深底调的,落到 light 的近白侧栏
+   (#f4f2ed)与白底欢迎屏上实测只有 1.00–2.35:1 —— 其中「o」的起点 #fdf2d7 在白底
+   上是 1.00:1,字面意义上看不见。此处只换明度、不换色相(仍是琥珀/陶土族),最差
+   3.26:1、多数 >4.5:1,四字的明暗层次与深底保持一致。
+   ★ 必须成对写两面(.sidebar-brand-* 与 .tofu-brand-*):只盖侧栏的单边覆盖正是之前
+   light 里那四条靓蓝渐变造成两套字标的原因;守卫按三主题钉死这一点。 */
+[data-theme="light"] .sidebar-brand-t,
+[data-theme="light"] .welcome h2.tofu-brand .tofu-brand-t{background-image:linear-gradient(135deg,#A06C1C,#85560F)}
+[data-theme="light"] .sidebar-brand-o,
+[data-theme="light"] .welcome h2.tofu-brand .tofu-brand-o1{background-image:linear-gradient(135deg,#B07C24,#96661A)}
+[data-theme="light"] .sidebar-brand-f,
+[data-theme="light"] .welcome h2.tofu-brand .tofu-brand-f{background-image:linear-gradient(135deg,#85560F,#6B430A)}
+[data-theme="light"] .sidebar-brand-u,
+[data-theme="light"] .welcome h2.tofu-brand .tofu-brand-u{background-image:linear-gradient(135deg,#A06C1C,#784C0D)}
+[data-theme="light"] .avatar.assistant{background:linear-gradient(135deg,var(--accent),#818cf8)}
+[data-theme="light"] .message-avatar img,[data-theme="light"] .message-avatar svg{filter:none}
+[data-theme="light"] .modal-overlay{background:rgba(30,28,20,0.18)}
+[data-theme="light"] #previewModal{background:rgba(0,0,0,0.55)}
+
+[data-theme="light"] .preview-close-btn{background:rgba(255,255,255,0.25)}[data-theme="light"] .preview-close-btn:hover{background:rgba(255,255,255,0.4)}
+[data-theme="light"] .drop-overlay{background:rgba(244,242,237,0.92)}
+[data-theme="light"] .debug-panel{background:rgba(244,242,237,0.97);color:#505060;border-color:var(--border)}
+[data-theme="light"] .debug-msg-block{border-color:rgba(0,0,0,0.12)}
+[data-theme="light"] .debug-msg-body pre{color:#333}
+/* Syntax + role colours are re-picked per theme, never inherited: the dark
+   palette is tuned for a #111 ground and lands at 1.7-4.3:1 on paper. Every
+   value below is >=4.5:1 on --bg-secondary (#eceae4), measured. */
+[data-theme="light"] .debug-msg-body pre .debug-key{color:#0b4f9e}[data-theme="light"] .debug-msg-body pre .debug-str{color:#1b5e20}[data-theme="light"] .debug-msg-body pre .debug-num{color:#9c3200}[data-theme="light"] .debug-msg-body pre .debug-null{color:#00606b}
+/* The ROLE labels had no light override at all — the dark #4fc3f7/#81c784/
+   #ce93d8 family measured 1.67-1.99:1 here, i.e. barely legible. */
+[data-theme="light"] .debug-msg-header .role-system{color:#9a5b00}
+[data-theme="light"] .debug-msg-header .role-user{color:#0b5c8a}
+[data-theme="light"] .debug-msg-header .role-assistant{color:#1f6b3a}
+[data-theme="light"] .debug-msg-header .role-tool{color:#6b3fa0}
+[data-theme="light"] .debug-msg-header .role-tools{color:#8a4b00}
+[data-theme="light"] .debug-tool-calls{color:#8a4b00}
+[data-theme="light"] pre.code-long[data-collapsed="true"]::after{background:linear-gradient(to bottom,transparent,var(--bg-secondary))}
+
+/* Light: scrollbar */
+[data-theme="light"] .conversations-list:hover::-webkit-scrollbar-thumb,
+[data-theme="light"] .chat-container:hover::-webkit-scrollbar-thumb,
+[data-theme="light"] .modal:hover::-webkit-scrollbar-thumb{background:var(--border-light)}
+[data-theme="light"] .conversations-list:hover,
+[data-theme="light"] .chat-container:hover,
+[data-theme="light"] .modal:hover{scrollbar-color:var(--border-light) transparent}
+
+/* Light: pinned zone removed — replaced by folders */
+
+/* Light: font rendering — enable subpixel smoothing for heavier strokes */
+[data-theme="light"]{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+
+/* Light: reading-friendly typography */
+[data-theme="light"] .md-content{font-size:15px;line-height:1.85;letter-spacing:0.006em;font-weight:400}
+[data-theme="light"] .md-content p{margin-bottom:var(--space-4)}
+[data-theme="light"] .md-content li{margin-bottom:6px;line-height:1.75}
+[data-theme="light"] .md-content h1{font-size:var(--font-size-3xl);margin:var(--space-6) 0 10px;font-weight:680}
+[data-theme="light"] .md-content h2{font-size:var(--font-size-2xl);margin:22px 0 var(--space-2);font-weight:660}
+[data-theme="light"] .md-content h3{font-size:var(--font-size-xl);font-weight:640}
+[data-theme="light"] .md-content blockquote{background:rgba(0,0,0,0.025);border-left-color:var(--border-light)}
+[data-theme="light"] .md-content code{background:rgba(0,0,0,0.045);border-color:rgba(0,0,0,0.07)}
+[data-theme="light"] .thinking-text{font-size:13.5px;line-height:1.7;font-weight:420}
+[data-theme="light"] .message{margin-bottom:28px}
+
+/* Light: code syntax highlighting (GitHub Light) */
+[data-theme="light"] .hljs{color:#2d2d35;background:#e5e3dc}
+[data-theme="light"] .hljs-doctag,
+[data-theme="light"] .hljs-keyword,
+[data-theme="light"] .hljs-meta .hljs-keyword,
+[data-theme="light"] .hljs-template-tag,
+[data-theme="light"] .hljs-template-variable,
+[data-theme="light"] .hljs-type,
+[data-theme="light"] .hljs-variable.language_{color:#d73a49}
+[data-theme="light"] .hljs-title,
+[data-theme="light"] .hljs-title.class_,
+[data-theme="light"] .hljs-title.class_.inherited__,
+[data-theme="light"] .hljs-title.function_{color:#6f42c1}
+[data-theme="light"] .hljs-attr,
+[data-theme="light"] .hljs-attribute,
+[data-theme="light"] .hljs-literal,
+[data-theme="light"] .hljs-meta,
+[data-theme="light"] .hljs-number,
+[data-theme="light"] .hljs-operator,
+[data-theme="light"] .hljs-selector-attr,
+[data-theme="light"] .hljs-selector-class,
+[data-theme="light"] .hljs-selector-id,
+[data-theme="light"] .hljs-variable{color:#005cc5}
+[data-theme="light"] .hljs-string,
+[data-theme="light"] .hljs-meta .hljs-string,
+[data-theme="light"] .hljs-regexp{color:#032f62}
+[data-theme="light"] .hljs-built_in,
+[data-theme="light"] .hljs-symbol{color:#e36209}
+[data-theme="light"] .hljs-comment,
+[data-theme="light"] .hljs-code,
+[data-theme="light"] .hljs-formula{color:#6a737d}
+[data-theme="light"] .hljs-name,
+[data-theme="light"] .hljs-quote,
+[data-theme="light"] .hljs-selector-pseudo,
+[data-theme="light"] .hljs-selector-tag{color:#22863a}
+[data-theme="light"] .hljs-subst{color:#24292e}
+[data-theme="light"] .hljs-section{color:#005cc5;font-weight:700}
+[data-theme="light"] .hljs-bullet{color:#735c0f}
+[data-theme="light"] .hljs-emphasis{color:#24292e;font-style:italic}
+[data-theme="light"] .hljs-strong{color:#24292e;font-weight:700}
+[data-theme="light"] .hljs-addition{color:#22863a;background:#ecf7ef}
+[data-theme="light"] .hljs-deletion{color:#b31d28;background:#ffeef0}
+

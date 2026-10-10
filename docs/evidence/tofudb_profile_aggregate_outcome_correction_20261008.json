@@ -1,0 +1,115 @@
+{
+  "source_sha256": "005fed60b862699a857e14b406dee15ec79f0a07e3802064ce8763d263e454ac",
+  "finding": "Aggregate.total is initialized via Sample::new(0,...), retaining default unwound text. Aggregate.add computes errors from each actual finished sample. RequestGuard.finish updates actual sample outcome. All retained slowSamples are ok in both current runs. The aggregate outcome field is misleading presentation, not evidence that successful dispatch guards failed to finish. Prior evidence suspicion about dispatch outcome lifecycle is superseded by this source inspection. Timing evidence remains observer-enabled.",
+  "rows": [
+    {
+      "label": "current-profile-embedded-0",
+      "slow_outcomes": [
+        "ok"
+      ],
+      "operations": [
+        {
+          "operation": "turn.create_pair",
+          "requests": 29,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "turn.attempt.start",
+          "requests": 30,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "turn.attempt.bind",
+          "requests": 35,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "turn.attempt.get",
+          "requests": 57,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "turn.get",
+          "requests": 37,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "turn.event.record",
+          "requests": 150,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "event.list",
+          "requests": 39,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "queue.depth",
+          "requests": 30,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        }
+      ]
+    },
+    {
+      "label": "current-profile-application-0",
+      "slow_outcomes": [
+        "ok"
+      ],
+      "operations": [
+        {
+          "operation": "turn.attempt.get",
+          "requests": 59,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "turn.get",
+          "requests": 35,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "turn.event.record",
+          "requests": 160,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "event.list",
+          "requests": 29,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        },
+        {
+          "operation": "queue.depth",
+          "requests": 30,
+          "errors": 0,
+          "outcome": "unwound",
+          "invalidSpans": 0
+        }
+      ]
+    }
+  ],
+  "reader_admission_finding": "Current reserve_until already uses FIFO capacity checks with targeted successor wakeups, releases reservation FIFO before authority admission and preserves exact topology check. Do not introduce that optimization again. Root capacity is a separate constraint; earlier rejected constant-capacity bump is not evidence for admission.",
+  "runtime_edits": false
+}

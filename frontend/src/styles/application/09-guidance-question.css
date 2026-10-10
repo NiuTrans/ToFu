@@ -1,0 +1,110 @@
+
+/* ═══════════════════════════════════════════
+   ★ Human Guidance — interactive Q&A card
+   ═══════════════════════════════════════════ */
+.hg-card {
+  margin: var(--space-2) 0;
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.06) 0%, rgba(139, 92, 246, 0.04) 100%);
+  overflow: hidden;
+  transition: opacity 0.3s ease, filter 0.3s ease;
+}
+.hg-card.hg-submitting {
+  opacity: 0.55;
+  pointer-events: none;
+  filter: grayscale(0.3);
+}
+/* Expired (turn settled before an answer arrived) — muted, non-interactive. */
+.hg-card.hg-expired {
+  opacity: 0.65;
+  filter: grayscale(0.45);
+}
+.hg-option-card.hg-option-static {
+  cursor: default;
+  pointer-events: none;
+  text-align: left;
+}
+.hg-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(99, 102, 241, 0.12);
+  background: rgba(99, 102, 241, 0.05);
+}
+.hg-title {
+  font-size: var(--font-size-md);
+  font-weight: 700;
+  color: #a5b4fc;
+  flex: 1;
+}
+.hg-badge {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.12);
+  padding: 2px var(--space-2);
+  border-radius: 10px;
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  animation: hgPulse 2s ease-in-out infinite;
+}
+@keyframes hgPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+/* ★ The question is rendered via renderMarkdown() — same pipeline as
+   assistant messages.  Styles here scope Markdown HTML (headings, lists,
+   code blocks, tables, math) inside the guidance card. */
+.hg-question {
+  padding: var(--space-3) 14px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: #e2e8f0;
+  word-break: break-word;
+}
+/* ── Markdown prose inside the question ── */
+.hg-question p { margin: 0 0 var(--space-2); }
+.hg-question p:last-child { margin-bottom: 0; }
+.hg-question ul, .hg-question ol { margin: var(--space-1) 0 var(--space-2) 18px; padding: 0; }
+.hg-question li { margin-bottom: 3px; }
+.hg-question code {
+  background: rgba(99, 102, 241, 0.13);
+  color: #c7d2fe;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12.5px;
+}
+.hg-question pre {
+  margin: var(--space-2) 0;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.hg-question pre code {
+  background: transparent;
+  padding: 0;
+}
+.hg-question blockquote {
+  border-left: 3px solid rgba(99, 102, 241, 0.4);
+  margin: 6px 0;
+  padding: var(--space-1) var(--space-3);
+  color: #94a3b8;
+}
+.hg-question table { margin: var(--space-2) 0; }
+.hg-question strong { color: #f1f5f9; }
+.hg-question h1, .hg-question h2, .hg-question h3,
+.hg-question h4, .hg-question h5, .hg-question h6 {
+  margin: var(--space-2) 0 var(--space-1);
+  color: #e2e8f0;
+  font-size: var(--font-size-lg);
+  font-weight: 700;
+}
+/* ── Markdown in option card descriptions ── */
+.hg-opt-desc p { margin: 0; }
+.hg-opt-desc code {
+  background: rgba(99, 102, 241, 0.13);
+  color: #c7d2fe;
+  padding: 1px var(--space-1);
+  border-radius: 3px;
+  font-size: var(--font-size-xs);
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.workspace-delivery-retry/v1",
+  "title": "Durable automatic workspace delivery retry evidence",
+  "description": "Advisory retry evidence in integration origin.delivery. Never grants execution or publication authority. Immutable Git inputs survive restart; only completed owned tasks may publish after exact combined-tree verification.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "condition",
+    "fingerprint",
+    "baselineSha",
+    "checkpointSha",
+    "sourceSha"
+  ],
+  "properties": {
+    "condition": {
+      "enum": [
+        "conflict_inputs_changed",
+        "validation_inputs_changed"
+      ]
+    },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "baselineSha": {
+      "$ref": "#/$defs/sha"
+    },
+    "checkpointSha": {
+      "$ref": "#/$defs/sha"
+    },
+    "sourceSha": {
+      "$ref": "#/$defs/sha"
+    },
+    "conflictPaths": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 4096
+      }
+    },
+    "conflictPathCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "resolution": {
+      "const": "owned_repair_checkpoint_required"
+    },
+    "conflictPathsTruncated": {
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40,64}$"
+    }
+  },
+  "x-conflictPathsMaxEncodedBytes": 4096
+}

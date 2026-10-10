@@ -1,0 +1,16 @@
+{
+  "brand": "chutes",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "chutes",
+  "category": "relay",
+  "name": "Chutes",
+  "base_url": "https://llm.chutes.ai/v1",
+  "catalog_source": {"url": "https://chutes.ai/llms.txt", "checked_at": "2026-09-08"},
+  "catalog_mode": "curated",
+  "offering_recipes": [
+    {"model_id": "Kimi-K3", "request_ids": ["moonshotai/Kimi-K3-TEE"], "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "GLM-5.2", "request_ids": ["zai-org/GLM-5.2-TEE"], "capabilities": ["text", "thinking"]},
+    {"model_id": "Qwen3.5-397B-A17B", "request_ids": ["Qwen/Qwen3.5-397B-A17B-TEE"], "capabilities": ["text", "vision", "thinking"]},
+    {"model_id": "DeepSeek-V4-Flash-0731", "request_ids": ["deepseek-ai/DeepSeek-V4-Flash-0731-TEE"], "capabilities": ["text", "thinking"]}
+  ]
+}

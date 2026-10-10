@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="tofu"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>项目协作 · 交互比较</title>
+<link rel="stylesheet" href="../../frontend/src/styles/fonts.css"><link rel="stylesheet" href="../../static/styles.css">
+<style>
+/* Derived from designs/ui-gallery/scaffold.html. Prototype-only layout. */
+body{height:auto;overflow:auto;display:block;background:var(--bg-primary);font-family:var(--font-ui)}
+.coord-preview-shell{display:grid;grid-template-columns:180px 260px minmax(0,1fr);min-height:100vh}
+.coord-preview-side,.coord-preview-threads{border-right:1px solid var(--border);padding:var(--space-4);background:var(--bg-secondary);display:flex;flex-direction:column;gap:var(--space-4)}
+.coord-preview-main{min-width:0;padding:var(--space-6);display:flex;flex-direction:column;gap:var(--space-5)}
+h1,h2,h3,p{margin:0}h1{font-size:var(--font-size-2xl)}h2{font-size:var(--font-size-xl)}small{color:var(--text-secondary)}
+.coord-preview-chat{max-width:720px;margin:auto;display:flex;flex-direction:column;gap:var(--space-6);min-height:45vh}
+.project-row{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3);border-radius:var(--radius-md);background:var(--accent-subtle)}
+.coord-preview-message{padding:var(--space-5);line-height:var(--leading-relaxed);border-radius:var(--radius-lg);background:var(--bg-secondary)}
+.coord-preview-compose{margin-top:auto;padding:var(--space-4);border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--bg-secondary)}
+@media(max-width:900px){.coord-preview-shell{grid-template-columns:160px minmax(0,1fr)}.coord-preview-side{display:none}}
+@media(max-width:600px){.coord-preview-shell{grid-template-columns:minmax(0,1fr)}.coord-preview-threads{display:none}.coord-preview-main{padding:var(--space-3)}}
+</style></head><body>
+<div class="coord-preview-shell"><aside class="coord-preview-side"><h2>Tofu</h2><small>项目</small><div class="project-row"><strong>Tofu 工作区</strong><small>2 项工作进行中</small></div><span>模型评估</span><span>资料调研</span><small>这里仍只有项目层</small></aside>
+<aside class="coord-preview-threads"><h3>Tofu</h3><div id="fixed-entry"></div><small>项目内对话</small><span>前端交互改进</span><small>正在推进</small><span>后端通信可靠性</span><small>执行失败 · 有部分证据</small><span>独立验收</span><small>暂无新的执行记录</small><small>专家在对话内展开，不放入第三层导航</small></aside>
+<main class="coord-preview-main"><div class="ui-row ui-row--between ui-row--wrap"><h1>项目协作 · 交互比较</h1><small>演示数据 · 不会启动 Agent</small></div><div id="alternatives"></div><section class="coord-preview-chat"><div id="mode-head"></div><div class="coord-preview-message"><h2>一个目标，多条熟悉上下文的对话。</h2><p>项目协调、普通对话共享同一个聊天画布。项目职责不需要变成新的侧栏树。</p></div><div class="coord-preview-message"><strong>工作结果不提前标成功</strong><p>“执行完成”“测试通过”“改动已整合”分别展示，不用模拟百分比。</p></div><div class="coord-preview-compose">在这里继续讨论项目目标…<div id="workspace-action"></div></div></section></main></div>
+<script type="module">
+import { createButton, createTabs } from '../../frontend/src/ui/index.ts';
+import { ready } from '../../frontend/src/i18n/index.ts';
+import { openProjectCoordination } from '../../frontend/src/features/project-coordination.ts';
+await ready();
+const params=new URLSearchParams(location.search); document.documentElement.dataset.theme=params.get('theme')||'tofu';
+const modes=[['fixed','A · 固定协调入口'],['switch','B · 标题双模式'],['drawer','C · 按需工作抽屉']];
+const panels=modes.map(([id,label])=>{const panel=document.createElement('section');panel.textContent={fixed:'项目列表顶端放一个固定协调入口，最容易发现；不增加新的侧栏。',switch:'项目标题切换协调与对话，聊天保持居中；工作状态按需查看。',drawer:'聊天优先，项目工作区按需展开；窄屏仍只有一张聊天画布。'}[id];return{id,label,panel};});
+const tabs=createTabs({tabs:panels,activeId:params.get('mode')||'fixed',onChange:mode=>{
+ document.getElementById('fixed-entry').hidden=mode!=='fixed';
+ const head=document.getElementById('mode-head');head.replaceChildren();
+ head.append(createButton({label:mode==='switch'?'项目协调 / 当前对话':'项目协调 · 当前画布',variant:'ghost',onClick:()=>{head.textContent='当前对话 · 前端交互改进';}}));
+}});document.getElementById('alternatives').append(tabs.el);
+function open(){return openProjectCoordination({path:'/demo/tofu',currentConversationId:'coord',currentPath:()=>'/demo/tofu',
+ binding:async()=>({projectPath:'/demo/tofu',conversationId:'coord',revision:1,availability:'available',capabilities:{assign:false,sendMessage:false,steerSubagent:params.get('childMessages')==='1'}}),
+ messages:async(_path,_id,before)=>({messages:before?[{id:'old',sender:'旧负责对话',kind:'report',state:'input_confirmed',decision:'deferred',revision:3,content:'更早的消息证据，暂缓处理。'}]:[{id:'one',sender:'负责对话 · 后端通信',kind:'consult',state:'submitted',decision:null,revision:1,content:'请核验消息边界；这条消息不会启动付费执行。'},{id:'two',sender:'负责对话 · 独立验收',kind:'report',state:'input_confirmed',decision:'accepted',revision:3,content:'输入已确认，但交付必须另查。'}],next_before_id:before?null:'one'}),
+ board:async()=>({active:[{id:'work-a',conversationId:'frontend',title:'前端交互改进',status:'active',changedPaths:['frontend/src/features/project-coordination.ts']}],recentOutcomes:[{id:'work-b',conversationId:'backend',title:'后端通信可靠性',status:'failed',resultSummary:'提交前失败，消息未确认。保留部分调查证据。'},{id:'work-c',conversationId:'validation',title:'协调绑定校验',status:'completed',resultSummary:'8 项语义测试通过；整合状态另查。'}]}),
+ bind:async()=>{throw new Error('原型不写入真实状态')},navigate:id=>{document.getElementById('mode-head').textContent='已进入负责对话：'+id},openEvidence:()=>{document.getElementById('mode-head').textContent='交付与整合证据入口 · 原型'}})}
+document.getElementById('fixed-entry').append(createButton({label:'项目协调',variant:'primary',onClick:open}));
+document.getElementById('workspace-action').append(createButton({label:'项目工作区',variant:'ghost',onClick:open}));
+window.previewReady=true;
+</script></body></html>

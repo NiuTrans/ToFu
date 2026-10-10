@@ -1,0 +1,19 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "conversationId": "s",
+  "count": 1,
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "previews": [],
+  "requestId": "s",
+  "roundNum": 1,
+  "seq": 1,
+  "taskId": "s",
+  "turnRole": "s",
+  "type": "background_command_inject",
+  "vuMsgId": "s"
+}

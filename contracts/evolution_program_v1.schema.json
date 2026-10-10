@@ -1,0 +1,1580 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Durable long-horizon evolution program",
+  "type": "object",
+  "$defs": {
+    "advance_mode": {
+      "enum": [
+        "continuous",
+        "checkpoint"
+      ],
+      "description": "Continuous advances automatically; checkpoint settles then pauses before a successor. Pacing never starts or resumes work. Omitted legacy values are continuous."
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "\\S"
+        },
+        "kind": {
+          "enum": [
+            "discovery",
+            "baseline",
+            "experiment",
+            "synthesis",
+            "replan",
+            "final"
+          ]
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2400,
+          "pattern": "\\S"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600,
+            "pattern": "\\S"
+          },
+          "maxItems": 16,
+          "minItems": 1
+        },
+        "hypothesis": {
+          "$ref": "#/$defs/hypothesis"
+        },
+        "recovery_of": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Archived failed experiment diagnosed by this internal recovery step."
+        },
+        "require_command_execution": {
+          "type": "boolean",
+          "description": "Require a current task command observation before successful stage acceptance; absent preserves the frozen legacy policy."
+        },
+        "scientific_protocol": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/scientific_protocol"
+        },
+        "scientific_required_outcome": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/scientific_required_outcome"
+        },
+        "requires_scientific_protocol": {
+          "type": "boolean",
+          "description": "Validation must launch with a previously frozen scientific protocol."
+        },
+        "required_observation_format": {
+          "const": "tofu.scientific-observations/v2"
+        },
+        "requires_frozen_measurement_scope": {
+          "const": true,
+          "description": "Before validation launch, freeze dataset and split digests, matched budget, and both candidate/baseline generation digests in measurement_scope. Omitted existing steps preserve their admitted policy."
+        },
+        "validation_parent_sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Server-created validation successor of this immutable failed experiment. Original checks and protocol conditions remain; only candidate_digest may change."
+        },
+        "failed_candidate_index": {
+          "$ref": "#/$defs/failed_candidate_index"
+        }
+      },
+      "dependentRequired": {
+        "scientific_required_outcome": [
+          "scientific_protocol"
+        ],
+        "failed_candidate_index": [
+          "validation_parent_sequence"
+        ]
+      },
+      "required": [
+        "title",
+        "kind",
+        "instruction",
+        "checks"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "replan"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "recovery_of"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "recovery_of"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "requires_frozen_measurement_scope"
+            ]
+          },
+          "then": {
+            "required": [
+              "requires_scientific_protocol"
+            ],
+            "properties": {
+              "requires_scientific_protocol": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "validation_parent_sequence"
+            ]
+          },
+          "then": {
+            "required": [
+              "requires_scientific_protocol",
+              "requires_frozen_measurement_scope"
+            ],
+            "properties": {
+              "kind": {
+                "const": "experiment"
+              },
+              "requires_scientific_protocol": {
+                "const": true
+              },
+              "requires_frozen_measurement_scope": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "\\S"
+        },
+        "acceptance": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600,
+            "pattern": "\\S"
+          },
+          "maxItems": 16,
+          "minItems": 1
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          },
+          "maxItems": 32,
+          "minItems": 1
+        },
+        "budget": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/requested_budget"
+        },
+        "model": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/model_ref"
+        },
+        "role_models": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/role_models"
+        },
+        "project_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "max_attempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Inclusive execution attempts per experiment; explicit null/0 is unlimited. Omitted uses three with auto_replan, unlimited otherwise. Overall program exploration has no default attempt ceiling."
+        },
+        "advance_mode": {
+          "$ref": "#/$defs/advance_mode"
+        },
+        "auto_replan": {
+          "type": "boolean",
+          "description": "New programs default to automatic diagnosis after definitive reviewed failure. Omitted max_attempts uses three attempts per technique, with no program-wide attempt ceiling; explicit 0/null remains unlimited. Legacy programs without this field require manual retry."
+        },
+        "max_review_recoveries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "max_review_format_retries": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/request/properties/max_review_format_retries"
+        },
+        "review_reserve": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/review_reserve"
+        },
+        "research_source": {
+          "$ref": "#/$defs/research_source_request"
+        }
+      },
+      "required": [
+        "objective"
+      ]
+    },
+    "current": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "step": {
+          "$ref": "#/$defs/step"
+        },
+        "payload": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/request"
+        },
+        "context_seed": {
+          "type": "string",
+          "maxLength": 24000
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "\\S"
+        },
+        "deadline_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cancellation_accounting": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "actuals": {
+              "$ref": "urn:tofu:evolution-run:v1#/$defs/actuals"
+            },
+            "prior_complete": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "actuals",
+            "prior_complete"
+          ]
+        }
+      },
+      "required": [
+        "sequence",
+        "step",
+        "payload",
+        "context_seed",
+        "run_id",
+        "deadline_at"
+      ]
+    },
+    "command": {
+      "type": "object",
+      "description": "Start is idempotent initial activation: after activation it only returns the snapshot. Resume separately authorizes continuation. Legacy programs without started_at may start only from ready with no current intent or settled experiments; ambiguous paused legacy states require explicit resume. Legacy creation-time accounting and frozen intents remain unchanged.",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "advance",
+            "pause",
+            "resume",
+            "cancel",
+            "retry",
+            "start",
+            "set_pacing"
+          ]
+        },
+        "advance_mode": {
+          "$ref": "#/$defs/advance_mode"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "if": {
+        "properties": {
+          "action": {
+            "const": "set_pacing"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "advance_mode"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "advance_mode"
+          ]
+        }
+      }
+    },
+    "append": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          },
+          "maxItems": 32,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "steps"
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "result_source": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/source_ref"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "program_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "\\S"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "step": {
+          "$ref": "#/$defs/step"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "\\S"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "needs_attention",
+            "cancelled"
+          ]
+        },
+        "result": {
+          "type": "string",
+          "maxLength": 24000
+        },
+        "review": {
+          "$ref": "urn:tofu:evolution-run:v1#/properties/review"
+        },
+        "actuals": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "wall_clock_seconds": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_calls": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "tokens",
+            "wall_clock_seconds",
+            "tool_calls"
+          ]
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replan": {
+          "$ref": "#/$defs/replan_proposal"
+        },
+        "actuals_complete": {
+          "type": "boolean",
+          "description": "False means counters are observed lower bounds after confirmed stage loss."
+        },
+        "tool_evidence_source": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/source_ref"
+        },
+        "artifact_evidence_source": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/source_ref"
+        },
+        "background_evidence_source": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/source_ref"
+        }
+      },
+      "required": [
+        "schema_version",
+        "program_id",
+        "sequence",
+        "step",
+        "run_id",
+        "outcome",
+        "result",
+        "review",
+        "actuals",
+        "error",
+        "created_at"
+      ]
+    },
+    "registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "program_ids",
+        "cursor"
+      ],
+      "properties": {
+        "program_ids": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 160,
+            "minLength": 1
+          }
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "expansion_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expansion_id",
+        "request_digest",
+        "program_id"
+      ],
+      "properties": {
+        "expansion_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "request_digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "program_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "program_id",
+        "objective",
+        "status",
+        "settled_through",
+        "pending_steps",
+        "current_title",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "program_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "\\S"
+        },
+        "objective": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "active",
+            "paused",
+            "needs_attention",
+            "completed",
+            "cancelled"
+          ]
+        },
+        "settled_through": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_steps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_title": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    },
+    "hypothesis": {
+      "$ref": "urn:tofu:evolution-run:v1#/$defs/exploration_hypothesis"
+    },
+    "explore_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "program_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "\\S"
+        },
+        "action": {
+          "enum": [
+            "recall",
+            "read",
+            "propose",
+            "replan",
+            "semantic_recall",
+            "read_context",
+            "validation_context",
+            "preregister",
+            "read_research_source"
+          ]
+        },
+        "query": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "after": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "step": {
+          "$ref": "#/$defs/proposal_step"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "pattern": "\\S"
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/proposal_step"
+          }
+        },
+        "refresh": {
+          "type": "boolean"
+        },
+        "source_kind": {
+          "enum": [
+            "receipt",
+            "deliverable",
+            "tool_evidence",
+            "artifact_evidence",
+            "background_evidence"
+          ]
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Exact current-context digest; required after the first page."
+        },
+        "target_step_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "scientific_protocol": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/scientific_protocol"
+        },
+        "scientific_required_outcome": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/scientific_required_outcome"
+        },
+        "refresh_validation_generation": {
+          "const": true,
+          "description": "Request independently reviewed candidate-generation refresh after a confirmed scoped numerical failure; retain all old evidence and checks, freeze only a changed candidate digest before successor validation."
+        }
+      },
+      "required": [
+        "program_id",
+        "action"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "replan"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason",
+              "steps"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "semantic_recall"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240,
+                "pattern": "\\S"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "source_kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "read",
+                  "semantic_recall"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "read_context",
+                  "read_research_source"
+                ]
+              },
+              "offset": {
+                "minimum": 1
+              }
+            },
+            "required": [
+              "action",
+              "offset"
+            ]
+          },
+          "then": {
+            "required": [
+              "source_digest"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "preregister"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "target_step_sha256",
+              "scientific_protocol",
+              "scientific_required_outcome"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "refresh_validation_generation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "action": {
+                "const": "replan"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "proposal_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "\\S"
+        },
+        "kind": {
+          "enum": [
+            "discovery",
+            "baseline",
+            "experiment",
+            "synthesis"
+          ]
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2400,
+          "pattern": "\\S"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600,
+            "pattern": "\\S"
+          },
+          "maxItems": 13,
+          "minItems": 1
+        },
+        "hypothesis": {
+          "$ref": "#/$defs/hypothesis"
+        }
+      },
+      "required": [
+        "title",
+        "kind",
+        "instruction",
+        "checks",
+        "hypothesis"
+      ]
+    },
+    "replan_proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "failed_sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "request_digest": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "pattern": "\\S"
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        },
+        "refresh_validation_generation": {
+          "const": true,
+          "description": "Request independently reviewed candidate-generation refresh after a confirmed scoped numerical failure; retain all old evidence and checks, freeze only a changed candidate digest before successor validation."
+        }
+      },
+      "required": [
+        "failed_sequence",
+        "source_run_id",
+        "request_id",
+        "request_digest",
+        "reason",
+        "steps"
+      ]
+    },
+    "semantic_rank": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "matches": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "candidate_id": {
+                "type": "string",
+                "maxLength": 3
+              },
+              "relevance": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "quote": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 240
+              }
+            },
+            "required": [
+              "candidate_id",
+              "relevance",
+              "quote",
+              "reason"
+            ]
+          }
+        }
+      },
+      "required": [
+        "matches"
+      ]
+    },
+    "semantic_memory_entry": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/semantic_memory_fields"
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "semantic_cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/semantic_memory_entry"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "revision",
+        "entries"
+      ]
+    },
+    "semantic_history_entry": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/semantic_memory_fields"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "source_chunks": {
+              "maxItems": 8
+            },
+            "source_chars": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "scanned_sources": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "source_chars",
+            "scanned_sources"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "semantic_history": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/semantic_history_entry"
+          }
+        },
+        "retained_limit": {
+          "const": 32
+        },
+        "evidence_status": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "entries",
+        "retained_limit",
+        "evidence_status"
+      ]
+    },
+    "semantic_memory_fields": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "source_chunks": {
+          "type": "array",
+          "maxItems": 54,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "candidate_id": {
+                "type": "string",
+                "maxLength": 3
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "end": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "source_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "source_kind": {
+                "enum": [
+                  "deliverable",
+                  "tool_evidence",
+                  "artifact_evidence",
+                  "background_evidence"
+                ]
+              },
+              "run_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "source_ref": {
+                "$ref": "urn:tofu:evolution-run:v1#/$defs/source_ref"
+              }
+            },
+            "required": [
+              "candidate_id",
+              "sequence",
+              "offset",
+              "end",
+              "source_digest"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "source_kind"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "run_id"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "source_ref"
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "source_kind",
+                    "run_id",
+                    "source_ref"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "matches": {
+          "$ref": "#/$defs/semantic_rank/properties/matches"
+        },
+        "actuals": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tool_calls": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "wall_clock_seconds": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "tokens",
+            "tool_calls",
+            "wall_clock_seconds"
+          ]
+        },
+        "actuals_complete": {
+          "type": "boolean"
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "inspector_task_id": {
+          "type": "string",
+          "maxLength": 320
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 320
+        },
+        "received_events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy_version": {
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "source_kind": {
+          "enum": [
+            "receipt",
+            "deliverable",
+            "tool_evidence",
+            "artifact_evidence",
+            "background_evidence"
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "query",
+        "source_chunks",
+        "matches",
+        "actuals",
+        "actuals_complete",
+        "task_id",
+        "inspector_task_id",
+        "model",
+        "received_events",
+        "created_at",
+        "policy_version"
+      ]
+    },
+    "catalog_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "type": "string",
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9_.-]*$"
+        },
+        "before": {
+          "type": "string",
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9_.-]*$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "not": {
+        "required": [
+          "after",
+          "before"
+        ],
+        "properties": {
+          "after": {
+            "minLength": 1
+          },
+          "before": {
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "catalog_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "programs",
+        "next_cursor",
+        "previous_cursor",
+        "order"
+      ],
+      "properties": {
+        "programs": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/summary"
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9_.-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previous_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9_.-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "order": {
+          "const": "program_id_asc"
+        }
+      }
+    },
+    "semantic_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "matches": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "candidate_id": {
+                "$ref": "#/$defs/semantic_rank/properties/matches/items/properties/candidate_id"
+              },
+              "relevance": {
+                "$ref": "#/$defs/semantic_rank/properties/matches/items/properties/relevance"
+              },
+              "reason": {
+                "$ref": "#/$defs/semantic_rank/properties/matches/items/properties/reason"
+              },
+              "evidence_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 24
+              }
+            },
+            "required": [
+              "candidate_id",
+              "evidence_id",
+              "relevance",
+              "reason"
+            ]
+          }
+        }
+      },
+      "required": [
+        "matches"
+      ]
+    },
+    "failed_candidate_index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "root",
+        "count"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "root": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "description": "Server-published owner/control-bound immutable failed-candidate membership root; never scientific or replay authority."
+    },
+    "research_source_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "idea_id"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "idea_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        }
+      }
+    },
+    "research_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "idea_id",
+        "direction",
+        "lang",
+        "source_digest"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "idea_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "direction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "lang": {
+          "enum": [
+            "en",
+            "zh"
+          ]
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "program_id",
+    "objective",
+    "acceptance",
+    "request_digest",
+    "execution_options",
+    "status",
+    "queue",
+    "current",
+    "settled_through",
+    "actuals",
+    "error",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "program_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "\\S"
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000,
+      "pattern": "\\S"
+    },
+    "acceptance": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 600,
+        "pattern": "\\S"
+      },
+      "maxItems": 16,
+      "minItems": 1
+    },
+    "request_digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "\\S"
+    },
+    "execution_options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "budget": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/requested_budget"
+        },
+        "model": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/model_ref"
+        },
+        "role_models": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/role_models"
+        },
+        "project_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "max_attempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Inclusive execution attempts per experiment; explicit null/0 is unlimited. Omitted uses three with auto_replan, unlimited otherwise. Overall program exploration has no default attempt ceiling."
+        },
+        "max_review_recoveries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "max_review_format_retries": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/request/properties/max_review_format_retries"
+        },
+        "review_reserve": {
+          "$ref": "urn:tofu:evolution-run:v1#/$defs/review_reserve"
+        }
+      },
+      "required": []
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "active",
+        "paused",
+        "needs_attention",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "queue": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      },
+      "maxItems": 32
+    },
+    "current": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/current"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "settled_through": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "actuals": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_clock_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "tokens",
+        "wall_clock_seconds",
+        "tool_calls"
+      ]
+    },
+    "error": {
+      "type": "string",
+      "maxLength": 1000
+    },
+    "created_at": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "updated_at": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "last_expansion": {
+      "$ref": "#/$defs/expansion_receipt"
+    },
+    "auto_replan": {
+      "type": "boolean"
+    },
+    "advance_mode": {
+      "$ref": "#/$defs/advance_mode"
+    },
+    "started_at": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "First explicit start. Null means prepared but never activated; wall-clock allowance has not started. Missing legacy values retain created_at accounting. Once started, pauses do not reset or suspend this clock."
+    },
+    "replan_proposal": {
+      "$ref": "#/$defs/replan_proposal"
+    },
+    "actuals_complete": {
+      "type": "boolean",
+      "description": "False means counters are observed lower bounds after confirmed stage loss."
+    },
+    "tool_calls_complete": {
+      "type": "boolean",
+      "description": "False means cumulative tool consumption is unknown. Without this witness, incomplete legacy actuals cannot authorize a finite tool allowance."
+    },
+    "final_evidence_version": {
+      "const": 1,
+      "description": "Frozen final audit policy requiring complete delivered original links for passing requirements; absent retains legacy launches."
+    },
+    "research_source": {
+      "$ref": "#/$defs/research_source"
+    }
+  }
+}

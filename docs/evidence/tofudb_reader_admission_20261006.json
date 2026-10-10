@@ -1,0 +1,559 @@
+{
+  "format": "tofu.reader-capacity-admission-evidence/v1",
+  "status": "verified incremental optimization; overall goal incomplete",
+  "sources": {
+    "baseline_source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+    "candidate_source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+    "scope": "Advisory full-or-queued reader-pressure routing; transition-only publication under original topology exclusion, scoped queue counts and isolated routing atomics. Original first acquisition without pressure; FIFO reservation when pressured/backpressured. Quotas, owner/OCC/durability and one absolute deadline unchanged."
+  },
+  "artifacts": {
+    "candidate": {
+      "source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+      "binary_sha256": {
+        "libtofu_db.so": "a162633548494260ac4a1f00e360fe32e9911aff2180259c9ec92da353eb2cc3",
+        "tofu-db": "6c404baac1159c3ec5b62a30501a5b34a6ff06f65192e5f6faf07113b74c1514"
+      }
+    },
+    "control": {
+      "source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+      "binary_sha256": {
+        "libtofu_db.so": "ea5f312c69b58665865cffe3908018b754c59b5198515a93893d2a492f4d9f94",
+        "tofu-db": "0e49b161ac2cdbe6d9134ad900da52e5ffbaed193492c2fe2b66a5d1106741bd"
+      }
+    }
+  },
+  "correctness": {
+    "rust_library_passed": 1629,
+    "rust_process_passed": 38,
+    "opt_in_ignored": 3,
+    "original_sql_native_differential_cases_passed": 39
+  },
+  "original_load": {
+    "simultaneous_attempts": 1000,
+    "rounds": 4,
+    "unique_chunk_bytes": 8192,
+    "offered_interval_ms": 1000,
+    "rpc_deadline_seconds": 30,
+    "carry_stream_events": true,
+    "no_coalescing": true
+  },
+  "active_summary": {
+    "application": {
+      "files": {
+        "pin-matrix.json": "79d578e0b8b29a564b38e6a626dd8f33faf3ac47cb5b4f3db0ac15a6fb357edb",
+        "pin-reverse-matrix.json": "9d143b56badcf68f0df977aeba048180944af85f3e165d983cd1ff97408af74d"
+      },
+      "phases": 8,
+      "means_ms": {
+        "baseline": {
+          "stream_scheduled": 2227.3892425000668,
+          "settle": 4921.819081529975
+        },
+        "candidate": {
+          "stream_scheduled": 1858.3901282399893,
+          "settle": 4672.216184437275
+        }
+      },
+      "percent_change": {
+        "stream_scheduled": -16.566440531332795,
+        "settle": -5.071354573543352
+      },
+      "scope": "actual running/final SIGKILL",
+      "limits": "Original1s stream/settlement budgets remain unmet; adverse phases retained, not a universal victory claim."
+    },
+    "embedded": {
+      "files": {
+        "embedded-matrix.json": "5875dca63deb12cd87373d93dd234e395548eb69d52e25ceb915455c5192e5bb",
+        "embedded-reverse-matrix.json": "e9cd1fd1fa572bd9fb13ab010aaa614f875631341851eb6cb89a74d219a67809"
+      },
+      "phases": 8,
+      "means_ms": {
+        "baseline": {
+          "stream_scheduled": 1387.7197802066803,
+          "settle": 3491.2180472165346
+        },
+        "candidate": {
+          "stream_scheduled": 1325.3191653639078,
+          "settle": 3204.7606334090233
+        }
+      },
+      "percent_change": {
+        "stream_scheduled": -4.496629343532077,
+        "settle": -8.205085157482417
+      },
+      "scope": "abandon/reopen, not process SIGKILL",
+      "limits": "Original1s stream/settlement budgets remain unmet; adverse phases retained, not a universal victory claim."
+    }
+  },
+  "active_phases": [
+    {
+      "matrix": "pin-matrix.json",
+      "engine": "baseline",
+      "raw_sha256": "e562abc6f4b3e2e1d027c085d0facaad72c1a6a75bf84fc757d9ce1c9ab5be58",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/pin-1-baseline.json",
+      "source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+      "stream_p99_ms": 2229.944422841072,
+      "settle_p99_ms": 4339.446343481541,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "process SIGKILL"
+    },
+    {
+      "matrix": "pin-matrix.json",
+      "engine": "candidate",
+      "raw_sha256": "15d4e73a0d14e583ded8fff560a253589d10e20d889ab961afbcd464ed011026",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/pin-2-candidate.json",
+      "source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+      "stream_p99_ms": 1809.4088956713676,
+      "settle_p99_ms": 5015.1344537734985,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "process SIGKILL"
+    },
+    {
+      "matrix": "pin-matrix.json",
+      "engine": "candidate",
+      "raw_sha256": "e5fadb87b53c5ffe86c1f642e83b12b26ac1ca2dd4345a6b4b27ca93db6a9d14",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/pin-3-candidate.json",
+      "source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+      "stream_p99_ms": 1831.3975557684898,
+      "settle_p99_ms": 4149.697475135326,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "process SIGKILL"
+    },
+    {
+      "matrix": "pin-matrix.json",
+      "engine": "baseline",
+      "raw_sha256": "0f9046fe79ac3aaa0e18005c33451568a4e9749ee16b3c32e0bd1572e2f9e122",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/pin-4-baseline.json",
+      "source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+      "stream_p99_ms": 2229.0749922394753,
+      "settle_p99_ms": 4614.985518157482,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "process SIGKILL"
+    },
+    {
+      "matrix": "pin-reverse-matrix.json",
+      "engine": "candidate",
+      "raw_sha256": "b5b570a4363a7d9eedf6d6f8c3875f7a8b0666a8c2fcfd23fa29ad1d1f527395",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/pin-reverse-1-candidate.json",
+      "source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+      "stream_p99_ms": 1827.544055879116,
+      "settle_p99_ms": 4115.15099555254,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "process SIGKILL"
+    },
+    {
+      "matrix": "pin-reverse-matrix.json",
+      "engine": "baseline",
+      "raw_sha256": "b7cb32ad6f7d3f8fb81de4aee479d0342fb230fba1522627a8af3d7f3a663161",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/pin-reverse-2-baseline.json",
+      "source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+      "stream_p99_ms": 2233.565926551819,
+      "settle_p99_ms": 4872.1232786774635,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "process SIGKILL"
+    },
+    {
+      "matrix": "pin-reverse-matrix.json",
+      "engine": "baseline",
+      "raw_sha256": "577d52ee9c8f399aea7167069263d2d0831fec0fd1f1bfe926a0d3eca996d8f0",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/pin-reverse-3-baseline.json",
+      "source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+      "stream_p99_ms": 2216.971628367901,
+      "settle_p99_ms": 5860.721185803413,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "process SIGKILL"
+    },
+    {
+      "matrix": "pin-reverse-matrix.json",
+      "engine": "candidate",
+      "raw_sha256": "c326e5c6e80f19e08630a60768ef87b9a91ec92132fbc97034c1531d7157ec1b",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/pin-reverse-4-candidate.json",
+      "source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+      "stream_p99_ms": 1965.2100056409836,
+      "settle_p99_ms": 5408.881813287735,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "process SIGKILL"
+    },
+    {
+      "matrix": "embedded-matrix.json",
+      "engine": "baseline",
+      "raw_sha256": "52c65bd90ad66e502fb063c9467edfee36ceeb5d0df3759b70dd6040ad01dc6c",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/embedded-1-baseline.json",
+      "source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+      "stream_p99_ms": 1321.9710886478424,
+      "settle_p99_ms": 3640.878364443779,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "in-process abandon/reopen, not SIGKILL"
+    },
+    {
+      "matrix": "embedded-matrix.json",
+      "engine": "candidate",
+      "raw_sha256": "68d6bbc8650363ba9ba1aff3488549d9975c68ed794a7b67b565ae42dc566e15",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/embedded-2-candidate.json",
+      "source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+      "stream_p99_ms": 1221.889466047287,
+      "settle_p99_ms": 3289.448879659176,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "in-process abandon/reopen, not SIGKILL"
+    },
+    {
+      "matrix": "embedded-matrix.json",
+      "engine": "candidate",
+      "raw_sha256": "42b7e279a0cf9e7e22e1ee8b986ea73b308f242ae90f67e15f0a0545418b6b6d",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/embedded-3-candidate.json",
+      "source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+      "stream_p99_ms": 1640.5372992157936,
+      "settle_p99_ms": 3231.0306653380394,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "in-process abandon/reopen, not SIGKILL"
+    },
+    {
+      "matrix": "embedded-matrix.json",
+      "engine": "baseline",
+      "raw_sha256": "94a7635f11c62ad18631ba093bff3fcb7aab17c37206c5e1d18e1b4accc1a620",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/embedded-4-baseline.json",
+      "source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+      "stream_p99_ms": 1729.6273335814476,
+      "settle_p99_ms": 3369.7168603539467,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "in-process abandon/reopen, not SIGKILL"
+    },
+    {
+      "matrix": "embedded-reverse-matrix.json",
+      "engine": "candidate",
+      "raw_sha256": "0e3bc2fd9200ad5f1d1b7be0e560a87f35a9770d340bb4677ee850cece39d1b3",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/embedded-reverse-1-candidate.json",
+      "source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+      "stream_p99_ms": 1233.3375811576843,
+      "settle_p99_ms": 3337.445132434368,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "in-process abandon/reopen, not SIGKILL"
+    },
+    {
+      "matrix": "embedded-reverse-matrix.json",
+      "engine": "baseline",
+      "raw_sha256": "b851609d0221490f6a00e99915cfd01ba624ddb7e8ea7275b60ec545495e089c",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/embedded-reverse-2-baseline.json",
+      "source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+      "stream_p99_ms": 1275.4514962434769,
+      "settle_p99_ms": 3454.7237381339073,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "in-process abandon/reopen, not SIGKILL"
+    },
+    {
+      "matrix": "embedded-reverse-matrix.json",
+      "engine": "baseline",
+      "raw_sha256": "6187afd5179adf5cf5be76e2ce40ebc3c426e184e8225b2c1d36a8ce2dfd9cb6",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/embedded-reverse-3-baseline.json",
+      "source_sha256": "2fd20a21892df31608291f8725d4a4b7ffac715b2bcf128de565d9ad1c850f7a",
+      "stream_p99_ms": 1223.8292023539543,
+      "settle_p99_ms": 3499.5532259345055,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "in-process abandon/reopen, not SIGKILL"
+    },
+    {
+      "matrix": "embedded-reverse-matrix.json",
+      "engine": "candidate",
+      "raw_sha256": "e555d61dc29cc9ebbf2e23124fdf044be9ee0273ce66372f4b66093b01cdc4ca",
+      "raw_path": ".tmp/tofudb-pin-pressure-routing-20261006/embedded-reverse-4-candidate.json",
+      "source_sha256": "d1f26e8f5d59298e7486213f398b1debc5f8a4ad9c92fc78c35852f6681d3306",
+      "stream_p99_ms": 1205.5123150348663,
+      "settle_p99_ms": 2961.1178562045097,
+      "errors": 0,
+      "running_completed_content_replay_each": 1000,
+      "stream_frames": 4000,
+      "integrity_returncode": 0,
+      "crash_scope": "in-process abandon/reopen, not SIGKILL"
+    }
+  ],
+  "resource_observations": {
+    "application": {
+      "baseline": {
+        "client_peak_rss_bytes": {
+          "samples": 4,
+          "mean": 204215296,
+          "max": 276267008
+        },
+        "engine_peak_rss_bytes": {
+          "samples": 4,
+          "mean": 2240809984,
+          "max": 2256195584
+        },
+        "observation_scopes": [
+          "productive workload and recovery readback; excludes offline verification and cleanup"
+        ]
+      },
+      "candidate": {
+        "client_peak_rss_bytes": {
+          "samples": 4,
+          "mean": 163315712,
+          "max": 271577088
+        },
+        "engine_peak_rss_bytes": {
+          "samples": 4,
+          "mean": 2098765824,
+          "max": 2152095744
+        },
+        "observation_scopes": [
+          "productive workload and recovery readback; excludes offline verification and cleanup"
+        ]
+      }
+    },
+    "embedded": {
+      "baseline": {
+        "client_peak_rss_bytes": {
+          "samples": 4,
+          "mean": 2396077056,
+          "max": 2496286720
+        },
+        "engine_peak_rss_bytes": {
+          "samples": 4,
+          "mean": 2396101632,
+          "max": 2496286720
+        },
+        "observation_scopes": [
+          "productive workload and recovery readback; excludes offline verification and cleanup"
+        ]
+      },
+      "candidate": {
+        "client_peak_rss_bytes": {
+          "samples": 4,
+          "mean": 2395789312,
+          "max": 2571698176
+        },
+        "engine_peak_rss_bytes": {
+          "samples": 4,
+          "mean": 2393656320,
+          "max": 2571726848
+        },
+        "observation_scopes": [
+          "productive workload and recovery readback; excludes offline verification and cleanup"
+        ]
+      }
+    }
+  },
+  "same_process_sqlite_comparison": {
+    "sqlite_library_version": "3.41.2",
+    "scope": "Original14 workloads, exact setup/operations/iterations/warmups, reversed engine order. SQLite uses full original authority/client/handler/lease/outbox over experimental memory transport, not rawSQL. Native production embedded client. Original39 differential assertions unchanged. Test-only adapter is not a production common transport seam.",
+    "native_wins": 28,
+    "comparisons": [
+      {
+        "cohort": "native-first",
+        "workload": "concurrent_read",
+        "sqlite_over_native_mean_ratio": 15.075757575757574
+      },
+      {
+        "cohort": "native-first",
+        "workload": "conversation_create_burst",
+        "sqlite_over_native_mean_ratio": 2.1785714285714284
+      },
+      {
+        "cohort": "native-first",
+        "workload": "conversation_open",
+        "sqlite_over_native_mean_ratio": 2.826923076923077
+      },
+      {
+        "cohort": "native-first",
+        "workload": "conversation_search",
+        "sqlite_over_native_mean_ratio": 3.567251461988304
+      },
+      {
+        "cohort": "native-first",
+        "workload": "mixed_80_10_10",
+        "sqlite_over_native_mean_ratio": 2.6666666666666665
+      },
+      {
+        "cohort": "native-first",
+        "workload": "open_windowed_long_history",
+        "sqlite_over_native_mean_ratio": 4.52988047808765
+      },
+      {
+        "cohort": "native-first",
+        "workload": "record_get_points",
+        "sqlite_over_native_mean_ratio": 1.540983606557377
+      },
+      {
+        "cohort": "native-first",
+        "workload": "record_put_burst",
+        "sqlite_over_native_mean_ratio": 2.6953124999999996
+      },
+      {
+        "cohort": "native-first",
+        "workload": "sidebar_list_page",
+        "sqlite_over_native_mean_ratio": 2.3993174061433447
+      },
+      {
+        "cohort": "native-first",
+        "workload": "sidebar_with_history",
+        "sqlite_over_native_mean_ratio": 4.352159468438539
+      },
+      {
+        "cohort": "native-first",
+        "workload": "swarm_write",
+        "sqlite_over_native_mean_ratio": 5.791793313069909
+      },
+      {
+        "cohort": "native-first",
+        "workload": "transcript_bulk_hydration",
+        "sqlite_over_native_mean_ratio": 2.8758698818579056
+      },
+      {
+        "cohort": "native-first",
+        "workload": "turn_append_burst",
+        "sqlite_over_native_mean_ratio": 3.6437768240343344
+      },
+      {
+        "cohort": "native-first",
+        "workload": "turn_append_large",
+        "sqlite_over_native_mean_ratio": 1.4824413777628183
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "concurrent_read",
+        "sqlite_over_native_mean_ratio": 14.605882352941176
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "conversation_create_burst",
+        "sqlite_over_native_mean_ratio": 2.1538461538461537
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "conversation_open",
+        "sqlite_over_native_mean_ratio": 2.8653846153846154
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "conversation_search",
+        "sqlite_over_native_mean_ratio": 3.5375722543352603
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "mixed_80_10_10",
+        "sqlite_over_native_mean_ratio": 2.7901234567901234
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "open_windowed_long_history",
+        "sqlite_over_native_mean_ratio": 4.384
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "record_get_points",
+        "sqlite_over_native_mean_ratio": 2.066666666666667
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "record_put_burst",
+        "sqlite_over_native_mean_ratio": 2.9
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "sidebar_list_page",
+        "sqlite_over_native_mean_ratio": 2.3667820069204155
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "sidebar_with_history",
+        "sqlite_over_native_mean_ratio": 3.8282828282828283
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "swarm_write",
+        "sqlite_over_native_mean_ratio": 6.143556280587275
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "transcript_bulk_hydration",
+        "sqlite_over_native_mean_ratio": 2.856605547719793
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "turn_append_burst",
+        "sqlite_over_native_mean_ratio": 3.5500000000000003
+      },
+      {
+        "cohort": "sqlite-first",
+        "workload": "turn_append_large",
+        "sqlite_over_native_mean_ratio": 1.5085596895685915
+      }
+    ],
+    "raw_sha256": "7fda9c6821e36026fa00080bc16c0213a360beecaa00a5be89b37bfa7eb62c02"
+  },
+  "attribution": {
+    "scope": "Every16 observer, not acceptance timing",
+    "selected": 625,
+    "dropped": 0,
+    "event_samples": 314,
+    "authority_acquires_per_event": 2.105095541401274,
+    "historical_control_authority_acquires_per_event": 3.616,
+    "historical_control_source": "c8db2ec7a6a5d9fe8622c087f58b4c7fab361487b518048d3563f383093b5553",
+    "raw_sha256": "80e7cea84bdc4d95d5195e001a0e4c7437a6b2466cf5c6d05dfb9cdd48cd17eb"
+  },
+  "neighbor_limits": {
+    "full56_phase_sha256": "61ecf1efee5daa85ad5bae84524eb3b8b403ff8ae363f331b76fb661feb16d2a",
+    "focused24_phase_sha256": "b30b8a18e7d72cfb9500d3abd8094d431b0b8665fa92e20250f2478d22d6c348",
+    "point_write_focused_abba_baab_percent": [
+      -2.44,
+      2.83
+    ],
+    "hydration_focused_abba_baab_percent": [
+      1.16,
+      2.42
+    ],
+    "note": "Original broad phases had adverse point/hydration measurements; retained. Observer showed similar prepare/compile/WAL cost and one higher mutex-wait candidate phase. No claim of universal improvement over own baseline."
+  },
+  "remaining_gaps": [
+    "Original1s interactive budgets unmet",
+    "Embedded native host SIGKILL not certified by abandon",
+    "RawSQLite floors remain a separate debt",
+    "Real provider and browser feedback capacity",
+    "Sustained soak, adverse filesystems and comprehensive GC/backup/resource matrices",
+    "Exhaustive scenarios and competitor-first ranking unproven"
+  ]
+}

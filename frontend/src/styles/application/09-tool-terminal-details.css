@@ -1,0 +1,99 @@
+/* ═══════════════════════════════════════════
+   ★ run_command inline terminal block
+   ═══════════════════════════════════════════ */
+.ptool-cmd-block {
+  /* Flat content inside the .ptool-turn card — the old 12px/8px side margins
+   * date from the retired nested-card model and pushed the header icon ~12px
+   * right of the .ptool-line icon column above it. */
+  margin: 0;
+  border-radius: 0;
+  border: none;
+  background: none;
+  overflow: visible;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: var(--font-size-sm);
+}
+.ptool-cmd-header {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--space-1) * 1.75);
+  /* Same horizontal inset as .ptool-line so the icon column aligns with
+   * plain tool rows in the same card. */
+  padding: calc(var(--space-1) * 0.5) var(--space-3) var(--space-1) var(--space-4);
+  border-bottom: none;
+  background: none;
+}
+.ptool-cmd-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  color: var(--accent);
+}
+.ptool-cmd-label {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+.ptool-cmd-status {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: calc(var(--space-1) * 0.25) calc(var(--space-1) * 1.75);
+  border-radius: 4px;
+}
+/* ── Two-axis verdict chips: "finished" (completion) sits beside the exit-
+ * code verdict chip instead of one fused "✓ done" label. The group takes
+ * over the right-push; the finish chip is neutral gray in every theme — it
+ * states completion, not success. */
+.ptool-cmd-chips {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--space-1) * 1.5);
+}
+.ptool-cmd-chips .ptool-cmd-status {
+  margin-left: 0;
+}
+.ptool-cmd-finish {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: calc(var(--space-1) * 0.25) calc(var(--space-1) * 1.75);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+}
+.ptool-cmd-ok .ptool-cmd-status {
+  color: var(--success-text);
+  background: var(--success-bg);
+}
+.ptool-cmd-err .ptool-cmd-status {
+  color: var(--error-text);
+  background: var(--error-bg);
+}
+.ptool-cmd-timeout .ptool-cmd-status {
+  color: var(--warning-text);
+  background: var(--warning-bg);
+}
+/* ── "not run": command refused/blocked before it executed ──
+ * Distinct from error (red, exit≠0): this is amber/neutral — the command
+ * never ran, and the reason is shown inline rather than as a cryptic code. */
+.ptool-cmd-notrun .ptool-cmd-status {
+  color: var(--warning-text);
+  background: var(--warning-bg);
+}
+.ptool-cmd-reason {
+  padding: var(--space-2) var(--space-4) calc(var(--space-1) * 2.5) var(--space-4);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--warning-text);
+  background: var(--warning-bg);
+  border-top: 1px solid var(--warning-border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ptool-cmd-running .ptool-cmd-header {
+  color: var(--accent);
+}
+.ptool-cmd-running .ptool-cmd-icon { color: var(--accent); }
+.ptool-cmd-running .ptool-cmd-label { color: var(--accent-hover); }

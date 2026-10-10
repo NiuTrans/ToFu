@@ -1,0 +1,48 @@
+
+
+/* ── Image Gen inline result (non-tool, direct mode) ── */
+.ig-result-wrapper{max-width:560px;margin:var(--space-3) auto;animation:igFadeIn .4s ease}
+@keyframes igFadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.ig-result-card{border-radius:16px;overflow:hidden;background:var(--bg-tertiary);border:1px solid var(--border);box-shadow:0 4px 24px rgba(0,0,0,0.15)}
+.ig-result-card img{display:block;width:100%;height:auto;cursor:zoom-in;transition:filter .2s}
+.ig-result-card img:hover{filter:brightness(1.08)}
+/* ★ Defence-in-depth: legacy img rule now excludes these via :not(), but keep overrides just in case */
+.message-body .ig-result-card img{max-width:none;max-height:none;border:none;border-radius:0;margin-bottom:0}
+.ig-result-footer{display:flex;align-items:center;gap:var(--space-2);padding:10px 14px;border-top:1px solid var(--border)}
+.ig-result-prompt{flex:1;font-size:var(--font-size-sm);color:var(--text-tertiary);font-style:italic;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ig-result-meta{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-tertiary)}
+.ig-result-meta .ig-meta-pill{padding:2px 6px;border-radius:6px;background:var(--bg-hover);font-family:'JetBrains Mono',monospace;font-weight:600}
+.ig-result-actions{display:flex;gap:2px}
+.ig-result-actions button{background:none;border:none;color:var(--text-tertiary);cursor:pointer;padding:var(--space-1) var(--space-2);border-radius:6px;font-size:var(--font-size-sm);transition:all .15s}
+.ig-result-actions button:hover{color:var(--text-primary);background:var(--bg-hover)}
+
+/* ── Image Gen Loading (creative mode) ── */
+.ig-generating{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:var(--space-12) var(--space-6);gap:var(--space-4);max-width:560px;margin:var(--space-3) auto;background:var(--bg-tertiary);border-radius:16px;border:1px solid var(--border);box-shadow:0 4px 24px rgba(0,0,0,0.15);animation:igFadeIn .3s ease}
+.ig-gen-spinner{position:relative;width:56px;height:56px}
+.ig-gen-spinner::before{content:'';position:absolute;inset:0;border:3px solid var(--border);border-radius:50%}
+.ig-gen-spinner::after{content:'';position:absolute;inset:0;border:3px solid transparent;border-top-color:#f472b6;border-right-color:#a78bfa;border-radius:50%;animation:spin 1s linear infinite}
+.ig-gen-title{font-size:var(--font-size-lg);font-weight:600;color:var(--text-primary);display:flex;align-items:center;gap:var(--space-2)}
+.ig-gen-model-info{font-size:var(--font-size-sm);color:var(--text-secondary);display:flex;align-items:center;gap:var(--space-2);font-weight:500}
+.ig-gen-subtitle{font-size:var(--font-size-sm);color:var(--text-tertiary);text-align:center;max-width:300px}
+.ig-gen-timer{font-size:var(--font-size-xs);color:var(--text-tertiary);font-family:'JetBrains Mono',monospace}
+.ig-gen-status{font-size:var(--font-size-xs);color:var(--text-tertiary);min-height:16px}
+
+/* History badge */
+.ig-history-badge{display:inline-flex;align-items:center;padding:2px var(--space-2);border-radius:8px;background:rgba(167,139,250,0.12);color:#a78bfa;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace}
+.ig-history-pill{background:rgba(167,139,250,0.15)!important;color:#a78bfa!important}
+
+/* Cancel button during generation */
+.ig-gen-cancel{margin-top:var(--space-1);padding:6px 18px;border:1px solid rgba(244,114,182,0.25);border-radius:10px;background:rgba(244,114,182,0.06);color:#f472b6;font-size:var(--font-size-sm);font-weight:600;cursor:pointer;transition:all .15s;font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif}
+.ig-gen-cancel:hover{background:rgba(244,114,182,0.15);border-color:rgba(244,114,182,0.4)}
+
+/* ── Gacha batch count ── */
+.ig-pill-n{min-width:34px;text-align:center;letter-spacing:.02em}
+.ig-pill-n.active{background:linear-gradient(135deg,#fb923c,#f59e0b);box-shadow:0 1px 6px rgba(251,146,60,0.35);color:#fff}
+
+/* ── Model dropdown enhancements ── */
+.ig-model-divider{height:1px;background:var(--border-light);margin:var(--space-1) var(--space-2)}
+.ig-model-info{display:flex;flex-direction:column;flex:1;min-width:0}
+.ig-model-option[data-model="__all__"]{background:linear-gradient(135deg,rgba(244,114,182,0.04),rgba(167,139,250,0.04))}
+.ig-model-option[data-model="__all__"]:hover{background:linear-gradient(135deg,rgba(244,114,182,0.1),rgba(167,139,250,0.1))}
+.ig-model-option[data-model="__all__"].active .ig-model-name{color:#a78bfa}
+.ig-model-option[data-model="__all__"].active .ig-model-check{color:#a78bfa}

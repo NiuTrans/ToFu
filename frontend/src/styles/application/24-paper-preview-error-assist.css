@@ -1,0 +1,12 @@
+/* ── Track B: Error Assist on diagnostics rows ── */
+.paper-preview-problem-row { display: flex; align-items: stretch; gap: 1px; }
+.paper-preview-problem-row > .paper-preview-problem { flex: 1; min-width: 0; }
+.paper-preview-problem-assist {
+  display: inline-flex; align-items: center; align-self: center; gap: var(--space-1);
+  margin-inline-end: var(--space-2); padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border); border-radius: var(--radius-xs, 6px);
+  background: none; color: var(--accent);
+  font-size: var(--font-size-xs); white-space: nowrap; cursor: pointer;
+}
+.paper-preview-problem-assist:hover { background: var(--accent-subtle); border-color: var(--accent); }
+

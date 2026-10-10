@@ -1,0 +1,182 @@
+/* Inline editor geometry, save/cancel and focus.
+ * Owner: ConversationSurface; tokens: 00-design-tokens.css.
+ * Delivery: ordered application manifest; neighboring content owners are independent.
+ */
+
+/* ── Inline turn editor: in-place replacement for the detached edit prompt.
+ *   The turn keeps its shell (header/footer); blocks and per-turn actions
+ *   yield to the editing session until it saves or cancels. ── */
+
+.conversation-surface .conversation-turn[data-inline-editing] .conversation-turn-blocks,
+.conversation-surface .conversation-turn[data-inline-editing] .conversation-turn-actions {
+  display: none;
+}
+
+.conversation-surface .turn-inline-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 var(--space-1);
+}
+
+.conversation-surface .turn-inline-editor-input {
+  box-sizing: border-box;
+  /* Editor fit/scroll belongs to this owner, independently of the composer. */
+  flex: none;
+  max-height: none;
+  width: 100%;
+  min-height: 72px;
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--conversation-font-size-table);
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+}
+
+.conversation-surface .turn-inline-editor-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.conversation-surface .turn-inline-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+}
+
+.conversation-surface .turn-inline-editor-hint {
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+}
+
+.conversation-surface .turn-inline-editor-buttons {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.conversation-surface .turn-inline-editor-btn {
+  min-height: 32px;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: background var(--motion-fast) ease, border-color var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+
+.conversation-surface .turn-inline-editor-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.conversation-surface .turn-inline-editor-btn--resend {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+}
+
+.conversation-surface .turn-inline-editor-btn--resend:hover:not(:disabled) {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.conversation-surface .turn-inline-editor-btn--save {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.conversation-surface .turn-inline-editor-btn--save:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  filter: brightness(1.06);
+}
+
+.conversation-surface .turn-inline-editor-btn:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.conversation-surface .turn-inline-editor-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.conversation-surface .turn-inline-editor-attachments[hidden] {
+  display: none;
+}
+
+.conversation-surface .turn-inline-editor-chip {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.conversation-surface .turn-inline-editor-chip img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.conversation-surface .turn-inline-editor-chip[data-processing="true"] img {
+  opacity: .55;
+}
+
+.conversation-surface .turn-inline-editor-chip-status {
+  position: absolute;
+  inset: auto 0 0;
+  padding: var(--space-1) var(--space-1);
+  font-size: var(--conversation-font-size-caption);
+  text-align: center;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+}
+
+.conversation-surface .turn-inline-editor-chip-remove {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bg-primary) 86%, transparent);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.conversation-surface .turn-inline-editor-chip-remove:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.conversation-surface .turn-inline-editor[data-submitting="true"] {
+  opacity: .75;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-surface .turn-inline-editor-btn {
+    transition-duration: .01ms !important;
+  }
+}

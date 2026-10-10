@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "contract": "tofu.automation-skill-sources/v1",
+  "provider": "mtskills",
+  "environments": {
+    "prod": {"origin": "https://friday.internal.example.com", "ssoEnvironment": "product"},
+    "test": {"origin": "https://friday.ai.test.internal.example.com", "ssoEnvironment": "test"},
+    "dev": {"origin": "https://mcphub.inf.dev.internal.example.com", "ssoEnvironment": "test"}
+  },
+  "metadata": {
+    "searchPage": 1,
+    "searchPageSize": 8,
+    "namePattern": "[A-Za-z0-9][A-Za-z0-9_.-]{0,159}",
+    "sourceIdPattern": "[A-Za-z0-9][A-Za-z0-9_.-]{0,199}",
+    "maximumOutputBytes": 524288,
+    "timeoutSeconds": 30,
+    "pollSeconds": 0.05,
+    "maximumCredentialCharacters": 8192,
+    "teardown": "kill the private Linux process group, reap the leader and await live descendants before deleting its private home; D-state members are waited out",
+    "protocol": "installed CLI metadata only; no install/pull/login/script execution"
+  },
+  "archives": {
+    "byIdPath": "/mcphub-api/skill/{sourceId}/download",
+    "byVersionPath": "/mcphub-api/skill/version/by-name/{name}/download",
+    "maximumBytes": 26214400,
+    "timeoutSeconds": 60,
+    "chunkBytes": 65536,
+    "exitCodes": {"tooLarge": 64, "httpFailure": 65, "authenticationRequired": 77, "timedOut": 124},
+    "redirectPolicy": "deny; credentials never follow a redirect"
+  },
+  "credentials": {
+    "ownership": "explicit owner and tenant; no ambient or personal legacy fallback",
+    "delivery": "private stdin descriptor to trusted node bootstrap; no secret in OS argv or inherited environment",
+    "childEnvironment": "allowlist; private HOME/TMPDIR and empty dedicated SSO cache; no CIBA or interactive login"
+  },
+  "snapshots": {
+    "maximumPackages": 32,
+    "authority": "complete validated content-sealed bytes; metadata or timestamps alone never prove unchanged content",
+    "firstCheck": "baseline suppresses changed; process explicitly reports initial content",
+    "retry": "reuse the accepted snapshot; never silently replace it with current upstream bytes",
+    "activation": "existing exact-byte Auto/Manual approval and reconciliation; bundled scripts remain unexecuted"
+  }
+}

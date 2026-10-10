@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "namespace": "swarm.run_messages.v1",
+  "limits": {"messageChars": 4096, "messageBytes": 16384, "messagesPerRun": 64, "batchSize": 8, "casAttempts": 4},
+  "states": ["submitted", "input_confirmed", "unconfirmed"],
+  "semantics": {
+    "input_confirmed": "A verified provider response consumed the input. It does not prove acceptance, compliance, task completion or delivery.",
+    "submitted": "Durable before execution sees it. No new worker or model call is started by sending.",
+    "unconfirmed": "The run ended without a durable verified input receipt. Consumption may be unknown after an ACK failure. Content remains inspectable and is never transferred to a later run.",
+    "provenance": "agent; not human guidance, not an authority grant",
+    "target": "Exact owned parent conversation + swarm_run_id + child agent_id. Retained run_id is revalidated before consumption."
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "send_agent_message",
+        "description": "Send bounded extra context or a direction adjustment to your existing pending/running child. Use the exact agent_id and swarm_run_id from spawn_agents; for a retained identity use its current assignment handle, not its stable identity ID. Supply a unique idempotency_key and reuse it unchanged after uncertain submission. Commits durably, then the child reads at the next complete tool boundary. Sending starts no worker, grants no permission, and submitted is not input-confirmed or accepted. Settled runs cannot be restarted; use kill to stop, never a natural-language message. Children cannot message siblings. Do not poll repeatedly for consumption.",
+        "parameters": {
+          "type": "object", "additionalProperties": false,
+          "required": ["agent_id", "swarm_run_id", "content", "idempotency_key"],
+          "properties": {
+            "agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "swarm_run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "content": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "kind": {"type": "string", "enum": ["reference", "steer"], "default": "reference"},
+            "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256}
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_agent_messages",
+        "description": "Read the bounded durable messages and actual input receipts for your exact child run. Use the agent_id and swarm_run_id returned by spawn_agents. Read on demand to reconcile an uncertain send or inspect an ended run; do not busy-poll. input_confirmed proves input consumption only, not that the child accepted or completed the request. Old records remain bound to their original run and cannot be used to steer a replacement.",
+        "parameters": {
+          "type": "object", "additionalProperties": false,
+          "required": ["agent_id", "swarm_run_id"],
+          "properties": {
+            "agent_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "swarm_run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "message_id": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        }
+      }
+    }
+  ]
+}

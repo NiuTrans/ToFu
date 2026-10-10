@@ -1,0 +1,3843 @@
+{
+  "format": "tofu.canonical-event-replay-evidence/v1",
+  "baseline_artifact": {
+    "binary_sha256": "7023fbd649174a973653598842983b7a60db0e3c397816460ba71af698719aff",
+    "certification": "Frozen integrated text pages plus concurrent source; baseline for event publication",
+    "created_utc": "2026-10-01T10:14:11.518940+00:00",
+    "deployment_checkout_head": "3451e05ac49b430d77da58f4d023b44128b6983b",
+    "deployment_utc": "2026-10-01T10:14:11.518940+00:00",
+    "library_sha256": "029c5a3fadda2435d3fe17ddc600cdaaa2e5665c1429c456e45857866a8032d1",
+    "previous_binary_sha256": null,
+    "source_sha256": "4183a128e0d4cbcd53710303b8362973a857bbf064ccd11b42167f2cae74db86"
+  },
+  "candidate_artifact": {
+    "binary_sha256": "d6084ed4a525b690f3df21796795c0532bff3ef70d9bdb367397a09c0815b46e",
+    "certification": "Isolated canonical event reference candidate; not activated",
+    "created_utc": "2026-10-01T11:19:16.115454+00:00",
+    "deployment_checkout_head": "3451e05ac49b430d77da58f4d023b44128b6983b-dirty",
+    "deployment_utc": "2026-10-01T11:19:16.115454+00:00",
+    "library_sha256": "ba049f140ad4c98f8d36b8e34d492369db387383dba55d7489a54ecd677aa12d",
+    "previous_binary_sha256": null,
+    "source_sha256": "386f5ae9354ceda97603b8e49de0922194ec15f93689653d62fd01171fe98b27"
+  },
+  "verified": {
+    "native": "1421 passed,2 ignored;8 threads",
+    "application_and_backup": "67 passed;3 previously reproduced baseline inspector cases deselected",
+    "browser": "4 passed after npm frontend build; initial missing Vite manifest503 excluded",
+    "generated_ir": "check passed",
+    "reference_fault_matrix": "I/O error at every commit operation, short writes, lost sync; acknowledged prefix remains atomic",
+    "documentation": "new owner document cataloged; pre-existing uncataloged/line-budget failures remain"
+  },
+  "paired_workloads": {
+    "carrier_20ms": {
+      "format": "tofu.event-reference-abba/v1",
+      "volume": "/path/to/your/project",
+      "legs": [
+        {
+          "conversations": 1,
+          "leg": 0,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-1-0-baseline.json",
+          "elapsed_seconds": 4.2702696323394775,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 1,
+              "p95": 9.14280116558075,
+              "total_ms": 9.14280116558075,
+              "p50": 9.14280116558075,
+              "p99": 9.14280116558075,
+              "max": 9.14280116558075
+            },
+            "bind": {
+              "count": 1,
+              "p95": 0.7036328315734863,
+              "total_ms": 0.7036328315734863,
+              "p50": 0.7036328315734863,
+              "p99": 0.7036328315734863,
+              "max": 0.7036328315734863
+            },
+            "start": {
+              "count": 1,
+              "p95": 0.6651133298873901,
+              "total_ms": 0.6651133298873901,
+              "p50": 0.6651133298873901,
+              "p99": 0.6651133298873901,
+              "max": 0.6651133298873901
+            },
+            "submit_to_running": {
+              "count": 1,
+              "p95": 10.778948664665222,
+              "total_ms": 10.778948664665222,
+              "p50": 10.778948664665222,
+              "p99": 10.778948664665222,
+              "max": 10.778948664665222
+            },
+            "stream": {
+              "count": 100,
+              "p95": 2.1987110376358032,
+              "total_ms": 630.8855935931206,
+              "p50": 1.5656128525733948,
+              "p99": 472.30465710163116,
+              "max": 472.30465710163116
+            },
+            "stream_scheduled": {
+              "count": 100,
+              "p95": 398.50325137376785,
+              "total_ms": 6382.519476115704,
+              "p50": 1.794077455997467,
+              "p99": 472.39019721746445,
+              "max": 472.39019721746445
+            },
+            "settle": {
+              "count": 1,
+              "p95": 106.27271980047226,
+              "total_ms": 106.27271980047226,
+              "p50": 106.27271980047226,
+              "p99": 106.27271980047226,
+              "max": 106.27271980047226
+            },
+            "settle_scheduled": {
+              "count": 1,
+              "p95": 108.01265388727188,
+              "total_ms": 108.01265388727188,
+              "p50": 108.01265388727188,
+              "p99": 108.01265388727188,
+              "max": 108.01265388727188
+            }
+          },
+          "recovered_exact_replay": 1,
+          "recovered_exact_content": 1,
+          "client_peak_rss_bytes": 55828480,
+          "engine_peak_rss_bytes": 30343168
+        },
+        {
+          "conversations": 1,
+          "leg": 1,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-1-1-candidate.json",
+          "elapsed_seconds": 3.4691226482391357,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 1,
+              "p95": 3.996320068836212,
+              "total_ms": 3.996320068836212,
+              "p50": 3.996320068836212,
+              "p99": 3.996320068836212,
+              "max": 3.996320068836212
+            },
+            "bind": {
+              "count": 1,
+              "p95": 0.8141323924064636,
+              "total_ms": 0.8141323924064636,
+              "p50": 0.8141323924064636,
+              "p99": 0.8141323924064636,
+              "max": 0.8141323924064636
+            },
+            "start": {
+              "count": 1,
+              "p95": 0.7002279162406921,
+              "total_ms": 0.7002279162406921,
+              "p50": 0.7002279162406921,
+              "p99": 0.7002279162406921,
+              "max": 0.7002279162406921
+            },
+            "submit_to_running": {
+              "count": 1,
+              "p95": 5.782388150691986,
+              "total_ms": 5.782388150691986,
+              "p50": 5.782388150691986,
+              "p99": 5.782388150691986,
+              "max": 5.782388150691986
+            },
+            "stream": {
+              "count": 100,
+              "p95": 2.5144070386886597,
+              "total_ms": 269.5082202553749,
+              "p50": 1.5799850225448608,
+              "p99": 106.85741156339645,
+              "max": 106.85741156339645
+            },
+            "stream_scheduled": {
+              "count": 100,
+              "p95": 33.95264595746994,
+              "total_ms": 533.8762924075127,
+              "p50": 1.701749861240387,
+              "p99": 106.93832486867905,
+              "max": 106.93832486867905
+            },
+            "settle": {
+              "count": 1,
+              "p95": 57.895541191101074,
+              "total_ms": 57.895541191101074,
+              "p50": 57.895541191101074,
+              "p99": 57.895541191101074,
+              "max": 57.895541191101074
+            },
+            "settle_scheduled": {
+              "count": 1,
+              "p95": 59.63318794965744,
+              "total_ms": 59.63318794965744,
+              "p50": 59.63318794965744,
+              "p99": 59.63318794965744,
+              "max": 59.63318794965744
+            }
+          },
+          "recovered_exact_replay": 1,
+          "recovered_exact_content": 1,
+          "client_peak_rss_bytes": 57651200,
+          "engine_peak_rss_bytes": 34467840
+        },
+        {
+          "conversations": 1,
+          "leg": 2,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-1-2-candidate.json",
+          "elapsed_seconds": 3.268623113632202,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 1,
+              "p95": 3.2704249024391174,
+              "total_ms": 3.2704249024391174,
+              "p50": 3.2704249024391174,
+              "p99": 3.2704249024391174,
+              "max": 3.2704249024391174
+            },
+            "bind": {
+              "count": 1,
+              "p95": 0.7461085915565491,
+              "total_ms": 0.7461085915565491,
+              "p50": 0.7461085915565491,
+              "p99": 0.7461085915565491,
+              "max": 0.7461085915565491
+            },
+            "start": {
+              "count": 1,
+              "p95": 0.6050094962120056,
+              "total_ms": 0.6050094962120056,
+              "p50": 0.6050094962120056,
+              "p99": 0.6050094962120056,
+              "max": 0.6050094962120056
+            },
+            "submit_to_running": {
+              "count": 1,
+              "p95": 4.878208041191101,
+              "total_ms": 4.878208041191101,
+              "p50": 4.878208041191101,
+              "p99": 4.878208041191101,
+              "max": 4.878208041191101
+            },
+            "stream": {
+              "count": 100,
+              "p95": 2.0085424184799194,
+              "total_ms": 216.47246181964874,
+              "p50": 1.4167055487632751,
+              "p99": 72.63226807117462,
+              "max": 72.63226807117462
+            },
+            "stream_scheduled": {
+              "count": 100,
+              "p95": 2.7149543166160583,
+              "total_ms": 330.75399696826935,
+              "p50": 1.5302672982215881,
+              "p99": 72.7049931883812,
+              "max": 72.7049931883812
+            },
+            "settle": {
+              "count": 1,
+              "p95": 58.16158652305603,
+              "total_ms": 58.16158652305603,
+              "p50": 58.16158652305603,
+              "p99": 58.16158652305603,
+              "max": 58.16158652305603
+            },
+            "settle_scheduled": {
+              "count": 1,
+              "p95": 59.75005775690079,
+              "total_ms": 59.75005775690079,
+              "p50": 59.75005775690079,
+              "p99": 59.75005775690079,
+              "max": 59.75005775690079
+            }
+          },
+          "recovered_exact_replay": 1,
+          "recovered_exact_content": 1,
+          "client_peak_rss_bytes": 57073664,
+          "engine_peak_rss_bytes": 35241984
+        },
+        {
+          "conversations": 1,
+          "leg": 3,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-1-3-baseline.json",
+          "elapsed_seconds": 3.8213346004486084,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 1,
+              "p95": 5.042083561420441,
+              "total_ms": 5.042083561420441,
+              "p50": 5.042083561420441,
+              "p99": 5.042083561420441,
+              "max": 5.042083561420441
+            },
+            "bind": {
+              "count": 1,
+              "p95": 1.068398356437683,
+              "total_ms": 1.068398356437683,
+              "p50": 1.068398356437683,
+              "p99": 1.068398356437683,
+              "max": 1.068398356437683
+            },
+            "start": {
+              "count": 1,
+              "p95": 0.8581653237342834,
+              "total_ms": 0.8581653237342834,
+              "p50": 0.8581653237342834,
+              "p99": 0.8581653237342834,
+              "max": 0.8581653237342834
+            },
+            "submit_to_running": {
+              "count": 1,
+              "p95": 7.23092257976532,
+              "total_ms": 7.23092257976532,
+              "p50": 7.23092257976532,
+              "p99": 7.23092257976532,
+              "max": 7.23092257976532
+            },
+            "stream": {
+              "count": 100,
+              "p95": 2.3372024297714233,
+              "total_ms": 306.25104904174805,
+              "p50": 1.7467960715293884,
+              "p99": 123.59803169965744,
+              "max": 123.59803169965744
+            },
+            "stream_scheduled": {
+              "count": 100,
+              "p95": 52.098095417022705,
+              "total_ms": 672.6098209619522,
+              "p50": 1.8835142254829407,
+              "p99": 123.67777526378632,
+              "max": 123.67777526378632
+            },
+            "settle": {
+              "count": 1,
+              "p95": 72.82953709363937,
+              "total_ms": 72.82953709363937,
+              "p50": 72.82953709363937,
+              "p99": 72.82953709363937,
+              "max": 72.82953709363937
+            },
+            "settle_scheduled": {
+              "count": 1,
+              "p95": 74.82580095529556,
+              "total_ms": 74.82580095529556,
+              "p50": 74.82580095529556,
+              "p99": 74.82580095529556,
+              "max": 74.82580095529556
+            }
+          },
+          "recovered_exact_replay": 1,
+          "recovered_exact_content": 1,
+          "client_peak_rss_bytes": 51101696,
+          "engine_peak_rss_bytes": 31870976
+        },
+        {
+          "conversations": 4,
+          "leg": 0,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-4-0-baseline.json",
+          "elapsed_seconds": 3.6193253993988037,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 4,
+              "p95": 5.2032992243766785,
+              "total_ms": 18.30361783504486,
+              "p50": 4.761308431625366,
+              "p99": 5.2032992243766785,
+              "max": 5.2032992243766785
+            },
+            "bind": {
+              "count": 4,
+              "p95": 2.3370981216430664,
+              "total_ms": 7.372759282588959,
+              "p50": 2.237267792224884,
+              "p99": 2.3370981216430664,
+              "max": 2.3370981216430664
+            },
+            "start": {
+              "count": 4,
+              "p95": 2.209372818470001,
+              "total_ms": 7.122397422790527,
+              "p50": 1.8271133303642273,
+              "p99": 2.209372818470001,
+              "max": 2.209372818470001
+            },
+            "submit_to_running": {
+              "count": 4,
+              "p95": 9.475715458393097,
+              "total_ms": 34.104123711586,
+              "p50": 8.719615638256073,
+              "p99": 9.475715458393097,
+              "max": 9.475715458393097
+            },
+            "stream": {
+              "count": 400,
+              "p95": 4.9438029527664185,
+              "total_ms": 1584.6701189875603,
+              "p50": 3.0294060707092285,
+              "p99": 77.4359181523323,
+              "max": 80.5441215634346
+            },
+            "stream_scheduled": {
+              "count": 400,
+              "p95": 9.605564177036285,
+              "total_ms": 2292.478673160076,
+              "p50": 3.7385299801826477,
+              "p99": 77.52763479948044,
+              "max": 80.80911636352539
+            },
+            "settle": {
+              "count": 4,
+              "p95": 139.3103376030922,
+              "total_ms": 544.9990481138229,
+              "p50": 137.87154853343964,
+              "p99": 139.3103376030922,
+              "max": 139.3103376030922
+            },
+            "settle_scheduled": {
+              "count": 4,
+              "p95": 141.59592241048813,
+              "total_ms": 559.9793717265129,
+              "p50": 141.37686789035797,
+              "p99": 141.59592241048813,
+              "max": 141.59592241048813
+            }
+          },
+          "recovered_exact_replay": 4,
+          "recovered_exact_content": 4,
+          "client_peak_rss_bytes": 86671360,
+          "engine_peak_rss_bytes": 141291520
+        },
+        {
+          "conversations": 4,
+          "leg": 1,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-4-1-candidate.json",
+          "elapsed_seconds": 3.7195756435394287,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 4,
+              "p95": 5.033582448959351,
+              "total_ms": 19.050724804401398,
+              "p50": 4.876337945461273,
+              "p99": 5.033582448959351,
+              "max": 5.033582448959351
+            },
+            "bind": {
+              "count": 4,
+              "p95": 2.147279679775238,
+              "total_ms": 6.637357175350189,
+              "p50": 1.8520653247833252,
+              "p99": 2.147279679775238,
+              "max": 2.147279679775238
+            },
+            "start": {
+              "count": 4,
+              "p95": 1.63375586271286,
+              "total_ms": 5.009278655052185,
+              "p50": 1.5369653701782227,
+              "p99": 1.63375586271286,
+              "max": 1.63375586271286
+            },
+            "submit_to_running": {
+              "count": 4,
+              "p95": 8.483216166496277,
+              "total_ms": 32.02217072248459,
+              "p50": 8.238159120082855,
+              "p99": 8.483216166496277,
+              "max": 8.483216166496277
+            },
+            "stream": {
+              "count": 400,
+              "p95": 4.417628049850464,
+              "total_ms": 1590.8548906445503,
+              "p50": 2.811908721923828,
+              "p99": 108.88244211673737,
+              "max": 111.30130290985107
+            },
+            "stream_scheduled": {
+              "count": 400,
+              "p95": 39.819441735744476,
+              "total_ms": 2911.683924496174,
+              "p50": 3.4798532724380493,
+              "p99": 109.25766825675964,
+              "max": 111.55234277248383
+            },
+            "settle": {
+              "count": 4,
+              "p95": 157.9795405268669,
+              "total_ms": 627.3545399308205,
+              "p50": 157.00508654117584,
+              "p99": 157.9795405268669,
+              "max": 157.9795405268669
+            },
+            "settle_scheduled": {
+              "count": 4,
+              "p95": 159.95091199874878,
+              "total_ms": 639.1166299581528,
+              "p50": 159.83407199382782,
+              "p99": 159.95091199874878,
+              "max": 159.95091199874878
+            }
+          },
+          "recovered_exact_replay": 4,
+          "recovered_exact_content": 4,
+          "client_peak_rss_bytes": 85757952,
+          "engine_peak_rss_bytes": 133582848
+        },
+        {
+          "conversations": 4,
+          "leg": 2,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-4-2-candidate.json",
+          "elapsed_seconds": 3.870839834213257,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 4,
+              "p95": 6.490185856819153,
+              "total_ms": 21.30112797021866,
+              "p50": 5.31642884016037,
+              "p99": 6.490185856819153,
+              "max": 6.490185856819153
+            },
+            "bind": {
+              "count": 4,
+              "p95": 2.070806920528412,
+              "total_ms": 7.288843393325806,
+              "p50": 1.8599852919578552,
+              "p99": 2.070806920528412,
+              "max": 2.070806920528412
+            },
+            "start": {
+              "count": 4,
+              "p95": 1.8941909074783325,
+              "total_ms": 5.965083837509155,
+              "p50": 1.6693472862243652,
+              "p99": 1.8941909074783325,
+              "max": 1.8941909074783325
+            },
+            "submit_to_running": {
+              "count": 4,
+              "p95": 10.528169572353363,
+              "total_ms": 35.840265452861786,
+              "p50": 8.926555514335632,
+              "p99": 10.528169572353363,
+              "max": 10.528169572353363
+            },
+            "stream": {
+              "count": 400,
+              "p95": 4.749119281768799,
+              "total_ms": 1507.2167739272118,
+              "p50": 3.0073970556259155,
+              "p99": 75.81617683172226,
+              "max": 78.27478647232056
+            },
+            "stream_scheduled": {
+              "count": 400,
+              "p95": 7.701463997364044,
+              "total_ms": 2196.5948045253754,
+              "p50": 3.5638809204101562,
+              "p99": 76.01793110370636,
+              "max": 78.36376130580902
+            },
+            "settle": {
+              "count": 4,
+              "p95": 108.89533907175064,
+              "total_ms": 411.12709790468216,
+              "p50": 105.5477038025856,
+              "p99": 108.89533907175064,
+              "max": 108.89533907175064
+            },
+            "settle_scheduled": {
+              "count": 4,
+              "p95": 110.98556220531464,
+              "total_ms": 426.1298105120659,
+              "p50": 110.72414368391037,
+              "p99": 110.98556220531464,
+              "max": 110.98556220531464
+            }
+          },
+          "recovered_exact_replay": 4,
+          "recovered_exact_content": 4,
+          "client_peak_rss_bytes": 64139264,
+          "engine_peak_rss_bytes": 79130624
+        },
+        {
+          "conversations": 4,
+          "leg": 3,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-4-3-baseline.json",
+          "elapsed_seconds": 3.7698111534118652,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 4,
+              "p95": 5.760319530963898,
+              "total_ms": 18.98026466369629,
+              "p50": 4.796020686626434,
+              "p99": 5.760319530963898,
+              "max": 5.760319530963898
+            },
+            "bind": {
+              "count": 4,
+              "p95": 2.1000802516937256,
+              "total_ms": 6.461769342422485,
+              "p50": 2.0809918642044067,
+              "p99": 2.1000802516937256,
+              "max": 2.1000802516937256
+            },
+            "start": {
+              "count": 4,
+              "p95": 1.5953481197357178,
+              "total_ms": 4.560649394989014,
+              "p50": 1.3699978590011597,
+              "p99": 1.5953481197357178,
+              "max": 1.5953481197357178
+            },
+            "submit_to_running": {
+              "count": 4,
+              "p95": 8.976183831691742,
+              "total_ms": 31.38982504606247,
+              "p50": 8.392564952373505,
+              "p99": 8.976183831691742,
+              "max": 8.976183831691742
+            },
+            "stream": {
+              "count": 400,
+              "p95": 5.126953125,
+              "total_ms": 1738.9044985175133,
+              "p50": 3.039635717868805,
+              "p99": 121.08214944601059,
+              "max": 123.61107021570206
+            },
+            "stream_scheduled": {
+              "count": 400,
+              "p95": 54.59704250097275,
+              "total_ms": 3376.4649406075478,
+              "p50": 3.6487653851509094,
+              "p99": 121.18557840585709,
+              "max": 123.81595373153687
+            },
+            "settle": {
+              "count": 4,
+              "p95": 139.4355371594429,
+              "total_ms": 546.572856605053,
+              "p50": 137.32291013002396,
+              "p99": 139.4355371594429,
+              "max": 139.4355371594429
+            },
+            "settle_scheduled": {
+              "count": 4,
+              "p95": 141.9174075126648,
+              "total_ms": 561.8687868118286,
+              "p50": 141.6890025138855,
+              "p99": 141.9174075126648,
+              "max": 141.9174075126648
+            }
+          },
+          "recovered_exact_replay": 4,
+          "recovered_exact_content": 4,
+          "client_peak_rss_bytes": 86253568,
+          "engine_peak_rss_bytes": 149184512
+        },
+        {
+          "conversations": 16,
+          "leg": 0,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-16-0-baseline.json",
+          "elapsed_seconds": 6.172367334365845,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 16,
+              "p95": 8.634872734546661,
+              "total_ms": 96.83600068092346,
+              "p50": 5.887635052204132,
+              "p99": 8.634872734546661,
+              "max": 8.634872734546661
+            },
+            "bind": {
+              "count": 16,
+              "p95": 6.346896290779114,
+              "total_ms": 70.73141634464264,
+              "p50": 4.52471524477005,
+              "p99": 6.346896290779114,
+              "max": 6.346896290779114
+            },
+            "start": {
+              "count": 16,
+              "p95": 6.046921014785767,
+              "total_ms": 61.09658628702164,
+              "p50": 3.7086457014083862,
+              "p99": 6.046921014785767,
+              "max": 6.046921014785767
+            },
+            "submit_to_running": {
+              "count": 16,
+              "p95": 18.759779632091522,
+              "total_ms": 246.56103551387787,
+              "p50": 15.185564756393433,
+              "p99": 18.759779632091522,
+              "max": 18.759779632091522
+            },
+            "stream": {
+              "count": 1600,
+              "p95": 24.188920855522156,
+              "total_ms": 27971.137017011642,
+              "p50": 14.358356595039368,
+              "p99": 234.13662612438202,
+              "max": 240.20718783140182
+            },
+            "stream_scheduled": {
+              "count": 1600,
+              "p95": 221.4846834540367,
+              "total_ms": 122577.34712213278,
+              "p50": 26.270069181919098,
+              "p99": 236.73483729362488,
+              "max": 246.13940715789795
+            },
+            "settle": {
+              "count": 16,
+              "p95": 1099.8196005821228,
+              "total_ms": 16947.522662580013,
+              "p50": 1075.814813375473,
+              "p99": 1099.8196005821228,
+              "max": 1099.8196005821228
+            },
+            "settle_scheduled": {
+              "count": 16,
+              "p95": 1222.2517132759094,
+              "total_ms": 19185.392275452614,
+              "p50": 1220.7961902022362,
+              "p99": 1222.2517132759094,
+              "max": 1222.2517132759094
+            }
+          },
+          "recovered_exact_replay": 16,
+          "recovered_exact_content": 16,
+          "client_peak_rss_bytes": 203235328,
+          "engine_peak_rss_bytes": 421691392
+        },
+        {
+          "conversations": 16,
+          "leg": 1,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-16-1-candidate.json",
+          "elapsed_seconds": 5.673123359680176,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 16,
+              "p95": 11.519581079483032,
+              "total_ms": 121.55113369226456,
+              "p50": 8.004702627658844,
+              "p99": 11.519581079483032,
+              "max": 11.519581079483032
+            },
+            "bind": {
+              "count": 16,
+              "p95": 8.524090051651001,
+              "total_ms": 87.62393146753311,
+              "p50": 5.343787372112274,
+              "p99": 8.524090051651001,
+              "max": 8.524090051651001
+            },
+            "start": {
+              "count": 16,
+              "p95": 7.374316453933716,
+              "total_ms": 63.040703535079956,
+              "p50": 3.838583827018738,
+              "p99": 7.374316453933716,
+              "max": 7.374316453933716
+            },
+            "submit_to_running": {
+              "count": 16,
+              "p95": 23.704029619693756,
+              "total_ms": 288.0617305636406,
+              "p50": 18.621429800987244,
+              "p99": 23.704029619693756,
+              "max": 23.704029619693756
+            },
+            "stream": {
+              "count": 1600,
+              "p95": 24.71761405467987,
+              "total_ms": 25137.859098613262,
+              "p50": 12.57798820734024,
+              "p99": 190.08751213550568,
+              "max": 208.4573358297348
+            },
+            "stream_scheduled": {
+              "count": 1600,
+              "p95": 184.3549907207489,
+              "total_ms": 96353.30069810152,
+              "p50": 20.841829478740692,
+              "p99": 201.58424228429794,
+              "max": 211.90933883190155
+            },
+            "settle": {
+              "count": 16,
+              "p95": 396.2520956993103,
+              "total_ms": 5276.007801294327,
+              "p50": 390.3816416859627,
+              "p99": 396.2520956993103,
+              "max": 396.2520956993103
+            },
+            "settle_scheduled": {
+              "count": 16,
+              "p95": 491.8413758277893,
+              "total_ms": 6797.245591878891,
+              "p50": 490.2268275618553,
+              "p99": 491.8413758277893,
+              "max": 491.8413758277893
+            }
+          },
+          "recovered_exact_replay": 16,
+          "recovered_exact_content": 16,
+          "client_peak_rss_bytes": 203493376,
+          "engine_peak_rss_bytes": 375701504
+        },
+        {
+          "conversations": 16,
+          "leg": 2,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-16-2-candidate.json",
+          "elapsed_seconds": 5.121776103973389,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 16,
+              "p95": 9.575270116329193,
+              "total_ms": 94.42675858736038,
+              "p50": 5.796708166599274,
+              "p99": 9.575270116329193,
+              "max": 9.575270116329193
+            },
+            "bind": {
+              "count": 16,
+              "p95": 6.191320717334747,
+              "total_ms": 55.638961493968964,
+              "p50": 3.469236195087433,
+              "p99": 6.191320717334747,
+              "max": 6.191320717334747
+            },
+            "start": {
+              "count": 16,
+              "p95": 6.835088133811951,
+              "total_ms": 52.75152623653412,
+              "p50": 3.0422210693359375,
+              "p99": 6.835088133811951,
+              "max": 6.835088133811951
+            },
+            "submit_to_running": {
+              "count": 16,
+              "p95": 17.987556755542755,
+              "total_ms": 221.15781903266907,
+              "p50": 14.591045677661896,
+              "p99": 17.987556755542755,
+              "max": 17.987556755542755
+            },
+            "stream": {
+              "count": 1600,
+              "p95": 23.098401725292206,
+              "total_ms": 24035.730198025703,
+              "p50": 12.809105217456818,
+              "p99": 174.4563803076744,
+              "max": 192.8701028227806
+            },
+            "stream_scheduled": {
+              "count": 1600,
+              "p95": 164.21837359666824,
+              "total_ms": 79764.52758163214,
+              "p50": 17.920494079589844,
+              "p99": 184.56708639860153,
+              "max": 195.03411650657654
+            },
+            "settle": {
+              "count": 16,
+              "p95": 493.0676072835922,
+              "total_ms": 6986.677519977093,
+              "p50": 454.7187611460686,
+              "p99": 493.0676072835922,
+              "max": 493.0676072835922
+            },
+            "settle_scheduled": {
+              "count": 16,
+              "p95": 563.6960119009018,
+              "total_ms": 8167.49495267868,
+              "p50": 528.1030833721161,
+              "p99": 563.6960119009018,
+              "max": 563.6960119009018
+            }
+          },
+          "recovered_exact_replay": 16,
+          "recovered_exact_content": 16,
+          "client_peak_rss_bytes": 199970816,
+          "engine_peak_rss_bytes": 385105920
+        },
+        {
+          "conversations": 16,
+          "leg": 3,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-delta-16-3-baseline.json",
+          "elapsed_seconds": 6.524813413619995,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 16,
+              "p95": 11.342935264110565,
+              "total_ms": 122.57039546966553,
+              "p50": 7.4264779686927795,
+              "p99": 11.342935264110565,
+              "max": 11.342935264110565
+            },
+            "bind": {
+              "count": 16,
+              "p95": 7.29147344827652,
+              "total_ms": 88.85902166366577,
+              "p50": 5.571998655796051,
+              "p99": 7.29147344827652,
+              "max": 7.29147344827652
+            },
+            "start": {
+              "count": 16,
+              "p95": 7.611848413944244,
+              "total_ms": 86.2436518073082,
+              "p50": 5.504302680492401,
+              "p99": 7.611848413944244,
+              "max": 7.611848413944244
+            },
+            "submit_to_running": {
+              "count": 16,
+              "p95": 24.01437610387802,
+              "total_ms": 312.2982233762741,
+              "p50": 19.370436668395996,
+              "p99": 24.01437610387802,
+              "max": 24.01437610387802
+            },
+            "stream": {
+              "count": 1600,
+              "p95": 22.75729924440384,
+              "total_ms": 25819.456674158573,
+              "p50": 12.905798852443695,
+              "p99": 229.40503060817719,
+              "max": 239.93006348609924
+            },
+            "stream_scheduled": {
+              "count": 1600,
+              "p95": 211.94897592067719,
+              "total_ms": 113320.71556895971,
+              "p50": 38.31079602241516,
+              "p99": 231.44787549972534,
+              "max": 243.40101331472397
+            },
+            "settle": {
+              "count": 16,
+              "p95": 885.8031406998634,
+              "total_ms": 13235.795609652996,
+              "p50": 875.424325466156,
+              "p99": 885.8031406998634,
+              "max": 885.8031406998634
+            },
+            "settle_scheduled": {
+              "count": 16,
+              "p95": 953.9253413677216,
+              "total_ms": 14426.036261022091,
+              "p50": 952.5082409381866,
+              "p99": 953.9253413677216,
+              "max": 953.9253413677216
+            }
+          },
+          "recovered_exact_replay": 16,
+          "recovered_exact_content": 16,
+          "client_peak_rss_bytes": 201068544,
+          "engine_peak_rss_bytes": 424501248
+        }
+      ],
+      "scope": "isolated daemon, production Turn producer with atomic reconnect-event carrier, strict durability, 100 text frames; exact body and event replay after crash; no browser in timed region",
+      "explicit_overrides": {
+        "TOFU_TURN_DELTA_RECORD_MS": 0,
+        "TOFU_TURN_STRUCTURAL_RECORD_MS": 60000
+      }
+    },
+    "default_structural_40ms": {
+      "format": "tofu.event-reference-abba/v1",
+      "volume": "/path/to/your/project",
+      "legs": [
+        {
+          "conversations": 4,
+          "leg": 0,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-default-structure-4-0-baseline.json",
+          "elapsed_seconds": 6.072448253631592,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 4,
+              "p95": 5.6517720222473145,
+              "total_ms": 19.895613193511963,
+              "p50": 5.224771797657013,
+              "p99": 5.6517720222473145,
+              "max": 5.6517720222473145
+            },
+            "bind": {
+              "count": 4,
+              "p95": 2.5200918316841125,
+              "total_ms": 7.96925276517868,
+              "p50": 2.1474212408065796,
+              "p99": 2.5200918316841125,
+              "max": 2.5200918316841125
+            },
+            "start": {
+              "count": 4,
+              "p95": 1.8267109990119934,
+              "total_ms": 5.445525050163269,
+              "p50": 1.3069510459899902,
+              "p99": 1.8267109990119934,
+              "max": 1.8267109990119934
+            },
+            "submit_to_running": {
+              "count": 4,
+              "p95": 9.480305016040802,
+              "total_ms": 34.63517874479294,
+              "p50": 9.23839956521988,
+              "p99": 9.480305016040802,
+              "max": 9.480305016040802
+            },
+            "stream": {
+              "count": 400,
+              "p95": 5.921460688114166,
+              "total_ms": 2155.143328011036,
+              "p50": 3.3221542835235596,
+              "p99": 113.11842501163483,
+              "max": 115.6240925192833
+            },
+            "stream_scheduled": {
+              "count": 400,
+              "p95": 41.38581454753876,
+              "total_ms": 3087.345339357853,
+              "p50": 3.9397403597831726,
+              "p99": 113.21248859167099,
+              "max": 115.95205217599869
+            },
+            "settle": {
+              "count": 4,
+              "p95": 118.61079186201096,
+              "total_ms": 469.87586468458176,
+              "p50": 117.89495497941971,
+              "p99": 118.61079186201096,
+              "max": 118.61079186201096
+            },
+            "settle_scheduled": {
+              "count": 4,
+              "p95": 122.27975577116013,
+              "total_ms": 488.25718462467194,
+              "p50": 122.14485555887222,
+              "p99": 122.27975577116013,
+              "max": 122.27975577116013
+            }
+          },
+          "recovered_exact_replay": 4,
+          "recovered_exact_content": 4,
+          "client_peak_rss_bytes": 86179840,
+          "engine_peak_rss_bytes": 131538944
+        },
+        {
+          "conversations": 4,
+          "leg": 1,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-default-structure-4-1-candidate.json",
+          "elapsed_seconds": 5.821645498275757,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 4,
+              "p95": 5.145423114299774,
+              "total_ms": 19.423238933086395,
+              "p50": 5.108587443828583,
+              "p99": 5.145423114299774,
+              "max": 5.145423114299774
+            },
+            "bind": {
+              "count": 4,
+              "p95": 1.560807228088379,
+              "total_ms": 5.8563947677612305,
+              "p50": 1.495659351348877,
+              "p99": 1.560807228088379,
+              "max": 1.560807228088379
+            },
+            "start": {
+              "count": 4,
+              "p95": 1.8885955214500427,
+              "total_ms": 5.836993455886841,
+              "p50": 1.4395862817764282,
+              "p99": 1.8885955214500427,
+              "max": 1.8885955214500427
+            },
+            "submit_to_running": {
+              "count": 4,
+              "p95": 8.859343826770782,
+              "total_ms": 32.461270689964294,
+              "p50": 8.23771208524704,
+              "p99": 8.859343826770782,
+              "max": 8.859343826770782
+            },
+            "stream": {
+              "count": 400,
+              "p95": 6.042778491973877,
+              "total_ms": 1948.5063701868057,
+              "p50": 2.9007121920585632,
+              "p99": 110.58014631271362,
+              "max": 114.36881870031357
+            },
+            "stream_scheduled": {
+              "count": 400,
+              "p95": 34.48602557182312,
+              "total_ms": 2680.4229840636253,
+              "p50": 3.5031884908676147,
+              "p99": 110.77817529439926,
+              "max": 114.63668197393417
+            },
+            "settle": {
+              "count": 4,
+              "p95": 128.68539988994598,
+              "total_ms": 509.7197815775871,
+              "p50": 127.81113386154175,
+              "p99": 128.68539988994598,
+              "max": 128.68539988994598
+            },
+            "settle_scheduled": {
+              "count": 4,
+              "p95": 131.10142946243286,
+              "total_ms": 523.4885364770889,
+              "p50": 130.9741660952568,
+              "p99": 131.10142946243286,
+              "max": 131.10142946243286
+            }
+          },
+          "recovered_exact_replay": 4,
+          "recovered_exact_content": 4,
+          "client_peak_rss_bytes": 87506944,
+          "engine_peak_rss_bytes": 130859008
+        },
+        {
+          "conversations": 4,
+          "leg": 2,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-default-structure-4-2-candidate.json",
+          "elapsed_seconds": 5.9234373569488525,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 4,
+              "p95": 5.609750747680664,
+              "total_ms": 17.40049570798874,
+              "p50": 4.17172908782959,
+              "p99": 5.609750747680664,
+              "max": 5.609750747680664
+            },
+            "bind": {
+              "count": 4,
+              "p95": 2.6783719658851624,
+              "total_ms": 8.035548031330109,
+              "p50": 2.3497939109802246,
+              "p99": 2.6783719658851624,
+              "max": 2.6783719658851624
+            },
+            "start": {
+              "count": 4,
+              "p95": 1.6098394989967346,
+              "total_ms": 4.793047904968262,
+              "p50": 1.539483666419983,
+              "p99": 1.6098394989967346,
+              "max": 1.6098394989967346
+            },
+            "submit_to_running": {
+              "count": 4,
+              "p95": 9.100459516048431,
+              "total_ms": 31.63900226354599,
+              "p50": 8.491657674312592,
+              "p99": 9.100459516048431,
+              "max": 9.100459516048431
+            },
+            "stream": {
+              "count": 400,
+              "p95": 5.446344614028931,
+              "total_ms": 1800.000123679638,
+              "p50": 2.9194578528404236,
+              "p99": 74.97958093881607,
+              "max": 76.9864022731781
+            },
+            "stream_scheduled": {
+              "count": 400,
+              "p95": 6.240174174308777,
+              "total_ms": 2214.225322008133,
+              "p50": 3.4875497221946716,
+              "p99": 75.2933993935585,
+              "max": 77.23118364810944
+            },
+            "settle": {
+              "count": 4,
+              "p95": 113.3873239159584,
+              "total_ms": 449.78446513414383,
+              "p50": 112.97644674777985,
+              "p99": 113.3873239159584,
+              "max": 113.3873239159584
+            },
+            "settle_scheduled": {
+              "count": 4,
+              "p95": 116.01369827985764,
+              "total_ms": 463.4156674146652,
+              "p50": 115.9224882721901,
+              "p99": 116.01369827985764,
+              "max": 116.01369827985764
+            }
+          },
+          "recovered_exact_replay": 4,
+          "recovered_exact_content": 4,
+          "client_peak_rss_bytes": 63049728,
+          "engine_peak_rss_bytes": 133910528
+        },
+        {
+          "conversations": 4,
+          "leg": 3,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-default-structure-4-3-baseline.json",
+          "elapsed_seconds": 5.822100639343262,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 4,
+              "p95": 5.970112979412079,
+              "total_ms": 22.379443049430847,
+              "p50": 5.769453942775726,
+              "p99": 5.970112979412079,
+              "max": 5.970112979412079
+            },
+            "bind": {
+              "count": 4,
+              "p95": 2.740822732448578,
+              "total_ms": 7.828928530216217,
+              "p50": 2.2092238068580627,
+              "p99": 2.740822732448578,
+              "max": 2.740822732448578
+            },
+            "start": {
+              "count": 4,
+              "p95": 2.21087783575058,
+              "total_ms": 6.177701056003571,
+              "p50": 2.1381601691246033,
+              "p99": 2.21087783575058,
+              "max": 2.21087783575058
+            },
+            "submit_to_running": {
+              "count": 4,
+              "p95": 10.49082726240158,
+              "total_ms": 37.67068684101105,
+              "p50": 9.432286024093628,
+              "p99": 10.49082726240158,
+              "max": 10.49082726240158
+            },
+            "stream": {
+              "count": 400,
+              "p95": 5.457252264022827,
+              "total_ms": 2001.285694539547,
+              "p50": 2.8694942593574524,
+              "p99": 114.00938779115677,
+              "max": 116.2172332406044
+            },
+            "stream_scheduled": {
+              "count": 400,
+              "p95": 39.608657360076904,
+              "total_ms": 2864.8640364408493,
+              "p50": 3.457210958003998,
+              "p99": 114.20972645282745,
+              "max": 116.52219295501709
+            },
+            "settle": {
+              "count": 4,
+              "p95": 188.20825219154358,
+              "total_ms": 691.6308328509331,
+              "p50": 187.04922497272491,
+              "p99": 188.20825219154358,
+              "max": 188.20825219154358
+            },
+            "settle_scheduled": {
+              "count": 4,
+              "p95": 192.23575294017792,
+              "total_ms": 708.9457213878632,
+              "p50": 192.09075719118118,
+              "p99": 192.23575294017792,
+              "max": 192.23575294017792
+            }
+          },
+          "recovered_exact_replay": 4,
+          "recovered_exact_content": 4,
+          "client_peak_rss_bytes": 62795776,
+          "engine_peak_rss_bytes": 175562752
+        },
+        {
+          "conversations": 16,
+          "leg": 0,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-default-structure-16-0-baseline.json",
+          "elapsed_seconds": 8.130285024642944,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 16,
+              "p95": 8.297629654407501,
+              "total_ms": 95.88126093149185,
+              "p50": 6.164371967315674,
+              "p99": 8.297629654407501,
+              "max": 8.297629654407501
+            },
+            "bind": {
+              "count": 16,
+              "p95": 8.830331265926361,
+              "total_ms": 78.47937941551208,
+              "p50": 4.877440631389618,
+              "p99": 8.830331265926361,
+              "max": 8.830331265926361
+            },
+            "start": {
+              "count": 16,
+              "p95": 4.9523040652275085,
+              "total_ms": 50.183333456516266,
+              "p50": 3.253549337387085,
+              "p99": 4.9523040652275085,
+              "max": 4.9523040652275085
+            },
+            "submit_to_running": {
+              "count": 16,
+              "p95": 18.503651022911072,
+              "total_ms": 242.51161515712738,
+              "p50": 15.121206641197205,
+              "p99": 18.503651022911072,
+              "max": 18.503651022911072
+            },
+            "stream": {
+              "count": 1600,
+              "p95": 29.92602437734604,
+              "total_ms": 28772.273786365986,
+              "p50": 11.544041335582733,
+              "p99": 196.6710016131401,
+              "max": 319.330096244812
+            },
+            "stream_scheduled": {
+              "count": 1600,
+              "p95": 210.2314606308937,
+              "total_ms": 68901.38529241085,
+              "p50": 13.83945345878601,
+              "p99": 289.0095114707947,
+              "max": 322.8398934006691
+            },
+            "settle": {
+              "count": 16,
+              "p95": 557.7081441879272,
+              "total_ms": 8238.430231809616,
+              "p50": 521.5499922633171,
+              "p99": 557.7081441879272,
+              "max": 557.7081441879272
+            },
+            "settle_scheduled": {
+              "count": 16,
+              "p95": 651.6707241535187,
+              "total_ms": 9819.652236998081,
+              "p50": 618.2633712887764,
+              "p99": 651.6707241535187,
+              "max": 651.6707241535187
+            }
+          },
+          "recovered_exact_replay": 16,
+          "recovered_exact_content": 16,
+          "client_peak_rss_bytes": 188674048,
+          "engine_peak_rss_bytes": 528420864
+        },
+        {
+          "conversations": 16,
+          "leg": 1,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-default-structure-16-1-candidate.json",
+          "elapsed_seconds": 7.724811553955078,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 16,
+              "p95": 9.87059623003006,
+              "total_ms": 119.81725692749023,
+              "p50": 7.578261196613312,
+              "p99": 9.87059623003006,
+              "max": 9.87059623003006
+            },
+            "bind": {
+              "count": 16,
+              "p95": 6.722882390022278,
+              "total_ms": 75.59195905923843,
+              "p50": 5.067154765129089,
+              "p99": 6.722882390022278,
+              "max": 6.722882390022278
+            },
+            "start": {
+              "count": 16,
+              "p95": 6.606891751289368,
+              "total_ms": 69.04801726341248,
+              "p50": 4.295721650123596,
+              "p99": 6.606891751289368,
+              "max": 6.606891751289368
+            },
+            "submit_to_running": {
+              "count": 16,
+              "p95": 21.84540033340454,
+              "total_ms": 279.70123291015625,
+              "p50": 18.333569169044495,
+              "p99": 21.84540033340454,
+              "max": 21.84540033340454
+            },
+            "stream": {
+              "count": 1600,
+              "p95": 24.054378271102905,
+              "total_ms": 22910.348668694496,
+              "p50": 10.794155299663544,
+              "p99": 126.05825066566467,
+              "max": 167.8832396864891
+            },
+            "stream_scheduled": {
+              "count": 1600,
+              "p95": 99.76337105035782,
+              "total_ms": 35070.98672538996,
+              "p50": 12.86955177783966,
+              "p99": 136.75298541784286,
+              "max": 171.25748097896576
+            },
+            "settle": {
+              "count": 16,
+              "p95": 401.7740339040756,
+              "total_ms": 4958.455257117748,
+              "p50": 384.4141960144043,
+              "p99": 401.7740339040756,
+              "max": 401.7740339040756
+            },
+            "settle_scheduled": {
+              "count": 16,
+              "p95": 409.95657444000244,
+              "total_ms": 5195.736028254032,
+              "p50": 408.38489681482315,
+              "p99": 409.95657444000244,
+              "max": 409.95657444000244
+            }
+          },
+          "recovered_exact_replay": 16,
+          "recovered_exact_content": 16,
+          "client_peak_rss_bytes": 204509184,
+          "engine_peak_rss_bytes": 474734592
+        },
+        {
+          "conversations": 16,
+          "leg": 2,
+          "version": "candidate",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-default-structure-16-2-candidate.json",
+          "elapsed_seconds": 7.87729287147522,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 16,
+              "p95": 9.56958532333374,
+              "total_ms": 112.55142092704773,
+              "p50": 7.262818515300751,
+              "p99": 9.56958532333374,
+              "max": 9.56958532333374
+            },
+            "bind": {
+              "count": 16,
+              "p95": 7.578521966934204,
+              "total_ms": 81.67119324207306,
+              "p50": 4.889443516731262,
+              "p99": 7.578521966934204,
+              "max": 7.578521966934204
+            },
+            "start": {
+              "count": 16,
+              "p95": 5.794815719127655,
+              "total_ms": 67.67711788415909,
+              "p50": 4.526004195213318,
+              "p99": 5.794815719127655,
+              "max": 5.794815719127655
+            },
+            "submit_to_running": {
+              "count": 16,
+              "p95": 20.57550847530365,
+              "total_ms": 278.1295105814934,
+              "p50": 18.575437366962433,
+              "p99": 20.57550847530365,
+              "max": 20.57550847530365
+            },
+            "stream": {
+              "count": 1600,
+              "p95": 21.907836198806763,
+              "total_ms": 22264.477148652077,
+              "p50": 10.077811777591705,
+              "p99": 127.33229994773865,
+              "max": 208.17063003778458
+            },
+            "stream_scheduled": {
+              "count": 1600,
+              "p95": 106.75515979528427,
+              "total_ms": 38074.46566224098,
+              "p50": 12.286245822906494,
+              "p99": 179.68196421861649,
+              "max": 210.60223132371902
+            },
+            "settle": {
+              "count": 16,
+              "p95": 444.10165399312973,
+              "total_ms": 6988.987646996975,
+              "p50": 437.18694895505905,
+              "p99": 444.10165399312973,
+              "max": 444.10165399312973
+            },
+            "settle_scheduled": {
+              "count": 16,
+              "p95": 450.92981308698654,
+              "total_ms": 7195.413626730442,
+              "p50": 449.7595205903053,
+              "p99": 450.92981308698654,
+              "max": 450.92981308698654
+            }
+          },
+          "recovered_exact_replay": 16,
+          "recovered_exact_content": 16,
+          "client_peak_rss_bytes": 204103680,
+          "engine_peak_rss_bytes": 521293824
+        },
+        {
+          "conversations": 16,
+          "leg": 3,
+          "version": "baseline",
+          "output": "/tmp/tofu-storage-root-20261001/event-publication-default-structure-16-3-baseline.json",
+          "elapsed_seconds": 7.675584077835083,
+          "correctness_passed": true,
+          "errors": [],
+          "identity_verified": true,
+          "volume_verified": true,
+          "harness_sha256": "ab79d1019ed3222b91d5d95f03562666df977ce9936bee6fdcfd2d74a1e86458",
+          "latency_ms": {
+            "accept": {
+              "count": 16,
+              "p95": 10.572068393230438,
+              "total_ms": 113.77643048763275,
+              "p50": 7.1518197655677795,
+              "p99": 10.572068393230438,
+              "max": 10.572068393230438
+            },
+            "bind": {
+              "count": 16,
+              "p95": 9.040869772434235,
+              "total_ms": 81.23767375946045,
+              "p50": 4.759974777698517,
+              "p99": 9.040869772434235,
+              "max": 9.040869772434235
+            },
+            "start": {
+              "count": 16,
+              "p95": 5.9830546379089355,
+              "total_ms": 59.708088636398315,
+              "p50": 3.4154802560806274,
+              "p99": 5.9830546379089355,
+              "max": 5.9830546379089355
+            },
+            "submit_to_running": {
+              "count": 16,
+              "p95": 21.451175212860107,
+              "total_ms": 271.39654010534286,
+              "p50": 17.53251999616623,
+              "p99": 21.451175212860107,
+              "max": 21.451175212860107
+            },
+            "stream": {
+              "count": 1600,
+              "p95": 43.97984594106674,
+              "total_ms": 28154.84644472599,
+              "p50": 11.512473225593567,
+              "p99": 187.7194195985794,
+              "max": 251.34792178869247
+            },
+            "stream_scheduled": {
+              "count": 1600,
+              "p95": 164.53496366739273,
+              "total_ms": 58320.5816373229,
+              "p50": 13.670943677425385,
+              "p99": 221.85523808002472,
+              "max": 254.50783222913742
+            },
+            "settle": {
+              "count": 16,
+              "p95": 401.9710123538971,
+              "total_ms": 6101.620130240917,
+              "p50": 393.7154859304428,
+              "p99": 401.9710123538971,
+              "max": 401.9710123538971
+            },
+            "settle_scheduled": {
+              "count": 16,
+              "p95": 493.20103228092194,
+              "total_ms": 7649.323351681232,
+              "p50": 491.58644676208496,
+              "p99": 493.20103228092194,
+              "max": 493.20103228092194
+            }
+          },
+          "recovered_exact_replay": 16,
+          "recovered_exact_content": 16,
+          "client_peak_rss_bytes": 180047872,
+          "engine_peak_rss_bytes": 519086080
+        }
+      ],
+      "scope": "isolated daemon, production Turn producer with atomic reconnect-event carrier, strict durability, 100 text frames at 40ms; default 3s structural cadence; delta coalescing still explicitly disabled; exact body and event replay after crash; no browser in timed region",
+      "explicit_overrides": {
+        "TOFU_TURN_DELTA_RECORD_MS": 0,
+        "TOFU_TURN_STRUCTURAL_RECORD_MS": 3000
+      }
+    }
+  },
+  "canonical_replay_workload": [
+    {
+      "format": "tofu.event-reference-replay/v1",
+      "rounds": 200,
+      "chunk_bytes": 8192,
+      "scope": "one synthetic conversation, production Turn facade, strict durability, canonical conversation replay before and after SIGKILL; no provider or timed browser",
+      "binary_sha256": "7023fbd649174a973653598842983b7a60db0e3c397816460ba71af698719aff",
+      "driver_sha256": "130442b6bd93c126c7dff106b425be2035dedb412a0999dcff61ad029ee436a9",
+      "identity": {
+        "format": "tofu-db-build.v1",
+        "source_sha256": "4183a128e0d4cbcd53710303b8362973a857bbf064ccd11b42167f2cae74db86",
+        "version": "0.2.0"
+      },
+      "source_matches_checkout": true,
+      "settle_ms": 62.87761777639389,
+      "replay_before_crash_ms": [
+        44.18950527906418,
+        40.36897420883179,
+        38.695454597473145
+      ],
+      "event_count": 203,
+      "public_replay_bytes": 3434045,
+      "restart_ms": 49.686938,
+      "replay_after_crash_ms": 43.89767348766327,
+      "write_p50_ms": 1.4891549944877625,
+      "write_p99_ms": 4.2493268847465515,
+      "exact_replay_and_body": true,
+      "storage_metrics": {
+        "authority": {
+          "contendedMilliseconds": 0,
+          "wedged": false
+        },
+        "backend": "tofudb",
+        "backgroundPacker": {
+          "discardedBytes": 0,
+          "discardedSegments": 0,
+          "failedRounds": 0,
+          "failedWalRetirements": 0,
+          "foregroundDrainUnpaces": 0,
+          "pacingWaitNanoseconds": 36466241,
+          "pacingWaits": 1,
+          "packedBytes": 2443535,
+          "packedSegments": 1,
+          "retiredWals": 0
+        },
+        "backgroundPackerPacing": {
+          "adaptive": true,
+          "paceBytesPerSecond": 67108864
+        },
+        "commitStages": [
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 4495
+              }
+            ],
+            "stage": "prepare",
+            "totalNanos": 4495
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 639708
+              }
+            ],
+            "stage": "engine_commit",
+            "totalNanos": 639708
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 11250
+              }
+            ],
+            "stage": "apply",
+            "totalNanos": 11250
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 261383
+              }
+            ],
+            "stage": "wal",
+            "totalNanos": 261383
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2060
+              }
+            ],
+            "stage": "encode",
+            "totalNanos": 2060
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 1975
+              }
+            ],
+            "stage": "carried",
+            "totalNanos": 1975
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 26790996
+              }
+            ],
+            "stage": "ir_steps",
+            "totalNanos": 26790996
+          },
+          {
+            "calls": 6113,
+            "components": [
+              {
+                "calls": 6113,
+                "component": "foreground",
+                "totalNanos": 677268
+              }
+            ],
+            "stage": "load_node",
+            "totalNanos": 677268
+          },
+          {
+            "calls": 5,
+            "components": [
+              {
+                "calls": 5,
+                "component": "foreground",
+                "totalNanos": 17530
+              }
+            ],
+            "stage": "put_deferred",
+            "totalNanos": 17530
+          },
+          {
+            "calls": 1565,
+            "components": [
+              {
+                "calls": 1565,
+                "component": "background_packer",
+                "totalNanos": 879387
+              }
+            ],
+            "stage": "block_get",
+            "totalNanos": 879387
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 3132
+              }
+            ],
+            "stage": "builder",
+            "totalNanos": 3132
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 369907
+              }
+            ],
+            "stage": "checkpoint_if",
+            "totalNanos": 369907
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 3771
+              }
+            ],
+            "stage": "commit_tail",
+            "totalNanos": 3771
+          },
+          {
+            "calls": 1565,
+            "components": [
+              {
+                "calls": 1565,
+                "component": "background_packer",
+                "totalNanos": 261573
+              }
+            ],
+            "stage": "get_pending",
+            "totalNanos": 261573
+          },
+          {
+            "calls": 5,
+            "components": [
+              {
+                "calls": 5,
+                "component": "foreground",
+                "totalNanos": 8156
+              }
+            ],
+            "stage": "put_stage",
+            "totalNanos": 8156
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 369383
+              }
+            ],
+            "stage": "history_stage",
+            "totalNanos": 369383
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "pack_adoption_driver",
+                "totalNanos": 582704
+              }
+            ],
+            "stage": "pack_retire",
+            "totalNanos": 582704
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "background_packer",
+                "totalNanos": 77
+              }
+            ],
+            "stage": "pack_filter",
+            "totalNanos": 77
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 99
+              }
+            ],
+            "stage": "ta_prepare_merge",
+            "totalNanos": 99
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 1677
+              }
+            ],
+            "stage": "ta_prepare_fast",
+            "totalNanos": 1677
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 3352
+              }
+            ],
+            "stage": "authority_wait",
+            "totalNanos": 3352
+          },
+          {
+            "calls": 1355,
+            "components": [
+              {
+                "calls": 1355,
+                "component": "foreground",
+                "totalNanos": 184432
+              }
+            ],
+            "stage": "overlay_point",
+            "totalNanos": 184432
+          },
+          {
+            "calls": 1351,
+            "components": [
+              {
+                "calls": 1351,
+                "component": "foreground",
+                "totalNanos": 42093
+              }
+            ],
+            "stage": "overlay_view",
+            "totalNanos": 42093
+          },
+          {
+            "calls": 4,
+            "components": [
+              {
+                "calls": 4,
+                "component": "foreground",
+                "totalNanos": 1610959
+              }
+            ],
+            "stage": "blob_encode",
+            "totalNanos": 1610959
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2488785
+              }
+            ],
+            "stage": "blob_stage",
+            "totalNanos": 2488785
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 471
+              }
+            ],
+            "stage": "history_lookup",
+            "totalNanos": 471
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 749912
+              }
+            ],
+            "stage": "history_range",
+            "totalNanos": 749912
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 2917388
+              }
+            ],
+            "stage": "overlay_replay",
+            "totalNanos": 2917388
+          }
+        ],
+        "contract": "tofu-db.system-metrics.v1",
+        "durability": {
+          "checkpoint": 0,
+          "checkpointHistoryTailBytes": 0,
+          "dropFlushFailures": 0,
+          "flushDeferred": 0,
+          "historyDecodeAttempts": 0,
+          "historyDecodeSourceBytes": 0,
+          "historyDecodedTransactions": 0,
+          "maxCheckpointHistoryTailBytes": 0,
+          "overlayMaterializedBlocks": 0,
+          "overlayMaterializedBytes": 0,
+          "overlayMergeCommits": 0,
+          "overlayMergedEntries": 0,
+          "overlayMergedPositions": 0,
+          "overlaySupersededPositions": 0,
+          "overlayWalPressureAttempts": 0,
+          "overlayWalPressurePendingEntries": 0,
+          "publishControl": 0,
+          "walAppend": 0,
+          "walEncodedBytes": 4668
+        },
+        "listener": {
+          "acceptedConnections": 1,
+          "activeConnections": 1,
+          "completedConnections": 0,
+          "failedConnections": 0,
+          "peakActiveConnections": 1,
+          "rejectedConnections": 0,
+          "requestFrames": 0,
+          "responseFrames": 0
+        },
+        "maintenance": {
+          "attemptEventPruneAttempts": 0,
+          "attemptEventPruneBacklogRounds": 0,
+          "attemptEventsPruned": 0,
+          "committedTransactions": 0,
+          "completedMounts": 0,
+          "conflictDeferrals": 0,
+          "currentIdleIntervalMilliseconds": 250,
+          "droppedTerminalRecords": 0,
+          "failedRounds": 0,
+          "foregroundDeferrals": 0,
+          "historyCompactions": 0,
+          "materializedBytes": 0,
+          "materializedRows": 0,
+          "noWorkRounds": 0,
+          "overlayBackgroundChunks": 0,
+          "overlayBackgroundWakes": 3,
+          "publishedBackgroundPacks": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "rounds": 0,
+          "searchAcknowledgedTokens": 0,
+          "searchDirtyConversations": 0,
+          "searchFailedRounds": 0,
+          "searchForegroundDeferrals": 0,
+          "searchIndexedTurns": 0,
+          "searchPageBudgetExhaustions": 0,
+          "searchRebuiltConversations": 0,
+          "searchRemovedConversations": 0,
+          "searchSkippedOversizedTurns": 0,
+          "searchSourceBytes": 0,
+          "searchSourcePages": 0,
+          "tombstoneCompactionRounds": 0,
+          "tombstoneEntriesReclaimed": 0,
+          "tombstonePagesRewritten": 0,
+          "toolResultArtifactsPruned": 0,
+          "toolResultPruneBacklogRounds": 0
+        },
+        "onlineBackup": {
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "epochs_failed": 0,
+          "last_error": null,
+          "last_report": null,
+          "last_success_unix_ms": null
+        },
+        "onlineGarbageCollector": {
+          "deferred_epochs": 0,
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "last_epoch_duration_ms": 0,
+          "last_epoch_reclaimed_bytes": 0,
+          "marks_built": 0,
+          "total_compacted_blocks": 0,
+          "total_consolidated_victims": 0,
+          "total_consolidations": 0,
+          "total_orphan_segments_removed": 0,
+          "total_reclaimed_blocks": 0,
+          "total_reclaimed_bytes": 0,
+          "total_segments_retired": 0,
+          "total_segments_rewritten": 0,
+          "total_temporary_files_removed": 0
+        },
+        "protocol": "storage.v2",
+        "requestProfile": {
+          "enabled": false
+        },
+        "resourceBudget": {
+          "authorityGcMaximumBlocksPerRound": 65536,
+          "authorityGcMaximumOrphanPayloadSegmentFilesRemoved": 1,
+          "authorityGcMaximumPayloadSegmentFilesScanned": 4163,
+          "authorityGcMaximumPayloadSegmentsScanned": 16,
+          "authorityGcMaximumTemporaryBlockFilesRemoved": 1,
+          "authorityGcMaximumTemporaryBytes": 1073741824,
+          "authorityGcMaximumVictimBytes": 268435456,
+          "authorityGcMinimumPayloadCompactionBlocks": 128,
+          "blockCacheBytes": 2147483648,
+          "checkpointMaterializeBatchBytes": 8388608,
+          "connectionStackBytes": 1048576,
+          "entityPageCacheBytes": 1073741824,
+          "historyRetainedSegments": 64,
+          "leanFallback": false,
+          "logicalCpus": 60,
+          "maintenanceIdleIntervalMilliseconds": 250,
+          "maintenanceWorkerStackBytes": 524288,
+          "maximumConnections": 512,
+          "maximumFrameBytes": 134217728,
+          "maximumMaintenanceScopes": 64,
+          "maximumMaintenanceWorkers": 1,
+          "memoryCapacityBytes": 225485783040,
+          "memoryHeadroomBytes": 205095186432,
+          "minimumWritableVolumeFreeBytes": 150994944,
+          "overlayBudgetBytes": 268435456,
+          "overlayWalWatermarkBytes": 50331648,
+          "paperBuildRetainedMaximumBytes": 536870912,
+          "payloadSegmentCacheBytes": 3204612288,
+          "registeredMaintenanceScopes": 1,
+          "searchProjectionAvailable": true,
+          "searchProjectionConfigured": true,
+          "searchProjectionMaximumBytesPerOwner": 4294967296,
+          "sessionIdleTimeoutMilliseconds": 300000,
+          "sessionIoTimeoutMilliseconds": 30000,
+          "timerLiveCapacity": 16,
+          "volumeFreeBytes": 6886403028811776
+        },
+        "walDurability": "strict"
+      },
+      "physical_authority_bytes_after_sigkill": 6847846,
+      "authority_file_count": 5,
+      "physical_measurement_limit": "Includes unreclaimed history, WAL, retired blobs and reconstructible projection state; one workload endpoint is not a steady-state growth rate.",
+      "leg": 0,
+      "version": "baseline"
+    },
+    {
+      "format": "tofu.event-reference-replay/v1",
+      "rounds": 200,
+      "chunk_bytes": 8192,
+      "scope": "one synthetic conversation, production Turn facade, strict durability, canonical conversation replay before and after SIGKILL; no provider or timed browser",
+      "binary_sha256": "d6084ed4a525b690f3df21796795c0532bff3ef70d9bdb367397a09c0815b46e",
+      "driver_sha256": "130442b6bd93c126c7dff106b425be2035dedb412a0999dcff61ad029ee436a9",
+      "identity": {
+        "format": "tofu-db-build.v1",
+        "source_sha256": "386f5ae9354ceda97603b8e49de0922194ec15f93689653d62fd01171fe98b27",
+        "version": "0.2.0"
+      },
+      "source_matches_checkout": true,
+      "settle_ms": 56.69105798006058,
+      "replay_before_crash_ms": [
+        39.74533826112747,
+        42.72548109292984,
+        39.849117398262024
+      ],
+      "event_count": 203,
+      "public_replay_bytes": 3434045,
+      "restart_ms": 70.823628,
+      "replay_after_crash_ms": 44.1056564450264,
+      "write_p50_ms": 1.4257356524467468,
+      "write_p99_ms": 3.936775028705597,
+      "exact_replay_and_body": true,
+      "storage_metrics": {
+        "authority": {
+          "contendedMilliseconds": 0,
+          "wedged": false
+        },
+        "backend": "tofudb",
+        "backgroundPacker": {
+          "discardedBytes": 0,
+          "discardedSegments": 0,
+          "failedRounds": 0,
+          "failedWalRetirements": 0,
+          "foregroundDrainUnpaces": 0,
+          "pacingWaitNanoseconds": 34813145,
+          "pacingWaits": 1,
+          "packedBytes": 2332670,
+          "packedSegments": 1,
+          "retiredWals": 0
+        },
+        "backgroundPackerPacing": {
+          "adaptive": true,
+          "paceBytesPerSecond": 67108864
+        },
+        "commitStages": [
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 5128
+              }
+            ],
+            "stage": "prepare",
+            "totalNanos": 5128
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 655815
+              }
+            ],
+            "stage": "engine_commit",
+            "totalNanos": 655815
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 10370
+              }
+            ],
+            "stage": "apply",
+            "totalNanos": 10370
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 247380
+              }
+            ],
+            "stage": "wal",
+            "totalNanos": 247380
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2571
+              }
+            ],
+            "stage": "encode",
+            "totalNanos": 2571
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 3154
+              }
+            ],
+            "stage": "carried",
+            "totalNanos": 3154
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 25108927
+              }
+            ],
+            "stage": "ir_steps",
+            "totalNanos": 25108927
+          },
+          {
+            "calls": 59136,
+            "components": [
+              {
+                "calls": 59136,
+                "component": "foreground",
+                "totalNanos": 4771497
+              }
+            ],
+            "stage": "load_node",
+            "totalNanos": 4771497
+          },
+          {
+            "calls": 5,
+            "components": [
+              {
+                "calls": 5,
+                "component": "foreground",
+                "totalNanos": 14343
+              }
+            ],
+            "stage": "put_deferred",
+            "totalNanos": 14343
+          },
+          {
+            "calls": 1166,
+            "components": [
+              {
+                "calls": 1166,
+                "component": "background_packer",
+                "totalNanos": 486320
+              }
+            ],
+            "stage": "block_get",
+            "totalNanos": 486320
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 3276
+              }
+            ],
+            "stage": "builder",
+            "totalNanos": 3276
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 397909
+              }
+            ],
+            "stage": "checkpoint_if",
+            "totalNanos": 397909
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 6557
+              }
+            ],
+            "stage": "commit_tail",
+            "totalNanos": 6557
+          },
+          {
+            "calls": 1166,
+            "components": [
+              {
+                "calls": 1166,
+                "component": "background_packer",
+                "totalNanos": 152881
+              }
+            ],
+            "stage": "get_pending",
+            "totalNanos": 152881
+          },
+          {
+            "calls": 5,
+            "components": [
+              {
+                "calls": 5,
+                "component": "foreground",
+                "totalNanos": 5585
+              }
+            ],
+            "stage": "put_stage",
+            "totalNanos": 5585
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 397338
+              }
+            ],
+            "stage": "history_stage",
+            "totalNanos": 397338
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "pack_adoption_driver",
+                "totalNanos": 450123
+              }
+            ],
+            "stage": "pack_retire",
+            "totalNanos": 450123
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "background_packer",
+                "totalNanos": 231
+              }
+            ],
+            "stage": "pack_filter",
+            "totalNanos": 231
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 115
+              }
+            ],
+            "stage": "ta_prepare_merge",
+            "totalNanos": 115
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2298
+              }
+            ],
+            "stage": "ta_prepare_fast",
+            "totalNanos": 2298
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 4060
+              }
+            ],
+            "stage": "authority_wait",
+            "totalNanos": 4060
+          },
+          {
+            "calls": 13353,
+            "components": [
+              {
+                "calls": 13353,
+                "component": "foreground",
+                "totalNanos": 1668142
+              }
+            ],
+            "stage": "overlay_point",
+            "totalNanos": 1668142
+          },
+          {
+            "calls": 12945,
+            "components": [
+              {
+                "calls": 12945,
+                "component": "foreground",
+                "totalNanos": 391985
+              }
+            ],
+            "stage": "overlay_view",
+            "totalNanos": 391985
+          },
+          {
+            "calls": 4,
+            "components": [
+              {
+                "calls": 4,
+                "component": "foreground",
+                "totalNanos": 1514024
+              }
+            ],
+            "stage": "blob_encode",
+            "totalNanos": 1514024
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2329222
+              }
+            ],
+            "stage": "blob_stage",
+            "totalNanos": 2329222
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 469
+              }
+            ],
+            "stage": "history_lookup",
+            "totalNanos": 469
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 488638
+              }
+            ],
+            "stage": "history_range",
+            "totalNanos": 488638
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 2495896
+              }
+            ],
+            "stage": "overlay_replay",
+            "totalNanos": 2495896
+          }
+        ],
+        "contract": "tofu-db.system-metrics.v1",
+        "durability": {
+          "checkpoint": 0,
+          "checkpointHistoryTailBytes": 0,
+          "dropFlushFailures": 0,
+          "flushDeferred": 0,
+          "historyDecodeAttempts": 0,
+          "historyDecodeSourceBytes": 0,
+          "historyDecodedTransactions": 0,
+          "maxCheckpointHistoryTailBytes": 0,
+          "overlayMaterializedBlocks": 0,
+          "overlayMaterializedBytes": 0,
+          "overlayMergeCommits": 0,
+          "overlayMergedEntries": 0,
+          "overlayMergedPositions": 0,
+          "overlaySupersededPositions": 0,
+          "overlayWalPressureAttempts": 0,
+          "overlayWalPressurePendingEntries": 0,
+          "publishControl": 0,
+          "walAppend": 0,
+          "walEncodedBytes": 4670
+        },
+        "listener": {
+          "acceptedConnections": 1,
+          "activeConnections": 1,
+          "completedConnections": 0,
+          "failedConnections": 0,
+          "peakActiveConnections": 1,
+          "rejectedConnections": 0,
+          "requestFrames": 0,
+          "responseFrames": 0
+        },
+        "maintenance": {
+          "attemptEventPruneAttempts": 0,
+          "attemptEventPruneBacklogRounds": 0,
+          "attemptEventsPruned": 0,
+          "committedTransactions": 0,
+          "completedMounts": 0,
+          "conflictDeferrals": 0,
+          "currentIdleIntervalMilliseconds": 250,
+          "droppedTerminalRecords": 0,
+          "failedRounds": 0,
+          "foregroundDeferrals": 0,
+          "historyCompactions": 0,
+          "materializedBytes": 0,
+          "materializedRows": 0,
+          "noWorkRounds": 0,
+          "overlayBackgroundChunks": 0,
+          "overlayBackgroundWakes": 3,
+          "publishedBackgroundPacks": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "rounds": 0,
+          "searchAcknowledgedTokens": 0,
+          "searchDirtyConversations": 0,
+          "searchFailedRounds": 0,
+          "searchForegroundDeferrals": 0,
+          "searchIndexedTurns": 0,
+          "searchPageBudgetExhaustions": 0,
+          "searchRebuiltConversations": 0,
+          "searchRemovedConversations": 0,
+          "searchSkippedOversizedTurns": 0,
+          "searchSourceBytes": 0,
+          "searchSourcePages": 0,
+          "tombstoneCompactionRounds": 0,
+          "tombstoneEntriesReclaimed": 0,
+          "tombstonePagesRewritten": 0,
+          "toolResultArtifactsPruned": 0,
+          "toolResultPruneBacklogRounds": 0
+        },
+        "onlineBackup": {
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "epochs_failed": 0,
+          "last_error": null,
+          "last_report": null,
+          "last_success_unix_ms": null
+        },
+        "onlineGarbageCollector": {
+          "deferred_epochs": 0,
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "last_epoch_duration_ms": 0,
+          "last_epoch_reclaimed_bytes": 0,
+          "marks_built": 0,
+          "total_compacted_blocks": 0,
+          "total_consolidated_victims": 0,
+          "total_consolidations": 0,
+          "total_orphan_segments_removed": 0,
+          "total_reclaimed_blocks": 0,
+          "total_reclaimed_bytes": 0,
+          "total_segments_retired": 0,
+          "total_segments_rewritten": 0,
+          "total_temporary_files_removed": 0
+        },
+        "protocol": "storage.v2",
+        "requestProfile": {
+          "enabled": false
+        },
+        "resourceBudget": {
+          "authorityGcMaximumBlocksPerRound": 65536,
+          "authorityGcMaximumOrphanPayloadSegmentFilesRemoved": 1,
+          "authorityGcMaximumPayloadSegmentFilesScanned": 4163,
+          "authorityGcMaximumPayloadSegmentsScanned": 16,
+          "authorityGcMaximumTemporaryBlockFilesRemoved": 1,
+          "authorityGcMaximumTemporaryBytes": 1073741824,
+          "authorityGcMaximumVictimBytes": 268435456,
+          "authorityGcMinimumPayloadCompactionBlocks": 128,
+          "blockCacheBytes": 2147483648,
+          "checkpointMaterializeBatchBytes": 8388608,
+          "connectionStackBytes": 1048576,
+          "entityPageCacheBytes": 1073741824,
+          "historyRetainedSegments": 64,
+          "leanFallback": false,
+          "logicalCpus": 60,
+          "maintenanceIdleIntervalMilliseconds": 250,
+          "maintenanceWorkerStackBytes": 524288,
+          "maximumConnections": 512,
+          "maximumFrameBytes": 134217728,
+          "maximumMaintenanceScopes": 64,
+          "maximumMaintenanceWorkers": 1,
+          "memoryCapacityBytes": 225485783040,
+          "memoryHeadroomBytes": 205095337984,
+          "minimumWritableVolumeFreeBytes": 150994944,
+          "overlayBudgetBytes": 268435456,
+          "overlayWalWatermarkBytes": 50331648,
+          "paperBuildRetainedMaximumBytes": 536870912,
+          "payloadSegmentCacheBytes": 3204614656,
+          "registeredMaintenanceScopes": 1,
+          "searchProjectionAvailable": true,
+          "searchProjectionConfigured": true,
+          "searchProjectionMaximumBytesPerOwner": 4294967296,
+          "sessionIdleTimeoutMilliseconds": 300000,
+          "sessionIoTimeoutMilliseconds": 30000,
+          "timerLiveCapacity": 16,
+          "volumeFreeBytes": 6886403028811776
+        },
+        "walDurability": "strict"
+      },
+      "physical_authority_bytes_after_sigkill": 6641418,
+      "authority_file_count": 5,
+      "physical_measurement_limit": "Includes unreclaimed history, WAL, retired blobs and reconstructible projection state; one workload endpoint is not a steady-state growth rate.",
+      "leg": 1,
+      "version": "candidate"
+    },
+    {
+      "format": "tofu.event-reference-replay/v1",
+      "rounds": 200,
+      "chunk_bytes": 8192,
+      "scope": "one synthetic conversation, production Turn facade, strict durability, canonical conversation replay before and after SIGKILL; no provider or timed browser",
+      "binary_sha256": "d6084ed4a525b690f3df21796795c0532bff3ef70d9bdb367397a09c0815b46e",
+      "driver_sha256": "130442b6bd93c126c7dff106b425be2035dedb412a0999dcff61ad029ee436a9",
+      "identity": {
+        "format": "tofu-db-build.v1",
+        "source_sha256": "386f5ae9354ceda97603b8e49de0922194ec15f93689653d62fd01171fe98b27",
+        "version": "0.2.0"
+      },
+      "source_matches_checkout": true,
+      "settle_ms": 53.767092525959015,
+      "replay_before_crash_ms": [
+        41.013799607753754,
+        44.360823929309845,
+        41.61880165338516
+      ],
+      "event_count": 203,
+      "public_replay_bytes": 3434045,
+      "restart_ms": 63.31049,
+      "replay_after_crash_ms": 45.16514390707016,
+      "write_p50_ms": 1.506619155406952,
+      "write_p99_ms": 3.9124712347984314,
+      "exact_replay_and_body": true,
+      "storage_metrics": {
+        "authority": {
+          "contendedMilliseconds": 0,
+          "wedged": false
+        },
+        "backend": "tofudb",
+        "backgroundPacker": {
+          "discardedBytes": 0,
+          "discardedSegments": 0,
+          "failedRounds": 0,
+          "failedWalRetirements": 0,
+          "foregroundDrainUnpaces": 0,
+          "pacingWaitNanoseconds": 34818484,
+          "pacingWaits": 1,
+          "packedBytes": 2332804,
+          "packedSegments": 1,
+          "retiredWals": 0
+        },
+        "backgroundPackerPacing": {
+          "adaptive": true,
+          "paceBytesPerSecond": 67108864
+        },
+        "commitStages": [
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 5087
+              }
+            ],
+            "stage": "prepare",
+            "totalNanos": 5087
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 620062
+              }
+            ],
+            "stage": "engine_commit",
+            "totalNanos": 620062
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 6267
+              }
+            ],
+            "stage": "apply",
+            "totalNanos": 6267
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 233443
+              }
+            ],
+            "stage": "wal",
+            "totalNanos": 233443
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2400
+              }
+            ],
+            "stage": "encode",
+            "totalNanos": 2400
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 1845
+              }
+            ],
+            "stage": "carried",
+            "totalNanos": 1845
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 26487837
+              }
+            ],
+            "stage": "ir_steps",
+            "totalNanos": 26487837
+          },
+          {
+            "calls": 6423,
+            "components": [
+              {
+                "calls": 6423,
+                "component": "foreground",
+                "totalNanos": 719464
+              }
+            ],
+            "stage": "load_node",
+            "totalNanos": 719464
+          },
+          {
+            "calls": 5,
+            "components": [
+              {
+                "calls": 5,
+                "component": "foreground",
+                "totalNanos": 14867
+              }
+            ],
+            "stage": "put_deferred",
+            "totalNanos": 14867
+          },
+          {
+            "calls": 1166,
+            "components": [
+              {
+                "calls": 1166,
+                "component": "background_packer",
+                "totalNanos": 475604
+              }
+            ],
+            "stage": "block_get",
+            "totalNanos": 475604
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2693
+              }
+            ],
+            "stage": "builder",
+            "totalNanos": 2693
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 378407
+              }
+            ],
+            "stage": "checkpoint_if",
+            "totalNanos": 378407
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 3613
+              }
+            ],
+            "stage": "commit_tail",
+            "totalNanos": 3613
+          },
+          {
+            "calls": 1166,
+            "components": [
+              {
+                "calls": 1166,
+                "component": "background_packer",
+                "totalNanos": 155722
+              }
+            ],
+            "stage": "get_pending",
+            "totalNanos": 155722
+          },
+          {
+            "calls": 5,
+            "components": [
+              {
+                "calls": 5,
+                "component": "foreground",
+                "totalNanos": 5888
+              }
+            ],
+            "stage": "put_stage",
+            "totalNanos": 5888
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 377961
+              }
+            ],
+            "stage": "history_stage",
+            "totalNanos": 377961
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "pack_adoption_driver",
+                "totalNanos": 446762
+              }
+            ],
+            "stage": "pack_retire",
+            "totalNanos": 446762
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "background_packer",
+                "totalNanos": 76
+              }
+            ],
+            "stage": "pack_filter",
+            "totalNanos": 76
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 124
+              }
+            ],
+            "stage": "ta_prepare_merge",
+            "totalNanos": 124
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2062
+              }
+            ],
+            "stage": "ta_prepare_fast",
+            "totalNanos": 2062
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 3884
+              }
+            ],
+            "stage": "authority_wait",
+            "totalNanos": 3884
+          },
+          {
+            "calls": 1637,
+            "components": [
+              {
+                "calls": 1637,
+                "component": "foreground",
+                "totalNanos": 254698
+              }
+            ],
+            "stage": "overlay_point",
+            "totalNanos": 254698
+          },
+          {
+            "calls": 1229,
+            "components": [
+              {
+                "calls": 1229,
+                "component": "foreground",
+                "totalNanos": 37663
+              }
+            ],
+            "stage": "overlay_view",
+            "totalNanos": 37663
+          },
+          {
+            "calls": 4,
+            "components": [
+              {
+                "calls": 4,
+                "component": "foreground",
+                "totalNanos": 1589985
+              }
+            ],
+            "stage": "blob_encode",
+            "totalNanos": 1589985
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2458731
+              }
+            ],
+            "stage": "blob_stage",
+            "totalNanos": 2458731
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 354
+              }
+            ],
+            "stage": "history_lookup",
+            "totalNanos": 354
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 445032
+              }
+            ],
+            "stage": "history_range",
+            "totalNanos": 445032
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 2433237
+              }
+            ],
+            "stage": "overlay_replay",
+            "totalNanos": 2433237
+          }
+        ],
+        "contract": "tofu-db.system-metrics.v1",
+        "durability": {
+          "checkpoint": 0,
+          "checkpointHistoryTailBytes": 0,
+          "dropFlushFailures": 0,
+          "flushDeferred": 0,
+          "historyDecodeAttempts": 0,
+          "historyDecodeSourceBytes": 0,
+          "historyDecodedTransactions": 0,
+          "maxCheckpointHistoryTailBytes": 0,
+          "overlayMaterializedBlocks": 0,
+          "overlayMaterializedBytes": 0,
+          "overlayMergeCommits": 0,
+          "overlayMergedEntries": 0,
+          "overlayMergedPositions": 0,
+          "overlaySupersededPositions": 0,
+          "overlayWalPressureAttempts": 0,
+          "overlayWalPressurePendingEntries": 0,
+          "publishControl": 0,
+          "walAppend": 0,
+          "walEncodedBytes": 4671
+        },
+        "listener": {
+          "acceptedConnections": 1,
+          "activeConnections": 1,
+          "completedConnections": 0,
+          "failedConnections": 0,
+          "peakActiveConnections": 1,
+          "rejectedConnections": 0,
+          "requestFrames": 0,
+          "responseFrames": 0
+        },
+        "maintenance": {
+          "attemptEventPruneAttempts": 0,
+          "attemptEventPruneBacklogRounds": 0,
+          "attemptEventsPruned": 0,
+          "committedTransactions": 0,
+          "completedMounts": 0,
+          "conflictDeferrals": 0,
+          "currentIdleIntervalMilliseconds": 250,
+          "droppedTerminalRecords": 0,
+          "failedRounds": 0,
+          "foregroundDeferrals": 0,
+          "historyCompactions": 0,
+          "materializedBytes": 0,
+          "materializedRows": 0,
+          "noWorkRounds": 0,
+          "overlayBackgroundChunks": 0,
+          "overlayBackgroundWakes": 3,
+          "publishedBackgroundPacks": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "rounds": 0,
+          "searchAcknowledgedTokens": 0,
+          "searchDirtyConversations": 0,
+          "searchFailedRounds": 0,
+          "searchForegroundDeferrals": 0,
+          "searchIndexedTurns": 0,
+          "searchPageBudgetExhaustions": 0,
+          "searchRebuiltConversations": 0,
+          "searchRemovedConversations": 0,
+          "searchSkippedOversizedTurns": 0,
+          "searchSourceBytes": 0,
+          "searchSourcePages": 0,
+          "tombstoneCompactionRounds": 0,
+          "tombstoneEntriesReclaimed": 0,
+          "tombstonePagesRewritten": 0,
+          "toolResultArtifactsPruned": 0,
+          "toolResultPruneBacklogRounds": 0
+        },
+        "onlineBackup": {
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "epochs_failed": 0,
+          "last_error": null,
+          "last_report": null,
+          "last_success_unix_ms": null
+        },
+        "onlineGarbageCollector": {
+          "deferred_epochs": 0,
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "last_epoch_duration_ms": 0,
+          "last_epoch_reclaimed_bytes": 0,
+          "marks_built": 0,
+          "total_compacted_blocks": 0,
+          "total_consolidated_victims": 0,
+          "total_consolidations": 0,
+          "total_orphan_segments_removed": 0,
+          "total_reclaimed_blocks": 0,
+          "total_reclaimed_bytes": 0,
+          "total_segments_retired": 0,
+          "total_segments_rewritten": 0,
+          "total_temporary_files_removed": 0
+        },
+        "protocol": "storage.v2",
+        "requestProfile": {
+          "enabled": false
+        },
+        "resourceBudget": {
+          "authorityGcMaximumBlocksPerRound": 65536,
+          "authorityGcMaximumOrphanPayloadSegmentFilesRemoved": 1,
+          "authorityGcMaximumPayloadSegmentFilesScanned": 4163,
+          "authorityGcMaximumPayloadSegmentsScanned": 16,
+          "authorityGcMaximumTemporaryBlockFilesRemoved": 1,
+          "authorityGcMaximumTemporaryBytes": 1073741824,
+          "authorityGcMaximumVictimBytes": 268435456,
+          "authorityGcMinimumPayloadCompactionBlocks": 128,
+          "blockCacheBytes": 2147483648,
+          "checkpointMaterializeBatchBytes": 8388608,
+          "connectionStackBytes": 1048576,
+          "entityPageCacheBytes": 1073741824,
+          "historyRetainedSegments": 64,
+          "leanFallback": false,
+          "logicalCpus": 60,
+          "maintenanceIdleIntervalMilliseconds": 250,
+          "maintenanceWorkerStackBytes": 524288,
+          "maximumConnections": 512,
+          "maximumFrameBytes": 134217728,
+          "maximumMaintenanceScopes": 64,
+          "maximumMaintenanceWorkers": 1,
+          "memoryCapacityBytes": 225485783040,
+          "memoryHeadroomBytes": 205095931904,
+          "minimumWritableVolumeFreeBytes": 150994944,
+          "overlayBudgetBytes": 268435456,
+          "overlayWalWatermarkBytes": 50331648,
+          "paperBuildRetainedMaximumBytes": 536870912,
+          "payloadSegmentCacheBytes": 3204623936,
+          "registeredMaintenanceScopes": 1,
+          "searchProjectionAvailable": true,
+          "searchProjectionConfigured": true,
+          "searchProjectionMaximumBytesPerOwner": 4294967296,
+          "sessionIdleTimeoutMilliseconds": 300000,
+          "sessionIoTimeoutMilliseconds": 30000,
+          "timerLiveCapacity": 16,
+          "volumeFreeBytes": 6886403028811776
+        },
+        "walDurability": "strict"
+      },
+      "physical_authority_bytes_after_sigkill": 6644786,
+      "authority_file_count": 5,
+      "physical_measurement_limit": "Includes unreclaimed history, WAL, retired blobs and reconstructible projection state; one workload endpoint is not a steady-state growth rate.",
+      "leg": 2,
+      "version": "candidate"
+    },
+    {
+      "format": "tofu.event-reference-replay/v1",
+      "rounds": 200,
+      "chunk_bytes": 8192,
+      "scope": "one synthetic conversation, production Turn facade, strict durability, canonical conversation replay before and after SIGKILL; no provider or timed browser",
+      "binary_sha256": "7023fbd649174a973653598842983b7a60db0e3c397816460ba71af698719aff",
+      "driver_sha256": "130442b6bd93c126c7dff106b425be2035dedb412a0999dcff61ad029ee436a9",
+      "identity": {
+        "format": "tofu-db-build.v1",
+        "source_sha256": "4183a128e0d4cbcd53710303b8362973a857bbf064ccd11b42167f2cae74db86",
+        "version": "0.2.0"
+      },
+      "source_matches_checkout": true,
+      "settle_ms": 59.09036099910736,
+      "replay_before_crash_ms": [
+        38.71900588274002,
+        41.51621460914612,
+        39.01946544647217
+      ],
+      "event_count": 203,
+      "public_replay_bytes": 3434045,
+      "restart_ms": 65.403478,
+      "replay_after_crash_ms": 42.767234146595,
+      "write_p50_ms": 1.518845558166504,
+      "write_p99_ms": 4.043497145175934,
+      "exact_replay_and_body": true,
+      "storage_metrics": {
+        "authority": {
+          "contendedMilliseconds": 0,
+          "wedged": false
+        },
+        "backend": "tofudb",
+        "backgroundPacker": {
+          "discardedBytes": 0,
+          "discardedSegments": 0,
+          "failedRounds": 0,
+          "failedWalRetirements": 0,
+          "foregroundDrainUnpaces": 0,
+          "pacingWaitNanoseconds": 36465242,
+          "pacingWaits": 1,
+          "packedBytes": 2443522,
+          "packedSegments": 1,
+          "retiredWals": 0
+        },
+        "backgroundPackerPacing": {
+          "adaptive": true,
+          "paceBytesPerSecond": 67108864
+        },
+        "commitStages": [
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 4574
+              }
+            ],
+            "stage": "prepare",
+            "totalNanos": 4574
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 700813
+              }
+            ],
+            "stage": "engine_commit",
+            "totalNanos": 700813
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 5984
+              }
+            ],
+            "stage": "apply",
+            "totalNanos": 5984
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 333453
+              }
+            ],
+            "stage": "wal",
+            "totalNanos": 333453
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2241
+              }
+            ],
+            "stage": "encode",
+            "totalNanos": 2241
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2171
+              }
+            ],
+            "stage": "carried",
+            "totalNanos": 2171
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 23486016
+              }
+            ],
+            "stage": "ir_steps",
+            "totalNanos": 23486016
+          },
+          {
+            "calls": 29648,
+            "components": [
+              {
+                "calls": 29648,
+                "component": "foreground",
+                "totalNanos": 2563113
+              }
+            ],
+            "stage": "load_node",
+            "totalNanos": 2563113
+          },
+          {
+            "calls": 5,
+            "components": [
+              {
+                "calls": 5,
+                "component": "foreground",
+                "totalNanos": 24273
+              }
+            ],
+            "stage": "put_deferred",
+            "totalNanos": 24273
+          },
+          {
+            "calls": 1565,
+            "components": [
+              {
+                "calls": 1565,
+                "component": "background_packer",
+                "totalNanos": 886514
+              }
+            ],
+            "stage": "block_get",
+            "totalNanos": 886514
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2915
+              }
+            ],
+            "stage": "builder",
+            "totalNanos": 2915
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 358445
+              }
+            ],
+            "stage": "checkpoint_if",
+            "totalNanos": 358445
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 13424
+              }
+            ],
+            "stage": "commit_tail",
+            "totalNanos": 13424
+          },
+          {
+            "calls": 1565,
+            "components": [
+              {
+                "calls": 1565,
+                "component": "background_packer",
+                "totalNanos": 278183
+              }
+            ],
+            "stage": "get_pending",
+            "totalNanos": 278183
+          },
+          {
+            "calls": 5,
+            "components": [
+              {
+                "calls": 5,
+                "component": "foreground",
+                "totalNanos": 7778
+              }
+            ],
+            "stage": "put_stage",
+            "totalNanos": 7778
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 357994
+              }
+            ],
+            "stage": "history_stage",
+            "totalNanos": 357994
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "pack_adoption_driver",
+                "totalNanos": 596008
+              }
+            ],
+            "stage": "pack_retire",
+            "totalNanos": 596008
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "background_packer",
+                "totalNanos": 74
+              }
+            ],
+            "stage": "pack_filter",
+            "totalNanos": 74
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 108
+              }
+            ],
+            "stage": "ta_prepare_merge",
+            "totalNanos": 108
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 1837
+              }
+            ],
+            "stage": "ta_prepare_fast",
+            "totalNanos": 1837
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 4078
+              }
+            ],
+            "stage": "authority_wait",
+            "totalNanos": 4078
+          },
+          {
+            "calls": 6585,
+            "components": [
+              {
+                "calls": 6585,
+                "component": "foreground",
+                "totalNanos": 820633
+              }
+            ],
+            "stage": "overlay_point",
+            "totalNanos": 820633
+          },
+          {
+            "calls": 6581,
+            "components": [
+              {
+                "calls": 6581,
+                "component": "foreground",
+                "totalNanos": 206593
+              }
+            ],
+            "stage": "overlay_view",
+            "totalNanos": 206593
+          },
+          {
+            "calls": 4,
+            "components": [
+              {
+                "calls": 4,
+                "component": "foreground",
+                "totalNanos": 1682623
+              }
+            ],
+            "stage": "blob_encode",
+            "totalNanos": 1682623
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 2633242
+              }
+            ],
+            "stage": "blob_stage",
+            "totalNanos": 2633242
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 489
+              }
+            ],
+            "stage": "history_lookup",
+            "totalNanos": 489
+          },
+          {
+            "calls": 1,
+            "components": [
+              {
+                "calls": 1,
+                "component": "foreground",
+                "totalNanos": 662034
+              }
+            ],
+            "stage": "history_range",
+            "totalNanos": 662034
+          },
+          {
+            "calls": 2,
+            "components": [
+              {
+                "calls": 2,
+                "component": "foreground",
+                "totalNanos": 2812648
+              }
+            ],
+            "stage": "overlay_replay",
+            "totalNanos": 2812648
+          }
+        ],
+        "contract": "tofu-db.system-metrics.v1",
+        "durability": {
+          "checkpoint": 0,
+          "checkpointHistoryTailBytes": 0,
+          "dropFlushFailures": 0,
+          "flushDeferred": 0,
+          "historyDecodeAttempts": 0,
+          "historyDecodeSourceBytes": 0,
+          "historyDecodedTransactions": 0,
+          "maxCheckpointHistoryTailBytes": 0,
+          "overlayMaterializedBlocks": 0,
+          "overlayMaterializedBytes": 0,
+          "overlayMergeCommits": 0,
+          "overlayMergedEntries": 0,
+          "overlayMergedPositions": 0,
+          "overlaySupersededPositions": 0,
+          "overlayWalPressureAttempts": 0,
+          "overlayWalPressurePendingEntries": 0,
+          "publishControl": 0,
+          "walAppend": 0,
+          "walEncodedBytes": 4668
+        },
+        "listener": {
+          "acceptedConnections": 1,
+          "activeConnections": 1,
+          "completedConnections": 0,
+          "failedConnections": 0,
+          "peakActiveConnections": 1,
+          "rejectedConnections": 0,
+          "requestFrames": 0,
+          "responseFrames": 0
+        },
+        "maintenance": {
+          "attemptEventPruneAttempts": 0,
+          "attemptEventPruneBacklogRounds": 0,
+          "attemptEventsPruned": 0,
+          "committedTransactions": 0,
+          "completedMounts": 0,
+          "conflictDeferrals": 0,
+          "currentIdleIntervalMilliseconds": 250,
+          "droppedTerminalRecords": 0,
+          "failedRounds": 0,
+          "foregroundDeferrals": 0,
+          "historyCompactions": 0,
+          "materializedBytes": 0,
+          "materializedRows": 0,
+          "noWorkRounds": 0,
+          "overlayBackgroundChunks": 0,
+          "overlayBackgroundWakes": 3,
+          "publishedBackgroundPacks": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "rounds": 0,
+          "searchAcknowledgedTokens": 0,
+          "searchDirtyConversations": 0,
+          "searchFailedRounds": 0,
+          "searchForegroundDeferrals": 0,
+          "searchIndexedTurns": 0,
+          "searchPageBudgetExhaustions": 0,
+          "searchRebuiltConversations": 0,
+          "searchRemovedConversations": 0,
+          "searchSkippedOversizedTurns": 0,
+          "searchSourceBytes": 0,
+          "searchSourcePages": 0,
+          "tombstoneCompactionRounds": 0,
+          "tombstoneEntriesReclaimed": 0,
+          "tombstonePagesRewritten": 0,
+          "toolResultArtifactsPruned": 0,
+          "toolResultPruneBacklogRounds": 0
+        },
+        "onlineBackup": {
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "epochs_failed": 0,
+          "last_error": null,
+          "last_report": null,
+          "last_success_unix_ms": null
+        },
+        "onlineGarbageCollector": {
+          "deferred_epochs": 0,
+          "epoch_in_progress": false,
+          "epochs_completed": 0,
+          "last_epoch_duration_ms": 0,
+          "last_epoch_reclaimed_bytes": 0,
+          "marks_built": 0,
+          "total_compacted_blocks": 0,
+          "total_consolidated_victims": 0,
+          "total_consolidations": 0,
+          "total_orphan_segments_removed": 0,
+          "total_reclaimed_blocks": 0,
+          "total_reclaimed_bytes": 0,
+          "total_segments_retired": 0,
+          "total_segments_rewritten": 0,
+          "total_temporary_files_removed": 0
+        },
+        "protocol": "storage.v2",
+        "requestProfile": {
+          "enabled": false
+        },
+        "resourceBudget": {
+          "authorityGcMaximumBlocksPerRound": 65536,
+          "authorityGcMaximumOrphanPayloadSegmentFilesRemoved": 1,
+          "authorityGcMaximumPayloadSegmentFilesScanned": 4163,
+          "authorityGcMaximumPayloadSegmentsScanned": 16,
+          "authorityGcMaximumTemporaryBlockFilesRemoved": 1,
+          "authorityGcMaximumTemporaryBytes": 1073741824,
+          "authorityGcMaximumVictimBytes": 268435456,
+          "authorityGcMinimumPayloadCompactionBlocks": 128,
+          "blockCacheBytes": 2147483648,
+          "checkpointMaterializeBatchBytes": 8388608,
+          "connectionStackBytes": 1048576,
+          "entityPageCacheBytes": 1073741824,
+          "historyRetainedSegments": 64,
+          "leanFallback": false,
+          "logicalCpus": 60,
+          "maintenanceIdleIntervalMilliseconds": 250,
+          "maintenanceWorkerStackBytes": 524288,
+          "maximumConnections": 512,
+          "maximumFrameBytes": 134217728,
+          "maximumMaintenanceScopes": 64,
+          "maximumMaintenanceWorkers": 1,
+          "memoryCapacityBytes": 225485783040,
+          "memoryHeadroomBytes": 205095387136,
+          "minimumWritableVolumeFreeBytes": 150994944,
+          "overlayBudgetBytes": 268435456,
+          "overlayWalWatermarkBytes": 50331648,
+          "paperBuildRetainedMaximumBytes": 536870912,
+          "payloadSegmentCacheBytes": 3204615424,
+          "registeredMaintenanceScopes": 1,
+          "searchProjectionAvailable": true,
+          "searchProjectionConfigured": true,
+          "searchProjectionMaximumBytesPerOwner": 4294967296,
+          "sessionIdleTimeoutMilliseconds": 300000,
+          "sessionIoTimeoutMilliseconds": 30000,
+          "timerLiveCapacity": 16,
+          "volumeFreeBytes": 6886403028811776
+        },
+        "walDurability": "strict"
+      },
+      "physical_authority_bytes_after_sigkill": 7951701,
+      "authority_file_count": 6,
+      "physical_measurement_limit": "Includes unreclaimed history, WAL, retired blobs and reconstructible projection state; one workload endpoint is not a steady-state growth rate.",
+      "leg": 3,
+      "version": "baseline"
+    }
+  ],
+  "limits": [
+    "Synthetic 1/4/16-conversation smoke, not1000-conversation capacity or real provider/browser latency certification.",
+    "Delta projection coalescing explicitly disabled; default3s structural cadence checked separately.",
+    "Single/four-way terminal and stream tails varied; no universal latency improvement claimed.",
+    "Full canonical replay costs remained similar; added source lookups are retained in measured results.",
+    "Physical bytes are post-SIGKILL endpoints including unreclaimed history/cache; no stable growth-rate or50%disk reduction claim.",
+    "No live authority restart or activation occurred."
+  ],
+  "reproduction_drivers": [
+    {
+      "path": "/tmp/tofu-storage-root-20261001/abba_event_publication.py",
+      "sha256": "f2a51dc11654f2e515ba9e7db1a18a2fcbd71c7f9a937f9c0fb4f5bff4a28c66"
+    },
+    {
+      "path": "/tmp/tofu-storage-root-20261001/abba_event_publication_default_structure.py",
+      "sha256": "987244aa3648859e43dea346310a8bb6a72367354384f3804d45bffad6e65c04"
+    },
+    {
+      "path": "/tmp/tofu-storage-root-20261001/replay_event_publication.py",
+      "sha256": "130442b6bd93c126c7dff106b425be2035dedb412a0999dcff61ad029ee436a9"
+    }
+  ]
+}

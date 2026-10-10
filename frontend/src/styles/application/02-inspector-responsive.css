@@ -1,0 +1,17 @@
+/* inspector responsive: readable evidence, theme tokens and demand-loaded diagnostics ownership. */
+body.ri-open{--inspector-panel-width:min(var(--inspector-reading-measure),50vw)}
+body.ri-open .chat-container,
+body.ri-open .input-area{margin-right:var(--inspector-panel-width);transition:margin-right .22s ease}
+/* The drawer preserves usable pane width; the composer must fit that pane. */
+body.ri-open .input-inner{min-width:0}
+body.ri-open .input-actions{flex-wrap:wrap}
+@media (max-width:900px){
+  body.ri-open .chat-container,
+  body.ri-open .input-area{margin-right:0}
+  .ri-drawer{width:100vw;border-left:none}
+}
+@media (max-width:640px){
+  .ri-turn-jump{left:var(--space-2);width:calc(100% - 16px)}
+  .ri-drawer .debug-panel{padding:var(--space-2) calc(var(--space-1) * 2.5) var(--space-4)}
+  .ri-main-empty{margin:calc(var(--space-1) * 7) auto}
+}

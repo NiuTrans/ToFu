@@ -1,0 +1,77 @@
+# Normalize line endings and preserve UTF-8 on every platform.
+#
+# Without this, a Windows checkout with core.autocrlf=true rewrites
+# line endings AND a non-UTF-8 toolchain can re-encode multibyte chars
+# (e.g. U+2212 MINUS, U+2014 EM DASH, CJK) in our source files. When a
+# mangled char lands in expression position inside static/js/*.js, the
+# bundled script fails to parse in the browser ("Uncaught SyntaxError:
+# Unexpected token '-'") and the whole app fails to initialize.
+#
+# Forcing eol=lf + UTF-8 keeps the working tree byte-identical to the
+# repo on Windows/macOS/Linux, so the JS bundle parses everywhere.
+
+# Default: let git detect text vs binary, but always check out text as LF.
+* text=auto eol=lf
+
+# Source / config files are always text with LF endings.
+*.py     text eol=lf
+*.js     text eol=lf working-tree-encoding=UTF-8
+*.mjs    text eol=lf working-tree-encoding=UTF-8
+*.css    text eol=lf working-tree-encoding=UTF-8
+*.html   text eol=lf working-tree-encoding=UTF-8
+*.json   text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.toml   text eol=lf
+*.sh     text eol=lf
+
+# Delivery artifact composed from frontend/src/runtime/sections/manifest.json.
+# Review and edit the named source section, never the 5 MiB concatenation.
+# `-diff` additionally keeps plain `git diff`/`git log -p` readable: every
+# feature commit regenerates these, which otherwise drowns the authored hunks.
+frontend/src/runtime/app-runtime.js linguist-generated=true -diff
+static/styles.css linguist-generated=true -diff
+static/settings.css linguist-generated=true -diff
+
+# Other generated outputs (regenerators live in scripts/gen_*). Same rule:
+# review the generator and its source contract, not the emitted artifact.
+# Authored lookalikes are deliberately NOT matched: tests/test_*_generated.py
+# are tests ABOUT generated artifacts; frontend/src/i18n/locales/{zh,en}.json
+# are the i18n source authority.
+*.generated.js   linguist-generated=true -diff
+*.generated.ts   linguist-generated=true -diff
+*.generated.json linguist-generated=true -diff
+clients/python/tofu_sdk/api_v4_generated.py linguist-generated=true -diff
+lib/api_v1_model_routing_generated.py linguist-generated=true -diff
+lib/api_v4_constants_generated.py linguist-generated=true -diff
+lib/api_v4_generated.py linguist-generated=true -diff
+lib/conversation_sync/generated_contract.py linguist-generated=true -diff
+lib/storage/generated_v2_semantics.py linguist-generated=true -diff
+lib/storage_sidecar/generated_storage_receipts.py linguist-generated=true -diff
+lib/storage_sidecar/generated_tofudb_migration.py linguist-generated=true -diff
+lib/tool_result_query_generated.py linguist-generated=true -diff
+scripts/generated_storage_operations.py linguist-generated=true -diff
+scripts/generated_storage_v2.py linguist-generated=true -diff
+tofu_db/generated_contract.py linguist-generated=true -diff
+tofu_db/generated_v2.py linguist-generated=true -diff
+
+# Shell scripts must stay LF even on Windows or they break under bash.
+install.sh text eol=lf
+
+# Binary assets — never touch.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.webp   binary
+*.ico    binary
+*.pdf    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.zip    binary
+
+# Generated bundles are gitignored, but be defensive.
+static/js/bundle-*.js binary

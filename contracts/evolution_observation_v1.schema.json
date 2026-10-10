@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_observation_v1.schema.json",
+  "title": "Self-evolution observation: a recorded noticing (anomaly, premise objection, friction) with zero learning rights",
+  "type": "object",
+  "required": ["schema_version", "observation_id", "kind", "statement", "subject", "lineage", "source", "status", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "observation_id": {"type": "string", "maxLength": 160},
+    "kind": {"enum": ["anomaly", "premise_objection", "consumer_friction", "edge_case", "friction", "reindex_note"], "description": "anomaly/premise_objection/consumer_friction/edge_case are actor-recorded; friction is miner-recorded; reindex_note receipts an on-demand reindex."},
+    "statement": {"type": "string", "minLength": 1, "maxLength": 1000, "description": "What was noticed. Never executable instructions."},
+    "subject": {
+      "type": "object",
+      "required": ["type", "id"],
+      "properties": {
+        "type": {"enum": ["goal", "run", "episode", "tool", "contract", "domain", "frontier"]},
+        "id": {"type": "string", "maxLength": 160}
+      },
+      "additionalProperties": false
+    },
+    "lineage": {"type": "array", "maxItems": 8, "items": {"type": "string", "maxLength": 160}, "description": "Episode/task/run ids where the noticing arose; empty for owner-recorded observations."},
+    "source": {
+      "type": "object",
+      "required": ["actor"],
+      "properties": {
+        "actor": {"enum": ["executor", "reviewer", "coordinator", "owner", "miner"]},
+        "task_id": {"type": "string", "maxLength": 160}
+      },
+      "additionalProperties": false
+    },
+    "status": {"enum": ["open", "dismissed", "promoted"], "description": "open counts toward clusters; dismissed is parked by the owner; promoted already became a draft goal and stops counting."},
+    "created_at": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

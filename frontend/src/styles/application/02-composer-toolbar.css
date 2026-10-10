@@ -1,0 +1,16 @@
+
+/* Unified toolbar */
+.input-actions{position:relative;display:flex;align-items:center;padding:var(--space-2) var(--space-3) 10px 14px;gap:var(--space-2);flex-wrap:nowrap;overflow:visible}.input-actions-scroll{display:flex;align-items:center;gap:2px;flex:0 1 auto;min-width:0;overflow:visible;scrollbar-width:none;-ms-overflow-style:none}.input-actions-scroll::-webkit-scrollbar{display:none}.input-actions-right{display:flex;align-items:center;gap:var(--space-1);flex-shrink:0;margin-left:auto}
+/* Gradient hairline divider */
+.input-actions::before{content:'';position:absolute;top:0;left:var(--space-4);right:var(--space-4);height:1px;background:linear-gradient(90deg,transparent,var(--border-light),transparent);opacity:.5}
+.input-group{display:flex;align-items:center;gap:2px;flex-shrink:0}
+.input-group:not(:last-child)::after{display:none}
+/* Search toggle + send btn — pinned right */
+.input-actions-right>.search-mode-toggle{margin-right:0}
+.input-actions-right>.send-btn{flex-shrink:0}
+/* Depth-bar-aware gap on model group */
+#modelGroup{gap:6px;min-width:0;flex-shrink:1}
+/* ── Action Buttons ── */
+.action-btn{width:32px;height:32px;background:none;border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--text-tertiary);transition:color .15s ease,background-color .15s ease,box-shadow .15s ease;font-size:15px;position:relative;flex-shrink:0}
+.action-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
+.action-btn.active{color:var(--accent);background:var(--accent-subtle);box-shadow:0 0 0 1px var(--accent-subtle)}

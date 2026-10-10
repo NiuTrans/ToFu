@@ -1,0 +1,53 @@
+/* ★ Expandable search results inside unified tool panel.
+ *   COLLAPSED: render flush + chromeless so the header row aligns with its
+ *   sibling tool rows (read_files, grep, …) — the ▼ chevron is the only
+ *   "this expands" affordance. EXPANDED: promote into a bordered, tinted
+ *   card that visually brackets the result list. Side margins stay 0 in
+ *   both states so the header never shifts horizontally on toggle; only the
+ *   border/background fade in (plus a little vertical breathing room). */
+.ptool-results-block {
+  margin: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  overflow: hidden;
+  background: none;
+  transition: background .25s ease, border-color .25s ease, margin .25s ease;
+}
+.ptool-results-block.expanded {
+  margin: var(--space-1) 0;
+  border-color: rgba(234,179,8,0.18);
+  background: rgba(0,0,0,0.12);
+}
+.ptool-results-header {
+  cursor: pointer;
+}
+.ptool-results-header:hover {
+  background: rgba(234,179,8,0.05);
+}
+.ptool-results-toggle {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+  transition: transform .3s ease;
+  flex-shrink: 0;
+  margin-left: var(--space-1);
+}
+.ptool-results-block.expanded .ptool-results-toggle {
+  transform: rotate(180deg);
+}
+.ptool-results-content {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height .4s ease;
+}
+.ptool-results-block.expanded .ptool-results-content {
+  max-height: none;
+  border-top: 1px solid rgba(234,179,8,0.1);
+}
+.ptool-results-content .search-result-item {
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid rgba(234,179,8,0.06);
+}
+.ptool-results-content .search-result-item:hover {
+  background: rgba(234,179,8,0.04);
+}

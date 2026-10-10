@@ -1,0 +1,234 @@
+/* Intent-first command, browser and checklist cards.
+ * Owner: ConversationSurface; tokens: 00-design-tokens.css.
+ * Delivery: ordered application manifest; neighboring content owners are independent.
+ */
+
+/* Intent-first execution rows. Each action owns one summary line: intent
+ * description on the left, meta strip (context + fold chips + quiet verdict)
+ * on the right; evidence folds open underneath. Owner call 2026-10-04: the
+ * tofu theme hides the icon slot entirely, so the icon grid column collapses
+ * to zero and never indents the description. */
+
+.ptool-cmd-block > .ptool-cmd-header {
+  display: grid;
+  grid-template-columns: 0 minmax(0, 1fr) max-content;
+  align-items: center;
+  column-gap: var(--space-2);
+  row-gap: var(--space-1);
+  padding: var(--space-3);
+  font-family: var(--font-ui);
+  background: transparent;
+}
+
+.ptool-cmd-header > .ptool-cmd-icon {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+}
+
+.ptool-cmd-block .ptool-cmd-desc-inline {
+  grid-column: 2;
+  grid-row: 1;
+  display: block;
+  flex: none;
+  min-width: 0;
+  max-width: none;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-body);
+  white-space: pre-wrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  text-overflow: clip;
+  cursor: text;
+  user-select: text;
+}
+
+.ptool-cmd-verdict {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.ptool-cmd-block .ptool-cmd-verdict .ptool-cmd-status {
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  white-space: nowrap;
+  box-shadow: none;
+  animation: none;
+}
+
+.ptool-cmd-block .ptool-cmd-meta {
+  grid-column: 3;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+
+.ptool-cmd-block .ptool-cmd-identity {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.ptool-cmd-context {
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-tight);
+  white-space: nowrap;
+}
+
+.ptool-cmd-block .ptool-cmd-tab {
+  min-width: 0;
+  max-width: 32ch;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-caption);
+  line-height: var(--leading-tight);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.ptool-cmd-block .ptool-cmd-root-pill {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-regular);
+}
+
+.ptool-cmd-block .ptool-cmd-right {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-left: auto;
+  min-width: 0;
+}
+
+.ptool-cmd-block .ptool-cmd-fold {
+  min-height: var(--control-h-sm);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-tight);
+}
+
+.ptool-cmd-block .ptool-cmd-fold:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ptool-cmd-block .ptool-cmd-fold:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ptool-cmd-block:not(.output-open) > .ptool-cmd-output-wrap {
+  display: none;
+}
+
+.ptool-cmd-block.output-open > .ptool-cmd-output-wrap {
+  display: block;
+}
+
+.ptool-todo-header .ptool-text {
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+  font-weight: var(--weight-medium);
+}
+
+/* Flatten only proven self-contained cards, not generic batch/program shells. */
+
+.conversation-surface .conversation-block[data-tool-summary="self-contained"] {
+  margin-block: var(--space-2);
+  border-bottom: 1px solid var(--turn-rule);
+}
+
+.conversation-surface .conversation-block[data-tool-summary="self-contained"] .ptool-turn {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.conversation-surface .conversation-block[data-tool-summary="self-contained"] .ptool-todo-block {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.conversation-surface .conversation-block[data-tool-summary="self-contained"] .ptool-todo-header {
+  padding: var(--space-3);
+  gap: var(--space-2);
+  border: 0;
+}
+
+.ptool-todo-body > .ptool-todo-revisions {
+  display: block;
+  margin-top: var(--space-2);
+  font-size: var(--conversation-font-size-caption);
+  color: var(--text-tertiary);
+}
+
+@media (max-width: 600px) {
+  .ptool-cmd-block > .ptool-cmd-header {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+  .ptool-cmd-block .ptool-cmd-desc-inline {
+    grid-column: 2;
+    grid-row: 1;
+    order: initial;
+  }
+  .ptool-cmd-block .ptool-cmd-meta {
+    grid-column: 2;
+    grid-row: 2;
+    justify-content: flex-start;
+    gap: var(--space-1) var(--space-2);
+  }
+  .ptool-cmd-block .ptool-cmd-right {
+    margin-left: 0;
+  }
+}
+
+/* Accepted automation time records stay beside their exact physical attempt. */
+.automation-task-start-record {
+  flex-basis:100%;
+  min-width:0;
+  color:var(--text-secondary);
+  font-size:var(--font-size-xs);
+  overflow-wrap:anywhere;
+}
+.conversation-turn-header:has(.automation-task-start-record){flex-wrap:wrap}

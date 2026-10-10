@@ -1,0 +1,122 @@
+{
+  "brand": "claude",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "anthropic",
+  "category": "official",
+  "name": "Anthropic",
+  "base_url": "https://api.anthropic.com/v1",
+  "protocol": "anthropic",
+  "offering_recipes": [
+    {
+      "model_id": "claude-opus-5-5",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "model_id": "claude-opus-5",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "model_id": "claude-sonnet-5",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "model_id": "claude-sonnet-5-5",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "model_id": "claude-fable-5-1",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "model_id": "claude-opus-4-8",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "model_id": "claude-opus-4-7",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "model_id": "claude-sonnet-4-6",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "model_id": "claude-haiku-5-5",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking",
+        "cheap"
+      ]
+    },
+    {
+      "model_id": "claude-haiku-4-5",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking",
+        "cheap"
+      ],
+      "request_ids": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    {
+      "model_id": "claude-opus-4.6",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ],
+      "request_ids": [
+        "claude-opus-4-6"
+      ]
+    },
+    {
+      "model_id": "claude-sonnet-4.5",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ],
+      "request_ids": [
+        "claude-sonnet-4-5-20250929"
+      ]
+    }
+  ],
+  "catalog_source": {
+    "url": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions",
+    "checked_at": "2026-09-23"
+  }
+}

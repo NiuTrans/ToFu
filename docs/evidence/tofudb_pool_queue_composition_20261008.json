@@ -1,0 +1,715 @@
+{
+  "scope": "Observer-enabled original1000 harness augmented with bounded metadata query probes and ephemeral admission-ticket operation tracking. Snapshots taken under pool condition just before a conversation.list ticket leaves queue, including success/timeout/close outcomes not individually tagged. At most64rows. Caller-operation labels only, no payloads. Observation adds work, no causal performance gain claim.",
+  "rows": [
+    {
+      "label": "queue-composition-embedded-1",
+      "admission_exit_samples": [
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.04702061414718628,
+          "waiting": 1,
+          "live": 48,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 134.78602468967438,
+          "waiting": 245,
+          "live": 256,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1,
+            "turn.attempt.bind": 134,
+            "turn.attempt.start": 110
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.017389655113220215,
+          "waiting": 1,
+          "live": 256,
+          "idle": 142,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.017628073692321777,
+          "waiting": 1,
+          "live": 6,
+          "idle": 2,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.014767050743103027,
+          "waiting": 1,
+          "live": 32,
+          "idle": 29,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 496.1329624056816,
+          "waiting": 124,
+          "live": 256,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1,
+            "turn.event.record": 123
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.034436583518981934,
+          "waiting": 1,
+          "live": 256,
+          "idle": 73,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 312.95138597488403,
+          "waiting": 256,
+          "live": 256,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1,
+            "turn.event.record": 255
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.02088397741317749,
+          "waiting": 1,
+          "live": 256,
+          "idle": 126,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 500.3078356385231,
+          "waiting": 745,
+          "live": 256,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "turn.event.record": 232,
+            "event.list": 512,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 500.77295303344727,
+          "waiting": 999,
+          "live": 256,
+          "idle": 254,
+          "long_in_flight": 0,
+          "operations": {
+            "event.list": 291,
+            "turn.event.record": 515,
+            "conversation.list": 1,
+            "queue.depth": 192
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 442.1926587820053,
+          "waiting": 585,
+          "live": 256,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "turn.event.record": 252,
+            "conversation.list": 1,
+            "queue.depth": 332
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 500.1992806792259,
+          "waiting": 297,
+          "live": 256,
+          "idle": 206,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 296,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 502.4339631199837,
+          "waiting": 202,
+          "live": 256,
+          "idle": 254,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 201,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 429.5141249895096,
+          "waiting": 99,
+          "live": 256,
+          "idle": 255,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 98,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 439.69888985157013,
+          "waiting": 1,
+          "live": 256,
+          "idle": 254,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.01607835292816162,
+          "waiting": 1,
+          "live": 29,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        }
+      ],
+      "slow_with_idle_and_waiting": [
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 500.77295303344727,
+          "waiting": 999,
+          "live": 256,
+          "idle": 254,
+          "long_in_flight": 0,
+          "operations": {
+            "event.list": 291,
+            "turn.event.record": 515,
+            "conversation.list": 1,
+            "queue.depth": 192
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 500.1992806792259,
+          "waiting": 297,
+          "live": 256,
+          "idle": 206,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 296,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 502.4339631199837,
+          "waiting": 202,
+          "live": 256,
+          "idle": 254,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 201,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 429.5141249895096,
+          "waiting": 99,
+          "live": 256,
+          "idle": 255,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 98,
+            "conversation.list": 1
+          }
+        }
+      ],
+      "original_write_replay_correctness": true,
+      "harness_errors": 0,
+      "raw_report": {
+        "path": ".tmp/tofudb-current-refresh-20261008/queue-composition-embedded-1.json",
+        "sha256": "c0c36bdbd5a1b8facfee897cd31df68ee165c7bac9567fb29284723f7dd8fa62"
+      },
+      "scope_receipt": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      }
+    },
+    {
+      "label": "queue-composition-application-0",
+      "admission_exit_samples": [
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.04661828279495239,
+          "waiting": 1,
+          "live": 12,
+          "idle": 6,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.017799437046051025,
+          "waiting": 1,
+          "live": 39,
+          "idle": 33,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.017754733562469482,
+          "waiting": 1,
+          "live": 63,
+          "idle": 33,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.017508864402770996,
+          "waiting": 1,
+          "live": 33,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.016644597053527832,
+          "waiting": 1,
+          "live": 33,
+          "idle": 32,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.015489757061004639,
+          "waiting": 1,
+          "live": 33,
+          "idle": 20,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.015713274478912354,
+          "waiting": 1,
+          "live": 33,
+          "idle": 32,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.015124678611755371,
+          "waiting": 1,
+          "live": 33,
+          "idle": 32,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.015966594219207764,
+          "waiting": 1,
+          "live": 33,
+          "idle": 32,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.019140541553497314,
+          "waiting": 1,
+          "live": 33,
+          "idle": 32,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.02703070640563965,
+          "waiting": 1,
+          "live": 33,
+          "idle": 32,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.020109117031097412,
+          "waiting": 1,
+          "live": 33,
+          "idle": 32,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.020772218704223633,
+          "waiting": 1,
+          "live": 33,
+          "idle": 32,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.02609938383102417,
+          "waiting": 1,
+          "live": 33,
+          "idle": 32,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.018246471881866455,
+          "waiting": 1,
+          "live": 33,
+          "idle": 27,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.017084181308746338,
+          "waiting": 1,
+          "live": 33,
+          "idle": 13,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.016100704669952393,
+          "waiting": 1,
+          "live": 33,
+          "idle": 15,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.022426247596740723,
+          "waiting": 1,
+          "live": 34,
+          "idle": 13,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.01693516969680786,
+          "waiting": 1,
+          "live": 34,
+          "idle": 14,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.016704201698303223,
+          "waiting": 1,
+          "live": 34,
+          "idle": 33,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.020176172256469727,
+          "waiting": 1,
+          "live": 34,
+          "idle": 33,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.018715858459472656,
+          "waiting": 1,
+          "live": 34,
+          "idle": 33,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.016197562217712402,
+          "waiting": 1,
+          "live": 232,
+          "idle": 86,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 504.34256345033646,
+          "waiting": 519,
+          "live": 256,
+          "idle": 254,
+          "long_in_flight": 0,
+          "operations": {
+            "turn.event.record": 1,
+            "queue.depth": 517,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 505.10475039482117,
+          "waiting": 385,
+          "live": 256,
+          "idle": 253,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 384,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 426.32073163986206,
+          "waiting": 274,
+          "live": 256,
+          "idle": 250,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 273,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 501.4767199754715,
+          "waiting": 142,
+          "live": 256,
+          "idle": 250,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 141,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 508.2428306341171,
+          "waiting": 56,
+          "live": 256,
+          "idle": 252,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 55,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 336.6928771138191,
+          "waiting": 1,
+          "live": 256,
+          "idle": 249,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.01833587884902954,
+          "waiting": 1,
+          "live": 33,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.017970800399780273,
+          "waiting": 1,
+          "live": 33,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 0.018268823623657227,
+          "waiting": 1,
+          "live": 33,
+          "idle": 0,
+          "long_in_flight": 0,
+          "operations": {
+            "conversation.list": 1
+          }
+        }
+      ],
+      "slow_with_idle_and_waiting": [
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 504.34256345033646,
+          "waiting": 519,
+          "live": 256,
+          "idle": 254,
+          "long_in_flight": 0,
+          "operations": {
+            "turn.event.record": 1,
+            "queue.depth": 517,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 505.10475039482117,
+          "waiting": 385,
+          "live": 256,
+          "idle": 253,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 384,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 426.32073163986206,
+          "waiting": 274,
+          "live": 256,
+          "idle": 250,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 273,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 501.4767199754715,
+          "waiting": 142,
+          "live": 256,
+          "idle": 250,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 141,
+            "conversation.list": 1
+          }
+        },
+        {
+          "outcome": "leaving_pool_admission",
+          "elapsed_ms": 508.2428306341171,
+          "waiting": 56,
+          "live": 256,
+          "idle": 252,
+          "long_in_flight": 0,
+          "operations": {
+            "queue.depth": 55,
+            "conversation.list": 1
+          }
+        }
+      ],
+      "original_write_replay_correctness": true,
+      "harness_errors": 0,
+      "raw_report": {
+        "path": ".tmp/tofudb-current-refresh-20261008/queue-composition-application-0.json",
+        "sha256": "07036d6ff9713f61c571ad690b628d75b1f27ab7088b1c19d08ebf5017c25aed"
+      },
+      "scope_receipt": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      }
+    }
+  ],
+  "finding": "Slow admission exits coexist with many idle sessions and queued callers, often queue.depth/event.list/turn.event.record. Long lane occupancy0 in these snapshots. Snapshot does not establish how long resources were idle, exact oldest-ticket position or causal wakeup cost.",
+  "decision": "Investigate FIFO reservation batching/handoff while retaining admission ordering, exact capacity and retirement charge, deadlines, long-call shedding and outside-lock liveness/factory I/O. Avoid bypassing older tickets or concluding operation-group fairness is sufficient from counts alone.",
+  "excluded_run": "queue-composition-embedded-0 failed before workload: temporary driver snapshot variable shadowed frozen Path; fixed and rerun under new label.",
+  "runtime_changes": false
+}

@@ -1,0 +1,4 @@
+/* Native model controls: feature layout only; shared menu/button paint stays in the UI kit. */
+.ps-dd-model-choice{flex:1;min-width:0;display:flex;align-items:center;text-align:start}
+.ps-dd-model-choice .ps-dd-label{min-width:0}
+.ps-dd-provider-menu-label{min-width:0;overflow:hidden;text-overflow:ellipsis}

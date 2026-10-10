@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- 首页 / 服务器列表 -->
+    <string name="list_no_servers">还没有服务器</string>
+    <string name="list_actions_cd">%1$s 的更多操作</string>
+    <string name="list_report_cd">反馈问题</string>
+    <string name="list_empty_title">你的服务器都在这里</string>
+    <string name="list_empty_body">添加一次 Tofu 服务器，地址和密码会被记住，之后一键即可打开。</string>
+    <string name="list_empty_cta">添加第一个服务器</string>
+    <string name="list_fab_add">添加服务器</string>
+    <string name="list_menu_edit">编辑</string>
+    <string name="list_menu_delete">删除</string>
+    <string name="list_signing_in">正在登录 %1$s…</string>
+    <string name="list_wrong_password">%1$s 的密码错误——编辑即可修复。</string>
+    <string name="list_update_available">Tofu %1$s 可用</string>
+    <string name="list_update_installed">当前版本 %1$s</string>
+    <string name="list_download">下载</string>
+    <string name="list_footer_version">Tofu v%1$s (%2$d)</string>
+    <plurals name="list_server_count">
+        <item quantity="other">%d 个服务器</item>
+    </plurals>
+    <plurals name="list_running_count">
+        <item quantity="other">运行中 %d 个</item>
+    </plurals>
+
+    <!-- 服务器状态标签 -->
+    <string name="state_running">运行中</string>
+    <string name="state_stopped">已停止</string>
+    <string name="state_checking">点按检查</string>
+    <string name="state_working">处理中…</string>
+    <string name="state_unreachable">无法连接</string>
+    <string name="state_open_only">仅打开</string>
+
+    <!-- 添加 / 编辑服务器 -->
+    <string name="add_title">添加服务器</string>
+    <string name="edit_title">编辑服务器</string>
+    <string name="add_subtitle">保存一次，一键打开</string>
+    <string name="edit_subtitle">保存后重新认证</string>
+    <string name="cd_back">返回</string>
+    <string name="section_identity">身份</string>
+    <string name="section_access">访问</string>
+    <string name="section_server_control">服务器控制</string>
+    <string name="field_name">名称</string>
+    <string name="field_name_placeholder">上海沙盒</string>
+    <string name="field_name_helper">该服务器在列表中的显示名称。</string>
+    <string name="field_url">服务器地址</string>
+    <string name="field_url_placeholder">https://…/proxy/15000/</string>
+    <string name="field_url_helper">粘贴完整地址，包含 /proxy/15000/。</string>
+    <string name="action_scan_qr">扫码</string>
+    <string name="action_paste_link">粘贴链接</string>
+    <string name="field_password">密码</string>
+    <string name="field_password_keep">密码（留空保持不变）</string>
+    <string name="field_password_reuse">密码（留空复用已保存）</string>
+    <string name="field_password_placeholder">code-server 密码</string>
+    <string name="helper_password_reuse">将复用 %1$s 已保存的密码。</string>
+    <string name="helper_password_stored">仅在本设备加密保存。</string>
+    <string name="helper_password_new">仅在本设备加密保存，绝不外发。</string>
+    <string name="cd_show_password">显示密码</string>
+    <string name="cd_hide_password">隐藏密码</string>
+    <string name="toggle_manage_title">在 App 内启动 / 停止</string>
+    <string name="toggle_manage_subtitle">需要在主机上运行 supervisor.py。</string>
+    <string name="field_project_path">主机上的项目路径</string>
+    <string name="field_project_path_placeholder">/home/dev/tofu</string>
+    <string name="field_project_path_helper">绝对路径，并已在主机的 TOFU_SUPERVISOR_PROJECTS 中允许。</string>
+    <string name="action_save_connect">保存并连接</string>
+    <string name="action_cancel">取消</string>
+    <string name="test_testing">测试中…</string>
+    <string name="test_connection">测试连接</string>
+    <string name="auth_code_server">code-server 密码</string>
+    <string name="auth_code_server_desc">确认 code-server 登录入口后自动使用保存的密码；其他网关会打开交互登录。</string>
+    <string name="auth_sso">交互式登录</string>
+    <string name="auth_sso_desc">在应用中完成登录，会话有效期遵循网关策略。</string>
+    <string name="auth_none">无需认证</string>
+    <string name="auth_none_desc">适用于在可信网络中直接暴露的 Tofu。</string>
+    <string name="toast_bad_qr">该二维码不是 Tofu 服务器链接</string>
+    <string name="toast_no_link">剪贴板里没有服务器链接</string>
+
+    <!-- 首装引导 -->
+    <string name="onboard_welcome">欢迎使用 Tofu</string>
+    <string name="onboard_sub">本应用会记住你的 Tofu 服务器，无需再重复输入冗长的地址或密码。</string>
+    <string name="onboard_connect">连接你的服务器</string>
+    <string name="onboard_scan_title">扫描二维码</string>
+    <string name="onboard_scan_sub">将摄像头对准服务器二维码</string>
+    <string name="onboard_paste_title">粘贴链接</string>
+    <string name="onboard_paste_sub">使用剪贴板中的服务器链接</string>
+    <string name="onboard_manual_title">手动输入</string>
+    <string name="onboard_manual_sub">输入地址和密码</string>
+    <string name="onboard_skip">稍后设置</string>
+
+    <!-- 反馈问题 -->
+    <string name="report_title">反馈问题</string>
+    <string name="report_title_with">反馈 %1$s 的问题</string>
+    <string name="report_subtitle">离开本设备前已对敏感信息脱敏。</string>
+    <string name="report_note_label">出了什么问题？（可选）</string>
+    <string name="report_note_placeholder">例如：点按发送没有反应</string>
+    <string name="report_share">分享报告</string>
+    <string name="report_copy">复制</string>
+    <string name="report_send">发送到服务器</string>
+    <string name="report_copied">已复制——请粘贴给维护者</string>
+    <string name="report_no_share">没有可分享的应用</string>
+    <string name="report_subject">Tofu 问题反馈</string>
+    <string name="report_clip_label">Tofu 报告</string>
+    <string name="report_summary_prefix">包含：</string>
+    <string name="report_summary_web">网页诊断</string>
+    <plurals name="report_events">
+        <item quantity="other">最近 %d 条事件</item>
+    </plurals>
+    <string name="report_version">Tofu v%1$s (%2$d)</string>
+
+    <!-- 服务器控制 -->
+    <string name="super_start">启动</string>
+    <string name="super_stop">停止</string>
+    <string name="super_check">检查</string>
+
+    <!-- WebView 外壳 -->
+    <string name="web_reload_cd">刷新</string>
+    <string name="web_report_cd">反馈问题</string>
+    <string name="web_show_tools">显示工具</string>
+    <string name="web_hide_tools">隐藏工具</string>
+    <string name="web_couldnt_load">无法加载 %1$s</string>
+    <string name="web_loading">加载中… %1$d%%</string>
+    <string name="web_connecting">连接中…</string>
+    <string name="web_retry">重试</string>
+    <string name="web_back_to_servers">返回服务器列表</string>
+    <string name="web_no_app">没有可打开此链接的应用</string>
+    <string name="web_downloading">正在下载 %1$s</string>
+    <string name="web_download_failed">下载失败：%1$s</string>
+    <string name="web_session_expired">会话已过期——请在服务器列表中重新登录</string>
+    <string name="web_cert_title">证书问题</string>
+    <string name="web_cert_body">服务器证书校验失败（%1$s）。仅在你信任该网络时才继续。</string>
+    <string name="web_proceed_once">仅本次继续</string>
+    <string name="qr_prompt">对准 Tofu 服务器二维码</string>
+
+    <string name="web_open_browser">在浏览器中打开</string>
+    <string name="web_close_sign_in">返回 Tofu</string>
+    <string name="diagnostics_copy">复制诊断日志</string>
+    <string name="diagnostics_copy_failed">复制失败，请改用分享报告。</string>
+    <string name="diagnostics_startup_failed">Tofu 启动失败</string>
+    <string name="diagnostics_startup_help">请复制诊断日志，发给维护者排查。</string>
+</resources>

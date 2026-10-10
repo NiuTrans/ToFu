@@ -1,0 +1,48 @@
+{
+  "format": "tofu.task-replay-benchmark/v1",
+  "iterations": 9,
+  "policy": "Committed performance baseline for scripts/check_perf_regression.py. Regenerate deliberately on representative hardware with --write-baseline and name the change that justified the new numbers.",
+  "scale": 1.0,
+  "workloads": [
+    {
+      "cursor_reset": false,
+      "event_count": 64,
+      "iterations": 9,
+      "median_ms": 1.412,
+      "name": "short_conversation",
+      "p90_ms": 1.524,
+      "peak_kib": 56.0,
+      "replayed_events": 64
+    },
+    {
+      "cursor_reset": true,
+      "event_count": 4096,
+      "iterations": 9,
+      "median_ms": 131.418,
+      "name": "long_tool_loop",
+      "p90_ms": 133.478,
+      "peak_kib": 567.5,
+      "replayed_events": 2048
+    },
+    {
+      "cursor_reset": true,
+      "event_count": 2048,
+      "iterations": 9,
+      "median_ms": 59.393,
+      "name": "disconnect_recovery",
+      "p90_ms": 65.601,
+      "peak_kib": 144.2,
+      "replayed_events": 512
+    },
+    {
+      "cursor_reset": false,
+      "event_count": 1024,
+      "iterations": 9,
+      "median_ms": 20.825,
+      "name": "paper_flow",
+      "p90_ms": 21.493,
+      "peak_kib": 245.6,
+      "replayed_events": 1025
+    }
+  ]
+}

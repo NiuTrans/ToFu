@@ -1,0 +1,125 @@
+{
+  "format": "tofu.reader-input-contention-evidence/v1",
+  "scope": "Real browser keys with controlled synchronous production reader contention.\n\nMetric is keydown timestamp to second animation frame, not physical input-to-\ndisplay, INP or full-application transport. Terminal stream preparation is part\nof this workload. CPU is a browser-process cohort mean, not raw per-key CPU.\n",
+  "whole_system_verdict": "incomplete",
+  "performance_admission": false,
+  "production_defaults_changed": false,
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/reader-input-full.json",
+  "raw_artifact_sha256": "b5dd5f3fae9a411df664d4624b83fe54fee2a7f3128030399e3d636aa713a71d",
+  "sources": {
+    "benchmarks/markdown_worker/reader_input.py": "e4c025f54273010eb1633b9ec70bf67209bf63f50722f0024ad4be323b3dc0fc",
+    "benchmarks/markdown_worker/reader_input.js": "b19adadf32581d1b800e9b4ff6c3059f5d52fd565d594a6cbb1035d12add02ff",
+    "benchmarks/markdown_worker/reader_measure.py": "fcf1e7bf29978a6b9725f6968b24f68611d9bb421d4cee1bda77c6cc6566f6a8",
+    "static/styles.css": "c9670e35057814dfdd84397a2ee8e1b4870e0273f7fcfb450acc5c733efd787c",
+    "node_modules/marked/lib/marked.umd.js": "27ade2eccd4d58ab5edeb4f046eae71f204979547c4575fa11e294332d30a291",
+    "node_modules/dompurify/dist/purify.min.js": "9ab3d44d73c3e3947f9ab72e0f0bc15c7f1931d60b365ba261fc85fe59013c56",
+    "frontend/src/conversation/ui/renderers/text-blocks.ts": "27744abb8e98b4c677fea517d8e212319feb741d102c044c4955137b745e5ffe",
+    "frontend/src/conversation/ui/renderers/stable-dom.ts": "10a2e27823f2c0290e4be4b7b2c05ecd9c5a15b1c16d8850eb62616461a9e052"
+  },
+  "reference_sources": {
+    "stable-dom.ts": "a6463ee6088137b4caab90406bc9a634f0772abafe7fe6a8ef43160ea29ca641",
+    "text-blocks.ts": "c5f71502b7decc60bbbf189ff0358e80a0d56fdc13f7d475e043de9e15869ca6"
+  },
+  "compiled_sha256": {
+    "reference": "3ef9aa732a98745ad5cabd5421755f6aa9aef0831c98aaef647e8ecde93f29ac",
+    "candidate": "679863d8774313481cb54c740b272b05a062f3d1f13491850b35c4d2d4cf916e",
+    "highlighter": "52b5c5ffb8b9dff69b5872efc24db86f0e9bbef687bbac059461bf8e3b0d26c8",
+    "policy": "a78079a186fb3d076303bc90b1001c247c37807a6dc817e901290df3c1c48952",
+    "markdown": "cc1229afb2758fa3f48ef96131063d48948081f2c75a3207e6f025bf0586fdde"
+  },
+  "browser": "148.0.7778.96",
+  "observations": 1200,
+  "independent_browser_processes": 12,
+  "canonical_frames_and_input_characters_checked": 1440,
+  "pairs": [
+    {
+      "case": "mixed_tail",
+      "pair": 0,
+      "ratios": {
+        "p50_ms": 1.0030580568844776,
+        "p95_ms": 1.0,
+        "p99_ms": 1.0,
+        "browser_cpu_ms_per_key_including_warmup": 0.5495867768595041
+      },
+      "browser_pids": {
+        "reference": 3117797,
+        "candidate": 3117971
+      }
+    },
+    {
+      "case": "mixed_tail",
+      "pair": 1,
+      "ratios": {
+        "p50_ms": 1.003058290912807,
+        "p95_ms": 1.0,
+        "p99_ms": 1.0,
+        "browser_cpu_ms_per_key_including_warmup": 0.5487804878048781
+      },
+      "browser_pids": {
+        "candidate": 3118155,
+        "reference": 3118264
+      }
+    },
+    {
+      "case": "mixed_tail",
+      "pair": 2,
+      "ratios": {
+        "p50_ms": 0.9999997673965298,
+        "p95_ms": 0.9969697432084517,
+        "p99_ms": 0.9969697432084517,
+        "browser_cpu_ms_per_key_including_warmup": 0.5958333333333332
+      },
+      "browser_pids": {
+        "reference": 3118458,
+        "candidate": 3118620
+      }
+    },
+    {
+      "case": "completion",
+      "pair": 0,
+      "ratios": {
+        "p50_ms": 0.8326995649891443,
+        "p95_ms": 0.5882353101172166,
+        "p99_ms": 0.5509181829610278,
+        "browser_cpu_ms_per_key_including_warmup": 0.4077669902912621
+      },
+      "browser_pids": {
+        "reference": 3118834,
+        "candidate": 3119098
+      }
+    },
+    {
+      "case": "completion",
+      "pair": 1,
+      "ratios": {
+        "p50_ms": 0.8388746778116981,
+        "p95_ms": 0.5864528060737054,
+        "p99_ms": 0.5782073926819762,
+        "browser_cpu_ms_per_key_including_warmup": 0.4179687499999999
+      },
+      "browser_pids": {
+        "candidate": 3119283,
+        "reference": 3119398
+      }
+    },
+    {
+      "case": "completion",
+      "pair": 2,
+      "ratios": {
+        "p50_ms": 0.8276730737912231,
+        "p95_ms": 0.5809858842776723,
+        "p99_ms": 0.5729166818437756,
+        "browser_cpu_ms_per_key_including_warmup": 0.4171539961013644
+      },
+      "browser_pids": {
+        "reference": 3119583,
+        "candidate": 3119773
+      }
+    }
+  ],
+  "limitations": [
+    "controlled render inside real keydown handler, not actual app scheduling",
+    "two RAF callbacks are not proof of physical presentation",
+    "no peak/retained memory or raw CPU/op admission"
+  ]
+}

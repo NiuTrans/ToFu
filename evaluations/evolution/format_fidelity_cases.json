@@ -1,0 +1,29 @@
+[
+  {
+    "id": "python-identifiers",
+    "objective": "Copy this JSON object exactly. Preserve every string value, character, escape and array position. Return only the JSON object with no Markdown fences or commentary: {\"python\": \"import json; print(json.dumps({}))\"}",
+    "expected": {
+      "python": "import json; print(json.dumps({}))"
+    }
+  },
+  {
+    "id": "evidence-paths",
+    "objective": "Copy this JSON object exactly. Preserve every string value, character, escape and array position. Return only the JSON object with no Markdown fences or commentary: {\"reference\": \"measurements.json\", \"description\": \"json original; JSON summary; application/json\"}",
+    "expected": {
+      "reference": "measurements.json",
+      "description": "json original; JSON summary; application/json"
+    }
+  },
+  {
+    "id": "escaped-source",
+    "objective": "Copy this JSON object exactly. Preserve every string value, character, escape and array position. Return only the JSON object with no Markdown fences or commentary: {\"source\": \"import json\\nprint(json.dumps({\\\"label\\\": \\\"seed 🧪\\\", \\\"path\\\": \\\"a\\\\b\\\"}))\", \"seeds\": [9, 4, 7]}",
+    "expected": {
+      "source": "import json\nprint(json.dumps({\"label\": \"seed 🧪\", \"path\": \"a\\b\"}))",
+      "seeds": [
+        9,
+        4,
+        7
+      ]
+    }
+  }
+]

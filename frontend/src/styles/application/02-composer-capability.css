@@ -1,0 +1,24 @@
+
+/* ── Capability mode picker (Chat / Pro / Studio) ──
+ * Collapsed into a single pill that opens an UPWARD popover — the visual twin
+ * of the orchestration-flow control (.flow-menu), so Model · Mode · Flow read
+ * as one consistent control family. The trigger shows the active tier's glyph
+ * + label; the popover (styled by .flow-menu / .flow-menu-item, reused) lists
+ * the three tiers with a radio-style check. */
+.chat-mode-trigger{gap:6px}
+.chat-mode-trigger-ic{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;flex-shrink:0}
+.chat-mode-trigger-ic>svg{display:block}
+.chat-mode-trigger-label{letter-spacing:.01em}
+/* Active-tier accent on the collapsed trigger — a subtle tint so the current
+ * mode is legible without opening the menu (Studio is the "strongest" tier). */
+.chat-mode-trigger[data-mode="studio"]{color:var(--accent);border-color:var(--accent-subtle);background:var(--accent-subtle)}
+#modeMenuWrapper{position:relative}
+/* The mode popover borrows every .flow-menu rule; only its open-state pivot is
+ * keyed on its own id so it doesn't require the #flowMenuWrapper :has() rule. */
+.chat-mode-menu.open{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0) scale(1)}
+#modeMenuWrapper:has(.chat-mode-menu.open) .chat-mode-trigger .submenu-arrow{transform:rotate(180deg)}
+/* "更多" extras trigger — a bare dots button (no text label). */
+.submenu-more-dots{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;color:inherit}
+.submenu-more-dots>svg{display:block}
+/* Section label inside the extras dropdown (e.g. "执行策略"). */
+.submenu-section-label{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-tertiary);padding:var(--space-1) 10px 3px;user-select:none}

@@ -1,0 +1,20 @@
+{
+  "brand": "cohere",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "cohere",
+  "category": "official",
+  "name": "Cohere",
+  "base_url": "https://api.cohere.com/compatibility/v1",
+  "offering_recipes": [
+    {
+      "model_id": "command-a-plus-05-2026",
+      "capabilities": [
+        "text"
+      ]
+    }
+  ],
+  "catalog_source": {
+    "url": "https://docs.cohere.com/docs/command-a-plus",
+    "checked_at": "2026-09-08"
+  }
+}

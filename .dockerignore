@@ -1,0 +1,71 @@
+# ── Runtime data (created at runtime, not shipped in image) ──
+data/
+logs/
+uploads/
+*.db
+*.db-wal
+*.db-shm
+
+# ── Development & CI ──
+.git
+.github
+codex/
+.chatui/
+.project_sessions/
+.tofu/
+.venv/
+venv/
+.conda/
+.tofu_env.json
+.migrate_backup/
+.update_backup/
+.coverage
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+node_modules/
+node_modules.*/
+*.egg-info/
+debug/*
+!debug/inspect_conversation.py
+tests/
+benchmarks/
+evaluations/
+outputs/
+swebench_*/
+*.log
+*.tmp
+*.tmp.*
+build/
+dist/
+
+# ── Documentation & meta ──
+CLAUDE.md
+CONTRIBUTING.md
+export.py
+install.py
+install.sh
+install.ps1
+*.md
+!README.md
+!packages/tofu-search/README.md
+!packages/tofu-repo-kernel/README.md
+!plugins/tofu-trading/README.md
+
+# ── Environment files (secrets) ──
+.env
+.env.*
+!.env.example
+.credentials_vault.key
+
+# ── OS junk ──
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── Scratch files ──
+a.md
+o.md

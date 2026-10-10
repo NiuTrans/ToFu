@@ -1,0 +1,17 @@
+{
+  "brand": "deepseek",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "deepseek",
+  "category": "official",
+  "name": "DeepSeek",
+  "base_url": "https://api.deepseek.com",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://api-docs.deepseek.com/quick_start/pricing/", "checked_at": "2026-09-11"},
+  "retired_model_ids": ["deepseek-chat", "deepseek-reasoner"],
+  "offering_recipes": [
+    {"model_id": "deepseek-flash", "request_ids": ["deepseek-flash"], "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 60, "context_window": 1000000},
+    {"model_id": "deepseek-v4-pro", "capabilities": ["text", "thinking", "cheap"], "rpm": 30, "context_window": 1000000},
+    {"model_id": "deepseek-v4-flash", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 60, "context_window": 1000000},
+    {"model_id": "deepseek-v4-flash-vision-exp", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 30, "context_window": 1000000}
+  ]
+}

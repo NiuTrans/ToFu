@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_capability_gap_v1.schema.json",
+  "title": "Self-evolution capability gap proposal distilled from episode settlements",
+  "type": "object",
+  "required": ["schema_version", "gap_id", "summary", "proposed_action", "status", "lineage", "samples", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "gap_id": {"type": "string", "maxLength": 160},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "proposed_action": {"type": "string", "maxLength": 1000},
+    "status": {"enum": ["proposed", "accepted", "dismissed"]},
+    "lineage": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "maxLength": 160}},
+    "samples": {"type": "integer", "minimum": 1, "maximum": 64},
+    "created_at": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

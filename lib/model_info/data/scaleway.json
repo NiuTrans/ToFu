@@ -1,0 +1,17 @@
+{
+  "brand": "scaleway",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "scaleway",
+  "category": "relay",
+  "name": "Scaleway Generative APIs",
+  "base_url": "https://api.scaleway.ai/v1",
+  "catalog_source": {"url": "https://www.scaleway.com/en/docs/generative-apis/reference-content/supported-models/", "checked_at": "2026-09-08"},
+  "catalog_mode": "curated",
+  "offering_recipes": [
+    {"model_id": "glm-5.2", "capabilities": ["text"]},
+    {"model_id": "deepseek-v4-flash-0731", "capabilities": ["text", "cheap"]},
+    {"model_id": "qwen3.6-35b-a3b", "capabilities": ["text", "vision"]},
+    {"model_id": "gpt-oss-120b", "capabilities": ["text", "cheap"]},
+    {"model_id": "mistral-small-3.2-24b-instruct-2506", "capabilities": ["text", "vision"]}
+  ]
+}

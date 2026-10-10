@@ -1,0 +1,342 @@
+{
+  "decision": "Measured codec waiting rises under shortcut schedule; proceed to private compound experiment, no source admitted",
+  "baseline_original_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+  "baseline_diagnostic_source": "e969ff9d417f24979b664243bb8f15f60e52818a088d2e5f7fa2f6512c806007",
+  "baseline_private_commit": "8d3b50838",
+  "shortcut_original_source": "45059c6fc6b345c844ccd1f395e1bb0efcc7bc7c4c8e3de80018831ca2d62ab7",
+  "shortcut_diagnostic_source": "ae646792d2ca8091cb6276c8849f096ef4b2e5260b52835e1bd1b3421c2bec30",
+  "shortcut_private_commit": "8119af3c7",
+  "scratch": ".tmp/tofudb-codec-schedule-attribution-20261008",
+  "pairs": {
+    "baseline": {
+      "source": "e969ff9d417f24979b664243bb8f15f60e52818a088d2e5f7fa2f6512c806007",
+      "files": {
+        "libtofu_db.so": "ba56da0b3604d6003ffc2bcd14021e58d14365816a60d05854ec7896a31fc92b",
+        "tofu-db": "63b9b9490acb76387f48f0237677bcdb7c80d393b3614bf340aa9316bce32e55"
+      }
+    },
+    "shortcut": {
+      "source": "ae646792d2ca8091cb6276c8849f096ef4b2e5260b52835e1bd1b3421c2bec30",
+      "files": {
+        "libtofu_db.so": "c5b7a5ca16c3d58eef8670ba99d17818ebb1ff6109f514f5fc412fbadb2b2a26",
+        "tofu-db": "d735695bf857e10ceed3bfdc9e3b4b93438a65c78fdfcd9beaaf0b0af653c026"
+      }
+    }
+  },
+  "archives_sha256": {
+    "baseline-source.tar.gz": "bc4c97520d58c07d20909291e0ec46d9af9e524f64e0f621b2593a69f358261b",
+    "shortcut-source.tar.gz": "49930e34c9dcda4e9d429535b93bf66ab22c48540bb3625b1eb9aabfb3b48669"
+  },
+  "focused_tests": {
+    "baseline_blob": 19,
+    "baseline_profile": 7,
+    "shortcut_blob": 19,
+    "shortcut_profile": 7,
+    "failed": 0
+  },
+  "rows": [
+    {
+      "label": "codec-baseline-0",
+      "correctness": true,
+      "errors": 0,
+      "unhealthy_probes": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity_returncode": 0,
+      "event_samples": 150,
+      "codec_calls": 302,
+      "cpu_samples": 302,
+      "codec_totals_nanos": {
+        "wait": 103797650,
+        "work_wall": 24308907,
+        "work_cpu": 23630730
+      },
+      "per_codec_call_us": {
+        "wait": 343.70082781456955,
+        "work_wall": 80.49306953642383,
+        "work_cpu": 78.24745033112583
+      },
+      "shortcut_keys": 0,
+      "profile_selected": 313,
+      "profile_dropped": 0,
+      "event_byte_work": {
+        "blob_collected_bytes": 6648636,
+        "blob_current_encoded_bytes": 1819889,
+        "projection_checkpoint_bytes": 2690118,
+        "projection_patch_bytes": 897534,
+        "semantic_payload_decoded_bytes": 2152252
+      },
+      "source_guard": {
+        "python_before": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "python_after": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "source": "e969ff9d417f24979b664243bb8f15f60e52818a088d2e5f7fa2f6512c806007",
+        "root_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+        "variant": "baseline",
+        "mode": "cold",
+        "routing_loaded_before": false,
+        "scope": "Instrumented codec wait/work and thread CPU attribution; raw timings are not optimization admission evidence."
+      },
+      "p99_ms": {
+        "submit_to_running": 66.35802984237671,
+        "stream_scheduled": 1852.24000364542,
+        "settle": 4134.05629247427
+      },
+      "result_sha256": "0f1ba29793085e641c571f337c5284c0a3477a77f9d2a40cc0cb5bd81f4fea94"
+    },
+    {
+      "label": "codec-shortcut-0",
+      "correctness": true,
+      "errors": 0,
+      "unhealthy_probes": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity_returncode": 0,
+      "event_samples": 159,
+      "codec_calls": 320,
+      "cpu_samples": 320,
+      "codec_totals_nanos": {
+        "wait": 188662853,
+        "work_wall": 25316726,
+        "work_cpu": 24722750
+      },
+      "per_codec_call_us": {
+        "wait": 589.571415625,
+        "work_wall": 79.11476875,
+        "work_cpu": 77.25859375
+      },
+      "shortcut_keys": 3520,
+      "profile_selected": 315,
+      "profile_dropped": 0,
+      "event_byte_work": {
+        "blob_collected_bytes": 7977656,
+        "blob_current_encoded_bytes": 2175352,
+        "projection_checkpoint_bytes": 3586824,
+        "projection_patch_bytes": 1196712,
+        "semantic_payload_decoded_bytes": 2220523
+      },
+      "source_guard": {
+        "python_before": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "python_after": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "source": "ae646792d2ca8091cb6276c8849f096ef4b2e5260b52835e1bd1b3421c2bec30",
+        "root_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+        "variant": "candidate",
+        "mode": "cold",
+        "routing_loaded_before": false,
+        "scope": "Instrumented codec wait/work and thread CPU attribution; raw timings are not optimization admission evidence."
+      },
+      "p99_ms": {
+        "submit_to_running": 40.28110206127167,
+        "stream_scheduled": 1859.617568552494,
+        "settle": 5698.153980076313
+      },
+      "result_sha256": "c1e79fdc8834653934f6087d02316d478c9102eaddc461587c82eacf5c00ebb6"
+    },
+    {
+      "label": "codec-shortcut-1",
+      "correctness": true,
+      "errors": 0,
+      "unhealthy_probes": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity_returncode": 0,
+      "event_samples": 155,
+      "codec_calls": 316,
+      "cpu_samples": 316,
+      "codec_totals_nanos": {
+        "wait": 215624630,
+        "work_wall": 24980783,
+        "work_cpu": 24220346
+      },
+      "per_codec_call_us": {
+        "wait": 682.3564240506329,
+        "work_wall": 79.05311075949368,
+        "work_cpu": 76.64666455696204
+      },
+      "shortcut_keys": 3710,
+      "profile_selected": 313,
+      "profile_dropped": 0,
+      "event_byte_work": {
+        "blob_collected_bytes": 8090770,
+        "blob_current_encoded_bytes": 2204068,
+        "projection_checkpoint_bytes": 3786092,
+        "projection_patch_bytes": 1263196,
+        "semantic_payload_decoded_bytes": 2191887
+      },
+      "source_guard": {
+        "python_before": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "python_after": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "source": "ae646792d2ca8091cb6276c8849f096ef4b2e5260b52835e1bd1b3421c2bec30",
+        "root_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+        "variant": "candidate",
+        "mode": "cold",
+        "routing_loaded_before": false,
+        "scope": "Instrumented codec wait/work and thread CPU attribution; raw timings are not optimization admission evidence."
+      },
+      "p99_ms": {
+        "submit_to_running": 38.099855184555054,
+        "stream_scheduled": 1757.2807744145393,
+        "settle": 3487.67102509737
+      },
+      "result_sha256": "3828868615074bbcaea15be53a4f43d19a4960068c0d1a08893907f275e5e443"
+    },
+    {
+      "label": "codec-baseline-1",
+      "correctness": true,
+      "errors": 0,
+      "unhealthy_probes": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity_returncode": 0,
+      "event_samples": 155,
+      "codec_calls": 311,
+      "cpu_samples": 311,
+      "codec_totals_nanos": {
+        "wait": 130380708,
+        "work_wall": 24278844,
+        "work_cpu": 23707823
+      },
+      "per_codec_call_us": {
+        "wait": 419.2305723472669,
+        "work_wall": 78.06702250803859,
+        "work_cpu": 76.23094212218649
+      },
+      "shortcut_keys": 0,
+      "profile_selected": 313,
+      "profile_dropped": 0,
+      "event_byte_work": {
+        "blob_collected_bytes": 7147636,
+        "blob_current_encoded_bytes": 1951914,
+        "projection_checkpoint_bytes": 2989020,
+        "projection_patch_bytes": 997260,
+        "semantic_payload_decoded_bytes": 2191790
+      },
+      "source_guard": {
+        "python_before": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "python_after": {
+          "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+          "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+          "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+          "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+          "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+          "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372",
+          "lib/tasks_pkg/turn_trace.py": "087058eebbcc03021515b43a226a32c944064956918e715bb1803e16aef3c842",
+          "lib/turn_projection_segments.py": "e616c73cda14f61494676e4b11ce608733aab49b09cebae5be6a5e4af1034cc5",
+          "lib/turn_projection_patch.py": "365081e7bf8804532d95b56590f81e0fde70cca2709a4949ec25b854daa4dc79"
+        },
+        "source": "e969ff9d417f24979b664243bb8f15f60e52818a088d2e5f7fa2f6512c806007",
+        "root_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+        "variant": "baseline",
+        "mode": "cold",
+        "routing_loaded_before": false,
+        "scope": "Instrumented codec wait/work and thread CPU attribution; raw timings are not optimization admission evidence."
+      },
+      "p99_ms": {
+        "submit_to_running": 60.41194498538971,
+        "stream_scheduled": 1827.4561017751694,
+        "settle": 4172.406420111656
+      },
+      "result_sha256": "e7072fab979e407491fa56741c0e485968b7a112db725827b388cd4958a295e1"
+    }
+  ],
+  "shortcut_to_neighbor_baseline_per_call": [
+    {
+      "wait": 1.7153622217723619,
+      "work_wall": 0.9828767769155562,
+      "work_cpu": 0.9873624434158402
+    },
+    {
+      "wait": 1.627639941023689,
+      "work_wall": 1.012631303459198,
+      "work_cpu": 1.0054534605398056
+    }
+  ],
+  "findings": [
+    "Codec lock wait is approximately72% and63% higher in the shortcut legs; codec work CPU stays approximately77us in both variants.",
+    "Encoder algorithm, level, byte envelope and one shared codec remain unchanged; identical probes were applied.",
+    "Prior shortcut admission latency improved while settle regressed; these diagnostics support checking a shifted bottleneck, not admitting the rejected shortcut."
+  ],
+  "limits": [
+    "Four instrumented observations, not a causal confidence interval, uninstrumented performance result or proof of universal superiority.",
+    "Per-call averages mix stream/settle/replay chunk sizes; byte-work and sample counts differ.",
+    "Work CPU is measured only after lock acquisition; waiting CPU/spin cost is not separately measured.",
+    "CPU clock calls and spans add observer cost; no no-op clock calibration was performed.",
+    "No full-suite claim for diagnostic wrappers; underlying shortcut semantics had1647pass/3ignore and focused wrappers passed52tests across both variants.",
+    "Prior standalone resource codec-pool rejection remains in force.",
+    "Original1s gate remains unmet; no source deployed or live authority changed."
+  ],
+  "next": "Create a resource-derived, lazy codec pool combined with the guarded point shortcut; measure resident memory, poison/error/bytes/teardown and original uninstrumented ABBA before considering admission."
+}

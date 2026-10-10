@@ -1,0 +1,173 @@
+{
+  "format": "tofu.native-public-parity-evidence/v1",
+  "task_commit": "55ac6d4bc6d2ed53af9c8fdd3656bdf0b8ffefbc",
+  "public_changes": [
+    "Native visible tool constructors retain exact nonnegative JavaScript-safe roundNum and non-null toolModelContent.",
+    "Missing, non-string and empty tool verdicts are omitted instead of status:null.",
+    "Diagnostic differential coverage reconstructs large multichunk UTF-8 public projections exactly and validates ranges, source/revision fences and owner isolation."
+  ],
+  "final_artifact": {
+    "source_sha256": "b25485e2d9ab4bf41e2dc6d9897d9d975627a0b64fb6470b48afda2244c9d4f0",
+    "binary_sha256": "55e52ef37a149d16362a336d0cfb51a20643dc9d5c51f2a2aa62ed623fcc4a65",
+    "library_sha256": "02ce1a3463c7086d24f7b5de5f3c98c6dbd6d0dd8a59be56f6c5983630108a61"
+  },
+  "final_gates": [
+    {
+      "log_name": "parity-refreshed-native-full.log",
+      "sha256": "8c1cd0ed59bb04b411b800872c9272e8d22baf87327204b73fc28d6f69e54a29",
+      "expected_summary": "test result: ok. 1425 passed; 0 failed; 2 ignored;"
+    },
+    {
+      "log_name": "parity-refreshed-differential-full.log",
+      "sha256": "e8deb6697f6163bc2d665b61c7d1d4a6ce49717705b3be69a0308d525c9b0086",
+      "expected_summary": "195 passed"
+    },
+    {
+      "log_name": "parity-refreshed-browser.log",
+      "sha256": "4c4254684539fe17bfa43ab35e6263a831534599f24b15603fd68123e3816873",
+      "expected_summary": "4 passed"
+    },
+    {
+      "log_name": "parity-refreshed-diagnostic-typed.log",
+      "sha256": "9aecc6b51320b9ae89b9fa9ba99ccd7e1661be4c92474869cb21c4abffeba3e0",
+      "expected_summary": "1 passed"
+    }
+  ],
+  "native_totals": {
+    "passed": 1463,
+    "ignored": 2
+  },
+  "prior_application_gate": {
+    "artifact_source_sha256": "37267d64edd777a67039273c02bd2592f0b25bcc8ed8bff38147f7faebf67b66",
+    "gate": {
+      "log_name": "parity-app-backup.log",
+      "sha256": "94902e899d0deecbd572d1762180ecd4e4a6a568cfb124e1c47a5d6302acdbd8",
+      "expected_summary": "73 passed, 3 deselected"
+    },
+    "deselections": "Three pre-existing conversation_inspector_api failures, reproduced before these changes; no newly introduced deselection."
+  },
+  "documentation": {
+    "frozen_context_errors": 14,
+    "new_errors": 0
+  },
+  "concurrent_context": {
+    "preserved_paths": [
+      "packages/tofu-db/src/entity.rs",
+      "packages/tofu-db/src/fsync_stats.rs",
+      "packages/tofu-db/src/wal.rs"
+    ],
+    "scope": "Concurrent WAL notification fix and observer stages were retained for final artifact validation; not authored or attributed to this parity task."
+  },
+  "native_abba": {
+    "scope": "16 writers and public sync subscribers; 100 x 8192-byte deltas per conversation, 20 ms schedule, immediate delta persistence and default 3 s structural cadence; same Python producer/session pool, FUSE volume, strict durability and profiling off; exact public patch folding and post-SIGKILL replay.",
+    "variants": {
+      "pre_refresh": "37267d64edd777a67039273c02bd2592f0b25bcc8ed8bff38147f7faebf67b66",
+      "final": "b25485e2d9ab4bf41e2dc6d9897d9d975627a0b64fb6470b48afda2244c9d4f0"
+    },
+    "legs": [
+      {
+        "variant": "pre_refresh",
+        "leg": 0,
+        "source_sha256": "37267d64edd777a67039273c02bd2592f0b25bcc8ed8bff38147f7faebf67b66",
+        "report": "/tmp/tofu-storage-root-20261001/parity-final-abba-0-pre_refresh.json",
+        "write_ms": {
+          "count": 1600,
+          "p50": 17.68171787261963,
+          "p99": 128.60926985740662,
+          "max": 208.55920016765594
+        },
+        "query_ms": {
+          "count": 1424,
+          "p50": 15.835277736186981,
+          "p99": 111.59346252679825,
+          "max": 158.9634194970131
+        },
+        "delivery_after_ack_ms": {
+          "count": 1351,
+          "p50": 12.302584946155548,
+          "p99": 130.68654388189316,
+          "max": 189.81000781059265
+        },
+        "productive_ms": 2704.7650292515755
+      },
+      {
+        "variant": "final",
+        "leg": 1,
+        "source_sha256": "b25485e2d9ab4bf41e2dc6d9897d9d975627a0b64fb6470b48afda2244c9d4f0",
+        "report": "/tmp/tofu-storage-root-20261001/parity-final-abba-1-final.json",
+        "write_ms": {
+          "count": 1600,
+          "p50": 18.826723098754883,
+          "p99": 131.65859133005142,
+          "max": 162.4562293291092
+        },
+        "query_ms": {
+          "count": 1447,
+          "p50": 17.143115401268005,
+          "p99": 97.15179353952408,
+          "max": 131.1928704380989
+        },
+        "delivery_after_ack_ms": {
+          "count": 1371,
+          "p50": 11.938326060771942,
+          "p99": 94.65651214122772,
+          "max": 127.39721685647964
+        },
+        "productive_ms": 2855.5021211504936
+      },
+      {
+        "variant": "final",
+        "leg": 2,
+        "source_sha256": "b25485e2d9ab4bf41e2dc6d9897d9d975627a0b64fb6470b48afda2244c9d4f0",
+        "report": "/tmp/tofu-storage-root-20261001/parity-final-abba-2-final.json",
+        "write_ms": {
+          "count": 1600,
+          "p50": 17.1823650598526,
+          "p99": 145.04128694534302,
+          "max": 203.03970575332642
+        },
+        "query_ms": {
+          "count": 1419,
+          "p50": 16.44303649663925,
+          "p99": 130.25366514921188,
+          "max": 163.69058936834335
+        },
+        "delivery_after_ack_ms": {
+          "count": 1373,
+          "p50": 12.335658073425293,
+          "p99": 95.22756934165955,
+          "max": 185.3693649172783
+        },
+        "productive_ms": 2796.901285648346
+      },
+      {
+        "variant": "pre_refresh",
+        "leg": 3,
+        "source_sha256": "37267d64edd777a67039273c02bd2592f0b25bcc8ed8bff38147f7faebf67b66",
+        "report": "/tmp/tofu-storage-root-20261001/parity-final-abba-3-pre_refresh.json",
+        "write_ms": {
+          "count": 1600,
+          "p50": 18.056966364383698,
+          "p99": 113.03795874118805,
+          "max": 136.3259255886078
+        },
+        "query_ms": {
+          "count": 1390,
+          "p50": 16.930319368839264,
+          "p99": 90.45091271400452,
+          "max": 123.9616870880127
+        },
+        "delivery_after_ack_ms": {
+          "count": 1373,
+          "p50": 13.350903987884521,
+          "p99": 79.2691558599472,
+          "max": 144.98911798000336
+        },
+        "productive_ms": 2727.658338844776
+      }
+    ],
+    "setup": "One initial harness invocation failed before authority initialization because its disposable parent directory was absent. Parent creation was corrected before all four measured legs; no measured leg was omitted.",
+    "limits": "Native artifact comparison includes concurrent changes, cannot isolate metadata parity or certify live-server/P99 performance. Retain all four legs; no universal improvement claim."
+  },
+  "runtime": "Verified in disposable stores only. No live server restart or durable user-data migration performed by this task."
+}

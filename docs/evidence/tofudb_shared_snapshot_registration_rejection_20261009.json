@@ -1,0 +1,934 @@
+{
+  "format": "tofudb-shared-registration-rejection-evidence-v1",
+  "decision": {
+    "decision": "Do not integrate shared-registration candidate",
+    "problem": "Duplicate registration capacity was suspected to dominate original harness latency",
+    "evidence": {
+      "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+      "fullNativePassed": 1696,
+      "fullNativeFailed": 0,
+      "windows": 16,
+      "eligiblePairs": 8,
+      "originalStreamGatePasses": 0,
+      "settlementRegressingPairs": 6
+    },
+    "diagnostic": {
+      "application": {
+        "reportSha256": "21ae5340a869b7a660ef13c1e8652d0f8b7617cd0da371a03380071b00f4ff6c",
+        "correctnessPassed": true,
+        "errorCount": 0,
+        "blockedChecks": 0,
+        "selected": 314,
+        "dropped": 0,
+        "scope": "FIFO totals include two acquisition calls; must split capture versus commit before next optimization"
+      },
+      "embedded": {
+        "reportSha256": "8a40b25e1672fcddbcaa543915c0afc4f82ab5d35c6c1fa094d17daee0e2f210",
+        "correctnessPassed": true,
+        "errorCount": 0,
+        "blockedChecks": 0,
+        "selected": 407,
+        "dropped": 0,
+        "scope": "FIFO totals include two acquisition calls; must split capture versus commit before next optimization"
+      }
+    },
+    "alternativesConsidered": {
+      "integrateFromSingleFastWindow": "Rejected: six pairs regress in settlement, original gates all fail",
+      "raiseSnapshotLimit": "Rejected: sharing already removes observed capacity blockage without stable macro gain",
+      "publishedPreparationCapture": "Investigate only after separating two FIFO waits and checking write-admission/source/configuration/GC/private-buffer boundaries"
+    },
+    "scope": "Controlled frozen Native baseline/candidate comparison and bounded sampled attribution. Not SQLite superiority proof; no runtime source integration."
+  },
+  "comparison": {
+    "scope": "All windows retained; paired ratios descriptive only, not causal proof: maintenance triggers and host load can differ; no SQLite comparison or global supremacy claim.",
+    "windows": [
+      {
+        "transport": "application",
+        "variant": "candidate",
+        "windowIndex": 0,
+        "returncode": 1,
+        "loadAverageBefore": [
+          3.65,
+          6.17,
+          7.95
+        ],
+        "startedUnix": 1791512796.8638713,
+        "finishedUnix": 1791512906.5631554,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 16,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 56.8079799413681,
+        "streamP99Ms": 1851.2673079967499,
+        "settleP99Ms": 3625.738799571991,
+        "enginePeakRssBytes": 2126745600,
+        "clientPeakRssBytes": 290418688,
+        "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+        "maintenance": {
+          "historyCompactions": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "overlayBackgroundChunks": 279,
+          "conflictDeferrals": 1,
+          "searchIndexedTurns": 49
+        }
+      },
+      {
+        "transport": "application",
+        "variant": "baseline",
+        "windowIndex": 1,
+        "returncode": 1,
+        "loadAverageBefore": [
+          5.36,
+          5.99,
+          7.63
+        ],
+        "startedUnix": 1791512945.9465427,
+        "finishedUnix": 1791512969.8819628,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 22,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 298.43948036432266,
+        "streamP99Ms": 3189.161591231823,
+        "settleP99Ms": 5614.677719771862,
+        "enginePeakRssBytes": 2029965312,
+        "clientPeakRssBytes": 291274752,
+        "nativeSource": "20af66f0526a6d2b1b44fa56fbc18ef621db9677f04909eb8735c477622ef17d",
+        "maintenance": {
+          "historyCompactions": 1,
+          "retainedHistorySegments": 64,
+          "retiredHistorySegments": 77,
+          "overlayBackgroundChunks": 261,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 96
+        }
+      },
+      {
+        "transport": "application",
+        "variant": "baseline",
+        "windowIndex": 2,
+        "returncode": 1,
+        "loadAverageBefore": [
+          7.35,
+          6.42,
+          7.73
+        ],
+        "startedUnix": 1791512969.8894794,
+        "finishedUnix": 1791512991.58669,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 20,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 595.0920507311821,
+        "streamP99Ms": 2100.0897735357285,
+        "settleP99Ms": 4757.315523922443,
+        "enginePeakRssBytes": 2096836608,
+        "clientPeakRssBytes": 147103744,
+        "nativeSource": "20af66f0526a6d2b1b44fa56fbc18ef621db9677f04909eb8735c477622ef17d",
+        "maintenance": {
+          "historyCompactions": 1,
+          "retainedHistorySegments": 64,
+          "retiredHistorySegments": 113,
+          "overlayBackgroundChunks": 258,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 48
+        }
+      },
+      {
+        "transport": "application",
+        "variant": "candidate",
+        "windowIndex": 3,
+        "returncode": 1,
+        "loadAverageBefore": [
+          7.39,
+          6.49,
+          7.72
+        ],
+        "startedUnix": 1791512991.5933347,
+        "finishedUnix": 1791513013.8203273,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 21,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 41.36858135461807,
+        "streamP99Ms": 1970.8318784832954,
+        "settleP99Ms": 5714.714474976063,
+        "enginePeakRssBytes": 2123038720,
+        "clientPeakRssBytes": 145129472,
+        "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+        "maintenance": {
+          "historyCompactions": 1,
+          "retainedHistorySegments": 64,
+          "retiredHistorySegments": 114,
+          "overlayBackgroundChunks": 268,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 49
+        }
+      },
+      {
+        "transport": "embedded",
+        "variant": "candidate",
+        "windowIndex": 0,
+        "returncode": 1,
+        "loadAverageBefore": [
+          9.87,
+          7.15,
+          7.91
+        ],
+        "startedUnix": 1791513013.8317084,
+        "finishedUnix": 1791513038.4812922,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 15,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 724.8403057456017,
+        "streamP99Ms": 1275.8208364248276,
+        "settleP99Ms": 2765.93030244112,
+        "enginePeakRssBytes": 2164088832,
+        "clientPeakRssBytes": 2163515392,
+        "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+        "maintenance": {
+          "historyCompactions": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "overlayBackgroundChunks": 266,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 32
+        }
+      },
+      {
+        "transport": "embedded",
+        "variant": "baseline",
+        "windowIndex": 1,
+        "returncode": 1,
+        "loadAverageBefore": [
+          9.58,
+          7.28,
+          7.93
+        ],
+        "startedUnix": 1791513038.4889138,
+        "finishedUnix": 1791513063.673586,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 15,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 703.3751010894775,
+        "streamP99Ms": 1267.018973827362,
+        "settleP99Ms": 2900.452993810177,
+        "enginePeakRssBytes": 2229137408,
+        "clientPeakRssBytes": 2201407488,
+        "nativeSource": "20af66f0526a6d2b1b44fa56fbc18ef621db9677f04909eb8735c477622ef17d",
+        "maintenance": {
+          "historyCompactions": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "overlayBackgroundChunks": 265,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 32
+        }
+      },
+      {
+        "transport": "embedded",
+        "variant": "baseline",
+        "windowIndex": 2,
+        "returncode": 1,
+        "loadAverageBefore": [
+          8.84,
+          7.3,
+          7.92
+        ],
+        "startedUnix": 1791513063.6810765,
+        "finishedUnix": 1791513091.9853306,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 16,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 703.3467516303062,
+        "streamP99Ms": 1224.987156689167,
+        "settleP99Ms": 4445.487044751644,
+        "enginePeakRssBytes": 2121945088,
+        "clientPeakRssBytes": 2121945088,
+        "nativeSource": "20af66f0526a6d2b1b44fa56fbc18ef621db9677f04909eb8735c477622ef17d",
+        "maintenance": {
+          "historyCompactions": 1,
+          "retainedHistorySegments": 64,
+          "retiredHistorySegments": 105,
+          "overlayBackgroundChunks": 270,
+          "conflictDeferrals": 1,
+          "searchIndexedTurns": 32
+        }
+      },
+      {
+        "transport": "embedded",
+        "variant": "candidate",
+        "windowIndex": 3,
+        "returncode": 1,
+        "loadAverageBefore": [
+          7.71,
+          7.18,
+          7.86
+        ],
+        "startedUnix": 1791513091.9914308,
+        "finishedUnix": 1791513121.0557334,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 21,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 708.0420628190041,
+        "streamP99Ms": 1311.9804337620735,
+        "settleP99Ms": 6270.6102803349495,
+        "enginePeakRssBytes": 2351038464,
+        "clientPeakRssBytes": 2351038464,
+        "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+        "maintenance": {
+          "historyCompactions": 3,
+          "retainedHistorySegments": 64,
+          "retiredHistorySegments": 129,
+          "overlayBackgroundChunks": 262,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 80
+        }
+      },
+      {
+        "transport": "application",
+        "variant": "baseline",
+        "windowIndex": 4,
+        "returncode": 1,
+        "loadAverageBefore": [
+          3.92,
+          6.12,
+          7.41
+        ],
+        "startedUnix": 1791513202.4925575,
+        "finishedUnix": 1791513223.6395807,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 18,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 53.73647063970566,
+        "streamP99Ms": 1844.841368496418,
+        "settleP99Ms": 4634.951204061508,
+        "enginePeakRssBytes": 1969602560,
+        "clientPeakRssBytes": 139141120,
+        "nativeSource": "20af66f0526a6d2b1b44fa56fbc18ef621db9677f04909eb8735c477622ef17d",
+        "maintenance": {
+          "historyCompactions": 1,
+          "retainedHistorySegments": 64,
+          "retiredHistorySegments": 100,
+          "overlayBackgroundChunks": 272,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 48
+        }
+      },
+      {
+        "transport": "application",
+        "variant": "candidate",
+        "windowIndex": 5,
+        "returncode": 1,
+        "loadAverageBefore": [
+          5.59,
+          6.37,
+          7.46
+        ],
+        "startedUnix": 1791513223.6467965,
+        "finishedUnix": 1791513247.8349352,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 21,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 184,
+          "failure_examples": []
+        },
+        "submitP99Ms": 131.2725991010666,
+        "streamP99Ms": 1823.311448097229,
+        "settleP99Ms": 5391.320839524269,
+        "enginePeakRssBytes": 1977868288,
+        "clientPeakRssBytes": 146219008,
+        "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+        "maintenance": {
+          "historyCompactions": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "overlayBackgroundChunks": 270,
+          "conflictDeferrals": 1,
+          "searchIndexedTurns": 80
+        }
+      },
+      {
+        "transport": "application",
+        "variant": "candidate",
+        "windowIndex": 6,
+        "returncode": 1,
+        "loadAverageBefore": [
+          6.43,
+          6.53,
+          7.49
+        ],
+        "startedUnix": 1791513247.8410034,
+        "finishedUnix": 1791513271.1525073,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 20,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 100.58357566595078,
+        "streamP99Ms": 1835.2263271808624,
+        "settleP99Ms": 5298.156201839447,
+        "enginePeakRssBytes": 1966977024,
+        "clientPeakRssBytes": 289398784,
+        "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+        "maintenance": {
+          "historyCompactions": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "overlayBackgroundChunks": 279,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 80
+        }
+      },
+      {
+        "transport": "application",
+        "variant": "baseline",
+        "windowIndex": 7,
+        "returncode": 1,
+        "loadAverageBefore": [
+          7.47,
+          6.77,
+          7.55
+        ],
+        "startedUnix": 1791513271.1602054,
+        "finishedUnix": 1791513293.2186432,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 16,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 65.72813540697098,
+        "streamP99Ms": 2197.625771164894,
+        "settleP99Ms": 3767.6651924848557,
+        "enginePeakRssBytes": 2041454592,
+        "clientPeakRssBytes": 172744704,
+        "nativeSource": "20af66f0526a6d2b1b44fa56fbc18ef621db9677f04909eb8735c477622ef17d",
+        "maintenance": {
+          "historyCompactions": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "overlayBackgroundChunks": 270,
+          "conflictDeferrals": 1,
+          "searchIndexedTurns": 55
+        }
+      },
+      {
+        "transport": "embedded",
+        "variant": "baseline",
+        "windowIndex": 4,
+        "returncode": 1,
+        "loadAverageBefore": [
+          7.37,
+          6.82,
+          7.54
+        ],
+        "startedUnix": 1791513293.225193,
+        "finishedUnix": 1791513316.9623904,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 16,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 696.7293322086334,
+        "streamP99Ms": 1261.565387248993,
+        "settleP99Ms": 3048.8244146108627,
+        "enginePeakRssBytes": 2134130688,
+        "clientPeakRssBytes": 2115190784,
+        "nativeSource": "20af66f0526a6d2b1b44fa56fbc18ef621db9677f04909eb8735c477622ef17d",
+        "maintenance": {
+          "historyCompactions": 1,
+          "retainedHistorySegments": 64,
+          "retiredHistorySegments": 8,
+          "overlayBackgroundChunks": 222,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 33
+        }
+      },
+      {
+        "transport": "embedded",
+        "variant": "candidate",
+        "windowIndex": 5,
+        "returncode": 1,
+        "loadAverageBefore": [
+          7.01,
+          6.78,
+          7.51
+        ],
+        "startedUnix": 1791513316.969105,
+        "finishedUnix": 1791513345.7944522,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 16,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 739.5442202687263,
+        "streamP99Ms": 1270.1657488942146,
+        "settleP99Ms": 3538.4204536676407,
+        "enginePeakRssBytes": 2153168896,
+        "clientPeakRssBytes": 2153168896,
+        "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+        "maintenance": {
+          "historyCompactions": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "overlayBackgroundChunks": 276,
+          "conflictDeferrals": 1,
+          "searchIndexedTurns": 33
+        }
+      },
+      {
+        "transport": "embedded",
+        "variant": "candidate",
+        "windowIndex": 6,
+        "returncode": 1,
+        "loadAverageBefore": [
+          5.95,
+          6.56,
+          7.42
+        ],
+        "startedUnix": 1791513345.8009138,
+        "finishedUnix": 1791513369.2405171,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 19,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 722.2333252429962,
+        "streamP99Ms": 1237.485110759735,
+        "settleP99Ms": 4475.811682641506,
+        "enginePeakRssBytes": 2164457472,
+        "clientPeakRssBytes": 2164457472,
+        "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+        "maintenance": {
+          "historyCompactions": 1,
+          "retainedHistorySegments": 64,
+          "retiredHistorySegments": 114,
+          "overlayBackgroundChunks": 248,
+          "conflictDeferrals": 1,
+          "searchIndexedTurns": 39
+        }
+      },
+      {
+        "transport": "embedded",
+        "variant": "baseline",
+        "windowIndex": 7,
+        "returncode": 1,
+        "loadAverageBefore": [
+          4.99,
+          6.28,
+          7.3
+        ],
+        "startedUnix": 1791513369.2479813,
+        "finishedUnix": 1791513393.5928326,
+        "report": "/path/to/your/project",
+        "scope": "/path/to/your/project",
+        "log": "/path/to/your/project",
+        "eligible": true,
+        "correctnessPassed": true,
+        "gatePassed": false,
+        "readiness": {
+          "probes": 15,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "submitP99Ms": 697.7069973945618,
+        "streamP99Ms": 1243.7333837151527,
+        "settleP99Ms": 2954.8854529857635,
+        "enginePeakRssBytes": 2148511744,
+        "clientPeakRssBytes": 2148511744,
+        "nativeSource": "20af66f0526a6d2b1b44fa56fbc18ef621db9677f04909eb8735c477622ef17d",
+        "maintenance": {
+          "historyCompactions": 0,
+          "retainedHistorySegments": 0,
+          "retiredHistorySegments": 0,
+          "overlayBackgroundChunks": 270,
+          "conflictDeferrals": 0,
+          "searchIndexedTurns": 33
+        }
+      }
+    ],
+    "pairs": [
+      {
+        "transport": "application",
+        "candidateIndex": 0,
+        "baselineIndex": 1,
+        "eligible": true,
+        "ratios": {
+          "submitP99Ms": 0.19035008327993083,
+          "streamP99Ms": 0.5804871453006847,
+          "settleP99Ms": 0.6457608041872284,
+          "enginePeakRssBytes": 1.0476758333888219,
+          "clientPeakRssBytes": 0.997060974237822
+        }
+      },
+      {
+        "transport": "application",
+        "candidateIndex": 3,
+        "baselineIndex": 2,
+        "eligible": true,
+        "ratios": {
+          "submitP99Ms": 0.06951627282500081,
+          "streamP99Ms": 0.9384512525696398,
+          "settleP99Ms": 1.2012477302039946,
+          "enginePeakRssBytes": 1.012496019909244,
+          "clientPeakRssBytes": 0.9865790499526647
+        }
+      },
+      {
+        "transport": "application",
+        "candidateIndex": 5,
+        "baselineIndex": 4,
+        "eligible": true,
+        "ratios": {
+          "submitP99Ms": 2.4428958124404585,
+          "streamP99Ms": 0.9883296630448306,
+          "settleP99Ms": 1.1631882628667094,
+          "enginePeakRssBytes": 1.0041966476729194,
+          "clientPeakRssBytes": 1.0508684133058581
+        }
+      },
+      {
+        "transport": "application",
+        "candidateIndex": 6,
+        "baselineIndex": 7,
+        "eligible": true,
+        "ratios": {
+          "submitP99Ms": 1.53029711010611,
+          "streamP99Ms": 0.8350950153847464,
+          "settleP99Ms": 1.4062173603979922,
+          "enginePeakRssBytes": 0.9635174016155633,
+          "clientPeakRssBytes": 1.6752975767060274
+        }
+      },
+      {
+        "transport": "embedded",
+        "candidateIndex": 0,
+        "baselineIndex": 1,
+        "eligible": true,
+        "ratios": {
+          "submitP99Ms": 1.0305174360350204,
+          "streamP99Ms": 1.0069469066993346,
+          "settleP99Ms": 0.9536201098048684,
+          "enginePeakRssBytes": 0.9708189473800262,
+          "clientPeakRssBytes": 0.9827873321015977
+        }
+      },
+      {
+        "transport": "embedded",
+        "candidateIndex": 3,
+        "baselineIndex": 2,
+        "eligible": true,
+        "ratios": {
+          "submitP99Ms": 1.0066756705391962,
+          "streamP99Ms": 1.07101566461156,
+          "settleP99Ms": 1.4105564176006433,
+          "enginePeakRssBytes": 1.1079638569798842,
+          "clientPeakRssBytes": 1.1079638569798842
+        }
+      },
+      {
+        "transport": "embedded",
+        "candidateIndex": 5,
+        "baselineIndex": 4,
+        "eligible": true,
+        "ratios": {
+          "submitP99Ms": 1.0614512495467496,
+          "streamP99Ms": 1.0068172143371625,
+          "settleP99Ms": 1.1605851871004738,
+          "enginePeakRssBytes": 1.008920825752167,
+          "clientPeakRssBytes": 1.0179549345086405
+        }
+      },
+      {
+        "transport": "embedded",
+        "candidateIndex": 6,
+        "baselineIndex": 7,
+        "eligible": true,
+        "ratios": {
+          "submitP99Ms": 1.0351527617467258,
+          "streamP99Ms": 0.9949761958332634,
+          "settleP99Ms": 1.51471579993699,
+          "enginePeakRssBytes": 1.0074217551030524,
+          "clientPeakRssBytes": 1.0074217551030524
+        }
+      }
+    ]
+  },
+  "verification": {
+    "nativeTestSummaries": [
+      "test result: ok. 1658 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 120.78s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.17s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.72s",
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 56.31s",
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.97s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.88s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.50s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 124.63s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.88s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "baselinePair": {
+      "source_sha256": "20af66f0526a6d2b1b44fa56fbc18ef621db9677f04909eb8735c477622ef17d",
+      "binary_sha256": "df9ac98456cbe2e7922e6c7adb2d321ac6c57bc496a0c03924eb257740cb1391",
+      "library_sha256": "cfea1a329b73be2e2dd8e2794401f15d585ab050bb5de720c74290260e17908a",
+      "scope": "Default-off reader-pin occupancy diagnostic; exported library identity and allocator verified; no deployment"
+    },
+    "candidatePair": {
+      "source_sha256": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+      "binary_sha256": "6fa37fafbabae7fb6549fe4b822859c17feb4fd1834b8aa226aaa8aa939fd633",
+      "library_sha256": "22629537a17a1cd4a9fb7087890c3130bf84d2be6cc4d60eaf83eb57a727215b",
+      "scope": "Shared immutable reader-root registration candidate; exported library identity and allocator verified; no deployment"
+    },
+    "sourceArchive": {
+      "archive": ".tmp/tofudb-reader-pin-lifecycle-20261009/rejected-sharing-source.tar.gz",
+      "sha256": "2416526b0d43e273c2ace67cfa971788bafde46b47ee6f36a107cccae92cce9e",
+      "files": 416,
+      "nativeSource": "0c283812ea6dd164df42e1aaaaf84df8e5a639b34325569407fb91ac72fc05e6",
+      "scope": "Exact rejected source preserved before diagnostic-only edits; worktree retained"
+    },
+    "reportByteGuards": [
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "82f249753a31fbb78c92f60a75b90ae2557461584f014fdcea595e314cefc483",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "f98d21b41ea0b5d3dfb4607c0ef36f55d89857763349c5e218827bcd59cb028e"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "3df330342849988d4107cb61e9f0bfee634a34c7a449ba63e545bcbe685f481f",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "1d0b923a8d18b400ef806121fa7efe0babf3a4ac5547fca8e8776b03c0d39bc0"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "f31f3071b7bcade9d4fa9febf842dc5946776279eaea011e73b2004fd80572c4",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "1d0b923a8d18b400ef806121fa7efe0babf3a4ac5547fca8e8776b03c0d39bc0"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "3d0b555737d1c8445f1ea3901b4ab87b614243cef5dba75bbf2fee042c3e297f",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "f98d21b41ea0b5d3dfb4607c0ef36f55d89857763349c5e218827bcd59cb028e"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "88f9ec9d58b1fe653bebc0bf0084b0d5c88fe93186d57bed0e86eb2ea881c397",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "95a026e486a49693896ddb65949cc29cdf08573f267498a3e39930e0db62c33c"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "41f8c924e5bc61300e5f2065dadec9ccdcd41635c62d23b761bc0043d6178673",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "ab82530e0f46e7fa9aed30d767d256ff04ccb638bb87980f2adeac236e8dfa8b"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "d1c33bfae4f0b3f11d0b17cecb14ae58b8c20e3cdc236b6d5a1fc79826519ba3",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "ab82530e0f46e7fa9aed30d767d256ff04ccb638bb87980f2adeac236e8dfa8b"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "1146dd21ba2facf52665086ef6ee29b0a847c3764ac7e69dd8b9b83cfe0228fa",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "95a026e486a49693896ddb65949cc29cdf08573f267498a3e39930e0db62c33c"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "4f9a04622f6ec85682926ea93ea7a5b9a51279c73390583910c166632e6e9489",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "1d0b923a8d18b400ef806121fa7efe0babf3a4ac5547fca8e8776b03c0d39bc0"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "5ac47f5bce267168c2760afcab074281060eed5c00ded36347b52a1c7bfaa62d",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "f98d21b41ea0b5d3dfb4607c0ef36f55d89857763349c5e218827bcd59cb028e"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "c1de0278f54b1ba881651e8658f752b65600c28c3c25db6b13a657cd3e285c9a",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "f98d21b41ea0b5d3dfb4607c0ef36f55d89857763349c5e218827bcd59cb028e"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "efacd2272645d15e4b454b5e2f216d1d4c5e2a3a9cd4ad42c34feaa16ca7d201",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "1d0b923a8d18b400ef806121fa7efe0babf3a4ac5547fca8e8776b03c0d39bc0"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "eda89299db855aa412bea87574332ecb2a5fd31dacdc4d962d2c993370cf3cac",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "ab82530e0f46e7fa9aed30d767d256ff04ccb638bb87980f2adeac236e8dfa8b"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "0247a922f38d617b3869989c8016564399bcc58fe5f0a277d3f047821a01bf4a",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "95a026e486a49693896ddb65949cc29cdf08573f267498a3e39930e0db62c33c"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "9143d22bc9ee6ef0667bca323627af45a129e9d9548ade5b91369274cd0e2d01",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "95a026e486a49693896ddb65949cc29cdf08573f267498a3e39930e0db62c33c"
+      },
+      {
+        "report": "/path/to/your/project",
+        "reportSha256": "c45e255e105494601edb0cba23243674608b1c81367ec63b67bb47d9dd73aaa1",
+        "scope": "/path/to/your/project",
+        "scopeSha256": "ab82530e0f46e7fa9aed30d767d256ff04ccb638bb87980f2adeac236e8dfa8b"
+      }
+    ]
+  },
+  "scopeLimitations": [
+    "Same frozen Native source controls and callers; not a direct SQLite comparison",
+    "No real-provider, browser-feedback or sustained-soak coverage",
+    "Independent cumulative occupancy peaks are not coherent topology; blocked-check counts are not wait durations",
+    "Diagnostic FIFO samples combine two admissions; split-phase diagnostic remains unfinished",
+    "Six of eight settlement pairs regress; all sixteen original 1-second stream gates fail; no source admission"
+  ],
+  "nextInvestigation": "Attribute snapshot-capture and prepared-commit FIFO separately before selecting a serialized-queue optimization"
+}

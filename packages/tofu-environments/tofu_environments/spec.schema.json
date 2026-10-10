@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile",
+    "project",
+    "image",
+    "workspace"
+  ],
+  "properties": {
+    "profile": {
+      "enum": [
+        "tofu_service",
+        "project_development",
+        "project_training"
+      ]
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base",
+        "name",
+        "instructions"
+      ],
+      "properties": {
+        "base": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]{0,127}$"
+        },
+        "instructions": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "context": {
+          "type": "string",
+          "maxLength": 512,
+          "default": "."
+        },
+        "base_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "cpu",
+        "memory_gib"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$"
+        },
+        "cpu": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "memory_gib": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "queue": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "gpu_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "gpu_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "ports": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        },
+        "mounts": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "target",
+              "read_only"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "read_only": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "ide": {
+          "enum": [
+            "jupyter",
+            "vscode"
+          ]
+        },
+        "startup_command": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "service_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "readiness_path": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9/_-]+$",
+          "maxLength": 128
+        }
+      }
+    },
+    "provider_options": {
+      "type": "object",
+      "maxProperties": 32
+    }
+  }
+}

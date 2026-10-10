@@ -1,0 +1,8 @@
+{
+  "slow_call_id": "call_slow",
+  "fast_call_id": "call_fast",
+  "timeout_sentinel": "Tool execution timed out: read_files",
+  "content_contains": ["timed out"],
+  "tool_names": ["read_files"],
+  "aborted": false
+}

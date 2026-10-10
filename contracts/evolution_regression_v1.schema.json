@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_regression_v1.schema.json",
+  "title": "Self-evolution regression receipt: holdout outcome for one proposed mutation",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "mutation_id",
+    "verdict",
+    "score",
+    "baseline",
+    "item_results",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "receipt_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "mutation_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "fail",
+        "unmeasurable"
+      ],
+      "description": "unmeasurable when no holdout item has a deterministic probe for this mutation kind; activation then needs an explicit operator waiver."
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "baseline": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "item_results": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "outcome"
+        ],
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "outcome": {
+            "enum": [
+              "pass",
+              "fail",
+              "skip"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "created_at": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "measurement": {
+      "enum": [
+        "historical",
+        "paired"
+      ]
+    },
+    "mutation_fingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "comparison": {
+      "$ref": "#/$defs/comparison"
+    },
+    "suite_fingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "paired_context_fingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Backend-owned paired controls including the immutable rollback parent; legacy absence grants no automatic rollback."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "arm": {
+      "type": "object",
+      "required": [
+        "outcome",
+        "tokens",
+        "wall_clock_seconds"
+      ],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "pass",
+            "fail",
+            "skip"
+          ]
+        },
+        "tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "wall_clock_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "pair": {
+      "type": "object",
+      "required": [
+        "item_id",
+        "baseline",
+        "candidate"
+      ],
+      "properties": {
+        "item_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "baseline": {
+          "$ref": "#/$defs/arm"
+        },
+        "candidate": {
+          "$ref": "#/$defs/arm"
+        }
+      },
+      "additionalProperties": false
+    },
+    "comparison": {
+      "type": "object",
+      "required": [
+        "pairs",
+        "measured",
+        "wins",
+        "losses",
+        "ties",
+        "conclusion",
+        "sign_test_p"
+      ],
+      "properties": {
+        "pairs": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/pair"
+          }
+        },
+        "measured": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "wins": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "losses": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "ties": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "conclusion": {
+          "enum": [
+            "inconclusive",
+            "observed_gain",
+            "no_gain",
+            "regression"
+          ]
+        },
+        "sign_test_p": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "measurement": {
+            "const": "paired"
+          }
+        },
+        "required": [
+          "measurement"
+        ]
+      },
+      "then": {
+        "required": [
+          "comparison",
+          "mutation_fingerprint",
+          "suite_fingerprint"
+        ]
+      }
+    }
+  ]
+}

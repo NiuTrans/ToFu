@@ -1,0 +1,58 @@
+"""lib.desktop — desktop-agent bridge command queue + result helpers.
+
+Relocated here (2026-06) from ``routes/desktop.py`` to break the
+``lib → routes`` circular-import coupling: ``lib/tools/registry`` and
+``lib/tasks_pkg/handlers/misc`` reached UP into ``routes.desktop`` for
+``send_desktop_command`` / ``format_desktop_result`` /
+``is_desktop_agent_connected``. The command queue is plain in-process
+state with no Flask dependency, so it belongs in lib.
+
+Dependencies flow ``routes → lib`` only. ``routes/desktop.py`` owns only the
+authenticated poll adapter.
+"""
+
+from lib.desktop.bridge import (
+    command_queue,
+    command_queue_lock,
+    consume_desktop_command,
+    enqueue_desktop_command,
+    format_desktop_result,
+    get_command_stream,
+    get_frames,
+    is_desktop_agent_connected,
+    last_poll_time,
+    list_agents,
+    online_agents,
+    pending_commands_count,
+    record_poll,
+    release_desktop_command,
+    register_agent,
+    resolve_results,
+    resolve_streams,
+    send_desktop_command,
+    take_pending_commands,
+    take_pending_commands_async,
+)
+
+__all__ = [
+    'command_queue',
+    'command_queue_lock',
+    'consume_desktop_command',
+    'enqueue_desktop_command',
+    'format_desktop_result',
+    'get_command_stream',
+    'get_frames',
+    'is_desktop_agent_connected',
+    'last_poll_time',
+    'list_agents',
+    'online_agents',
+    'pending_commands_count',
+    'record_poll',
+    'release_desktop_command',
+    'register_agent',
+    'resolve_results',
+    'resolve_streams',
+    'send_desktop_command',
+    'take_pending_commands',
+    'take_pending_commands_async',
+]

@@ -1,0 +1,228 @@
+
+/* ── Inline Turn activity events ─────────────────────────────────────────
+   Durable "what actually happened" diagnostics anchored where they
+   happened: a tool-linked row sits right under its tool block, everything
+   else rides its model round.  Routine stream phase text never lands here
+   — the live-status surface owns it — so rows stay scannable: a severity
+   dot, one summary line, and small duration/repeat chips.  The full
+   timestamp rides the row tooltip instead of a per-row line. */
+.conversation-block--activity-event {
+  margin: 2px 0;
+}
+.activity-event {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  min-width: 0;
+  padding: 3px 6px 3px 2px;
+  border-radius: 7px;
+}
+.activity-event--nested {
+  margin-left: var(--space-3);
+}
+.activity-event--warning {
+  background: rgba(245, 158, 11, 0.06);
+}
+.activity-event--error,
+.activity-event--failed {
+  background: rgba(220, 38, 38, 0.06);
+}
+.activity-event__marker {
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.6);
+}
+.activity-event--warning .activity-event__marker {
+  background: #f59e0b;
+}
+.activity-event--error .activity-event__marker,
+.activity-event--failed .activity-event__marker {
+  background: var(--error-text, #f87171);
+}
+.activity-event--succeeded .activity-event__marker {
+  background: var(--s-done, #10b981);
+}
+.activity-event--switched .activity-event__marker,
+.activity-event--skipped .activity-event__marker,
+.activity-event--aborted .activity-event__marker {
+  background: #f59e0b;
+}
+.activity-event__body {
+  min-width: 0;
+}
+.activity-event__line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.activity-event__summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.activity-event--failed .activity-event__summary,
+.activity-event--error .activity-event__summary {
+  color: var(--error-text, #f87171);
+}
+.activity-event--warning .activity-event__summary {
+  color: #d97706;
+}
+.activity-event__chips {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font: 500 10px/1.2 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.activity-event__repeated {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 15px;
+  padding: 0 var(--space-1);
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-tertiary);
+  font: 600 9.5px/1 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.activity-event__detail,
+.activity-event__facts {
+  margin-top: 1px;
+  color: var(--text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.activity-event--failed .activity-event__detail,
+.activity-event--error .activity-event__detail {
+  color: var(--error-text, #f87171);
+  opacity: 0.85;
+}
+.activity-event__facts {
+  font-size: 10.5px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.activity-event.activity-event--terminal-error {
+  display: block;
+  padding: 0;
+}
+.activity-event__terminal-summary {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  min-width: 0;
+  padding: 3px 6px 3px 2px;
+  border-radius: 7px;
+  cursor: pointer;
+  list-style: none;
+}
+.activity-event__terminal-summary::-webkit-details-marker {
+  display: none;
+}
+.activity-event__terminal-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.activity-event__chevron {
+  width: 14px;
+  height: 14px;
+  transition: transform .16s ease;
+  transform: rotate(-90deg);
+}
+.activity-event--terminal-error[open] .activity-event__chevron {
+  transform: rotate(0deg);
+}
+.activity-event__terminal-content {
+  min-width: 0;
+  margin: 1px 6px 6px 14px;
+}
+.activity-event__terminal-envelope {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: var(--space-2) 10px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  color: inherit;
+  font: 11px/1.5 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+.activity-event__terminal-content .activity-event__facts {
+  margin-top: var(--space-1);
+}
+/* One terminal failure = one structured receipt: durable execution identity
+ * (turn / attempt / round / tool) plus the copy-diagnostics action. */
+.activity-event__failure-receipt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  margin: 0 0 var(--space-1);
+}
+.activity-event__receipt-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--space-2);
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  font-size: 10.5px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.activity-event__receipt-facts dt {
+  margin: 0;
+  padding: 0;
+  color: var(--text-tertiary);
+  font-weight: 600;
+}
+.activity-event__receipt-facts dt::after {
+  content: ':';
+}
+.activity-event__receipt-facts dd {
+  margin: 0 var(--space-1) 0 0;
+  padding: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  user-select: text;
+}
+.activity-event__copy-diagnostics {
+  margin-left: auto;
+  padding: 1px var(--space-2);
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+  cursor: pointer;
+}
+.activity-event__copy-diagnostics:hover {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+.activity-event__copy-diagnostics:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+@media (max-width: 600px) {
+  .activity-event {
+    padding-right: var(--space-1);
+  }
+  .activity-event--nested {
+    margin-left: var(--space-2);
+  }
+}

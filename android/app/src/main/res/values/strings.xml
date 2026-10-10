@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- Home / server list -->
+    <string name="list_no_servers">No servers yet</string>
+    <string name="list_actions_cd">More actions for %1$s</string>
+    <string name="list_report_cd">Report a problem</string>
+    <string name="list_empty_title">Your servers live here</string>
+    <string name="list_empty_body">Add a Tofu server once — its address and password are remembered, so opening it later is a single tap.</string>
+    <string name="list_empty_cta">Add your first server</string>
+    <string name="list_fab_add">Add server</string>
+    <string name="list_menu_edit">Edit</string>
+    <string name="list_menu_delete">Delete</string>
+    <string name="list_signing_in">Signing in to %1$s…</string>
+    <string name="list_wrong_password">Wrong password for %1$s — edit it to fix.</string>
+    <string name="list_update_available">Tofu %1$s is available</string>
+    <string name="list_update_installed">You have %1$s</string>
+    <string name="list_download">Download</string>
+    <string name="list_footer_version">Tofu v%1$s (%2$d)</string>
+    <plurals name="list_server_count">
+        <item quantity="one">%d server</item>
+        <item quantity="other">%d servers</item>
+    </plurals>
+    <plurals name="list_running_count">
+        <item quantity="one">%d running</item>
+        <item quantity="other">%d running</item>
+    </plurals>
+
+    <!-- Server lifecycle labels (UI mapping; SessionManager stays English) -->
+    <string name="state_running">Running</string>
+    <string name="state_stopped">Stopped</string>
+    <string name="state_checking">Tap to check</string>
+    <string name="state_working">Working…</string>
+    <string name="state_unreachable">Unreachable</string>
+    <string name="state_open_only">Open only</string>
+
+    <!-- Add / edit server -->
+    <string name="add_title">Add server</string>
+    <string name="edit_title">Edit server</string>
+    <string name="add_subtitle">Saved once, opened with a tap</string>
+    <string name="edit_subtitle">Changes re-authenticate on save</string>
+    <string name="cd_back">Back</string>
+    <string name="section_identity">Identity</string>
+    <string name="section_access">Access</string>
+    <string name="section_server_control">Server control</string>
+    <string name="field_name">Name</string>
+    <string name="field_name_placeholder">Shanghai sandbox</string>
+    <string name="field_name_helper">How this server appears in your list.</string>
+    <string name="field_url">Server URL</string>
+    <string name="field_url_placeholder">https://…/proxy/15000/</string>
+    <string name="field_url_helper">Paste the full address, including /proxy/15000/.</string>
+    <string name="action_scan_qr">Scan QR</string>
+    <string name="action_paste_link">Paste link</string>
+    <string name="field_password">Password</string>
+    <string name="field_password_keep">Password (blank keeps current)</string>
+    <string name="field_password_reuse">Password (blank reuses saved)</string>
+    <string name="field_password_placeholder">code-server password</string>
+    <string name="helper_password_reuse">Will reuse the saved password for %1$s.</string>
+    <string name="helper_password_stored">Stored encrypted on this device only.</string>
+    <string name="helper_password_new">Stored encrypted on this device, never sent anywhere else.</string>
+    <string name="cd_show_password">Show password</string>
+    <string name="cd_hide_password">Hide password</string>
+    <string name="toggle_manage_title">Start and stop from the app</string>
+    <string name="toggle_manage_subtitle">Needs supervisor.py running on the host.</string>
+    <string name="field_project_path">Project path on the host</string>
+    <string name="field_project_path_placeholder">/home/dev/tofu</string>
+    <string name="field_project_path_helper">Absolute path, and allow-listed in TOFU_SUPERVISOR_PROJECTS on the host.</string>
+    <string name="action_save_connect">Save &amp; connect</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="test_testing">Testing…</string>
+    <string name="test_connection">Test connection</string>
+    <string name="auth_code_server">code-server password</string>
+    <string name="auth_code_server_desc">Uses your saved password for verified code-server forms; other gateways open interactive sign-in.</string>
+    <string name="auth_sso">Interactive sign-in</string>
+    <string name="auth_sso_desc">Complete sign-in in the app. Session lifetime follows the gateway policy.</string>
+    <string name="auth_none">No authentication</string>
+    <string name="auth_none_desc">For a Tofu exposed directly on a trusted network.</string>
+    <string name="toast_bad_qr">That QR code isn\'t a Tofu server link</string>
+    <string name="toast_no_link">No server link on the clipboard</string>
+
+    <!-- Onboarding -->
+    <string name="onboard_welcome">Welcome to Tofu</string>
+    <string name="onboard_sub">This app remembers your Tofu servers, so you never re-type a long address or password again.</string>
+    <string name="onboard_connect">Connect your server</string>
+    <string name="onboard_scan_title">Scan a QR code</string>
+    <string name="onboard_scan_sub">Point your camera at a server QR code</string>
+    <string name="onboard_paste_title">Paste a link</string>
+    <string name="onboard_paste_sub">Use a server link from your clipboard</string>
+    <string name="onboard_manual_title">Enter it manually</string>
+    <string name="onboard_manual_sub">Type the address and password</string>
+    <string name="onboard_skip">Set up later</string>
+
+    <!-- Report a problem -->
+    <string name="report_title">Report a problem</string>
+    <string name="report_title_with">Report a problem with %1$s</string>
+    <string name="report_subtitle">Secrets are masked before anything leaves this device.</string>
+    <string name="report_note_label">What went wrong? (optional)</string>
+    <string name="report_note_placeholder">e.g. tapping Send does nothing</string>
+    <string name="report_share">Share report</string>
+    <string name="report_copy">Copy</string>
+    <string name="report_send">Send to server</string>
+    <string name="report_copied">Copied — paste it to the maintainer</string>
+    <string name="report_no_share">No app can share this</string>
+    <string name="report_subject">Tofu problem report</string>
+    <string name="report_clip_label">Tofu report</string>
+    <string name="report_summary_prefix">Includes: </string>
+    <string name="report_summary_web">web diagnostics</string>
+    <plurals name="report_events">
+        <item quantity="one">%d recent event</item>
+        <item quantity="other">%d recent events</item>
+    </plurals>
+    <string name="report_version">Tofu v%1$s (%2$d)</string>
+
+    <!-- Supervisor controls -->
+    <string name="super_start">Start</string>
+    <string name="super_stop">Stop</string>
+    <string name="super_check">Check</string>
+
+    <!-- WebView shell -->
+    <string name="web_reload_cd">Reload</string>
+    <string name="web_report_cd">Report a problem</string>
+    <string name="web_show_tools">Show tools</string>
+    <string name="web_hide_tools">Hide tools</string>
+    <string name="web_couldnt_load">Couldn\'t load %1$s</string>
+    <string name="web_loading">Loading… %1$d%%</string>
+    <string name="web_connecting">Connecting…</string>
+    <string name="web_retry">Retry</string>
+    <string name="web_back_to_servers">Back to servers</string>
+    <string name="web_no_app">No app can open this link</string>
+    <string name="web_downloading">Downloading %1$s</string>
+    <string name="web_download_failed">Download failed: %1$s</string>
+    <string name="web_session_expired">Session expired — sign in again from the server list</string>
+    <string name="web_cert_title">Certificate problem</string>
+    <string name="web_cert_body">The server\'s certificate failed validation (%1$s). Proceed only if you trust this network.</string>
+    <string name="web_proceed_once">Proceed once</string>
+    <string name="qr_prompt">Point at the Tofu server QR code</string>
+
+    <string name="web_open_browser">Open in browser</string>
+    <string name="web_close_sign_in">Return to Tofu</string>
+    <string name="diagnostics_copy">Copy diagnostic logs</string>
+    <string name="diagnostics_copy_failed">Could not copy. Try sharing the report instead.</string>
+    <string name="diagnostics_startup_failed">Tofu could not start</string>
+    <string name="diagnostics_startup_help">Copy the diagnostic logs and send them to the maintainer.</string>
+</resources>

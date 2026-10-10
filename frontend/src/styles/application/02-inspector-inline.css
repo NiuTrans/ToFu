@@ -1,0 +1,15 @@
+/* inspector inline: readable evidence, theme tokens and demand-loaded diagnostics ownership. */
+.ri-state-panel{margin:var(--space-1) 0 var(--space-2);border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary,color-mix(in srgb, var(--text-secondary) 60%, transparent));overflow:hidden}
+.ri-state-panel-head{display:flex;align-items:center;gap:var(--space-2);padding:calc(var(--space-1) * 1.5) calc(var(--space-1) * 2.25);border-bottom:1px solid var(--border);background:color-mix(in srgb, var(--text-secondary) 6%, transparent)}
+.ri-state-panel-kind{--ri-kind-ink:var(--text-secondary);padding:calc(var(--space-1) * 0.25) calc(var(--space-1) * 1.75);font-size:var(--font-size-sm);font-weight:var(--weight-semibold);line-height:1.6;color:var(--ri-kind-ink);background:var(--accent-subtle);border:1px solid var(--accent);border-radius:3px;flex-shrink:0;cursor:help}
+.ri-state-panel-kind:empty{display:none}
+.ri-state-panel-kind.ri-kind-fallback{color:var(--text-secondary);background:color-mix(in srgb, var(--text-secondary) 10%, transparent);border-color:var(--border-light)}
+.ri-state-panel-title{font-family:var(--font-mono);font-size:var(--font-size-sm);font-weight:var(--weight-semibold);color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ri-state-panel-close{margin-left:auto;display:inline-flex;align-items:center;padding:calc(var(--space-1) * 0.5);border-radius:3px;color:var(--text-secondary);cursor:pointer}
+.ri-state-panel-close:hover{color:var(--accent);background:color-mix(in srgb, var(--text-secondary) 12%, transparent)}
+.ri-state-body{max-height:420px;overflow-y:auto;padding:calc(var(--space-1) * 1.75) calc(var(--space-1) * 2.25)}
+.ri-state-body .debug-msg-block{margin-bottom:calc(var(--space-1) * 1.25)}
+.ri-state-body .debug-msg-header{font-size:var(--font-size-sm);padding:calc(var(--space-1) * 1.25) calc(var(--space-1) * 2.25)}
+.ri-state-body .debug-msg-summary{font-size:var(--font-size-sm)}
+.ri-state-body .debug-msg-body pre{font-size:var(--font-size-lg);line-height:var(--leading-body)}
+.ri-state-body .debug-struct{font-size:var(--font-size-lg);line-height:var(--leading-body)}

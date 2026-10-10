@@ -1,0 +1,235 @@
+{
+  "contract": "tofudb-unpark-outside-lock-mechanism-control-v1",
+  "date": "2026-10-08",
+  "decision": "Do not advance candidate to native/runtime admission: contended empty handoff control gives no stable benefit; 56/256-worker mean drain worsens~13/~6percent. This is not a productive regression proof.",
+  "results": {
+    "rows": [
+      {
+        "round": 0,
+        "mode": "baseline",
+        "workers": 1,
+        "drain_ns": 54195
+      },
+      {
+        "round": 0,
+        "mode": "candidate",
+        "workers": 1,
+        "drain_ns": 39053
+      },
+      {
+        "round": 0,
+        "mode": "baseline",
+        "workers": 8,
+        "drain_ns": 118765
+      },
+      {
+        "round": 0,
+        "mode": "candidate",
+        "workers": 8,
+        "drain_ns": 97677
+      },
+      {
+        "round": 0,
+        "mode": "baseline",
+        "workers": 56,
+        "drain_ns": 874706
+      },
+      {
+        "round": 0,
+        "mode": "candidate",
+        "workers": 56,
+        "drain_ns": 551521
+      },
+      {
+        "round": 0,
+        "mode": "baseline",
+        "workers": 256,
+        "drain_ns": 3344090
+      },
+      {
+        "round": 0,
+        "mode": "candidate",
+        "workers": 256,
+        "drain_ns": 3703403
+      },
+      {
+        "round": 1,
+        "mode": "candidate",
+        "workers": 1,
+        "drain_ns": 25285
+      },
+      {
+        "round": 1,
+        "mode": "baseline",
+        "workers": 1,
+        "drain_ns": 24212
+      },
+      {
+        "round": 1,
+        "mode": "candidate",
+        "workers": 8,
+        "drain_ns": 58392
+      },
+      {
+        "round": 1,
+        "mode": "baseline",
+        "workers": 8,
+        "drain_ns": 59049
+      },
+      {
+        "round": 1,
+        "mode": "candidate",
+        "workers": 56,
+        "drain_ns": 912116
+      },
+      {
+        "round": 1,
+        "mode": "baseline",
+        "workers": 56,
+        "drain_ns": 740987
+      },
+      {
+        "round": 1,
+        "mode": "candidate",
+        "workers": 256,
+        "drain_ns": 3145124
+      },
+      {
+        "round": 1,
+        "mode": "baseline",
+        "workers": 256,
+        "drain_ns": 2947985
+      },
+      {
+        "round": 2,
+        "mode": "baseline",
+        "workers": 1,
+        "drain_ns": 25097
+      },
+      {
+        "round": 2,
+        "mode": "candidate",
+        "workers": 1,
+        "drain_ns": 25430
+      },
+      {
+        "round": 2,
+        "mode": "baseline",
+        "workers": 8,
+        "drain_ns": 56777
+      },
+      {
+        "round": 2,
+        "mode": "candidate",
+        "workers": 8,
+        "drain_ns": 64010
+      },
+      {
+        "round": 2,
+        "mode": "baseline",
+        "workers": 56,
+        "drain_ns": 526336
+      },
+      {
+        "round": 2,
+        "mode": "candidate",
+        "workers": 56,
+        "drain_ns": 548350
+      },
+      {
+        "round": 2,
+        "mode": "baseline",
+        "workers": 256,
+        "drain_ns": 2968960
+      },
+      {
+        "round": 2,
+        "mode": "candidate",
+        "workers": 256,
+        "drain_ns": 2422645
+      },
+      {
+        "round": 3,
+        "mode": "candidate",
+        "workers": 1,
+        "drain_ns": 26279
+      },
+      {
+        "round": 3,
+        "mode": "baseline",
+        "workers": 1,
+        "drain_ns": 25302
+      },
+      {
+        "round": 3,
+        "mode": "candidate",
+        "workers": 8,
+        "drain_ns": 62558
+      },
+      {
+        "round": 3,
+        "mode": "baseline",
+        "workers": 8,
+        "drain_ns": 59114
+      },
+      {
+        "round": 3,
+        "mode": "candidate",
+        "workers": 56,
+        "drain_ns": 969959
+      },
+      {
+        "round": 3,
+        "mode": "baseline",
+        "workers": 56,
+        "drain_ns": 497771
+      },
+      {
+        "round": 3,
+        "mode": "candidate",
+        "workers": 256,
+        "drain_ns": 3384258
+      },
+      {
+        "round": 3,
+        "mode": "baseline",
+        "workers": 256,
+        "drain_ns": 2662226
+      }
+    ],
+    "summary": {
+      "1": {
+        "baseline_ms": 0.0322015,
+        "candidate_ms": 0.02901175,
+        "percent": -9.905594459885414
+      },
+      "8": {
+        "baseline_ms": 0.07342625,
+        "candidate_ms": 0.07065925,
+        "percent": -3.768407075126401
+      },
+      "56": {
+        "baseline_ms": 0.65995,
+        "candidate_ms": 0.7454865,
+        "percent": 12.961057655883025
+      },
+      "256": {
+        "baseline_ms": 2.98081525,
+        "candidate_ms": 3.1638575,
+        "percent": 6.140677453928078
+      }
+    },
+    "scope": "Standalone copied current admission algorithms, alternating four rounds, gate held until exact n+1 queued claimants, all waiters enter/drain, no semantic/database work. Timer includes head release, worker drain and joins. No productive harness credit."
+  },
+  "reproducer": "mod baseline {\n// FIFO foreground mutex admission. One waiter polls the authority; other\n// connections park without a 1 ms thundering herd. No I/O or extra worker.\n// Background maintenance still owns its existing authority mutex protocol.\nuse std::collections::VecDeque;\nuse std::io;\nuse std::sync::{Arc, Mutex};\nuse std::thread::{self, Thread};\nuse std::time::{Duration, Instant};\n\n#[derive(Debug, Default)]\npub(crate) struct AuthorityAdmission {\n    waiting: Mutex<VecDeque<Arc<Thread>>>,\n}\n\npub(crate) struct Permit<'a> {\n    admission: &'a AuthorityAdmission,\n    thread: Arc<Thread>,\n}\n\npub(crate) enum Admission<'a> {\n    Entered(Permit<'a>),\n    DeadlineElapsed,\n    ConnectionClosed,\n}\n\nimpl AuthorityAdmission {\n    /// Execute a capacity fast path only while no FIFO claimant can be passed.\n    /// The queue guard spans the decision; this grants no authority access.\n    pub(crate) fn when_uncontended<T>(\n        &self, operation: impl FnOnce() -> io::Result<Option<T>>,\n    ) -> io::Result<Option<T>> {\n        let waiting = self.waiting.lock()\n            .map_err(|_| io::Error::other(\"authority admission poisoned\"))?;\n        if !waiting.is_empty() { return Ok(None); }\n        operation()\n    }\n\n    pub(crate) fn waiting_count(&self) -> usize {\n        self.waiting.lock().unwrap().len()\n    }\n\n    pub(crate) fn acquire(\n        &self,\n        deadline: Instant,\n        alive: &mut impl FnMut() -> bool,\n    ) -> io::Result<Admission<'_>> {\n        let thread = Arc::new(thread::current());\n        self.waiting\n            .lock()\n            .map_err(|_| io::Error::other(\"authority admission poisoned\"))?\n            .push_back(Arc::clone(&thread));\n        let permit = Permit {\n            admission: self,\n            thread,\n        };\n        loop {\n            if !alive() {\n                return Ok(Admission::ConnectionClosed);\n            }\n            let remaining = deadline.saturating_duration_since(Instant::now());\n            if remaining.is_zero() {\n                return Ok(Admission::DeadlineElapsed);\n            }\n            let first = self\n                .waiting\n                .lock()\n                .map_err(|_| io::Error::other(\"authority admission poisoned\"))?\n                .front()\n                .is_some_and(|head| Arc::ptr_eq(head, &permit.thread));\n            if first {\n                return Ok(Admission::Entered(permit));\n            }\n            // unpark retains a token even if release raced this park. The\n            // slice only checks listener shutdown; no capacity busy-poll.\n            thread::park_timeout(remaining.min(Duration::from_millis(25)));\n        }\n    }\n}\n\nimpl Drop for Permit<'_> {\n    fn drop(&mut self) {\n        let mut waiting = self\n            .admission\n            .waiting\n            .lock()\n            .unwrap_or_else(|e| e.into_inner());\n        if let Some(index) = waiting.iter().position(|t| Arc::ptr_eq(t, &self.thread)) {\n            waiting.remove(index);\n        }\n        if let Some(next) = waiting.front() {\n            next.unpark();\n        }\n    }\n}\n\n}\nmod candidate {\n// FIFO foreground mutex admission. One waiter polls the authority; other\n// connections park without a 1 ms thundering herd. No I/O or extra worker.\n// Background maintenance still owns its existing authority mutex protocol.\nuse std::collections::VecDeque;\nuse std::io;\nuse std::sync::{Arc, Mutex};\nuse std::thread::{self, Thread};\nuse std::time::{Duration, Instant};\n\n#[derive(Debug, Default)]\npub(crate) struct AuthorityAdmission {\n    waiting: Mutex<VecDeque<Arc<Thread>>>,\n}\n\npub(crate) struct Permit<'a> {\n    admission: &'a AuthorityAdmission,\n    thread: Arc<Thread>,\n}\n\npub(crate) enum Admission<'a> {\n    Entered(Permit<'a>),\n    DeadlineElapsed,\n    ConnectionClosed,\n}\n\nimpl AuthorityAdmission {\n    /// Execute a capacity fast path only while no FIFO claimant can be passed.\n    /// The queue guard spans the decision; this grants no authority access.\n    pub(crate) fn when_uncontended<T>(\n        &self, operation: impl FnOnce() -> io::Result<Option<T>>,\n    ) -> io::Result<Option<T>> {\n        let waiting = self.waiting.lock()\n            .map_err(|_| io::Error::other(\"authority admission poisoned\"))?;\n        if !waiting.is_empty() { return Ok(None); }\n        operation()\n    }\n\n    pub(crate) fn waiting_count(&self) -> usize {\n        self.waiting.lock().unwrap().len()\n    }\n\n    pub(crate) fn acquire(\n        &self,\n        deadline: Instant,\n        alive: &mut impl FnMut() -> bool,\n    ) -> io::Result<Admission<'_>> {\n        let thread = Arc::new(thread::current());\n        self.waiting\n            .lock()\n            .map_err(|_| io::Error::other(\"authority admission poisoned\"))?\n            .push_back(Arc::clone(&thread));\n        let permit = Permit {\n            admission: self,\n            thread,\n        };\n        loop {\n            if !alive() {\n                return Ok(Admission::ConnectionClosed);\n            }\n            let remaining = deadline.saturating_duration_since(Instant::now());\n            if remaining.is_zero() {\n                return Ok(Admission::DeadlineElapsed);\n            }\n            let first = self\n                .waiting\n                .lock()\n                .map_err(|_| io::Error::other(\"authority admission poisoned\"))?\n                .front()\n                .is_some_and(|head| Arc::ptr_eq(head, &permit.thread));\n            if first {\n                return Ok(Admission::Entered(permit));\n            }\n            // unpark retains a token even if release raced this park. The\n            // slice only checks listener shutdown; no capacity busy-poll.\n            thread::park_timeout(remaining.min(Duration::from_millis(25)));\n        }\n    }\n}\n\nimpl Drop for Permit<'_> {\n    fn drop(&mut self) {\n        let next = {\n            let mut waiting = self.admission.waiting.lock().unwrap_or_else(|e|e.into_inner());\n            if let Some(index)=waiting.iter().position(|t|Arc::ptr_eq(t,&self.thread)) {waiting.remove(index);}\n            waiting.front().cloned()\n        };\n        if let Some(next)=next {next.unpark();}\n    }\n}\n\n}\nuse std::{time::{Instant,Duration},thread};\nfn run_baseline(workers:usize)->u128 {\n let gate=baseline::AuthorityAdmission::default();\n thread::scope(|scope|{\n  let baseline::Admission::Entered(head)=gate.acquire(Instant::now()+Duration::from_secs(30),&mut||true).unwrap() else {panic!(\"head\")};\n  let handles:Vec<_>=(0..workers).map(|_|scope.spawn(||{\n   let baseline::Admission::Entered(permit)=gate.acquire(Instant::now()+Duration::from_secs(30),&mut||true).unwrap() else {panic!(\"waiter\")};drop(permit);\n  })).collect();\n  let until=Instant::now()+Duration::from_secs(10);\n  while gate.waiting_count()!=workers+1 {assert!(Instant::now()<until);thread::sleep(Duration::from_millis(1));}\n  let begin=Instant::now();drop(head);for handle in handles{handle.join().unwrap();}let nanos=begin.elapsed().as_nanos();assert_eq!(gate.waiting_count(),0);nanos\n })\n}\nfn run_candidate(workers:usize)->u128 {\n let gate=candidate::AuthorityAdmission::default();\n thread::scope(|scope|{\n  let candidate::Admission::Entered(head)=gate.acquire(Instant::now()+Duration::from_secs(30),&mut||true).unwrap() else {panic!(\"head\")};\n  let handles:Vec<_>=(0..workers).map(|_|scope.spawn(||{\n   let candidate::Admission::Entered(permit)=gate.acquire(Instant::now()+Duration::from_secs(30),&mut||true).unwrap() else {panic!(\"waiter\")};drop(permit);\n  })).collect();\n  let until=Instant::now()+Duration::from_secs(10);\n  while gate.waiting_count()!=workers+1 {assert!(Instant::now()<until);thread::sleep(Duration::from_millis(1));}\n  let begin=Instant::now();drop(head);for handle in handles{handle.join().unwrap();}let nanos=begin.elapsed().as_nanos();assert_eq!(gate.waiting_count(),0);nanos\n })\n}\nfn main(){for round in 0..4 {for workers in [1,8,56,256] {let modes=if round%2==0{[\"baseline\",\"candidate\"]}else{[\"candidate\",\"baseline\"]};for mode in modes {let n=if mode==\"baseline\"{run_baseline(workers)}else{run_candidate(workers)};println!(\"{} {} {} {}\",round,mode,workers,n);}}}}\n",
+  "source_sha256": "7cad23475d3225ded4e0ff9f7dae2c25ea7adef7dd287e5408848ae49bce4868",
+  "binary_sha256": "e671644102d7dcd5d389aa0235733336ebd4b5ed9a377b8125106637a7efd91e",
+  "limitations": [
+    "Four rounds per size, no confidence interval or all-scene conclusion.",
+    "Empty permits only; no authority-held transaction, snapshot, allocator transport, I/O or application caller.",
+    "Timer includes head release, worker drain and joins; cannot subtract it from productive FIFO waits.",
+    "Moving unpark outside lock adds an Arc clone and changes scheduling timing. Current code is retained.",
+    "Gate proves exact n+1 enqueued claimants before timing; all32 controls drained without deadline/connection failure.",
+    "No runtime/test/contract source changed; no actual database speedup or original harness credit."
+  ]
+}

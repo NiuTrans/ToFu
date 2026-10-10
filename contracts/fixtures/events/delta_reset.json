@@ -1,0 +1,19 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "contentEpoch": 1,
+  "conversationId": "s",
+  "discard": true,
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "requestId": "s",
+  "roundNum": 1,
+  "seq": 1,
+  "taskId": "s",
+  "turnRole": "s",
+  "type": "delta_reset",
+  "vuMsgId": "s"
+}

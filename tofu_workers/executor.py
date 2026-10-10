@@ -1,0 +1,681 @@
+"""Standard-library demand executor shared by app and standalone helpers.
+
+Owns atomic worker publication, pre-entry cancellation, quarantine, resizing,
+initializer failure and joined teardown. Metrics are an injected observer port;
+this package must never import application configuration or storage.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+import uuid
+import weakref
+from collections import deque
+from concurrent.futures import Executor, Future
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+def _cancel_unstarted_weak(future, item_ref, executor_ref):
+    """Cancellation notification must not retain completed job payloads."""
+    item, executor = item_ref(), executor_ref()
+    if item is not None and executor is not None:
+        executor._forget_cancelled(item, future)
+
+
+class _SilentMetrics:
+    """Standalone consumers keep lifecycle ownership without app metrics."""
+    @staticmethod
+    def _ignore(*args, **kwargs):
+        pass
+
+    observe_executor_queue_wait = _ignore
+    publish_executor_state = _ignore
+    record_executor_abandonment = _ignore
+    record_executor_idle_retirement = _ignore
+    record_executor_rejection = _ignore
+
+
+
+class _WeakWorkItemBase:
+    # Keep slotted jobs weak-referenceable on Python 3.10, which has no
+    # dataclass weakref_slot argument. Idle callbacks must not pin job data.
+    __slots__ = ('__weakref__',)
+
+
+@dataclass(slots=True)
+class _WorkItem(_WeakWorkItemBase):
+    job_id: str
+    future: Future[Any]
+    function: Callable[..., Any]
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+    queued_at: float
+    started: bool = False
+    admission_ready: bool = False
+    abandoned: bool = False
+    cancel_notification_claimed: bool = False
+
+
+class DemandExecutor(Executor):
+    """Start accepted work on demand and retire excess threads after completion.
+
+    ``max_workers`` is the idle reuse target, never an execution ceiling.
+    ``queue_capacity`` is retained for callers migrating from the bounded
+    executor; it cannot reject work. The short handoff deque owns cancellation
+    before worker entry. Proven wedged calls retain quarantine accounting and
+    retire on return; they do not prevent unrelated submissions from starting.
+    Optional ``state_publisher`` receives scalar scheduling snapshots so
+    multiple owners can aggregate observations. It must not acquire executor
+    locks or raise. The app adapter supplies process metrics; standalone owners
+    default to silent observers.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_workers: int,
+        queue_capacity: int,
+        max_abandoned_workers: int,
+        thread_name_prefix: str = 'tofu-agent',
+        metric_pool: str = 'agent',
+        idle_retain_threads: int = 0,
+        state_publisher: Callable[..., None] | None = None,
+        initializer: Callable[..., None] | None = None,
+        initargs: tuple[Any, ...] = (),
+        daemon_workers: bool = True,
+        metrics=None,
+    ) -> None:
+        if max_workers <= 0:
+            raise ValueError('max_workers must be positive')
+        if queue_capacity < 0:
+            raise ValueError('queue_capacity must be non-negative')
+        if max_abandoned_workers <= 0:
+            raise ValueError('max_abandoned_workers must be positive')
+        self._metrics = _SilentMetrics() if metrics is None else metrics
+        self._max_workers = int(max_workers)
+        self.queue_capacity = 0  # no local queue admission ceiling
+        self.max_abandoned_workers = int(max_abandoned_workers)
+        self.thread_name_prefix = str(thread_name_prefix or 'tofu-agent')
+        self.metric_pool = str(metric_pool or 'agent')
+        if initializer is not None and not callable(initializer):
+            raise TypeError('initializer must be callable')
+        self._initializer = initializer
+        self._initargs = tuple(initargs)
+        self._daemon_workers = bool(daemon_workers)
+        self._broken_reason = None
+        self._state_publisher = state_publisher
+        self._idle_retain_threads = max(
+            0, min(self._max_workers, int(idle_retain_threads)))
+
+        self._lifecycle_lock = threading.RLock()
+        self._condition = threading.Condition(self._lifecycle_lock)
+        # Physical startup was already serialized by the scheduler condition.
+        # Keep that ordering separately so slow Thread.start never owns the
+        # lock needed by completion, cancellation, snapshots or shutdown.
+        self._startup_lock = threading.RLock()
+        self._pending: deque[_WorkItem] = deque()
+        self._jobs_by_id: dict[str, _WorkItem] = {}
+        self._running_by_id: dict[str, _WorkItem] = {}
+        self._threads: set[threading.Thread] = set()
+        self._starting_threads: set[threading.Thread] = set()
+        self._live_threads: set[threading.Thread] = set()
+        self._retiring_threads: set[threading.Thread] = set()
+        self._startup_extra_demand = 0
+        self._next_thread_index = 0
+        self._completed_jobs = 0
+        self._failed_jobs = 0
+        self._active_jobs = 0
+        self._notifying_jobs = 0
+        self._abandoned_jobs = 0
+        self._last_excess_activity = time.monotonic()
+        self._shutdown = False
+        self._publish_locked()
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any):
+        """Submit a generic job, preserving ``Executor`` compatibility.
+
+        Chat spawn wrappers stamp ``_tofu_task_id`` on their callable.  Other
+        callers receive an internal unique id and retain ordinary Future
+        semantics without gaining task-addressed cancellation.
+        """
+        task_id = str(getattr(fn, '_tofu_task_id', '') or '')
+        return self.submit_task(task_id or f'executor:{uuid.uuid4().hex}', fn,
+                                *args, **kwargs)
+
+    def submit_task(
+        self,
+        task_id: str,
+        fn: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Future[Any]:
+        """Accept one uniquely-addressed task and prepare its worker immediately."""
+        job_id = str(task_id or '')
+        if not job_id:
+            raise ValueError('task_id must be non-empty')
+        future: Future[Any] = Future()
+        item = _WorkItem(
+            job_id=job_id,
+            future=future,
+            function=fn,
+            args=tuple(args),
+            kwargs=dict(kwargs),
+            queued_at=time.monotonic(),
+        )
+        with self._startup_lock:
+            with self._condition:
+                if self._broken_reason is not None:
+                    from concurrent.futures.thread import BrokenThreadPool
+                    raise BrokenThreadPool(self._broken_reason)
+                if self._shutdown:
+                    self._metrics.record_executor_rejection(self.metric_pool, reason='shutdown')
+                    raise RuntimeError('cannot schedule new futures after shutdown')
+                if job_id in self._jobs_by_id:
+                    self._metrics.record_executor_rejection(self.metric_pool, reason='duplicate')
+                    raise RuntimeError(f'agent task already scheduled: {job_id}')
+                self._pending.append(item)
+                self._jobs_by_id[job_id] = item
+                self._last_excess_activity = item.queued_at
+                cancellation_owner = weakref.ref(item)
+                cancellation_scheduler = weakref.ref(self)
+                future.add_done_callback(
+                    lambda completed, owner=cancellation_owner, scheduler=cancellation_scheduler:
+                        _cancel_unstarted_weak(completed, owner, scheduler)
+                )
+                threads, reservation_error = self._reserve_workers_outcome_locked()
+            try:
+                if reservation_error is not None:
+                    raise reservation_error
+                self._start_reserved_workers(threads)
+            except BaseException:
+                # No worker can consume a provisional item. Rejection remains
+                # an all-or-nothing ownership handoff even after a late start.
+                with self._condition:
+                    if self._jobs_by_id.get(job_id) is item:
+                        self._pending.remove(item)
+                        self._jobs_by_id.pop(job_id, None)
+                    self._last_excess_activity = time.monotonic()
+                    self._metrics.record_executor_rejection(
+                        self.metric_pool, reason='thread_start_failed')
+                    self._publish_locked()
+                    self._condition.notify_all()
+                item.future.cancel()
+                raise
+            with self._condition:
+                # Concurrent cancel/shutdown/initializer failure may already
+                # have terminally settled this Future; never resurrect it.
+                if self._jobs_by_id.get(job_id) is item:
+                    item.admission_ready = True
+                self._publish_locked()
+                self._condition.notify_all()
+        return future
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Cancel one task only while it is still waiting in this queue."""
+        with self._condition:
+            item = self._jobs_by_id.get(str(task_id or ''))
+            if item is None or item.started:
+                return False
+            try:
+                self._pending.remove(item)
+            except ValueError:
+                return False
+            self._jobs_by_id.pop(item.job_id, None)
+            self._last_excess_activity = time.monotonic()
+            self._publish_locked()
+            self._condition.notify_all()
+        # Caller callbacks must never run while the scheduling lock is held.
+        return item.future.cancel()
+
+    def abandon_task(self, task_id: str) -> bool:
+        """Restore a slot whose running thread was durably declared wedged.
+
+        Returns ``True`` only when a replacement was admitted.  A false result
+        means the task was not running here, was already quarantined, or the
+        explicit replacement-residency budget is exhausted.
+        """
+        with self._startup_lock:
+            with self._condition:
+                item = self._running_by_id.get(str(task_id or ''))
+                if item is None or item.abandoned:
+                    return False
+                if self._abandoned_jobs >= self.max_abandoned_workers:
+                    self._metrics.record_executor_abandonment(
+                        self.metric_pool, recovered=False, failure_reason='thread_start_failed')
+                    return False
+                # Keep the original running accounting until replacement is
+                # physically started. Completion may race while start waits.
+                self._startup_extra_demand += 1
+                threads, reservation_error = self._reserve_workers_outcome_locked()
+            try:
+                if reservation_error is not None:
+                    raise reservation_error
+                self._start_reserved_workers(threads)
+            except BaseException:
+                with self._condition:
+                    self._startup_extra_demand -= 1
+                    self._last_excess_activity = time.monotonic()
+                    self._publish_locked()
+                    self._condition.notify_all()
+                self._metrics.record_executor_abandonment(self.metric_pool, recovered=False)
+                raise
+            with self._condition:
+                self._startup_extra_demand -= 1
+                if self._running_by_id.get(item.job_id) is item:
+                    item.abandoned = True
+                    self._active_jobs = max(0, self._active_jobs - 1)
+                    self._abandoned_jobs += 1
+                # If it completed meanwhile, its completion already restored
+                # capacity. Do not manufacture active/abandoned bookkeeping.
+                self._last_excess_activity = time.monotonic()
+                self._publish_locked()
+                self._condition.notify_all()
+            self._metrics.record_executor_abandonment(self.metric_pool, recovered=True)
+            return True
+
+    def scheduling_snapshot(self, task_id: str | None = None) -> dict[str, Any]:
+        """Return bounded scheduler evidence for diagnostics and presentation."""
+        with self._lifecycle_lock:
+            job_id = str(task_id or '')
+            item = self._jobs_by_id.get(job_id) if job_id else None
+            queue_position = None
+            queued_for_seconds = None
+            task_state = 'unknown'
+            if item is not None:
+                if item.abandoned:
+                    task_state = 'abandoned'
+                elif item.started:
+                    task_state = 'running'
+                else:
+                    task_state = 'queued'
+                    queued_for_seconds = max(
+                        0.0, time.monotonic() - item.queued_at)
+                    for index, queued in enumerate(self._pending, start=1):
+                        if queued is item:
+                            queue_position = index
+                            break
+            return {
+                'capacity': max(self._max_workers, self._active_jobs + len(self._pending)),
+                'active': self._active_jobs,
+                'queued': len(self._pending),
+                'available': max(0, self._max_workers - self._active_jobs),
+                'queueCapacity': self.queue_capacity,
+                'abandoned': self._abandoned_jobs,
+                'replacementCapacity': self.max_abandoned_workers,
+                'residentThreads': len(self._live_threads),
+                'startingWorkers': len(self._starting_threads),
+                'taskState': task_state,
+                'queuePosition': queue_position,
+                'queuedForSeconds': (
+                    round(queued_for_seconds, 3)
+                    if queued_for_seconds is not None else None),
+            }
+
+    def resize(self, capacity: int) -> None:
+        """Change idle thread reuse; active and future work remain demand-driven."""
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
+            raise ValueError('worker capacity must be a positive integer')
+        with self._startup_lock:
+            with self._condition:
+                if self._shutdown:
+                    raise RuntimeError('cannot resize a stopped executor')
+                previous = self._max_workers
+                self._max_workers = capacity
+                threads, reservation_error = self._reserve_workers_outcome_locked()
+            try:
+                if reservation_error is not None:
+                    raise reservation_error
+                self._start_reserved_workers(threads)
+            except BaseException:
+                with self._condition:
+                    self._max_workers = previous
+                    self._condition.notify_all()
+                raise
+            with self._condition:
+                self._publish_locked()
+                self._condition.notify_all()
+
+    def resource_snapshot(self) -> dict[str, int]:
+        with self._condition:
+            return {'capacity': max(self._max_workers, self._active_jobs + len(self._pending)), 'used': self._active_jobs,
+                    'waiting': len(self._pending), 'completed': self._completed_jobs,
+                    'errors': self._failed_jobs}
+
+    def idle_retirement_snapshot(
+        self,
+        idle_seconds: float,
+        *,
+        now: float | None = None,
+    ) -> dict[str, int | float | bool]:
+        """Return the same quiescent-generation contract as the sync pool."""
+        observed_at = time.monotonic() if now is None else float(now)
+        with self._lifecycle_lock:
+            quiet_for = max(0.0, observed_at - self._last_excess_activity)
+            resident = len(self._live_threads)
+            due = bool(
+                idle_seconds > 0
+                and not self._shutdown
+                and not self._pending
+                and not self._starting_threads
+                and not self._retiring_threads
+                and self._active_jobs == 0
+                and self._notifying_jobs == 0
+                and self._abandoned_jobs == 0
+                and resident > self._idle_retain_threads
+                and quiet_for >= idle_seconds
+            )
+            return {
+                'due': due,
+                'pending': len(self._pending),
+                'active': self._active_jobs,
+                'abandoned': self._abandoned_jobs,
+                'resident_threads': resident,
+                'retain_threads': self._idle_retain_threads,
+                'quiet_for_seconds': quiet_for,
+            }
+
+    def record_idle_retirement(self, resident_threads: int) -> None:
+        self._metrics.record_executor_idle_retirement(self.metric_pool, resident_threads)
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        """Reject new work, optionally cancel queued work, and wake workers."""
+        pending: tuple[_WorkItem, ...] = ()
+        with self._condition:
+            if not self._shutdown:
+                self._shutdown = True
+            if cancel_futures:
+                pending = tuple(self._pending)
+                self._pending.clear()
+                for item in pending:
+                    self._jobs_by_id.pop(item.job_id, None)
+            self._publish_locked()
+            self._condition.notify_all()
+        for item in pending:
+            item.future.cancel()
+        if wait:
+            with self._condition:
+                while self._starting_threads:
+                    self._condition.wait()
+                threads = tuple(self._threads | self._retiring_threads)
+            current = threading.current_thread()
+            for thread in threads:
+                if thread is not current:
+                    thread.join()
+
+    def _forget_cancelled(self, item: _WorkItem, future: Future[Any]) -> None:
+        if not future.cancelled():
+            return
+        with self._condition:
+            if item.started or item.cancel_notification_claimed:
+                return
+            item.cancel_notification_claimed = True
+            if self._jobs_by_id.get(item.job_id) is item:
+                self._pending.remove(item)
+                self._jobs_by_id.pop(item.job_id, None)
+                self._last_excess_activity = time.monotonic()
+                self._publish_locked()
+                self._condition.notify_all()
+        # No worker will consume a removed item. Finish the executor-side
+        # cancellation handshake before invoking the caller's later callbacks.
+        future.set_running_or_notify_cancel()
+
+    def _healthy_worker_count_locked(self) -> int:
+        return max(0, len(self._threads) - self._abandoned_jobs)
+
+    def _reserve_workers_locked(self) -> tuple[threading.Thread, ...]:
+        if self._shutdown:
+            return ()
+        desired = (self._active_jobs + self._notifying_jobs + len(self._pending)
+                   + self._startup_extra_demand)
+        reserved = []
+        try:
+            while self._healthy_worker_count_locked() < desired:
+                index = self._next_thread_index
+                self._next_thread_index += 1
+                thread = threading.Thread(target=self._worker,
+                    name=f'{self.thread_name_prefix}_{index}', daemon=self._daemon_workers)
+                reserved.append(thread)
+                self._threads.add(thread)
+                self._starting_threads.add(thread)
+        except BaseException:
+            for thread in reserved:
+                self._threads.discard(thread)
+                self._starting_threads.discard(thread)
+            self._condition.notify_all()
+            raise
+        return tuple(reserved)
+
+    def _reserve_workers_outcome_locked(self):
+        # Admission registration and reservations share one atomic condition
+        # hold. Rollback/cancellation callbacks happen after releasing it.
+        try:
+            return self._reserve_workers_locked(), None
+        except BaseException as error:
+            return (), error
+
+    def _start_reserved_workers(self, threads: tuple[threading.Thread, ...]) -> None:
+        # Caller owns startup_lock, never condition. Reservations are visible
+        # to shutdown but not reported as live physical worker threads.
+        try:
+            for thread in threads:
+                thread.start()
+        finally:
+            with self._condition:
+                for thread in threads:
+                    self._starting_threads.discard(thread)
+                    if thread.is_alive():
+                        if thread in self._threads:
+                            self._live_threads.add(thread)
+                    else:
+                        self._threads.discard(thread)
+                        self._live_threads.discard(thread)
+                self._condition.notify_all()
+
+    def _ensure_workers(self) -> None:
+        with self._startup_lock:
+            with self._condition:
+                threads = self._reserve_workers_locked()
+            self._start_reserved_workers(threads)
+
+    def worker_threads_snapshot(self) -> tuple[threading.Thread, ...]:
+        """Observe physical carriers without granting mutation ownership."""
+        with self._condition:
+            return tuple(self._live_threads)
+
+    def _fail_initializer(self) -> None:
+        from concurrent.futures.thread import BrokenThreadPool
+        reason = 'A thread initializer failed, the thread pool is not usable anymore'
+        with self._condition:
+            self._broken_reason = reason
+            self._shutdown = True
+            pending = tuple(self._pending)
+            self._pending.clear()
+            for item in pending:
+                self._jobs_by_id.pop(item.job_id, None)
+                item.cancel_notification_claimed = True
+            self._notifying_jobs += len(pending)
+            self._publish_locked()
+            self._condition.notify_all()
+        try:
+            for item in pending:
+                if item.future.set_running_or_notify_cancel():
+                    item.future.set_exception(BrokenThreadPool(reason))
+        finally:
+            with self._condition:
+                self._notifying_jobs -= len(pending)
+                self._publish_locked()
+                self._condition.notify_all()
+
+    def _worker(self) -> None:
+        current = threading.current_thread()
+        with self._condition:
+            self._live_threads.add(current)
+        retire_after_item = False
+        try:
+            if self._initializer is not None:
+                try:
+                    self._initializer(*self._initargs)
+                except BaseException:
+                    self._fail_initializer()
+                    return
+            while True:
+                with self._condition:
+                    while True:
+                        if (not self._shutdown and
+                                self._healthy_worker_count_locked() > max(
+                                    self._max_workers, self._active_jobs + self._notifying_jobs + len(self._pending) + self._startup_extra_demand)):
+                            return
+                        if self._pending:
+                            if self._pending[0].admission_ready:
+                                break
+                            self._condition.wait()
+                            continue
+                        if self._shutdown and not self._pending:
+                            return
+                        self._condition.wait()
+                    item = self._pending.popleft()
+                    if not item.future.set_running_or_notify_cancel():
+                        item.cancel_notification_claimed = True
+                        self._jobs_by_id.pop(item.job_id, None)
+                        self._publish_locked()
+                        continue
+                    item.started = True
+                    self._running_by_id[item.job_id] = item
+                    self._active_jobs += 1
+                    self._last_excess_activity = time.monotonic()
+                    self._publish_locked()
+                self._metrics.observe_executor_queue_wait(
+                    self.metric_pool, time.monotonic() - item.queued_at,
+                )
+
+                execution_outcome: Future[Any] = Future()
+                try:
+                    execution_outcome.set_result(
+                        item.function(*item.args, **item.kwargs))
+                except BaseException as exc:
+                    execution_outcome.set_exception(exc)
+
+                # A completed Future is an observable resource-release
+                # boundary: commit the scheduler bookkeeping first so a
+                # waiter that immediately snapshots or retires the pool cannot
+                # see the job as both completed and still active.
+                with self._condition:
+                    self._completed_jobs += 1
+                    if execution_outcome.exception() is not None:
+                        self._failed_jobs += 1
+                    self._running_by_id.pop(item.job_id, None)
+                    self._jobs_by_id.pop(item.job_id, None)
+                    if item.abandoned:
+                        self._abandoned_jobs = max(
+                            0, self._abandoned_jobs - 1)
+                        retire_after_item = True
+                    else:
+                        self._active_jobs = max(0, self._active_jobs - 1)
+                    # Future callbacks still occupy this physical worker.
+                    # A callback may submit and synchronously await another
+                    # job, so it cannot count as an available idle thread.
+                    self._notifying_jobs += 1
+                    self._last_excess_activity = time.monotonic()
+                    self._publish_locked()
+                    self._condition.notify_all()
+                try:
+                    result = execution_outcome.result()
+                except BaseException as exc:
+                    item.future.set_exception(exc)
+                else:
+                    item.future.set_result(result)
+                finally:
+                    with self._condition:
+                        self._notifying_jobs -= 1
+                        self._condition.notify_all()
+                # Idle reuse must retain the carrier, not the completed call,
+                # its copied request context, or its duplicate outcome Future.
+                item = execution_outcome = result = None
+                if retire_after_item:
+                    return
+        finally:
+            with self._condition:
+                self._threads.discard(current)
+                self._retiring_threads.add(current)
+                self._publish_locked()
+                self._condition.notify_all()
+            try:
+                # Completion and callback bookkeeping above never wait for
+                # physical startup. Only replacement creation is serialized.
+                if not self._shutdown:
+                    self._ensure_workers()
+            finally:
+                with self._condition:
+                    self._retiring_threads.discard(current)
+                    self._live_threads.discard(current)
+                    self._publish_locked()
+                    self._condition.notify_all()
+
+    def _publish_locked(self) -> None:
+        publisher = (self._metrics.publish_executor_state if self._state_publisher is None
+                     else self._state_publisher)
+        publisher(
+            self.metric_pool,
+            workers=max(self._max_workers, self._active_jobs + len(self._pending)),
+            queued=len(self._pending),
+            active=self._active_jobs,
+            resident_threads=len(self._live_threads),
+            abandoned=self._abandoned_jobs,
+        )
+
+
+_STANDALONE_POOLS = weakref.WeakSet()
+_STANDALONE_EXIT_LOCK = threading.Lock()
+_STANDALONE_EXITING = False
+_STANDALONE_EXIT_REGISTERED = False
+
+
+def _shutdown_standalone_pools():
+    """Fence non-daemon owners before threading performs interpreter joins."""
+    global _STANDALONE_EXITING
+    with _STANDALONE_EXIT_LOCK:
+        _STANDALONE_EXITING = True
+        pools = tuple(_STANDALONE_POOLS)
+    for pool in pools:
+        pool.shutdown(wait=False)
+
+
+class DemandThreadPoolExecutor(DemandExecutor):
+    """Standalone fan-out with legacy idle hints and per-item failed Futures.
+
+    No app imports or eager workers. Physical start failure withdraws only
+    the unpublished job; published siblings keep their worker ownership.
+    Closing rejects new submissions through a terminal failed Future.
+    """
+
+    def __init__(self, max_workers=None, thread_name_prefix='',
+                 initializer=None, initargs=()):
+        global _STANDALONE_EXIT_REGISTERED
+        hint = 1 if max_workers is None else int(max_workers)
+        super().__init__(max_workers=hint, queue_capacity=0,
+                         max_abandoned_workers=hint,
+                         thread_name_prefix=thread_name_prefix or 'tofu-demand',
+                         initializer=initializer, initargs=initargs,
+                         daemon_workers=False)
+        with _STANDALONE_EXIT_LOCK:
+            if _STANDALONE_EXITING:
+                self.shutdown(wait=False)
+                raise RuntimeError('cannot create executor during interpreter shutdown')
+            _STANDALONE_POOLS.add(self)
+            if not _STANDALONE_EXIT_REGISTERED:
+                threading._register_atexit(_shutdown_standalone_pools)
+                _STANDALONE_EXIT_REGISTERED = True
+
+    def submit(self, fn, /, *args, **kwargs):
+        try:
+            return super().submit(fn, *args, **kwargs)
+        except Exception as error:
+            future = Future()
+            future.set_exception(error)
+            return future
+
+
+__all__ = ['DemandExecutor', 'DemandThreadPoolExecutor']

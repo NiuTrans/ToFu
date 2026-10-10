@@ -1,0 +1,64 @@
+/* ── Async-swarm inbox-injection row (inside the ptool-panel timeline) ───── */
+/*    A synthetic tool row marking where the model received N <swarm-update>  */
+/*    sub-agent results as a user message before its next turn. Collapsible:  */
+/*    expands to show the raw payloads the model actually saw.                */
+.sw-inbox-row{margin:0;border:none}
+.sw-inbox-row>.sw-inbox-row-header{cursor:pointer;list-style:none;display:flex;align-items:center;gap:var(--space-2)}
+.sw-inbox-row>.sw-inbox-row-header::-webkit-details-marker{display:none}
+.sw-inbox-row .sw-inbox-row-ids{color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;font-size:10px;opacity:0.85}
+/* Collapse affordance: a caret appended after the row label (same convention as
+   the convmeta / memory / todo blocks). The explicit .sw-inbox-row-chev span was
+   removed so the far-right slot belongs unambiguously to the "模型原文" button. */
+.sw-inbox-row>.sw-inbox-row-header .ptool-text::after{content:" ▸";font-size:10px;opacity:0.5}
+.sw-inbox-row[open]>.sw-inbox-row-header .ptool-text::after{content:" ▾"}
+/* "Who sent this" bubble — a conversation TITLE (via convTitleById), not a raw
+   id. Reads like the peer-msg provenance banner so the sender is legible. It is
+   a <button>: clicking jumps to the source conversation (delegated handler in
+   tool_rounds.js). */
+.sw-peer-from-group{display:inline-flex;align-items:center;gap:var(--space-1);flex-wrap:wrap;min-width:0}
+.sw-peer-from-bubble{display:inline-flex;align-items:center;gap:5px;flex-shrink:1;min-width:0;max-width:420px;padding:1px 9px;border:1px solid rgba(130,170,255,.35);background:rgba(130,170,255,.09);border-radius:9px;font-size:var(--font-size-xs);line-height:1.4;color:#82aaff;font-weight:600;font-family:inherit;cursor:pointer;transition:background .15s,border-color .15s}
+.sw-peer-from-bubble:hover{background:rgba(130,170,255,.2);border-color:rgba(130,170,255,.65)}
+.sw-peer-from-bubble svg{display:block;flex-shrink:0}
+.sw-peer-from-bubble>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sw-peer-from-bubble .sw-peer-jump{opacity:.45;margin-left:1px}
+.sw-peer-from-bubble:hover .sw-peer-jump{opacity:1}
+/* Inside an expanded body card the bubble gets the full card width — the title
+   must be readable end-to-end there, not ellipsized like the cramped header. */
+.sw-peer-card-item .sw-peer-from-bubble{max-width:100%}
+.sw-peer-from-more{flex-shrink:0;padding:1px 7px;border-radius:9px;font-size:10px;font-weight:700;color:var(--text-tertiary);background:rgba(130,170,255,.12)}
+/* Inbox/peer/steer rows: the right-hand control group owns the right
+   end of the header — exactly ONE owner, same as every other row. */
+.sw-inbox-row>.sw-inbox-row-header .ptool-row-ctl{margin-left:auto}
+.sw-inbox-row .sw-inbox-row-body{padding:6px 10px var(--space-2) var(--space-4);display:flex;flex-direction:column;gap:var(--space-2)}
+
+/* A styled flex body overrides the UA's closed-<details> hiding rule. Keep
+   every injection lane compact until its summary is explicitly opened. */
+.sw-inbox-row:not([open])>.sw-inbox-row-body{display:none}
+.sw-inbox-row-empty{color:var(--text-tertiary);font-size:var(--font-size-sm);font-style:italic}
+/* ── Beautified sub-agent / peer update cards (human view) ──
+   Replaces the old raw-<pre> XML dump. Clean field header + Markdown body. */
+.sw-card{border:1px solid var(--border);border-left:2px solid rgba(251,191,36,0.5);border-radius:7px;padding:var(--space-2) 11px;background:var(--bg-secondary);display:flex;flex-direction:column;gap:6px}
+.sw-card-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.sw-card-agent{font-family:'JetBrains Mono',monospace;font-size:var(--font-size-sm);font-weight:700;color:#fbbf24}
+.sw-card-role{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;color:var(--chip-neutral-color);background:var(--chip-neutral-bg);padding:1px 7px;border-radius:7px}
+.sw-card-status{margin-left:0}
+.sw-card-meta{margin-left:auto;font-size:10.5px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace}
+.sw-card-error{font-size:var(--font-size-sm);line-height:1.5;color:var(--pb-red,#ef4444);background:color-mix(in srgb,var(--pb-red,#ef4444) 8%,transparent);border-radius:5px;padding:6px 9px;overflow-wrap:anywhere}
+.sw-card-preview{font-size:12.5px;line-height:1.55;color:var(--text-primary);overflow-wrap:anywhere}
+.sw-card-preview > :first-child{margin-top:0}
+.sw-card-preview > :last-child{margin-bottom:0}
+.sw-card-file{display:inline-flex;align-items:center;gap:5px;font-size:var(--font-size-xs);color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;overflow-wrap:anywhere}
+.sw-card-file svg{display:block;flex-shrink:0}
+.sw-card-raw-pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:var(--font-size-xs);line-height:1.5;color:var(--text-secondary);background:rgba(255,255,255,0.02);border-radius:6px;padding:var(--space-2) 10px;max-height:280px;overflow:auto}
+.sw-card-rawonly .sw-card-raw-pre,.sw-peer-card-item{}
+.sw-peer-card-item{border-left-color:var(--accent)}
+[data-theme="light"] .sw-card-raw-pre{background:rgba(0,0,0,0.03)}
+[data-theme="light"] .sw-peer-from-bubble{color:#3b5bdb;border-color:rgba(59,91,219,.35);background:rgba(59,91,219,.08)}
+[data-theme="light"] .sw-peer-from-bubble:hover{background:rgba(59,91,219,.16);border-color:rgba(59,91,219,.55)}
+[data-theme="light"] .sw-peer-from-more{background:rgba(59,91,219,.12)}
+[data-theme="tofu"] .sw-card{background:#faf8f3;border-color:#e0d9c8;border-left-color:#d98c3f}
+[data-theme="tofu"] .sw-card-agent{color:#b06d28}
+[data-theme="tofu"] .sw-card-raw-pre{background:rgba(0,0,0,0.04);color:#3a342c}
+[data-theme="tofu"] .sw-peer-from-bubble{color:#5b54c7;border-color:rgba(91,84,199,.35);background:rgba(91,84,199,.08)}
+[data-theme="tofu"] .sw-peer-from-bubble:hover{background:rgba(91,84,199,.16);border-color:rgba(91,84,199,.55)}
+[data-theme="tofu"] .sw-peer-from-more{background:rgba(91,84,199,.12)}

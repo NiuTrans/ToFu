@@ -1,0 +1,973 @@
+/* Project location and write mode are owned by 25-conversation-bar.css. */
+
+/* Project badge (topbar) — pixel tag */
+[data-theme="tofu"] .project-badge{background:rgba(196,149,106,0.14);color:#8A6240;border-color:rgba(196,149,106,0.25);border-radius:4px;box-shadow:none;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
+
+/* File changes bar — calm notification */
+[data-theme="tofu"] .file-changes-bar{
+  border:1px solid rgba(106,158,90,0.4);
+  border-left:3px solid #6A9E5A;
+  border-radius:var(--radius-sm);
+  background:rgba(106,158,90,0.05);
+  box-shadow:var(--clay-sm);
+  position:relative
+}
+[data-theme="tofu"] .file-changes-bar::before{
+  content:none;
+  display:none
+}
+[data-theme="tofu"] .file-changes-bar:hover{
+  transform:translateY(-1px);
+  box-shadow:var(--clay-md)}
+[data-theme="tofu"] .file-changes-bar.fc-pulse{
+  border-color:#5E8A50;
+  box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .fc-summary{color:#5E8A50;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
+[data-theme="tofu"] .fc-count{color:#5E8A50;font-weight:800}
+[data-theme="tofu"] .fc-undo-btn{
+  color:#A67B52;
+  border:2px solid #8A7A5A;
+  border-radius:10px;
+  box-shadow:var(--clay-sm);
+  font-family:var(--sans-body);
+  font-size:10px;
+  transition:transform 0.12s cubic-bezier(0.34,1.56,0.64,1),box-shadow 0.12s
+}
+[data-theme="tofu"] .fc-undo-btn:hover{
+  background:rgba(196,149,106,0.08);
+  transform:translateY(-2px) scale(1.03);
+  box-shadow:var(--clay-md)}
+
+/* ── Folder browser ── */
+[data-theme="tofu"] .folder-browser{border-radius:var(--radius-sm);border:1px solid rgba(184,176,160,0.4);box-shadow:0 2px 8px rgba(74,63,47,0.06);overflow:hidden}
+[data-theme="tofu"] .folder-browser-header{background:#E4E1D7;border-bottom:var(--stitch)}
+[data-theme="tofu"] .folder-browser-footer{background:#E4E1D7;border-top:var(--stitch)}
+[data-theme="tofu"] .folder-item.selected{background:rgba(196,149,106,0.08);border-left:3px solid #C4956A}
+[data-theme="tofu"] .folder-code-badge{background:rgba(196,149,106,0.1);color:#A67B52;border-radius:var(--radius-sm)}
+[data-theme="tofu"] .recent-search .recent-search-input{border:2px solid #1a1814;border-radius:var(--radius-sm);background:#F5F3ED}
+[data-theme="tofu"] .recent-search .recent-search-input:focus{border-color:#1a1814;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .recent-hl{background:rgba(196,149,106,0.22);color:#A67B52}
+[data-theme="tofu"] .recent-path-item{border-radius:var(--radius-sm);border:1px solid #D6D1C3;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .recent-path-item:hover{background:rgba(196,149,106,0.06);box-shadow:none;color:#A67B52;transform:none}
+[data-theme="tofu"] .recent-path-item:hover .recent-path-name{color:#A67B52}
+
+/* ── Capability mode picker — tofu (clay) theme ──
+ * The trigger inherits the pixel-pill [data-theme="tofu"] .submenu-trigger
+ * style and the popover inherits [data-theme="tofu"] .flow-menu, so only the
+ * active-Studio accent is bespoke here. */
+[data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{color:#A67B52;background:rgba(196,149,106,0.12);border-color:rgba(196,149,106,0.35)}
+[data-theme="tofu"] .submenu-section-label{color:#8A7A56;font-family:var(--sans-body)}
+/* ── Light theme ── */
+[data-theme="light"] .chat-mode-trigger[data-mode="studio"]{color:var(--accent);background:var(--accent-subtle);border-color:var(--accent-subtle)}
+[data-theme="light"] .submenu-section-label{color:var(--text-tertiary)}
+/* Mobile capability-mode rows read as a radio group — active row painted
+ * like an active submenu item (accent tint), NOT a check toggle. */
+.mobile-mode-item.active .mobile-sheet-item-name{color:var(--accent)}
+.mobile-mode-item .mobile-sheet-item-check{opacity:0}
+.mobile-mode-item.active .mobile-sheet-item-check{opacity:1}
+
+/* ── Submenu triggers — pixel pill buttons with JetBrains Mono ── */
+[data-theme="tofu"] .submenu-trigger{
+  border-radius:4px;
+  border:1.5px solid rgba(194,188,164,0.4);
+  border-top-color:rgba(255,252,246,0.6);
+  border-left-color:rgba(255,252,246,0.6);
+  border-right-color:rgba(168,152,120,0.4);
+  border-bottom-color:rgba(168,152,120,0.4);
+  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
+  /* Item 2 — true frosted glass matching the project bar's pills */
+  -webkit-backdrop-filter:blur(6px) saturate(1.05);
+  backdrop-filter:blur(6px) saturate(1.05);
+  color:#3D3022;
+  box-shadow:0 1px 0 rgba(154,144,122,0.3);
+  clip-path:none;
+  padding:var(--space-1) 10px;
+  font-family:var(--sans-body);
+  font-size:var(--font-size-xs);
+  font-weight:700;
+  letter-spacing:0.02em;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  transition:color 0.15s,background 0.15s,transform 0.08s ease,box-shadow 0.08s ease
+}
+[data-theme="tofu"] .submenu-trigger:hover{
+  background:linear-gradient(180deg, rgba(251,248,240,0.8) 0%, rgba(242,239,229,0.8) 100%);
+  color:#2A2018;
+  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06);
+  transform:translateY(-1px)
+}
+[data-theme="tofu"] .submenu-trigger:active{
+  transform:translateY(1px);
+  box-shadow:0 0 0 rgba(154,144,122,0.3)
+}
+[data-theme="tofu"] .submenu-trigger:disabled,[data-theme="tofu"] .submenu-trigger:disabled:hover{
+  opacity:.5;
+  cursor:not-allowed;
+  transform:none;
+  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
+  color:#3D3022;
+  box-shadow:0 1px 0 rgba(154,144,122,0.3)
+}
+[data-theme="tofu"] .submenu-trigger.open{
+  background:rgba(196,149,106,0.12);
+  color:#3D3022;
+  border-color:rgba(196,149,106,0.35);
+  font-weight:700
+}
+[data-theme="tofu"] .submenu-trigger.has-active{
+  color:#6A4E2E;
+  background:rgba(196,149,106,0.1);
+  border-color:rgba(196,149,106,0.35);
+  font-weight:700
+}
+[data-theme="tofu"] .submenu-item.active .submenu-item-name,[data-theme="tofu"] .submenu-item.active .submenu-item-icon,[data-theme="tofu"] .submenu-item.active .submenu-item-check{color:#A67B52}
+[data-theme="tofu"] .submenu-item.active .submenu-item-icon{background:rgba(196,149,106,0.1)}
+[data-theme="tofu"] .submenu-item{border-radius:3px;padding:var(--space-2) 10px;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
+[data-theme="tofu"] .submenu-item:hover{background:rgba(196,149,106,0.08)}
+[data-theme="tofu"] .submenu-item.active{background:rgba(196,149,106,0.07);border-radius:3px}
+[data-theme="tofu"] .submenu-item-icon{border-radius:3px;background:transparent;color:#8A7A5A}
+[data-theme="tofu"] .submenu-item.active .submenu-item-icon{background:#E8E5DC}
+[data-theme="tofu"] .submenu-item-name{color:#3D3022;font-weight:700;-webkit-font-smoothing:antialiased}
+[data-theme="tofu"] .submenu-item-desc{font-size:10px;color:#6A5A3A;font-weight:500}
+[data-theme="tofu"] .submenu-count{background:rgba(196,149,106,0.18);color:#8E6B48;border-radius:8px;box-shadow:none;font-family:var(--sans-body);font-size:9px;font-weight:700;padding:0 5px;min-width:14px;height:14px;line-height:1}
+[data-theme="tofu"] .submenu-dropdown{
+  border-radius:4px;
+  border:2px solid #C2BCA4;
+  border-top-color:#FFFCF6;
+  border-left-color:#FFFCF6;
+  border-right-color:#A89878;
+  border-bottom-color:#A89878;
+  box-shadow:var(--clay-sm);
+  background:#F4F2EB;
+  padding:var(--space-1);
+  overflow:visible;
+  z-index:9999;
+  max-height:none;
+  clip-path:none
+}
+[data-theme="tofu"] .submenu-dropdown::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
+
+/* ── Flow menu: same clay treatment as the Mode/Enhance/Tools sub-menus ── */
+[data-theme="tofu"] .flow-menu{
+  border-radius:4px;
+  border:2px solid #C2BCA4;
+  border-top-color:#FFFCF6;
+  border-left-color:#FFFCF6;
+  border-right-color:#A89878;
+  border-bottom-color:#A89878;
+  box-shadow:var(--clay-sm);
+  background:#F4F2EB;
+  padding:var(--space-1);
+  z-index:9999
+}
+[data-theme="tofu"] .flow-menu::after{background:#F4F2EB;border-right-color:#A89878;border-bottom-color:#A89878;border-bottom-right-radius:1px;bottom:-6px}
+[data-theme="tofu"] .flow-menu-item{border-radius:3px;padding:var(--space-2) 10px;font-family:var(--sans-body);font-size:var(--font-size-xs);font-weight:600}
+[data-theme="tofu"] .flow-menu-item:hover{background:rgba(196,149,106,0.08)}
+[data-theme="tofu"] .flow-menu-item.selected{background:rgba(196,149,106,0.07);border-radius:3px}
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-name,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon,[data-theme="tofu"] .flow-menu-item.selected .flow-menu-check{color:#A67B52}
+[data-theme="tofu"] .flow-menu-icon{border-radius:3px;background:transparent;color:#8A7A5A}
+[data-theme="tofu"] .flow-menu-item.selected .flow-menu-icon{background:#E8E5DC}
+[data-theme="tofu"] .flow-menu-name{color:#3D3022;font-weight:700;-webkit-font-smoothing:antialiased}
+[data-theme="tofu"] .flow-menu-desc{font-size:10px;color:#6A5A3A;font-weight:500}
+
+/* ── Scrollbar — thin pixel track ── */
+[data-theme="tofu"] ::-webkit-scrollbar{width:5px}
+[data-theme="tofu"] ::-webkit-scrollbar-track{background:transparent}
+[data-theme="tofu"] .conversations-list:hover::-webkit-scrollbar-thumb,
+[data-theme="tofu"] .chat-container:hover::-webkit-scrollbar-thumb,
+[data-theme="tofu"] .modal:hover::-webkit-scrollbar-thumb{
+  background:rgba(196,149,106,0.35);
+  border-radius:2px;
+  border:1px solid rgba(255,252,246,0.3)
+}
+[data-theme="tofu"] .conversations-list:hover,
+[data-theme="tofu"] .chat-container:hover,
+[data-theme="tofu"] .modal:hover{scrollbar-color:rgba(196,149,106,0.3) transparent}
+
+/* ── Debug panel — pixel window ── */
+[data-theme="tofu"] .debug-panel{
+  background:rgba(245,243,237,0.98);color:#716A55;
+  border:1px solid rgba(160,152,128,0.35);
+  box-shadow:0 4px 12px rgba(74,63,47,0.08);border-radius:var(--radius)}
+[data-theme="tofu"] .debug-msg-block{border-color:#D8D1C0}
+[data-theme="tofu"] .debug-msg-body pre{color:#4A3F2F}
+/* Darkened from the original #5A8AA8/#6A8A5E/#B8884A/#8A78B0, which measured
+   2.75-3.40:1 on the paper ground (#F4EFE5) — the same hues, taken to >=4.5:1
+   so the palette still reads as tofu rather than as the dark theme. */
+[data-theme="tofu"] .debug-msg-body pre .debug-key{color:#2F5A72}
+[data-theme="tofu"] .debug-msg-body pre .debug-str{color:#3D5C33}
+[data-theme="tofu"] .debug-msg-body pre .debug-num{color:#8A5A1E}
+[data-theme="tofu"] .debug-msg-body pre .debug-null{color:#5A4A80}
+/* Role labels had no tofu override either (1.51-2.08:1 before). */
+[data-theme="tofu"] .debug-msg-header .role-system{color:#8A5A1E}
+[data-theme="tofu"] .debug-msg-header .role-user{color:#2F5A72}
+[data-theme="tofu"] .debug-msg-header .role-assistant{color:#3A6B45}
+[data-theme="tofu"] .debug-msg-header .role-tool{color:#63508F}
+[data-theme="tofu"] .debug-msg-header .role-tools{color:#8A5A1E}
+[data-theme="tofu"] .debug-tool-calls{color:#8A5A1E}
+[data-theme="tofu"] pre.code-long[data-collapsed="true"]::after{background:linear-gradient(to bottom,transparent,#EDE9DF);border-radius:0 0 11px 11px}
+
+/* ── Modal — neo-brutalist tofu block (generic shell) ──
+   Drives every plain .modal under the tofu theme. Bespoke modals that
+   want a different identity out-specify this via [data-theme="tofu"]
+   .settings-panel (Settings), !important (Memory) or the pin below
+   (My Day). Plain modals (browser, apply) + project-modal inherit it. */
+/* :not(.memory-modal) — as with the input rule below, the memory modal owns
+   its own --m-* shell (border/background/shadow/radius) and must not inherit
+   the generic tofu block styling. Excluding it at the source lets its own
+   .memory-modal shell rule win by normal cascade, retiring the shell
+   counter-!important overrides.
+   :not(.settings-panel) — the settings panel owns the 2026-09-04 soft-shell
+   redesign (07's `.settings-panel.modal`: 1px hairline + deep soft shadow),
+   which this rule (0,3,0) silently out-specified — the panel still rendered
+   the 3px ink frame the owner rejected. Excluded at the source like
+   memory-modal. */
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel){
+  background:#faf8f3;
+  border:3px solid #1a1814;
+  border-radius:var(--radius);
+  box-shadow:var(--clay-sm);
+  animation:tofuSlam .25s cubic-bezier(0.2,1.2,0.4,1) both
+}
+/* Stamped header — only direct-child h3 (browser/apply); bespoke modals
+   nest their title inside their own .*-header so are unaffected. */
+[data-theme="tofu"] .modal > h3{
+  position:relative;
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:-0.01em;
+  color:#1a1814;
+  padding-bottom:var(--space-3);
+  border-bottom:2px solid #1a1814
+}
+[data-theme="tofu"] .modal > h3::after{
+  content:'';position:absolute;left:0;right:0;bottom:-2px;height:2px;
+  background:linear-gradient(90deg,transparent,#c9993f 15%,#c9993f 50%,#a87d2e 85%,transparent);
+  opacity:.55
+}
+[data-theme="tofu"] .modal .modal-actions{border-top-color:rgba(26,24,20,.15)}
+/* Pin My Day to its heavier shell (4px border / 10px shadow) so the
+   generic rule above can't flatten it. */
+[data-theme="tofu"] .modal.myday-modal{
+  border-width:4px;
+  box-shadow:var(--clay-sm)}
+/* :not(.memory-modal) — the memory modal owns a complete --m-* design system
+   and must not inherit the generic tofu input styling. Excluding it here at the
+   SOURCE (specificity 0,3,1) lets its own .memory-modal .memory-* rules win by
+   normal cascade in every theme, retiring ~15 counter-!important overrides that
+   previously existed only to beat this over-broad bleed.
+   :not(.recent-search-input) — SAME source-exclusion pattern: the project
+   modal's Recent-search box owns its own blocky tofu styling
+   ([data-theme="tofu"] .recent-search .recent-search-input, specificity 0,3,0).
+   Without this carve-out this bleed (0,3,1) out-specifies it and flattens its
+   intended 2px ink border to the generic 1px — so exclude it at the source
+   rather than adding an !important counter-rule. Proven by
+   tests/search/test_recent_search_tofu_specificity.py.
+   :not(.settings-panel) — SAME source-exclusion: this bleed (0,3,1) out-
+   specified BOTH the retired tofu pixel settings inputs (0,2,1) and the
+   2026-09-04 unified soft settings inputs, flattening them to a 1px no-shadow
+   box. Settings inputs now come solely from 07's cross-theme soft system. */
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input){
+  border-radius:var(--radius);
+  border:1px solid rgba(184,176,160,0.4);
+  background:#F5F3ED;
+  box-shadow:none
+}
+[data-theme="tofu"] .modal:not(.memory-modal):not(.settings-panel) input:not(.recent-search-input):focus{border-color:#BB9572;box-shadow:none}
+
+/* ── Project modal — tofu header band + blocky close (it nests its own
+      .pm-header, so the generic > h3 rule doesn't reach it). ── */
+[data-theme="tofu"] .pm-header{
+  background:#f2ecda;
+  border-bottom:3px solid #1a1814;
+  position:relative
+}
+[data-theme="tofu"] .pm-header::after{
+  content:'';position:absolute;left:0;right:0;bottom:-2px;height:2px;
+  background:linear-gradient(90deg,transparent,#c9993f 15%,#c9993f 50%,#a87d2e 85%,transparent);
+  opacity:.55
+}
+[data-theme="tofu"] .pm-workbench h3{font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#1a1814}
+[data-theme="tofu"] .pm-header-icon{color:#a87d2e}
+[data-theme="tofu"] .pm-subtitle{color:#3d362c}
+/* Blocky close button shared by plain modals (browser/apply) + project. */
+[data-theme="tofu"] .modal-close-btn,
+[data-theme="tofu"] .pm-close{
+  border:2px solid #1a1814;border-radius:var(--radius);background:#fff;color:#1a1814;
+  box-shadow:var(--clay-sm);
+  transition:transform .1s,box-shadow .1s,background .1s,color .1s
+}
+[data-theme="tofu"] .modal-close-btn:hover,
+[data-theme="tofu"] .pm-close:hover{
+  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#fff
+}
+[data-theme="tofu"] .modal-close-btn:active,
+[data-theme="tofu"] .pm-close:active{transform:translate(2px,2px);box-shadow:0 0 0 #1a1814}
+/* pm rail/cards: square + ink on the cream shell */
+[data-theme="tofu"] .pm-rail-card{border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm);background:#fff}
+
+/* ═══════════════════════════════════════════
+   Update modal — neo-brutalist tofu treatment
+   (matches Settings / My Day; overrides the flat
+    [data-theme="tofu"] .modal reset above)
+   ═══════════════════════════════════════════ */
+[data-theme="tofu"] .update-modal{
+  background:#faf8f3;
+  border:3px solid #1a1814;
+  border-radius:var(--radius);
+  box-shadow:var(--clay-sm);
+  animation:tofuSlam .25s cubic-bezier(0.2,1.2,0.4,1) both;
+}
+[data-theme="tofu"] .update-modal-header{
+  background:#f2ecda;
+  border-bottom:3px solid #1a1814;
+  padding:var(--space-4) var(--space-5);
+  position:relative;
+}
+/* gold kintsugi line under the header */
+[data-theme="tofu"] .update-modal-header::after{
+  content:'';position:absolute;bottom:-2px;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,#c9993f 15%,#c9993f 50%,#a87d2e 85%,transparent);
+  opacity:.55;
+}
+[data-theme="tofu"] .upd-head-icon{
+  border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814;
+  box-shadow:var(--clay-sm);
+}
+[data-theme="tofu"] .update-modal-header h3{
+  font-weight:900;text-transform:uppercase;letter-spacing:-0.01em;color:#1a1814;
+}
+[data-theme="tofu"] .upd-head-sub{color:#3d362c}
+[data-theme="tofu"] .modal-close-btn{
+  width:34px;height:34px;border:2px solid #1a1814;border-radius:var(--radius);background:#fff;color:#1a1814;
+  box-shadow:var(--clay-sm);font-size:var(--font-size-2xl);
+  transition:transform .1s,box-shadow .1s,background .1s,color .1s;
+}
+[data-theme="tofu"] .modal-close-btn:hover{
+  transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f87171;color:#fff;
+}
+[data-theme="tofu"] .modal-close-btn:active{transform:translate(2px,2px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .update-modal-body{padding:var(--space-5);min-height:140px}
+/* Checking + retry */
+[data-theme="tofu"] .upd-checking-wrap .upd-big-spin{border-color:rgba(26,24,20,.18);border-top-color:#c9993f}
+[data-theme="tofu"] .upd-checking-wrap span{color:#3d362c}
+[data-theme="tofu"] .upd-retry-btn{
+  border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814;
+  box-shadow:var(--clay-sm);font-weight:700;transition:transform .1s,box-shadow .1s,background .1s;
+}
+[data-theme="tofu"] .upd-retry-btn:hover{transform:translate(1px,1px);box-shadow:var(--clay-md);background:#f2ecda}
+/* Version hero — current → latest */
+[data-theme="tofu"] .upd-hero{
+  background:linear-gradient(135deg,#f2ecda,#f5eedd);
+  border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm);
+}
+[data-theme="tofu"] .upd-ver-label{color:#3d362c}
+[data-theme="tofu"] .upd-ver-num{color:#1a1814}
+[data-theme="tofu"] .upd-ver.latest .upd-ver-num{color:#a87d2e}
+[data-theme="tofu"] .upd-hero.up-to-date .upd-ver.latest .upd-ver-num{color:#1a1814}
+[data-theme="tofu"] .upd-arrow{border-radius:var(--radius-sm);border:2px solid #1a1814;background:#fff;color:#1a1814}
+[data-theme="tofu"] .upd-hero:not(.up-to-date) .upd-arrow{background:#c9993f;color:#fff;box-shadow:var(--clay-sm)}
+/* Apply / restart action button — tofu block */
+[data-theme="tofu"] .upd-apply-btn{
+  background:#c9993f;color:#1a1814;border:2px solid #1a1814;border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm);font-weight:800;text-transform:uppercase;letter-spacing:.01em;
+  transition:transform .1s,box-shadow .1s,background .1s;
+}
+[data-theme="tofu"] .upd-apply-btn:hover{background:#d4a44a;transform:translate(1px,1px);box-shadow:var(--clay-md)}
+[data-theme="tofu"] .upd-apply-btn:active{transform:translate(3px,3px);box-shadow:0 0 0 #1a1814}
+[data-theme="tofu"] .upd-apply-btn:disabled{transform:none;box-shadow:var(--clay-sm)}
+/* Live stepper — square dots, ink rails */
+[data-theme="tofu"] .upd-step-dot{border-radius:var(--radius-sm);border:2px solid #1a1814;color:#1a1814}
+[data-theme="tofu"] .upd-step:not(:last-child)::before{background:rgba(26,24,20,.25)}
+[data-theme="tofu"] .upd-step.is-done:not(:last-child)::before{background:#1a1814}
+[data-theme="tofu"] .upd-step.is-done .upd-step-dot{background:#4ade80;border-color:#1a1814}
+[data-theme="tofu"] .upd-step.is-active .upd-step-dot{border-color:#c9993f;border-top-color:transparent}
+[data-theme="tofu"] .upd-step.is-error .upd-step-dot{background:#f87171;border-color:#1a1814}
+[data-theme="tofu"] .upd-step.is-active .upd-step-label,
+[data-theme="tofu"] .upd-step.is-done .upd-step-label{color:#1a1814}
+/* Badges, file lists, hints */
+[data-theme="tofu"] .upd-badge{border-radius:var(--radius-sm);border-width:2px;border-color:#1a1814;box-shadow:var(--clay-sm);font-weight:800}
+[data-theme="tofu"] .upd-badge.ok{background:#dff5e3;color:#2f7d4f}
+[data-theme="tofu"] .upd-badge.ok .upd-badge-icon{background:#4ade80;color:#1a1814;border-radius:var(--radius-sm)}
+[data-theme="tofu"] .upd-badge.warn{background:#f5eedd;color:#3d362c}
+[data-theme="tofu"] .upd-files{border-radius:var(--radius-sm);border:2px solid #1a1814;background:#f5eedd;color:#3d362c}
+[data-theme="tofu"] .upd-log-label{color:#1a1814}
+[data-theme="tofu"] .upd-log-copy{border:2px solid #1a1814;border-radius:var(--radius-sm);background:#f5eedd;color:#1a1814;font-weight:700}
+[data-theme="tofu"] .upd-log-copy.copied{color:#2f7d4f}
+[data-theme="tofu"] .upd-ready,[data-theme="tofu"] .upd-uptodate,[data-theme="tofu"] .upd-warn{color:#1a1814}
+[data-theme="tofu"] .upd-hint{color:#3d362c}
+/* Check-failure card — ink heading, muted reason */
+[data-theme="tofu"] .upd-err-icon{color:#c0392b}
+[data-theme="tofu"] .upd-err-title{color:#1a1814;font-weight:900}
+[data-theme="tofu"] .upd-err-reason{color:#3d362c}
+/* ── Settings-panel pixel inputs RETIRED (2026-09-04 owner direction: no
+   brutalist ink boxes in Settings, any theme). They were already dead — the
+   generic `.modal input` bleed above out-specified them — and the unified
+   soft inputs in 07-settings-providers-onboarding.css now govern every
+   theme. The textarea typography rule below stays. ── */
+/* Override tofu console-style gold text for settings textareas (white bg) */
+[data-theme="tofu"] .settings-panel textarea,
+[data-theme="tofu"] .settings-panel .stg-field textarea {
+  color: var(--s-ink);
+  font-family:var(--sans-body);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+  letter-spacing: normal;
+  caret-color: var(--s-ink);
+}
+/* 🧱 btn-primary — neo-brutalist gold block (matches the modal's ink border + hard shadow) */
+[data-theme="tofu"] .btn-primary{
+  background:#C9993F;color:#1a1814;
+  border:2px solid #1a1814;
+  border-radius:var(--radius-sm);
+  position:relative;overflow:visible;
+  box-shadow:var(--clay-sm);
+  clip-path:none;
+  font-family:var(--sans-body);
+  font-size:var(--font-size-md);font-weight:800;letter-spacing:0.02em;
+  padding:9px var(--space-5);
+  image-rendering:auto;
+  transition:transform 0.08s ease,box-shadow 0.08s ease,background 0.12s
+}
+[data-theme="tofu"] .btn-primary:hover{
+  background:#D6A848;
+  transform:translate(-1px,-1px);
+  box-shadow:var(--clay-md)}
+[data-theme="tofu"] .btn-primary:active{
+  transform:translate(3px,3px);
+  box-shadow:0 0 0 #1a1814;
+  background:#BC8A35
+}
+/* 🧱 btn-secondary — neo-brutalist cream block (matches btn-primary geometry exactly) */
+[data-theme="tofu"] .btn-secondary{
+  background:#faf8f3;color:#1a1814;
+  border:2px solid #1a1814;
+  border-radius:var(--radius-sm);
+  position:relative;overflow:visible;
+  box-shadow:var(--clay-sm);
+  clip-path:none;
+  font-family:var(--sans-body);
+  font-size:var(--font-size-md);font-weight:700;letter-spacing:0.02em;
+  padding:9px var(--space-5);
+  image-rendering:auto;
+  transition:transform 0.08s ease,box-shadow 0.08s ease,background 0.12s,color 0.1s
+}
+[data-theme="tofu"] .btn-secondary:hover{
+  background:#ECE7DD;color:#1a1814;
+  transform:translate(-1px,-1px);
+  box-shadow:var(--clay-md)}
+[data-theme="tofu"] .btn-secondary:active{
+  transform:translate(3px,3px);
+  box-shadow:0 0 0 #1a1814;
+  background:#E2DCCF
+}
+/* ── Settings buttons — standard theme button language (owner direction
+   2026-09-07, superseding the 2026-09-04 raised-gradient "bread" skin and the
+   earlier SNES pixel bevels, both retired as Settings-only divergence). Settings
+   buttons render with the same neo-brutalist blocks as the project modal's
+   Cancel/Clear/Apply row via the global [data-theme="tofu"] .btn-primary /
+   .btn-secondary rules above. Only the uppercase legacy of the all-theme base
+   in 07-settings-providers-onboarding.css needs a tofu reset here. ── */
+[data-theme="tofu"] .settings-footer .btn{text-transform:none}
+
+/* ── Settings card buttons — same blocks for the component classes the global
+   .btn-primary/.btn-secondary rules cannot reach (owner direction 2026-09-07,
+   second pass: retire the stg-btn-balance gold bread and the oauth red/dark
+   gradient breads). 0-3/0-4 specificity to outrank the settings sheet and the
+   comfort flattening, which load after this file. ── */
+[data-theme="tofu"] .settings-panel .stg-btn-balance{
+  background:#C9993F;color:#1a1814;
+  border:2px solid #1a1814;
+  border-radius:var(--radius-sm);
+  box-shadow:var(--clay-sm);
+  text-shadow:none;
+  text-transform:none;
+  letter-spacing:0.02em;
+}
+[data-theme="tofu"] .settings-panel .stg-btn-balance:hover{
+  background:#D6A848;
+  transform:translate(-1px,-1px);
+  box-shadow:var(--clay-md);
+}
+[data-theme="tofu"] .settings-panel .stg-btn-balance:active{
+  transform:translate(3px,3px);
+  box-shadow:0 0 0 #1a1814;
+  background:#BC8A35;
+}
+/* The tofu-theme oauth button overrides moved to
+   frontend/src/styles/settings/01-core-panels.css (2026-09): the .oauth-
+   prefix is settings-page-specific and the half-migration guard
+   (tests/frontend/test_settings_panels_parity.py) requires it to live ONLY in the
+   settings bundle. */
+
+/* ══════════════════════════════════════════════════════
+   🎮 AUTO-SETUP MODAL — Game Cartridge Insert Screen
+   Concept: inserting a new game cartridge into a console.
+   The modal is a chunky game-boy-style dialog with pixel
+   borders, warm parchment bg, and SNES button styling.
+   ══════════════════════════════════════════════════════ */
+
+/* ── Overlay — warm tinted fog ── */
+[data-theme="tofu"] .stg-modal-overlay {
+  background: rgba(74, 63, 47, 0.45);
+  backdrop-filter: blur(2px);
+}
+
+/* ── Modal shell — game cartridge card ── */
+[data-theme="tofu"] .stg-modal {
+  background: #FAF8F2;
+  border: 3px solid #8A7A5A;
+  border-top-color: #C4B89E;
+  border-left-color: #C4B89E;
+  border-right-color: #6B5A3A;
+  border-bottom-color: #6B5A3A;
+  border-radius: 12px;
+  box-shadow:
+    0 4px 0 #5C4A33,
+    0 5px 0 #4A3D28,
+    0 8px 20px rgba(74, 63, 47, 0.25);
+  animation: tofuModalPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  overflow: hidden;
+  position: relative;
+}
+[data-theme="tofu"] .stg-modal::before {
+  content: none;
+  display: none;
+}
+@keyframes tofuModalPop {
+  0% { transform: scale(0.9) translateY(20px); opacity: 0; }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+/* ── Header — cartridge label strip ── */
+[data-theme="tofu"] .stg-modal-header {
+  padding: 14px 18px var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  position: relative;
+  z-index: 1;
+}
+/* Gold kintsugi line under header */
+[data-theme="tofu"] .stg-modal-header::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: var(--space-3); right: var(--space-3);
+  height: 1.5px;
+  background: linear-gradient(90deg, transparent, #C4956A 20%, #C4956A 80%, transparent);
+  opacity: 0.4;
+}
+[data-theme="tofu"] .stg-modal-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #4A3820;
+  letter-spacing: 0.04em;
+}
+
+/* ── Close button — pixel X ── */
+[data-theme="tofu"] .stg-modal-close {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid rgba(138, 122, 90, 0.3);
+  border-top-color: rgba(255, 252, 246, 0.6);
+  border-left-color: rgba(255, 252, 246, 0.6);
+  border-right-color: rgba(168, 152, 120, 0.4);
+  border-bottom-color: rgba(168, 152, 120, 0.4);
+  border-radius: 6px;
+  background: linear-gradient(180deg, #F6F4EE, #EBE8DF);
+  color: #8A7A5A;
+  font-size: var(--font-size-lg);
+  font-weight: 700;
+  padding: 0;
+  box-shadow: 0 1px 0 rgba(154, 144, 122, 0.3);
+  transition: all 0.1s;
+}
+[data-theme="tofu"] .stg-modal-close:hover {
+  background: #E85050;
+  color: #fff;
+  border-color: #C04040;
+  box-shadow: 0 1px 0 #903030;
+}
+
+/* ── Body ── */
+[data-theme="tofu"] .stg-modal-body {
+  padding: 18px;
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Description — warm muted text ── */
+[data-theme="tofu"] .stg-modal-desc {
+  font-size: var(--font-size-xs);
+  color: #8A7A5A;
+  line-height: 1.7;
+  margin-bottom: 18px;
+  padding: 10px var(--space-3);
+  background: rgba(196, 149, 106, 0.06);
+  border: 1.5px dashed rgba(196, 149, 106, 0.25);
+  border-radius: 8px;
+}
+
+/* ── Field labels — pixel game font ── */
+[data-theme="tofu"] .stg-modal .stg-field label {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: #5C4A33;
+  letter-spacing: 0.03em;
+  text-transform: none;
+}
+[data-theme="tofu"] .stg-modal .stg-required {
+  color: #D06050;
+}
+
+/* ── Inputs — SNES recessed screen ── */
+[data-theme="tofu"] .stg-modal .stg-field input {
+  background: #F5F3ED;
+  border: 2.5px solid #B8AD94;
+  border-top-color: #9A9070;
+  border-left-color: #9A9070;
+  border-right-color: #D8D2C0;
+  border-bottom-color: #D8D2C0;
+  border-radius: 8px;
+  box-shadow: inset 0 2px 4px rgba(74, 63, 47, 0.08);
+  font-family:var(--sans-body);
+  font-size: var(--font-size-md);
+  font-weight: 500;
+  color: #4A3820;
+  padding: 10px 14px;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+[data-theme="tofu"] .stg-modal .stg-field input:focus {
+  transform: none;
+  background: #FFFEF8;
+  border-color: #C4956A;
+  border-top-color: #A07850;
+  border-left-color: #A07850;
+  border-right-color: #DEB890;
+  border-bottom-color: #DEB890;
+  box-shadow:
+    inset 0 2px 4px rgba(74, 63, 47, 0.06),
+    0 0 0 3px rgba(196, 149, 106, 0.15);
+}
+[data-theme="tofu"] .stg-modal .stg-field input::placeholder {
+  color: #B8AD94;
+  font-weight: 400;
+  font-style: italic;
+}
+
+/* ── Tag editor (model aliases / wire pool) — same recessed screen ──
+ * Base chrome is the square brutalist frame, and the generic modal input
+ * rule above outranks the base .stg-tag-input reset (0,3,1 vs 0,3,0) —
+ * without these rules the editor renders as a square black box holding a
+ * rounded beige input. Give the EDITOR the recessed chrome and strip the
+ * inner input's own. */
+[data-theme="tofu"] .stg-modal .stg-tag-editor {
+  background: #F5F3ED;
+  border: 2.5px solid #B8AD94;
+  border-top-color: #9A9070;
+  border-left-color: #9A9070;
+  border-right-color: #D8D2C0;
+  border-bottom-color: #D8D2C0;
+  border-radius: 8px;
+  box-shadow: inset 0 2px 4px rgba(74, 63, 47, 0.08);
+  padding: var(--space-2) 10px;
+}
+[data-theme="tofu"] .stg-modal .stg-tag-editor:focus-within {
+  transform: none;
+  background: #FFFEF8;
+  border-color: #C4956A;
+  border-top-color: #A07850;
+  border-left-color: #A07850;
+  border-right-color: #DEB890;
+  border-bottom-color: #DEB890;
+  box-shadow:
+    inset 0 2px 4px rgba(74, 63, 47, 0.06),
+    0 0 0 3px rgba(196, 149, 106, 0.15);
+}
+[data-theme="tofu"] .stg-modal .stg-field .stg-tag-editor .stg-tag-input,
+[data-theme="tofu"] .stg-modal .stg-field .stg-tag-editor .stg-tag-input:focus {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: var(--space-1) 2px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: var(--font-size-sm);
+}
+[data-theme="tofu"] .stg-modal .stg-tag-chip {
+  border-color: #B8AD94;
+  border-radius: 6px;
+  background: #FFFEF8;
+  box-shadow: none;
+}
+
+/* ── Hint text ── */
+[data-theme="tofu"] .stg-modal .stg-hint {
+  font-size: 10px;
+  color: #A89878;
+}
+
+/* ── Footer — action bar ── */
+[data-theme="tofu"] .stg-modal-footer {
+  padding: 14px 18px var(--space-4);
+  border-top: 2px solid rgba(168, 152, 120, 0.25);
+  background: linear-gradient(180deg, #F5F3ED, #F0EDE4);
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Secondary button — pixel ghost ── */
+[data-theme="tofu"] .stg-modal .stg-btn-secondary {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  padding: var(--space-2) 18px;
+  background: linear-gradient(180deg, #F0EDE4, #E9E5DC);
+  border: 2.5px solid #B8AD94;
+  border-top-color: #DDD6C4;
+  border-left-color: #DDD6C4;
+  border-right-color: #9A9070;
+  border-bottom-color: #9A9070;
+  border-radius: 8px;
+  color: #5C4A33;
+  box-shadow: 0 2px 0 #8A8060;
+  cursor: pointer;
+  transition: transform 0.08s, box-shadow 0.08s, background 0.1s;
+}
+[data-theme="tofu"] .stg-modal .stg-btn-secondary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 0 #8A8060, 0 4px 8px rgba(74, 63, 47, 0.1);
+  background: linear-gradient(180deg, #F5F3ED, #EBE8DF);
+}
+[data-theme="tofu"] .stg-modal .stg-btn-secondary:active {
+  transform: translateY(2px);
+  box-shadow: none;
+  border-top-color: #9A9070;
+  border-left-color: #9A9070;
+  border-right-color: #DDD6C4;
+  border-bottom-color: #DDD6C4;
+}
+
+/* ── Primary button — pixel game action ── */
+[data-theme="tofu"] .stg-modal .stg-btn-primary {
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  padding: var(--space-2) var(--space-5);
+  background: linear-gradient(180deg, #D4AA80, #C4956A);
+  border: 2.5px solid #C4956A;
+  border-top-color: #E8CCA8;
+  border-left-color: #E8CCA8;
+  border-right-color: #A07850;
+  border-bottom-color: #A07850;
+  border-radius: 8px;
+  color: #FFFCF6;
+  box-shadow: 0 2px 0 #8A6840, 0 3px 6px rgba(187, 149, 114, 0.2);
+  cursor: pointer;
+  text-shadow: 0 1px 1px rgba(74, 50, 20, 0.25);
+  transition: transform 0.08s, box-shadow 0.08s, background 0.1s;
+}
+[data-theme="tofu"] .stg-modal .stg-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 0 #8A6840, 0 4px 10px rgba(187, 149, 114, 0.3);
+  background: linear-gradient(180deg, #DEB890, #CCA078);
+}
+[data-theme="tofu"] .stg-modal .stg-btn-primary:active {
+  transform: translateY(2px);
+  box-shadow: none;
+  border-top-color: #A07850;
+  border-left-color: #A07850;
+  border-right-color: #E8CCA8;
+  border-bottom-color: #E8CCA8;
+  background: linear-gradient(180deg, #C4956A, #B88A5E);
+}
+[data-theme="tofu"] .stg-modal .stg-btn-primary:disabled {
+  background: #D8D2C4;
+  color: #B0A890;
+  border-color: #C8C2B4;
+  box-shadow: none;
+  text-shadow: none;
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ── Status messages — pixel HUD alerts ── */
+[data-theme="tofu"] .stg-auto-status {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 10px 14px;
+  line-height: 1.6;
+}
+[data-theme="tofu"] .stg-auto-loading {
+  background: rgba(196, 149, 106, 0.08);
+  color: #A07850;
+  border: 2px solid rgba(196, 149, 106, 0.3);
+  border-top-color: rgba(222, 184, 144, 0.4);
+  border-left-color: rgba(222, 184, 144, 0.4);
+  border-right-color: rgba(160, 120, 80, 0.3);
+  border-bottom-color: rgba(160, 120, 80, 0.3);
+  animation: tofuProbeShimmer 2s ease-in-out infinite;
+}
+@keyframes tofuProbeShimmer {
+  0%, 100% { background: rgba(196, 149, 106, 0.08); }
+  50% { background: rgba(196, 149, 106, 0.14); }
+}
+[data-theme="tofu"] .stg-auto-success {
+  background: rgba(106, 168, 120, 0.08);
+  color: #4A8A58;
+  border: 2px solid rgba(106, 168, 120, 0.3);
+  border-top-color: rgba(140, 200, 150, 0.4);
+  border-left-color: rgba(140, 200, 150, 0.4);
+  border-right-color: rgba(80, 130, 90, 0.3);
+  border-bottom-color: rgba(80, 130, 90, 0.3);
+}
+[data-theme="tofu"] .stg-auto-error {
+  background: rgba(184, 106, 90, 0.08);
+  color: #A85A4A;
+  border: 2px solid rgba(184, 106, 90, 0.3);
+  border-top-color: rgba(220, 140, 120, 0.4);
+  border-left-color: rgba(220, 140, 120, 0.4);
+  border-right-color: rgba(150, 80, 65, 0.3);
+  border-bottom-color: rgba(150, 80, 65, 0.3);
+}
+
+/* 🕹️ Image-gen generate btn — pixel art style */
+[data-theme="tofu"] .ig-generate-btn{
+  background:#BB9572;color:#FFFCF6;
+  border-radius:var(--radius-sm);
+  border:2px solid #C4956A;
+  border-top-color:#D4BC9E;border-left-color:#D4BC9E;
+  border-right-color:#8E6B48;border-bottom-color:#8E6B48;
+  box-shadow:0 2px 0 #6B4F32;
+  clip-path:none;
+  image-rendering:auto;
+  transition:transform 0.06s,box-shadow 0.06s,background 0.1s
+}
+[data-theme="tofu"] .ig-generate-btn:hover{
+  background:#A8845E;
+  box-shadow:0 2px 0 #5E4228
+}
+[data-theme="tofu"] .ig-generate-btn:active{
+  transform:translateY(2px);
+  box-shadow:none;
+  border-top-color:#8E6B48;border-left-color:#8E6B48;
+  border-right-color:#D4BC9E;border-bottom-color:#D4BC9E;
+  background:#9A7A58
+}
+/* ── Finish area — Pixel HUD Status Strip ──
+   Instead of 5 heavy bordered tags competing for attention,
+   unify everything into a single retro game status bar.
+   Individual tags become borderless text segments inside one strip. */
+/* Calm telemetry strip: no card chrome, no drop shadow. The turn footer is
+ * quiet metadata on the reading column, not a Pixel HUD banner. Everywhere it
+ * renders (surface footer or a stray copy) it shares one baseline. */
+[data-theme="tofu"] .message-finish{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:2px 10px;
+  margin-top:6px;
+  padding:2px 0 0;
+  border:0;
+  background:transparent;
+  box-shadow:none;
+  border-radius:0;
+  position:relative;
+  overflow:visible;
+  color:var(--text-tertiary);
+  font-family:var(--sans-body);
+  font-size:var(--font-size-xs);
+  line-height:1.5;
+  font-variant-numeric:tabular-nums;
+  user-select:none
+}
+/* (retired) scanline texture on the finish strip */
+[data-theme="tofu"] .message-finish::before{
+  content:none;display:none
+}
+/* ── All tags inside the strip: borderless text segments ── */
+[data-theme="tofu"] .finish-tag,
+[data-theme="tofu"] .token-tag,
+[data-theme="tofu"] .cost-tag,
+[data-theme="tofu"] .subscription-quota-tag{
+  display:inline-flex;
+  align-items:center;
+  gap:3px;
+  border:none !important;
+  background:transparent !important;
+  box-shadow:none !important;
+  border-radius:0 !important;
+  font-family:inherit;
+  font-size:inherit;font-weight:500;
+  line-height:1.5;
+  padding:0;
+  position:relative;
+  color:inherit;
+  white-space:nowrap
+}
+/* Separators removed: the flex `gap` on .message-finish spaces the tags, so
+ * no oversized `·` glyph (which used to push an icon-only tag's block SVG
+ * onto a second line and break the shared baseline). */
+[data-theme="tofu"] .message-finish :is(
+  .finish-tag,.token-tag,.cost-tag,.subscription-quota-tag
+)::before{
+  content:none
+}
+/* ── Model preset tag — emphasized by weight + warm tone only, no chip ── */
+[data-theme="tofu"] .finish-tag.preset{
+  background:transparent !important;
+  border-left:0 !important;
+  padding-left:0;
+  color:#8A6E4E;
+  font-weight:650
+}
+/* ── Status indicators — colored text on the shared baseline ── */
+[data-theme="tofu"] .finish-tag.ok{
+  color:#6A8A5E;
+  font-weight:700;
+  font-size:inherit
+}
+[data-theme="tofu"] .finish-tag.warn{
+  color:#B8884A
+}
+[data-theme="tofu"] .finish-tag.err{
+  color:#B86A5A
+}
+/* ── Cost tag — warm accent text ── */
+[data-theme="tofu"] .cost-tag{
+  color:#A67B52 !important;
+  font-weight:700 !important
+}
+[data-theme="tofu"] .cost-tag .cost-breakdown{color:#B8A080}
+[data-theme="tofu"] #browserToggle.active{background:rgba(196,149,106,0.08);color:#A67B52;border-bottom-color:rgba(196,149,106,0.5)}
+[data-theme="tofu"] #desktopToggle.active{background:rgba(138,120,176,0.08);color:#8A78B0;border-bottom-color:rgba(138,120,176,0.5)}
+
+/* ── Conv action buttons — pixel overlay ── */
+[data-theme="tofu"] .conv-actions{
+  background:linear-gradient(90deg,transparent 0%, #EDEBE2 30%, #EDEBE2 100%)
+}
+[data-theme="tofu"] .conv-item:hover>.conv-actions{
+  background:linear-gradient(90deg,transparent 0%, rgba(237,235,226,0.95) 30%)
+}
+[data-theme="tofu"] .conv-item.active>.conv-actions{
+  background:linear-gradient(90deg,transparent 0%, rgba(232,229,219,0.95) 30%)
+}
+[data-theme="tofu"] .conv-action-btn{
+  width:24px;height:24px;
+  border-radius:3px;
+  border:1px solid transparent;
+  transition:all 0.08s ease
+}
+[data-theme="tofu"] .conv-action-btn:hover{
+  background:rgba(196,149,106,0.12);
+  border-color:rgba(196,149,106,0.2);
+  color:#8E6B48
+}
+[data-theme="tofu"] .conv-action-btn.conv-delete:hover{
+  background:rgba(207,56,56,0.08);
+  border-color:rgba(207,56,56,0.2);
+  color:#C05050
+}
+/* tofu conv-pin removed — replaced by folders */
+

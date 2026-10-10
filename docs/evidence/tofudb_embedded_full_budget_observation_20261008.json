@@ -1,0 +1,856 @@
+{
+  "decision": "Fulladvertised embeddedSDK capacity restores two latency-passing combined runs; candidatepolicy andoverallcoverage remain unproven",
+  "native_source": "5cd5348bb3df3e8d1ded6e1ded7e04a0c7dc6c73f275e0c643e2a69846fe75c5",
+  "parent_source": "6d3e37c7cafdb1ca0ad7252c6d3613ecf9168d30d0b09eeac6d546e0e18c135e",
+  "scope": "Existingcombined c1h1 prototype onfrozen native; temporarySDK budgetfunction usesmaximumConnections512 instead ofnetwork-half256 onlyin disposableembedded invocation. Lean fallback andnativeworker/requestmemory/reader/responsebounds unchanged.",
+  "matrix": {
+    "scope": "4originalcombinedembeddedABBA, samefrozen5cd andPythonfactors, no extraCPUthreads or nativecaps edits",
+    "rows": [
+      {
+        "label": "normal-0",
+        "variant": "normal",
+        "code": 1,
+        "correctness": true,
+        "errors": 0,
+        "p99_ms": {
+          "submit_to_running": 707.0025950670242,
+          "stream_scheduled": 1030.4534882307053,
+          "settle": 3129.1622668504715
+        },
+        "readiness": {
+          "probes": 18,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": false,
+          "coverage_passed": false,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 707.0025950670242,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 1030.4534882307053,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": false
+            },
+            "settle": {
+              "p99_ms": 3129.1622668504715,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            }
+          },
+          "failures": [
+            "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+          ],
+          "coverage_gaps": [
+            "in-process abandon is not a process-crash durability test"
+          ],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "raw_sha256": "3e000667a791fe27d30395f9dbe43ff3350bfdd2084b6909a19fd09c1f7ac4b5"
+      },
+      {
+        "label": "full-0",
+        "variant": "full",
+        "code": 1,
+        "correctness": true,
+        "errors": 0,
+        "p99_ms": {
+          "submit_to_running": 703.2797113060951,
+          "stream_scheduled": 975.1763269305229,
+          "settle": 2666.892684996128
+        },
+        "readiness": {
+          "probes": 17,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": true,
+          "coverage_passed": false,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 703.2797113060951,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 975.1763269305229,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": true
+            },
+            "settle": {
+              "p99_ms": 2666.892684996128,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            }
+          },
+          "failures": [],
+          "coverage_gaps": [
+            "in-process abandon is not a process-crash durability test"
+          ],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "raw_sha256": "39f44f90f00ca7637dfae502d9eee38459baac15e13cd879cdf393188b106827"
+      },
+      {
+        "label": "full-1",
+        "variant": "full",
+        "code": 1,
+        "correctness": true,
+        "errors": 0,
+        "p99_ms": {
+          "submit_to_running": 731.4055487513542,
+          "stream_scheduled": 957.6739072799683,
+          "settle": 2707.343377172947
+        },
+        "readiness": {
+          "probes": 17,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": true,
+          "coverage_passed": false,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 731.4055487513542,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 957.6739072799683,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": true
+            },
+            "settle": {
+              "p99_ms": 2707.343377172947,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            }
+          },
+          "failures": [],
+          "coverage_gaps": [
+            "in-process abandon is not a process-crash durability test"
+          ],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "raw_sha256": "6ce10ec59bebb1441ace80e4e53c597ea91eff1f36e39f080495989b662f2ffa"
+      },
+      {
+        "label": "normal-1",
+        "variant": "normal",
+        "code": 1,
+        "correctness": true,
+        "errors": 0,
+        "p99_ms": {
+          "submit_to_running": 679.6962693333626,
+          "stream_scheduled": 1270.4228162765503,
+          "settle": 3489.9224787950516
+        },
+        "readiness": {
+          "probes": 19,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": false,
+          "coverage_passed": false,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 679.6962693333626,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 1270.4228162765503,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": false
+            },
+            "settle": {
+              "p99_ms": 3489.9224787950516,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            }
+          },
+          "failures": [
+            "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+          ],
+          "coverage_gaps": [
+            "in-process abandon is not a process-crash durability test"
+          ],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "events": 4000,
+        "exact_content": 1000,
+        "exact_replay": 1000,
+        "integrity": 0,
+        "raw_sha256": "81292c4297a8637bf337a6e4532aec6c824005e1891ccb02d74f214a73579f66"
+      }
+    ]
+  },
+  "limits": [
+    "ABBA4observations, noCI; diagnostics beforehand revealedpool waiting butno unique nativecause.",
+    "Bothfull satisfy latency butoverallpassedFalse: embeddedabandon isnotprocessSIGKILL recovery. Provider/browser/soak/allSQLite remainuncovered.",
+    "ExperimentgloballypatchesSDK budgetfunction inembeddedonlytestprocess; retainedimplementation mustscope policy toembeddedtransport andpreserveDaemonreservation/resize/snapshot/longcall contracts.",
+    "Beforeadmission require ordinaryloadmatrix, defaultfactors, measuredmemory, actualprocesscrash recovery, andsemanticgates."
+  ],
+  "next": "Implement embedded-specific poolbudget seam withnormaldaemon policy, combinewithcoldcontext/lightprojection inisolated source, thenverify fulloriginal andneighboring resource/recovery contracts.",
+  "terminal_diagnostics": {
+    "decision": "Embeddedterminal wall regression dominated bypool/nativewait, notdecodecallerCPU; fourdiagnostic observationsmixed",
+    "rows": [
+      {
+        "label": "baseline-0",
+        "terminal_stages": {
+          "5:event.list:pool": {
+            "calls": 1000,
+            "wall_ns": 484631314879,
+            "cpu_ns": 55970183,
+            "max_wall_ns": 623630035
+          },
+          "5:event.list:encode": {
+            "calls": 1000,
+            "wall_ns": 4644649,
+            "cpu_ns": 5039691,
+            "max_wall_ns": 13525
+          },
+          "5:event.list:decode": {
+            "calls": 1000,
+            "wall_ns": 10085965,
+            "cpu_ns": 9889981,
+            "max_wall_ns": 28625
+          },
+          "5:event.list:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 42708093604,
+            "cpu_ns": 91343454,
+            "max_wall_ns": 288175342
+          },
+          "5:event.list:rpc": {
+            "calls": 1000,
+            "wall_ns": 527407902860,
+            "cpu_ns": 214391455,
+            "max_wall_ns": 695128817
+          },
+          "5:turn.event.record:pool": {
+            "calls": 1000,
+            "wall_ns": 490643677607,
+            "cpu_ns": 52789467,
+            "max_wall_ns": 621609001
+          },
+          "5:turn.event.record:encode": {
+            "calls": 1000,
+            "wall_ns": 13551000,
+            "cpu_ns": 13611383,
+            "max_wall_ns": 26411
+          },
+          "5:turn.event.record:decode": {
+            "calls": 1000,
+            "wall_ns": 10779912,
+            "cpu_ns": 10437976,
+            "max_wall_ns": 27645
+          },
+          "5:turn.event.record:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 169294672488,
+            "cpu_ns": 93595529,
+            "max_wall_ns": 406194019
+          },
+          "5:turn.event.record:rpc": {
+            "calls": 1000,
+            "wall_ns": 660028194386,
+            "cpu_ns": 234523689,
+            "max_wall_ns": 966012316
+          },
+          "5:queue.depth:pool": {
+            "calls": 1000,
+            "wall_ns": 882484102685,
+            "cpu_ns": 52256626,
+            "max_wall_ns": 2048428156
+          },
+          "5:queue.depth:encode": {
+            "calls": 1000,
+            "wall_ns": 3986833,
+            "cpu_ns": 4105842,
+            "max_wall_ns": 14161
+          },
+          "5:queue.depth:decode": {
+            "calls": 1000,
+            "wall_ns": 5978501,
+            "cpu_ns": 5633663,
+            "max_wall_ns": 16990
+          },
+          "5:queue.depth:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 42734363108,
+            "cpu_ns": 73299291,
+            "max_wall_ns": 199053838
+          },
+          "5:queue.depth:rpc": {
+            "calls": 1000,
+            "wall_ns": 925285078716,
+            "cpu_ns": 190742349,
+            "max_wall_ns": 2052861838
+          },
+          "5:event:whole_event": {
+            "calls": 1000,
+            "wall_ns": 2119046286902,
+            "cpu_ns": 1417922471,
+            "max_wall_ns": 3545965845
+          }
+        },
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": false,
+          "coverage_passed": false,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 651.9082859158516,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 1316.2923976778984,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": false
+            },
+            "settle": {
+              "p99_ms": 3500.2622082829475,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            }
+          },
+          "failures": [
+            "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+          ],
+          "coverage_gaps": [
+            "in-process abandon is not a process-crash durability test"
+          ],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "raw_sha256": "2c84ec64e84ab12b3d26a67a039681a64e87ae94fc21aecd356f77eececdf788"
+      },
+      {
+        "label": "combined-0",
+        "terminal_stages": {
+          "5:event.list:pool": {
+            "calls": 1000,
+            "wall_ns": 476767018417,
+            "cpu_ns": 54273468,
+            "max_wall_ns": 603290666
+          },
+          "5:event.list:encode": {
+            "calls": 1000,
+            "wall_ns": 4672406,
+            "cpu_ns": 4816717,
+            "max_wall_ns": 16360
+          },
+          "5:event.list:decode": {
+            "calls": 1000,
+            "wall_ns": 10824946,
+            "cpu_ns": 10382314,
+            "max_wall_ns": 214714
+          },
+          "5:event.list:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 45710398517,
+            "cpu_ns": 93204776,
+            "max_wall_ns": 328794045
+          },
+          "5:event.list:rpc": {
+            "calls": 1000,
+            "wall_ns": 522548108139,
+            "cpu_ns": 216686711,
+            "max_wall_ns": 720484329
+          },
+          "5:turn.event.record:pool": {
+            "calls": 1000,
+            "wall_ns": 516249355172,
+            "cpu_ns": 53178252,
+            "max_wall_ns": 795509467
+          },
+          "5:turn.event.record:encode": {
+            "calls": 1000,
+            "wall_ns": 13673125,
+            "cpu_ns": 13785278,
+            "max_wall_ns": 23812
+          },
+          "5:turn.event.record:decode": {
+            "calls": 1000,
+            "wall_ns": 11176768,
+            "cpu_ns": 10782956,
+            "max_wall_ns": 23398
+          },
+          "5:turn.event.record:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 491039128449,
+            "cpu_ns": 95417391,
+            "max_wall_ns": 2373014952
+          },
+          "5:turn.event.record:rpc": {
+            "calls": 1000,
+            "wall_ns": 1007378266698,
+            "cpu_ns": 236498957,
+            "max_wall_ns": 2858398622
+          },
+          "5:queue.depth:pool": {
+            "calls": 1000,
+            "wall_ns": 1589454669874,
+            "cpu_ns": 52165834,
+            "max_wall_ns": 2926526025
+          },
+          "5:queue.depth:encode": {
+            "calls": 1000,
+            "wall_ns": 4014345,
+            "cpu_ns": 4152875,
+            "max_wall_ns": 21677
+          },
+          "5:queue.depth:decode": {
+            "calls": 1000,
+            "wall_ns": 6121517,
+            "cpu_ns": 5765016,
+            "max_wall_ns": 17104
+          },
+          "5:queue.depth:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 151823314501,
+            "cpu_ns": 74029691,
+            "max_wall_ns": 1681818447
+          },
+          "5:queue.depth:rpc": {
+            "calls": 1000,
+            "wall_ns": 1741347312443,
+            "cpu_ns": 194089907,
+            "max_wall_ns": 2926742734
+          },
+          "5:event:whole_event": {
+            "calls": 1000,
+            "wall_ns": 3283438773278,
+            "cpu_ns": 1426523662,
+            "max_wall_ns": 5367016038
+          }
+        },
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": false,
+          "coverage_passed": false,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 649.5606079697609,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 1060.9752833843231,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": false
+            },
+            "settle": {
+              "p99_ms": 5310.273580253124,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": false
+            }
+          },
+          "failures": [
+            "stream_scheduled: missing/invalid samples or P99 above 1000 ms",
+            "settle: missing/invalid samples or P99 above 5000 ms"
+          ],
+          "coverage_gaps": [
+            "in-process abandon is not a process-crash durability test"
+          ],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "raw_sha256": "404dfa16499721942f40a26d533234d97a6ccd4470ea03fa5cb9e125f54d2906"
+      },
+      {
+        "label": "combined-1",
+        "terminal_stages": {
+          "5:event.list:pool": {
+            "calls": 1000,
+            "wall_ns": 504000327297,
+            "cpu_ns": 55369378,
+            "max_wall_ns": 629147276
+          },
+          "5:event.list:encode": {
+            "calls": 1000,
+            "wall_ns": 4787082,
+            "cpu_ns": 4971839,
+            "max_wall_ns": 15262
+          },
+          "5:event.list:decode": {
+            "calls": 1000,
+            "wall_ns": 10964942,
+            "cpu_ns": 10763646,
+            "max_wall_ns": 25590
+          },
+          "5:event.list:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 39844096387,
+            "cpu_ns": 91864829,
+            "max_wall_ns": 290075689
+          },
+          "5:event.list:rpc": {
+            "calls": 1000,
+            "wall_ns": 543918677039,
+            "cpu_ns": 219618774,
+            "max_wall_ns": 696843208
+          },
+          "5:turn.event.record:pool": {
+            "calls": 1000,
+            "wall_ns": 516679109074,
+            "cpu_ns": 55256331,
+            "max_wall_ns": 686708817
+          },
+          "5:turn.event.record:encode": {
+            "calls": 1000,
+            "wall_ns": 14025401,
+            "cpu_ns": 14167885,
+            "max_wall_ns": 25157
+          },
+          "5:turn.event.record:decode": {
+            "calls": 1000,
+            "wall_ns": 11284133,
+            "cpu_ns": 10942221,
+            "max_wall_ns": 32431
+          },
+          "5:turn.event.record:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 194674409010,
+            "cpu_ns": 98601231,
+            "max_wall_ns": 444491725
+          },
+          "5:turn.event.record:rpc": {
+            "calls": 1000,
+            "wall_ns": 711444251410,
+            "cpu_ns": 242703415,
+            "max_wall_ns": 1073494365
+          },
+          "5:queue.depth:pool": {
+            "calls": 1000,
+            "wall_ns": 716085866510,
+            "cpu_ns": 52469377,
+            "max_wall_ns": 1665049704
+          },
+          "5:queue.depth:encode": {
+            "calls": 1000,
+            "wall_ns": 3832629,
+            "cpu_ns": 3927457,
+            "max_wall_ns": 11138
+          },
+          "5:queue.depth:decode": {
+            "calls": 1000,
+            "wall_ns": 6520306,
+            "cpu_ns": 6112391,
+            "max_wall_ns": 18577
+          },
+          "5:queue.depth:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 56519372599,
+            "cpu_ns": 83005153,
+            "max_wall_ns": 188575885
+          },
+          "5:queue.depth:rpc": {
+            "calls": 1000,
+            "wall_ns": 772675343506,
+            "cpu_ns": 204138087,
+            "max_wall_ns": 1665211769
+          },
+          "5:event:whole_event": {
+            "calls": 1000,
+            "wall_ns": 2037648043586,
+            "cpu_ns": 1495943548,
+            "max_wall_ns": 3273016993
+          }
+        },
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": false,
+          "coverage_passed": false,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 658.4674715995789,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 1112.0624616742134,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": false
+            },
+            "settle": {
+              "p99_ms": 3190.783590078354,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            }
+          },
+          "failures": [
+            "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+          ],
+          "coverage_gaps": [
+            "in-process abandon is not a process-crash durability test"
+          ],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "raw_sha256": "374f29117c553be7b6e2d28dec9a0fb332dc3364891e38a718ba5e6531f332c4"
+      },
+      {
+        "label": "baseline-1",
+        "terminal_stages": {
+          "5:event.list:pool": {
+            "calls": 1000,
+            "wall_ns": 607579831829,
+            "cpu_ns": 59435734,
+            "max_wall_ns": 754192338
+          },
+          "5:event.list:encode": {
+            "calls": 1000,
+            "wall_ns": 5079946,
+            "cpu_ns": 5207521,
+            "max_wall_ns": 14537
+          },
+          "5:event.list:decode": {
+            "calls": 1000,
+            "wall_ns": 11236461,
+            "cpu_ns": 10994592,
+            "max_wall_ns": 32951
+          },
+          "5:event.list:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 56693641665,
+            "cpu_ns": 111278122,
+            "max_wall_ns": 192198742
+          },
+          "5:event.list:rpc": {
+            "calls": 1000,
+            "wall_ns": 664350747483,
+            "cpu_ns": 246353023,
+            "max_wall_ns": 826887952
+          },
+          "5:turn.event.record:pool": {
+            "calls": 1000,
+            "wall_ns": 591720445876,
+            "cpu_ns": 60719615,
+            "max_wall_ns": 876438087
+          },
+          "5:turn.event.record:encode": {
+            "calls": 1000,
+            "wall_ns": 15032538,
+            "cpu_ns": 15014238,
+            "max_wall_ns": 35465
+          },
+          "5:turn.event.record:decode": {
+            "calls": 1000,
+            "wall_ns": 12056619,
+            "cpu_ns": 11632475,
+            "max_wall_ns": 27727
+          },
+          "5:turn.event.record:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 230905649261,
+            "cpu_ns": 102476306,
+            "max_wall_ns": 475256136
+          },
+          "5:turn.event.record:rpc": {
+            "calls": 1000,
+            "wall_ns": 822723755692,
+            "cpu_ns": 258772382,
+            "max_wall_ns": 1189198267
+          },
+          "5:queue.depth:pool": {
+            "calls": 1000,
+            "wall_ns": 1064553731320,
+            "cpu_ns": 56848936,
+            "max_wall_ns": 2264568518
+          },
+          "5:queue.depth:encode": {
+            "calls": 1000,
+            "wall_ns": 4292443,
+            "cpu_ns": 4440035,
+            "max_wall_ns": 11937
+          },
+          "5:queue.depth:decode": {
+            "calls": 1000,
+            "wall_ns": 6771724,
+            "cpu_ns": 6374148,
+            "max_wall_ns": 18088
+          },
+          "5:queue.depth:embedded_request": {
+            "calls": 1000,
+            "wall_ns": 54830642848,
+            "cpu_ns": 81037106,
+            "max_wall_ns": 221136381
+          },
+          "5:queue.depth:rpc": {
+            "calls": 1000,
+            "wall_ns": 1119455962166,
+            "cpu_ns": 207869113,
+            "max_wall_ns": 2268996905
+          },
+          "5:event:whole_event": {
+            "calls": 1000,
+            "wall_ns": 2607777828830,
+            "cpu_ns": 1529853521,
+            "max_wall_ns": 4085737726
+          }
+        },
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": false,
+          "coverage_passed": false,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 660.8632728457451,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 1299.5128259062767,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": false
+            },
+            "settle": {
+              "p99_ms": 4023.644670844078,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            }
+          },
+          "failures": [
+            "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+          ],
+          "coverage_gaps": [
+            "in-process abandon is not a process-crash durability test"
+          ],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "raw_sha256": "3ef2a462e58a5eba778546ddeb8c34138e618b19a2174e46a094ae7f9a917880"
+      }
+    ],
+    "limits": [
+      "Nestedtimes overlap; callerCPU excludesnativeworkers.",
+      "Baseline/combined resourcework differs; no causaladmission fromthese hooks."
+    ]
+  }
+}

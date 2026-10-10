@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tofu-environments"
+version = "0.1.0"
+readme = "README.md"
+description = "Provider-neutral image and workspace provisioning for Tofu"
+requires-python = ">=3.10"
+dependencies = ["jsonschema>=4.21,<5"]
+license = {text = "MIT"}
+
+[project.entry-points."tofu.tools"]
+environments = "tofu_environments.host:register"
+
+[tool.setuptools.package-data]
+tofu_environments = ["*.json"]
+
+[tool.setuptools.packages.find]
+include = ["tofu_environments*"]

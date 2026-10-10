@@ -1,0 +1,143 @@
+/* ═══════════════════════════════════════════════════════════
+   trading/state.js — Shared state, config, utilities
+   ═══════════════════════════════════════════════════════════ */
+
+// Namespace that all trading modules attach to
+window.TradingApp = window.TradingApp || {};
+
+(function (F) {
+  "use strict";
+
+  // ── Base path for API calls (handles reverse-proxy) ──
+  const BASE_PATH = (() => {
+    const p = window.location.pathname;
+    return p.replace(/\/trading\.html$/i, "").replace(/\/+$/, "");
+  })();
+
+  F._API = BASE_PATH + "/api/v1/trading";
+  F._$ = (id) => document.getElementById(id);
+
+  // ── Shared mutable state ──
+  F._state = {
+    holdings: [],
+    cash: 0,
+    currentPage: "dashboard",
+    refreshTimer: null,
+  };
+
+  // ── API helper ──
+  // Delegates to the unified window.Api client (Api.trading.call), which
+  // owns the URL and error contract. trading.html loads static/js/api.js
+  // before this file. Signature unchanged so existing callers — api(path,
+  // {method, body, headers, signal}) — work as-is.
+  F.api = function (path, opts = {}) {
+    if (!window.Api || !window.Api.trading) {
+      return Promise.reject(new Error("Api client not loaded"));
+    }
+    return window.Api.trading.call(path, opts);
+  };
+
+  // ── Toast notifications ──
+  F.toast = function (msg, type = "info") {
+    const container = F._$("toastContainer");
+    if (!container) return;
+    const el = document.createElement("div");
+    el.className = `toast ${type}`;
+    el.textContent = msg;
+    container.appendChild(el);
+    setTimeout(() => {
+      el.classList.add("leaving");
+      setTimeout(() => el.remove(), 300);
+    }, 3000);
+  };
+
+  // ── Formatters ──
+  F.fmtNum = function (n, decimals = 2) {
+    if (n == null || isNaN(n)) return "--";
+    return Number(n).toLocaleString("zh-CN", {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    });
+  };
+
+  F.fmtPct = function (n) {
+    if (n == null || isNaN(n)) return "--";
+    const s = Number(n).toFixed(2);
+    return (n >= 0 ? "+" : "") + s + "%";
+  };
+
+  F.pnlClass = function (n) {
+    if (n > 0) return "up";
+    if (n < 0) return "down";
+    return "";
+  };
+
+  F.escHtml = function (s) {
+    if (!s) return "";
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  };
+
+  F.timeAgo = function (isoStr) {
+    try {
+      const d = new Date(isoStr);
+      const now = new Date();
+      const diffMs = now - d;
+      const diffH = diffMs / 3600000;
+      if (diffH < 1) return `${Math.floor(diffMs / 60000)}分钟前`;
+      if (diffH < 24) return `${Math.floor(diffH)}小时前`;
+      const diffD = Math.floor(diffH / 24);
+      if (diffD < 7) return `${diffD}天前`;
+      return d.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+    } catch (e) {
+      console.debug("[Trading] timeAgo parse error:", e.message);
+      return isoStr ? isoStr.slice(0, 10) : "--";
+    }
+  };
+
+  // ── HTML sanitizer ──
+  // ★ SECURITY: every renderMarkdown / simpleMarkdown result is injected via
+  //   innerHTML and the source is LLM-generated (brain analysis, decision /
+  //   autopilot rationales). It MUST be sanitized to prevent stored XSS.
+  //   trading.html loads static/vendor/purify.min.js (DOMPurify). If DOMPurify
+  //   somehow failed to load, we degrade SAFELY to fully-escaped text rather
+  //   than emitting raw HTML.
+  F.sanitizeHtml = function (html) {
+    if (typeof DOMPurify !== "undefined" && typeof DOMPurify.sanitize === "function") {
+      return DOMPurify.sanitize(html);
+    }
+    console.warn("[Trading] DOMPurify unavailable — escaping HTML as a safe fallback");
+    return F.escHtml(html);
+  };
+
+  F.simpleMarkdown = function (md) {
+    if (!md) return "";
+    let html = F.escHtml(md);
+    html = html.replace(/^### (.+)$/gm, "<h4>$1</h4>");
+    html = html.replace(/^## (.+)$/gm, "<h3>$1</h3>");
+    html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+    html = html.replace(/^- (.+)$/gm, "<li>$1</li>");
+    html = html.replace(/(<li>.*<\/li>\n?)+/g, "<ul>$&</ul>");
+    html = html.replace(/\n\n/g, "</p><p>");
+    html = html.replace(/\n/g, "<br>");
+    return F.sanitizeHtml('<div class="markdown-body"><p>' + html + "</p></div>");
+  };
+
+  // renderMarkdown: parse with 'marked' if loaded, then ALWAYS sanitize.
+  // Falls back to escaped text (never raw HTML) when marked is unavailable.
+  F.renderMarkdown = function (text) {
+    if (!text) return "";
+    if (typeof marked !== "undefined") {
+      try {
+        return F.sanitizeHtml(marked.parse(text));
+      } catch (e) {
+        console.warn("[Trading] marked.parse failed:", e.message);
+      }
+    }
+    return F.escHtml(text).replace(/\n/g, "<br>");
+  };
+})(window.TradingApp);

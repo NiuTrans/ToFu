@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_mutation_version_v1.schema.json",
+  "title": "Durable owner/kind mutation version reservation head",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "user_id",
+    "kind",
+    "allocated_version",
+    "mutation_id",
+    "request_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "user_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "allocated_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "mutation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "request_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "additionalProperties": false
+}

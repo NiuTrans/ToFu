@@ -1,0 +1,433 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/research_program_v1.schema.json",
+  "title": "Tofu scientific research program",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version", "revision", "direction", "lang", "stage",
+    "selected_idea_id", "hypothesis", "protocol", "capability_bindings",
+    "runs", "claims", "manuscript", "source_files", "figures", "tables",
+    "compilation", "publication", "updated_at"
+  ],
+  "properties": {
+    "contract_version": {"const": "tofu.research-program/v1"},
+    "revision": {"type": "integer", "minimum": 0},
+    "direction": {"type": "string", "maxLength": 2000},
+    "lang": {"enum": ["en", "zh"]},
+    "stage": {"enum": ["selection", "experiment", "evidence", "writing", "submission"]},
+    "selected_idea_id": {"type": "string", "maxLength": 160},
+    "selected_idea_source_task_id": {"type": "string", "maxLength": 160, "description": "Owned completed discovery record containing the selected idea; empty preserves legacy/manual hypotheses."},
+    "hypothesis": {"type": "string", "maxLength": 12000},
+    "protocol": {"$ref": "#/$defs/protocol"},
+
+    "decision": {"$ref": "#/$defs/decision"},
+    "manuscript_audit": {"$ref": "#/$defs/audit"},
+    "capability_bindings": {
+      "type": "array",
+      "maxItems": 24,
+      "items": {"$ref": "#/$defs/capabilityBinding"}
+    },
+    "history": {"$ref": "#/$defs/history"},
+    "runs": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/run"}},
+    "claims": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/claim"}},
+    "manuscript": {"$ref": "#/$defs/manuscript"},
+    "source_files": {
+      "type": "array",
+      "maxItems": 24,
+      "items": {"$ref": "#/$defs/sourceFile"}
+    },
+    "figures": {"type": "array", "maxItems": 24, "items": {"$ref": "#/$defs/visual"}},
+    "tables": {"type": "array", "maxItems": 24, "items": {"$ref": "#/$defs/visual"}},
+    "compilation": {"$ref": "#/$defs/compilation"},
+    "publication": {"$ref": "#/$defs/publication"},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "scientificObservations":{"type":"object","additionalProperties":false,"required":["format","comparison","partitions","samples"],"properties":{"format":{"enum":["tofu.scientific-observations/v1","tofu.scientific-observations/v2"]},"comparison":{"type":"object","required":["method","baseline"],"additionalProperties":false,"properties":{"method":{"type":"object","additionalProperties":false,"required":["dataset","dataset_digest","split_digest","metric","evaluation_partition","budget_unit","budget","system"],"properties":{"dataset":{"type":"string","minLength":1},"dataset_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},"split_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},"metric":{"type":"string","minLength":1},"evaluation_partition":{"const":"test"},"budget_unit":{"type":"string","minLength":1,"pattern":"\\S"},"budget":{"type":"number","exclusiveMinimum":0},"system":{"type":"string","minLength":1,"pattern":"\\S"},"system_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"}}},"baseline":{"type":"object","additionalProperties":false,"required":["dataset","dataset_digest","split_digest","metric","evaluation_partition","budget_unit","budget","system"],"properties":{"dataset":{"type":"string","minLength":1},"dataset_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},"split_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},"metric":{"type":"string","minLength":1},"evaluation_partition":{"const":"test"},"budget_unit":{"type":"string","minLength":1,"pattern":"\\S"},"budget":{"type":"number","exclusiveMinimum":0},"system":{"type":"string","minLength":1,"pattern":"\\S"},"system_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"}}}}},"partitions":{"type":"object","additionalProperties":false,"required":["dataset_size","train","validation","test"],"properties":{"dataset_size":{"type":"integer","minimum":3},"train":{"type":"array","minItems":1,"items":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"integer","minimum":0}}},"validation":{"type":"array","minItems":1,"items":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"integer","minimum":0}}},"test":{"type":"array","minItems":1,"items":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"integer","minimum":0}}}}},"samples":{"type":"object","additionalProperties":false,"required":["seeds","method_values","baseline_values","mean_difference","standard_error"],"properties":{"seeds":{"type":"array","minItems":2,"maxItems":32,"uniqueItems":true,"items":{"type":"integer"}},"method_values":{"type":"array","minItems":2,"maxItems":32,"items":{"type":"number"}},"baseline_values":{"type":"array","minItems":2,"maxItems":32,"items":{"type":"number"}},"mean_difference":{"type":"number"},"standard_error":{"type":"number","minimum":0},"method_seeds":{"type":"array","minItems":2,"maxItems":32,"uniqueItems":true,"items":{"type":"integer"}},"baseline_seeds":{"type":"array","minItems":2,"maxItems":32,"uniqueItems":true,"items":{"type":"integer"}}}}},"description":"Computable reported observations. Consistency is not independent reproduction or benchmark integrity.","allOf":[{"if":{"properties":{"format":{"const":"tofu.scientific-observations/v2"}}},"then":{"properties":{"samples":{"required":["method_seeds","baseline_seeds"]}}},"else":{"properties":{"samples":{"not":{"anyOf":[{"required":["method_seeds"]},{"required":["baseline_seeds"]}]}}}}}]},
+    "historyChunk": {"type":"object","additionalProperties":false,"required":["previous","previous_count","count","runs"],"properties":{"previous":{"type":"string","pattern":"^([0-9a-f]{64})?$"},"previous_count":{"type":"integer","minimum":0},"count":{"type":"integer","minimum":1},"runs":{"type":"array","minItems":1,"maxItems":16,"items":{"$ref":"#/$defs/run"}}}},
+    "historyPage": {"type":"object","additionalProperties":false,"required":["head","page","total","runs","next_cursor","revision"],"properties":{"head":{"type":"string","pattern":"^([0-9a-f]{64})?$"},"page":{"type":"string","pattern":"^([0-9a-f]{64})?$"},"total":{"type":"integer","minimum":0},"runs":{"type":"array","maxItems":16,"items":{"$ref":"#/$defs/run"}},"next_cursor":{"type":["integer","null"],"minimum":1},"revision":{"type":"integer","minimum":0}}},
+    "history": {"type":"object","additionalProperties":false,"required":["head","count","scope","outcomes","evidence_sum","audit_failures","artifact_count"],"properties":{"head":{"type":"string","pattern":"^([0-9a-f]{64})?$"},"count":{"type":"integer","minimum":0},"scope":{"type":"string","pattern":"^[0-9a-f]{64}$"},"outcomes":{"type":"object","additionalProperties":false,"required":["supported","refuted","inconclusive"],"properties":{"supported":{"type":"integer","minimum":0},"refuted":{"type":"integer","minimum":0},"inconclusive":{"type":"integer","minimum":0}}},"evidence_sum":{"type":"string","pattern":"^[0-9a-f]{64}$"},"audit_failures":{"type":"object","additionalProperties":false,"required":["baseline_fairness","uncertainty","seeds","validation_split"],"properties":{"baseline_fairness":{"type":"integer","minimum":0},"uncertainty":{"type":"integer","minimum":0},"seeds":{"type":"integer","minimum":0},"validation_split":{"type":"integer","minimum":0}}},"artifact_count":{"type":"integer","minimum":0},"source_index":{"$ref":"#/$defs/receiptSourceIndex"},"audit_version":{"type":"integer","enum":[0,1,2,3,4,5,6,7],"description":"0 is legacy; 1 permits cross-receipt aggregation; 2 requires one coherent observation per run; 3 binds explicit receipt outcomes to run conclusions; 4 uses robust paired SE and enforces explicit frozen numeric rules; 5 supports independent per-system seed identity pairing; 6 rejects ambiguous duplicate-key scientific originals; 7 retains malformed scientific envelopes as invalid evidence."}},"description":"Server-owned immutable archive head and current-scope aggregate; request saves cannot replace it."},
+
+    "hypothesis": {"type":"object","additionalProperties":false,"required":["id","statement","prediction","scope"],"properties":{"id":{"type":"string","maxLength":2000},"statement":{"type":"string","maxLength":2000},"prediction":{"type":"string","maxLength":2000},"scope":{"type":"string","maxLength":2000}}},
+    "nextExperiment": {"type":"object","additionalProperties":false,"required":["id","hypothesis_ids","design","decision_rule","expected_information","expected_value","cost"],"properties":{"id":{"type":"string","maxLength":2000},"hypothesis_ids":{"type":"array","maxItems":16,"items":{"type":"string","maxLength":96}},"design":{"type":"string","maxLength":2000},"decision_rule":{"$ref":"#/$defs/longText"},"expected_information":{"type":"string","maxLength":2000},"expected_value":{"type":"string","maxLength":2000},"cost":{"$ref":"#/$defs/longText"},"priority":{"type":"integer","minimum":1,"maximum":16},"requires_confirmation":{"const":true}}},
+    "decision": {"type":"object","additionalProperties":false,"required":["status","reason","run_ids","scope","next_actions"],"properties":{"status":{"enum":["retain","refine","refute","inconclusive"]},"reason":{"$ref":"#/$defs/longText"},"scope":{"$ref":"#/$defs/longText"},"run_ids":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":96}},"next_actions":{"type":"array","maxItems":16,"items":{"$ref":"#/$defs/nextExperiment"}}}},
+    "audit": {"type":"object","additionalProperties":false,"required":["passed","checks"],"properties":{"passed":{"type":"boolean"},"checks":{"type":"array","maxItems":5,"items":{"type":"object","additionalProperties":false,"required":["id","ok"],"properties":{"id":{"enum":["baseline_fairness","uncertainty","seeds","validation_split","claim_traceability"]},"ok":{"type":"boolean"}}}},"verification_basis":{"const":"reported_observation_consistency/v1"}}},
+    "shortText": {"type": "string", "maxLength": 1000},
+    "longText": {"type": "string", "maxLength": 12000},
+    "scientificDecisionRule": {
+      "type":"object", "additionalProperties":false,
+      "required":["direction","minimum_effect","uncertainty_multiplier"],
+      "properties": {
+        "direction":{"enum":["higher","lower"]},
+        "minimum_effect":{"type":"number"},
+        "uncertainty_multiplier":{"type":"number","exclusiveMinimum":0}
+      },
+      "description":"Owner-frozen rule: orient paired mean by metric direction; support if effect minus multiplier times recomputed SE exceeds minimum_effect, refute if effect plus that margin is below it, otherwise inconclusive. Equality is inconclusive. A precommitted SE margin is not a confidence interval or significance test. Negative thresholds allow explicit noninferiority."
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary_metric", "baseline", "dataset", "falsifier", "resources",
+        "evaluation_protocol", "environment", "random_seeds", "stop_conditions"
+      ],
+      "properties": {
+        "observation_format": {"const":"tofu.scientific-observations/v2"},
+        "primary_metric": {"$ref": "#/$defs/longText"},
+        "decision_rule": {"$ref":"#/$defs/scientificDecisionRule"},
+        "measurement_scope": {"type":"object","additionalProperties":false,"required":["dataset_digest","split_digest","budget_unit","budget"],"properties":{"dataset_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},"split_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},"budget_unit":{"type":"string","minLength":1,"maxLength":2000},"budget":{"type":"number","exclusiveMinimum":0},"candidate_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},"baseline_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"description":"Optional frozen dataset, split and budget; candidate_digest and baseline_digest optionally freeze both system generations together. Missing legacy fields establish no generation precommitment.","dependentRequired":{"candidate_digest":["baseline_digest"],"baseline_digest":["candidate_digest"]}},
+        "baseline": {"$ref": "#/$defs/longText"},
+        "dataset": {"$ref": "#/$defs/longText"},
+        "falsifier": {"$ref": "#/$defs/longText"},
+        "resources": {"$ref": "#/$defs/longText"},
+        "evaluation_protocol": {"$ref": "#/$defs/longText"},
+        "environment": {"$ref": "#/$defs/longText"},
+        "matched_budget": {"$ref": "#/$defs/longText"},
+        "exploratory_plan": {"$ref": "#/$defs/longText"},
+        "validation_plan": {"$ref": "#/$defs/longText"},
+
+        "competing_hypotheses": {"type":"array","maxItems":16,"items":{"$ref":"#/$defs/hypothesis"}},
+        "discriminating_experiments": {"type":"array","maxItems":16,"items":{"$ref":"#/$defs/nextExperiment"}},
+        "random_seeds": {"type": "array", "maxItems": 32, "items": {"type": "integer"}},
+        "stop_conditions": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/shortText"}}
+      }
+    },
+    "capabilityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "provider", "tool", "schema_hash", "enabled", "argument_defaults", "notes"],
+      "properties": {
+        "capability": {
+          "type": "string",
+          "maxLength": 120,
+          "pattern": "^(literature|experiment|compute|evaluation|figure|manuscript|publication)\\.[a-z0-9_.-]+$"
+        },
+        "provider": {"type": "string", "maxLength": 120},
+        "tool": {"type": "string", "maxLength": 240},
+        "schema_hash": {"type": "string", "maxLength": 128},
+        "enabled": {"type": "boolean"},
+        "argument_defaults": {"type": "object", "maxProperties": 48},
+        "notes": {"type": "string", "maxLength": 2000}
+      }
+    },
+    "receiptSourceNode": {
+      "oneOf": [
+        {"type":"object","additionalProperties":false,"required":["kind","key","facts"],
+         "properties":{"kind":{"const":"leaf"},"key":{"type":"string","pattern":"^[0-9a-f]{64}$"},"facts":{"type":"string","pattern":"^[0-9a-f]{64}$"}}},
+        {"type":"object","additionalProperties":false,"required":["kind","children"],
+         "properties":{"kind":{"const":"branch"},"children":{"type":"object","minProperties":1,"maxProperties":16,"propertyNames":{"pattern":"^[0-9a-f]$"},"additionalProperties":{"type":"string","pattern":"^[0-9a-f]{64}$"}}}}
+      ]
+    },
+    "receiptSourceIndex": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "root", "count"],
+      "properties": {
+        "version": {"type": "integer", "enum": [0, 1]},
+        "root": {"type": "string", "pattern": "^([0-9a-f]{64})?$"},
+        "count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "executionObservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {"enum": ["planned", "queued", "running", "completed", "failed"]},
+        "job_id": {"type": "string", "minLength": 1, "maxLength": 240},
+        "provider_scope": {"type": "string", "minLength": 1, "maxLength": 300}
+      }
+    },
+    "toolReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "call_id", "status", "artifact_ref", "result_digest", "result_excerpt", "observed_at"],
+      "properties": {
+        "tool": {"type": "string", "maxLength": 240},
+        "call_id": {"type": "string", "maxLength": 240},
+        "source_task_id": {"type": "string", "minLength": 1, "maxLength": 160},
+        "status": {"enum": ["done", "rejected", "error", "pending"]},
+        "artifact_ref": {"type": "string", "maxLength": 1000},
+        "result_digest": {"type": "string", "maxLength": 128},
+        "result_excerpt": {"type": "string", "maxLength": 4000},
+        "execution_observation": {"$ref": "#/$defs/executionObservation"},
+        "observation_incomplete": {"const": true, "description": "Scientific payload exceeded the compact receipt capacity; original remains in the journal and cannot be ignored by later audit."},
+        "observation_excerpt": {"type":"string","maxLength":4000,"description":"Server-captured complete scientific payload extracted before presentation truncation; never a partial JSON prefix."},
+        "observed_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "receiptPageReference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["head", "count"],
+      "properties": {
+        "head": {"type": "string", "pattern": "^([0-9a-f]{64})?$"},
+        "count": {"type": "integer", "minimum": 0}
+      },
+      "oneOf": [
+        {"properties": {"head": {"const": ""}, "count": {"const": 0}}},
+        {"properties": {"head": {"minLength": 64}, "count": {"minimum": 1}}}
+      ]
+    },
+    "receiptPage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["previous", "count", "receipts"],
+      "properties": {
+        "previous": {"$ref": "#/$defs/receiptPageReference"},
+        "count": {"type": "integer", "minimum": 1},
+        "receipts": {"type": "array", "minItems": 1, "maxItems": 32,
+                     "items": {"$ref": "#/$defs/toolReceipt"}}
+      }
+    },
+    "receiptProgressIndex": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sources", "jobs", "job_counts", "last_state", "receipts"],
+      "properties": {
+        "sources": {"$ref": "#/$defs/receiptSourceIndex"},
+        "jobs": {"$ref": "#/$defs/receiptSourceIndex"},
+        "last_state": {"$ref": "#/$defs/executionObservation/properties/state"},
+        "receipts": {"type": "integer", "minimum": 0},
+        "job_counts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["planned", "queued", "running", "completed", "failed"],
+          "properties": {
+            "planned": {"type": "integer", "minimum": 0}, "queued": {"type": "integer", "minimum": 0},
+            "running": {"type": "integer", "minimum": 0}, "completed": {"type": "integer", "minimum": 0},
+            "failed": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "receiptProgressCheckpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "receipt_history", "index"],
+      "properties": {
+        "version": {"const": 1},
+        "receipt_history": {"$ref": "#/$defs/receiptPageReference"},
+        "index": {"$ref": "#/$defs/receiptProgressIndex"}
+      }
+    },
+    "receiptEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "run_digest", "scientific_outcome", "outcome_consistent", "observed_receipts", "checks", "verification_basis"],
+      "properties": {
+        "version": {"const": 1},
+        "run_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "scientific_outcome": {"enum": ["supported", "refuted", "inconclusive"]},
+        "outcome_consistent": {"type": "boolean"},
+        "observed_receipts": {"type": "integer", "minimum": 0},
+        "verification_basis": {"const": "reported_observation_consistency/v1"},
+        "checks": {
+          "type": "object", "additionalProperties": false,
+          "required": ["baseline_fairness", "uncertainty", "seeds", "validation_split"],
+          "properties": {
+            "baseline_fairness": {"type": "boolean"}, "uncertainty": {"type": "boolean"},
+            "seeds": {"type": "boolean"}, "validation_split": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "label", "status", "metric", "baseline", "delta", "artifact_ref",
+        "artifact_refs", "backend", "remote_job_id", "spec_digest", "task_id",
+        "notes", "tool_receipts", "started_at", "finished_at", "updated_at"
+      ],
+      "properties": {
+        "id": {"type": "string", "maxLength": 96},
+        "label": {"type": "string", "maxLength": 240},
+        "status": {"enum": ["planned", "running", "passed", "failed", "inconclusive"]},
+        "metric": {"type": "string", "maxLength": 500},
+        "baseline": {"type": "string", "maxLength": 500},
+        "delta": {"type": "string", "maxLength": 500},
+        "artifact_ref": {"type": "string", "maxLength": 1000},
+        "artifact_refs": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 1000}},
+        "backend": {"type": "string", "maxLength": 240},
+        "remote_job_id": {"type": "string", "maxLength": 500},
+        "spec_digest": {"type": "string", "maxLength": 128},
+        "protocol_digest": {"type": "string", "maxLength": 64},
+        "hypothesis_digest": {"type": "string", "maxLength": 64},
+        "execution_status": {"enum": ["planned", "queued", "running", "completed", "failed"]},
+        "scientific_outcome": {"enum": ["supported", "refuted", "inconclusive"]},
+        "validity": {"enum": ["current", "stale", "unverified"]},
+        "task_id": {"type": "string", "maxLength": 160},
+        "notes": {"$ref": "#/$defs/longText"},
+        "receipt_progress": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "receipt_evidence": {"$ref": "#/$defs/receiptEvidence"},
+        "receipt_history": {"$ref": "#/$defs/receiptPageReference"},
+        "tool_receipts": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/toolReceipt"}},
+        "started_at": {"type": "integer", "minimum": 0},
+        "finished_at": {"type": "integer", "minimum": 0},
+        "updated_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "status", "evidence_refs"],
+      "properties": {
+        "id": {"type": "string", "maxLength": 96},
+        "text": {"$ref": "#/$defs/longText"},
+        "protocol_digest": {"type": "string", "maxLength": 64},
+        "hypothesis_digest": {"type": "string", "maxLength": 64},
+        "evidence_digest": {"type": "string", "maxLength": 64},
+
+        "outcome_scope": {"enum":["supported","refuted","inconclusive"]},
+        "validity": {"enum": ["current", "stale", "unverified"]},
+        "validity_reason": {"type": "string", "maxLength": 1000},
+        "status": {"enum": ["draft", "supported", "contested", "rejected"]},
+        "evidence_refs": {"type": "array", "maxItems": 24, "items": {"type": "string", "maxLength": 1000}}
+      }
+    },
+    "manuscript": {
+      "type": "object",
+      "additionalProperties": false,
+
+      "required": [
+        "title", "venue", "abstract", "keywords", "method", "results", "limitations",
+        "introduction", "related_work", "experiments", "conclusion", "ethics"
+      ],
+      "properties": {
+        "scientific_dependency_digest": {"type": "string", "maxLength": 64},
+        "title": {"$ref": "#/$defs/longText"},
+        "venue": {"$ref": "#/$defs/longText"},
+        "abstract": {"$ref": "#/$defs/longText"},
+        "keywords": {"$ref": "#/$defs/longText"},
+        "method": {"$ref": "#/$defs/longText"},
+        "results": {"$ref": "#/$defs/longText"},
+        "limitations": {"$ref": "#/$defs/longText"},
+        "introduction": {"$ref": "#/$defs/longText"},
+        "related_work": {"$ref": "#/$defs/longText"},
+        "experiments": {"$ref": "#/$defs/longText"},
+        "conclusion": {"$ref": "#/$defs/longText"},
+        "ethics": {"$ref": "#/$defs/longText"}
+      }
+    },
+    "sourceFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "content", "sha256", "updated_at"],
+      "properties": {
+        "path": {"type": "string", "maxLength": 240, "pattern": "^[A-Za-z0-9_./-]+$"},
+        "content": {"type": "string", "maxLength": 65536},
+        "sha256": {"type": "string", "maxLength": 64},
+        "updated_at": {"type": "integer", "minimum": 0}
+      }
+    },
+    "visual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "caption", "data_ref", "script_ref", "output_ref", "status"],
+      "properties": {
+        "id": {"type": "string", "maxLength": 96},
+        "title": {"type": "string", "maxLength": 500},
+        "caption": {"type": "string", "maxLength": 4000},
+        "data_ref": {"type": "string", "maxLength": 1000},
+        "script_ref": {"type": "string", "maxLength": 1000},
+        "output_ref": {"type": "string", "maxLength": 1000},
+        "status": {"enum": ["planned", "generated", "verified", "rejected"]}
+      }
+    },
+    "compilation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "status",
+        "detail",
+        "source_digest",
+        "engine",
+        "compiled_at",
+        "build"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "unconfigured",
+            "paper_build"
+          ]
+        },
+        "status": {
+          "enum": [
+            "not_run",
+            "passing",
+            "failing"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "source_digest": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "engine": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "compiled_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "build": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/compiledBuild"
+            }
+          ]
+        }
+      }
+    },
+    "compiledBuild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_id",
+        "build_id",
+        "source_digest",
+        "manifest_digest",
+        "pdf_sha256"
+      ],
+      "properties": {
+        "document_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32,64}$"
+        },
+        "build_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "manifest_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "pdf_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "status", "project_ref", "project_url", "source_digest", "published_at", "detail"],
+      "properties": {
+        "provider": {"type": "string", "maxLength": 120},
+        "status": {"enum": ["not_started", "syncing", "published", "conflict", "failed"]},
+        "project_ref": {"type": "string", "maxLength": 1000},
+        "project_url": {"type": "string", "maxLength": 2000},
+        "source_digest": {"type": "string", "maxLength": 128},
+        "published_at": {"type": "integer", "minimum": 0},
+        "detail": {"type": "string", "maxLength": 4000}
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "format": "tofu.native-runtime-delivery-evidence/v1",
+  "whole_application_admission": "incomplete",
+  "scope": "GNU/Linux x86_64 archive build/integrity and installed transient agent",
+  "compiler": "rustc 1.85.1 (4eb161250 2025-03-15)",
+  "runtime_tests_passed_at_msrv": 162,
+  "private_core_tests_passed_at_msrv": 103,
+  "archive_failure_tests_passed": 4,
+  "archive_bytes": 2841593,
+  "archive_sha256": "9efec1a54dabd6041d911bb333eae45b7edcc0fbc76351c5ca172f8bb27a35ed",
+  "binary_bytes": 6619632,
+  "installed_agent": {
+    "installed_http_rounds": 2,
+    "host_tools": 1,
+    "terminal_status": "done",
+    "python_or_compiler_in_path": false
+  },
+  "sources": {
+    "scripts/build_native_runtime.py": "0dc4f2bba5ff4e5773d55cd8ad737e759dd23795124d7a5fe7e3bbe1fd3e7466",
+    "contracts/native_runtime_artifact_v1.json": "178110469785d1e62c68f11aca67df79f2bd769cfc5418a02024ff7357fe0bee",
+    "packages/tofu-runtime/src/main.rs": "c01b5bf0ccad0e001c4e6154bb679ecad105b51dcc318305010db7036dd4a334",
+    ".github/workflows/native-runtime.yml": "633f7b2ea0867aeab33310cd88ab543e988d3abb9e5949a850e30268ab6b49ae",
+    "tests/release/test_native_runtime_archive.py": "df4cecd3f347861f5e5a68d4a69cdc2038202ef8f165327187d41d776ba1adcb"
+  },
+  "limitations": [
+    "Local certification covers x86_64 GNU/Linux on this host; aarch64 and distro/ABI matrix pending",
+    "CI workflow authored and matching commands verified locally; no hosted run or release publication",
+    "No deployment/backend selection performed",
+    "Full production routing/approval/durable/progress/multimodal adapters pending",
+    "No application CPU/RSS/throughput/latency improvement admission"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "contract": "tofu.conversation-execution-identity/v1",
+  "version": 1,
+  "configKey": "_conversationExecutionIdentity",
+  "responsibility": "Server-authored identity carried by an accepted attempt; not a paid execution grant.",
+  "fields": ["version", "principal", "attended"],
+  "principalFields": ["kind", "subject_id", "owner_user_id", "tenant_id", "scopes"],
+  "supportedPrincipalKinds": ["user"],
+  "executionScopes": [],
+  "legacyPolicy": "Only absent envelopes retain the existing explicit-owner user path; present malformed or nonhuman envelopes never fall back.",
+  "publicPolicy": "Discard reserved identity and attendance fields, then stamp authenticated owner and tenant at command acceptance.",
+  "reservedConfigFields": ["_conversationExecutionIdentity", "_conversationExecutionAdmission", "_turnPrincipalTenantId", "_turnPrincipalKind", "_turnPrincipalSubjectId", "_turnPrincipalScopes", "_turnOwnerUserId", "_turnId", "_attemptId", "_principalContext", "_userId", "_attended", "_unattended", "_principal"],
+  "nonhumanPolicy": "Deny before model context or registry creation until trusted grant, scope, revocation and cost admission exists."
+}

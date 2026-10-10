@@ -1,0 +1,112 @@
+/* User notes, narrow screens and reduced motion.
+ * Owner: ConversationSurface; tokens: 00-design-tokens.css.
+ * Delivery: ordered application manifest; neighboring content owners are independent.
+ */
+
+/* User turns are compact notes; they deliberately do not grow an execution spine. */
+
+.conversation-surface .message.user-msg .message-content {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--turn-rule);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--user-bubble) 50%, var(--bg-primary));
+  box-shadow: none;
+}
+
+.conversation-surface .message.user-msg .message-header {
+  margin-bottom: var(--space-1);
+}
+
+.conversation-surface .message.user-msg .conversation-turn-blocks > .conversation-block {
+  margin-bottom: var(--space-1);
+}
+
+.conversation-surface .message.user-msg .conversation-block--text > .md-content {
+  font-size: var(--conversation-font-size-body);
+  line-height: var(--leading-body);
+}
+
+.conversation-surface .message.user-msg .conversation-turn-actions {
+  margin-top: var(--space-1);
+  padding-top: var(--space-1);
+}
+
+@media (max-width: 720px) {
+  .conversation-surface .conversation-turn.message {
+    grid-template-columns: minmax(0, 1fr);
+    margin-bottom: var(--space-6);
+  }
+
+  .conversation-surface .conversation-turn.message > .conversation-turn-content {
+    grid-column: 1;
+  }
+
+  .conversation-surface .conversation-turn-header.message-header {
+    min-height: 22px;
+    margin-bottom: var(--space-2);
+  }
+
+  .conversation-surface .message-time {
+    font-size: var(--conversation-font-size-caption);
+  }
+
+  .conversation-surface .conversation-round-header__toggle {
+    flex-wrap: wrap;
+  }
+
+  .conversation-surface .thinking-header {
+    min-height: 36px;
+  }
+
+  .conversation-surface .bilingual-header {
+    min-height: 44px;
+  }
+
+  .conversation-surface .thinking-text {
+    padding: var(--space-1) 0 var(--space-2) var(--space-3);
+    font-size: var(--conversation-font-size-content);
+  }
+
+  .conversation-surface .conversation-turn-actions.message-actions {
+    flex-wrap: nowrap;
+    margin-right: calc(-1 * var(--space-1));
+    overflow-x: auto;
+    scrollbar-width: none;
+    opacity: 1;
+  }
+  .conversation-surface .conversation-block-copy {
+    opacity: .6;
+  }
+
+  .conversation-surface .conversation-turn-actions::-webkit-scrollbar {
+    display: none;
+  }
+
+  .conversation-surface .msg-action-btn,
+  [data-theme="tofu"] .conversation-surface .msg-action-btn {
+    min-height: 44px;
+    padding: var(--space-2) var(--space-2);
+    flex: 0 0 auto;
+    font-size: var(--conversation-font-size-caption);
+  }
+
+  .conversation-surface .conversation-action--delete {
+    margin-left: 0;
+  }
+
+  .conversation-surface .message.user-msg .message-content {
+    padding: var(--space-2) var(--space-3) var(--space-2);
+    border-radius: var(--radius-sm);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-surface .thinking-state-dot,
+  .conversation-surface .conversation-disclosure-chevron,
+  .conversation-surface .conversation-turn-actions,
+  .conversation-surface .thinking-header,
+  .conversation-surface .conversation-block--tool * {
+    animation: none !important;
+    transition-duration: .01ms !important;
+  }
+}

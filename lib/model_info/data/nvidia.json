@@ -1,0 +1,21 @@
+{
+  "brand": "nvidia",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "nvidia",
+  "category": "relay",
+  "name": "NVIDIA (NIM)",
+  "base_url": "https://integrate.api.nvidia.com/v1",
+  "offering_recipes": [
+    {
+      "model_id": "nvidia/nemotron-3-super-120b-a12b",
+      "capabilities": [
+        "text",
+        "thinking"
+      ]
+    }
+  ],
+  "catalog_source": {
+    "url": "https://build.nvidia.com/nvidia/nemotron-3-super-120b-a12b?nim=self-hosted",
+    "checked_at": "2026-09-08"
+  }
+}

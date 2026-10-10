@@ -1,0 +1,369 @@
+{
+  "format": "tofu.http-cohort-cpu-evidence/v1",
+  "scope": "Actual HTTP/1+HTTP/2 concurrent cohorts with raw owned-server CPU samples.\n\nOne operation is a barrier-separated batch of concurrent requests. Per-request\nlatencies stay diagnostic; overlapping intervals never pretend to be CPU/request.\nBoth arms reuse owned Headless auth/routes/SSE and checked graceful shutdown.\nSynthetic compute, post-workload RSS and incomplete five-case coverage remain\nexplicit: this report cannot authorize whole HTTP or system promotion.\n",
+  "whole_system_verdict": "incomplete",
+  "production_promoted": false,
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/http-cohort-cpu-full.json",
+  "raw_artifact_sha256": "db89fdc62463626d4a66b12358c2df9dc3e98bcb24fec6be4cd749ef1329942a",
+  "sources": {
+    "benchmarks/http_cohort_cpu_measure.py": "06787daaedb084d9083d72ac5ba1546555e495188c38ea6d31d8e2d2c89caf41",
+    "benchmarks/http_cpu_clock.py": "e5f71eba3b68b50e5de4596c54fc36428ee8041424e063a1421197d6fea37349",
+    "benchmarks/http_runtime.py": "c579b5fe817427140e14b51dd4bdd0935098ce11861ba9ea7240ebae178c3f22",
+    "benchmarks/http_frame_coalescing.py": "8bfd01b17e6cc358c6d07cc4fad122d683f3d5354d2c7c923b8d4a12a1c5aca6",
+    "benchmarks/http_frame_coalescing_measure.py": "76cddabe704824c85f5a30b2957d00f67c367ca9f7c3cddecc20c0c003a5e83d",
+    "tofu_agent/server.py": "ca3f880ba023e575e6011003583818558c126511468973e0d4e69cf86c896d36",
+    "lib/hypercorn_runtime.py": "54721dee72fcf8fb2f2baf6c016f8a5213f91fc2053aadedb47214c7df334a68"
+  },
+  "observations": 3600,
+  "independent_latency_memory_servers": 72,
+  "requests_per_cohort": 16,
+  "pairs": [
+    {
+      "protocol": "h1",
+      "case": "short_requests",
+      "pair": 0,
+      "ratios": {
+        "wall_ms": 1.0073282678155635,
+        "cpu_ms": 1.0109029674111452
+      },
+      "server_pids": {
+        "reference": [
+          58130,
+          58461
+        ],
+        "coalesced": [
+          59358,
+          60028
+        ]
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "short_requests",
+      "pair": 1,
+      "ratios": {
+        "wall_ms": 0.9965458837587866,
+        "cpu_ms": 0.9962690601132578
+      },
+      "server_pids": {
+        "coalesced": [
+          60910,
+          61630
+        ],
+        "reference": [
+          62520,
+          63448
+        ]
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "short_requests",
+      "pair": 2,
+      "ratios": {
+        "wall_ms": 0.9988270648982589,
+        "cpu_ms": 0.9907966239114345
+      },
+      "server_pids": {
+        "reference": [
+          64424,
+          65170
+        ],
+        "coalesced": [
+          66174,
+          67146
+        ]
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "authentication",
+      "pair": 0,
+      "ratios": {
+        "wall_ms": 0.9884565927732587,
+        "cpu_ms": 0.9884472638556063
+      },
+      "server_pids": {
+        "reference": [
+          68405,
+          69494
+        ],
+        "coalesced": [
+          70155,
+          70542
+        ]
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "authentication",
+      "pair": 1,
+      "ratios": {
+        "wall_ms": 1.0005835164910684,
+        "cpu_ms": 0.986223935867817
+      },
+      "server_pids": {
+        "coalesced": [
+          71501,
+          72576
+        ],
+        "reference": [
+          75895,
+          76685
+        ]
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "authentication",
+      "pair": 2,
+      "ratios": {
+        "wall_ms": 1.012434976332747,
+        "cpu_ms": 1.0053196124014054
+      },
+      "server_pids": {
+        "reference": [
+          77424,
+          78399
+        ],
+        "coalesced": [
+          79306,
+          80184
+        ]
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "sse_fanout",
+      "pair": 0,
+      "ratios": {
+        "wall_ms": 0.9619055911225163,
+        "cpu_ms": 0.9115256931675915
+      },
+      "server_pids": {
+        "reference": [
+          81155,
+          82394
+        ],
+        "coalesced": [
+          84874,
+          87913
+        ]
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "sse_fanout",
+      "pair": 1,
+      "ratios": {
+        "wall_ms": 0.9583939235327747,
+        "cpu_ms": 0.9394266728067928
+      },
+      "server_pids": {
+        "coalesced": [
+          89365,
+          90786
+        ],
+        "reference": [
+          92219,
+          93793
+        ]
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "sse_fanout",
+      "pair": 2,
+      "ratios": {
+        "wall_ms": 0.9529100398925937,
+        "cpu_ms": 0.915940185782089
+      },
+      "server_pids": {
+        "reference": [
+          95342,
+          96634
+        ],
+        "coalesced": [
+          98213,
+          99602
+        ]
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "short_requests",
+      "pair": 0,
+      "ratios": {
+        "wall_ms": 0.9901428626602531,
+        "cpu_ms": 0.9892136854285065
+      },
+      "server_pids": {
+        "reference": [
+          101513,
+          104823
+        ],
+        "coalesced": [
+          105526,
+          106130
+        ]
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "short_requests",
+      "pair": 1,
+      "ratios": {
+        "wall_ms": 1.0040550649624937,
+        "cpu_ms": 0.9769931667444436
+      },
+      "server_pids": {
+        "coalesced": [
+          106738,
+          107958
+        ],
+        "reference": [
+          108687,
+          109296
+        ]
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "short_requests",
+      "pair": 2,
+      "ratios": {
+        "wall_ms": 0.9978808563251489,
+        "cpu_ms": 1.0049245031773657
+      },
+      "server_pids": {
+        "reference": [
+          109901,
+          110503
+        ],
+        "coalesced": [
+          111123,
+          111729
+        ]
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "authentication",
+      "pair": 0,
+      "ratios": {
+        "wall_ms": 0.9958747426653026,
+        "cpu_ms": 0.9989559539422188
+      },
+      "server_pids": {
+        "reference": [
+          112334,
+          113158
+        ],
+        "coalesced": [
+          113772,
+          114424
+        ]
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "authentication",
+      "pair": 1,
+      "ratios": {
+        "wall_ms": 0.9920542945186728,
+        "cpu_ms": 0.9740434331603995
+      },
+      "server_pids": {
+        "coalesced": [
+          115053,
+          115668
+        ],
+        "reference": [
+          115997,
+          117926
+        ]
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "authentication",
+      "pair": 2,
+      "ratios": {
+        "wall_ms": 1.004679933207829,
+        "cpu_ms": 1.0159488229286295
+      },
+      "server_pids": {
+        "reference": [
+          118966,
+          121280
+        ],
+        "coalesced": [
+          122132,
+          122867
+        ]
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "sse_fanout",
+      "pair": 0,
+      "ratios": {
+        "wall_ms": 1.001100910223972,
+        "cpu_ms": 0.9980924119618829
+      },
+      "server_pids": {
+        "reference": [
+          123617,
+          124836
+        ],
+        "coalesced": [
+          126059,
+          127223
+        ]
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "sse_fanout",
+      "pair": 1,
+      "ratios": {
+        "wall_ms": 1.0093980175082726,
+        "cpu_ms": 0.9880118670866166
+      },
+      "server_pids": {
+        "coalesced": [
+          128356,
+          129762
+        ],
+        "reference": [
+          130975,
+          132322
+        ]
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "sse_fanout",
+      "pair": 2,
+      "ratios": {
+        "wall_ms": 1.0059346213539846,
+        "cpu_ms": 0.9896341145313207
+      },
+      "server_pids": {
+        "reference": [
+          133371,
+          134902
+        ],
+        "coalesced": [
+          135975,
+          137374
+        ]
+      }
+    }
+  ],
+  "limitations": [
+    "three cases only; slow/cancellation performance separate",
+    "RSS is postworkload snapshot; no peak/retained admission",
+    "synthetic compute excludes inference/storage/full app"
+  ]
+}

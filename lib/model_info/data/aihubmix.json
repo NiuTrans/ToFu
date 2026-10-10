@@ -1,0 +1,16 @@
+{
+  "brand": "aihubmix",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "aihubmix",
+  "category": "relay",
+  "name": "AIHubMix",
+  "base_url": "https://aihubmix.com/v1",
+  "catalog_source": {"url": "https://docs.aihubmix.com/en/quick-start", "checked_at": "2026-09-08"},
+  "catalog_mode": "curated",
+  "offering_recipes": [
+    {"model_id": "gpt-6-astra", "capabilities": ["text"]},
+    {"model_id": "gemini-3.8-flash", "capabilities": ["text", "cheap"]},
+    {"model_id": "claude-fable-5-1", "capabilities": ["text"]},
+    {"model_id": "glm-5.3", "capabilities": ["text"]}
+  ]
+}

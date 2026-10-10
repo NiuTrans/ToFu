@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.research-model-budget/v1",
+  "title": "Immutable research model budget binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "owner_user_id",
+    "task_id",
+    "source_identity_sha256",
+    "execution_limits"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "owner_user_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "source_identity_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "execution_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_tokens",
+        "max_tool_calls",
+        "deadline"
+      ],
+      "properties": {
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_tool_calls": {
+          "type": "null",
+          "description": "Model-account binding does not yet authorize a tool-call limit."
+        },
+        "deadline": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "$defs": {
+    "attempt_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding_sha256",
+        "producer_id",
+        "attempt_ordinal",
+        "attempt_task_id",
+        "phase",
+        "usage_complete",
+        "reserved_tokens",
+        "reported_tokens",
+        "account_observed_tokens"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "producer_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "attempt_ordinal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "attempt_task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "phase": {
+          "enum": [
+            "dispatch_intent",
+            "settled",
+            "voided"
+          ]
+        },
+        "usage_complete": {
+          "type": "boolean"
+        },
+        "reserved_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reported_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "account_observed_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "dispatch_intent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reported_tokens": {
+                "const": 0
+              },
+              "usage_complete": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "voided"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reported_tokens": {
+                "const": 0
+              },
+              "usage_complete": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "discovery_execution_owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding_sha256",
+        "nonce",
+        "process",
+        "replay_allowed"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "process": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "research_action_observation_v1.schema.json#/$defs/processOwner"
+            }
+          ]
+        },
+        "replay_allowed": {
+          "const": false
+        },
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "previous_nonce",
+            "consumed_tokens",
+            "last_attempt_ordinal"
+          ],
+          "properties": {
+            "previous_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "consumed_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "last_attempt_ordinal": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775806
+            }
+          }
+        }
+      }
+    }
+  }
+}

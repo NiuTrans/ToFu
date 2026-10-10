@@ -1,0 +1,56 @@
+
+/* ── Batch question form ── */
+.hg-batch-form {
+  padding: 0 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.hg-batch-section {
+  border: 1px solid rgba(99, 102, 241, 0.18);
+  border-radius: 10px;
+  background: rgba(99, 102, 241, 0.05);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.hg-batch-section .hg-question {
+  padding: 0;
+  font-size: var(--font-size-md);
+}
+.hg-batch-section .hg-options-grid {
+  padding: 0;
+}
+.hg-batch-qnum {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: #a5b4fc;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.hg-batch-input {
+  margin-top: 0;
+}
+.hg-batch-choice.hg-selected {
+  border-color: rgba(34, 197, 94, 0.5);
+  background: rgba(34, 197, 94, 0.12);
+  box-shadow: 0 0 8px -2px rgba(34, 197, 94, 0.2);
+}
+.hg-batch-submit-wrap {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--space-1);
+}
+
+/* ── Skipped HG round — user never answered before task ended ── */
+.hg-skipped-line {
+  background: rgba(148, 163, 184, 0.04);
+  border-color: rgba(148, 163, 184, 0.12);
+  opacity: 0.7;
+}
+.ptool-badge-skip {
+  background: var(--chip-neutral-bg);
+  color: var(--chip-neutral-color);
+  border: 1px solid var(--chip-neutral-border);
+}

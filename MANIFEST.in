@@ -1,0 +1,30 @@
+# Public tofu-agent source distribution: agent/runtime sources only.
+# Setuptools' VCS file finder otherwise includes the full application test and
+# storage trees even though they are not importable packages in the wheel.
+prune .github
+prune benchmarks
+prune browser_extension
+prune clients
+prune data
+prune debug
+prune desktop
+prune docs
+prune frontend
+prune logs
+prune routes
+prune static
+prune tests
+prune uploads
+prune lib/database
+prune lib/storage
+prune lib/storage_sidecar
+prune lib/tests
+
+exclude audit_codex_session.py
+
+global-exclude *.py[cod]
+global-exclude __pycache__
+
+include README.md
+include LICENSE
+include VERSION

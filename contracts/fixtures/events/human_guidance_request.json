@@ -1,0 +1,23 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "batchQuestions": [],
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "guidanceId": "s",
+  "options": [],
+  "question": "s",
+  "requestId": "s",
+  "responseType": "s",
+  "roundNum": 1,
+  "seq": 1,
+  "taskId": "s",
+  "toolCallId": "s",
+  "turnRole": "s",
+  "type": "human_guidance_request",
+  "vuMsgId": "s"
+}

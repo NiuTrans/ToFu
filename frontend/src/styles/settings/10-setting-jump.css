@@ -1,0 +1,23 @@
+/* ── 10-setting-jump: chat "jump to setting" target flash ────────────────
+   Owner: frontend/src/features/settings/setting-jump.ts. After a jump, the
+   control's row (.settings-field / .settings-toggle-row) pulses an accent
+   ring so the eye lands on it; reduced-motion users get a steady outline
+   instead (the class is removed by the owner after FLASH_MS either way). */
+
+@keyframes settingJumpFlash {
+  0% { box-shadow: 0 0 0 0 var(--accent); }
+  100% { box-shadow: 0 0 0 14px transparent; }
+}
+
+.setting-jump-flash {
+  border-radius: var(--radius-sm);
+  animation: settingJumpFlash 0.9s ease-out 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setting-jump-flash {
+    animation: none;
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}

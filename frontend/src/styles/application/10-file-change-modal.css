@@ -1,0 +1,30 @@
+/* ═══════════════════════════════════════════
+   ★ Apply Code Button & Modal (NEW)
+   ═══════════════════════════════════════════ */
+.apply-btn {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 4px;
+  padding: 1px var(--space-2);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.apply-btn:hover {
+  background: rgba(245, 158, 11, 0.25);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.5);
+}
+.apply-modal { max-width: 560px; }
+.apply-preview {
+  margin: var(--space-3) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  background: var(--bg-primary);
+  max-height: 350px;
+  overflow: auto;
+}

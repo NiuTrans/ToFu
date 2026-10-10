@@ -1,0 +1,1029 @@
+{
+  "format": "tofu.pdf-caption-demand-rejection/v1",
+  "scope": "Public PDF extraction and owned native upload checks; no default promotion",
+  "decision": "Withdraw production candidate: complete cold triples regress despite body/uncaptioned-table CPU gains. Retain all failed observations; incomplete warm coverage is not a pass.",
+  "production_promoted": false,
+  "whole_system_admission": false,
+  "warm": {
+    "scope": "Early-stopped warm public PDF cohort",
+    "coverage_complete": false,
+    "observations": 5000,
+    "independent_workers": 100,
+    "completed_pairs": 25,
+    "required_pairs": 33,
+    "cases": [
+      {
+        "case": "body_text",
+        "pair": 0,
+        "ratios": {
+          "p50_ms": 0.7592749999210295,
+          "p95_ms": 0.760883419265946,
+          "p99_ms": 0.7478514371836531,
+          "cpu_ms_per_operation": 0.7580201440818282,
+          "peak_rss_bytes": 1.001242089075531
+        }
+      },
+      {
+        "case": "body_text",
+        "pair": 1,
+        "ratios": {
+          "p50_ms": 0.7537411705820856,
+          "p95_ms": 0.7655979306436145,
+          "p99_ms": 0.7856827369501234,
+          "cpu_ms_per_operation": 0.7554134662860313,
+          "peak_rss_bytes": 0.9992288527701981
+        }
+      },
+      {
+        "case": "body_text",
+        "pair": 2,
+        "ratios": {
+          "p50_ms": 0.7434860453374309,
+          "p95_ms": 0.786693969963404,
+          "p99_ms": 0.8123935289824992,
+          "cpu_ms_per_operation": 0.747374201498592,
+          "peak_rss_bytes": 1.0027148253068934
+        }
+      },
+      {
+        "case": "uncaptioned_table",
+        "pair": 0,
+        "ratios": {
+          "p50_ms": 0.6759051690198067,
+          "p95_ms": 0.6794158759947515,
+          "p99_ms": 0.6814297583144097,
+          "cpu_ms_per_operation": 0.6751020388268475,
+          "peak_rss_bytes": 0.9686764958981126
+        }
+      },
+      {
+        "case": "uncaptioned_table",
+        "pair": 1,
+        "ratios": {
+          "p50_ms": 0.6778885192085711,
+          "p95_ms": 0.6845463327794863,
+          "p99_ms": 0.6838808409399667,
+          "cpu_ms_per_operation": 0.6784189726185196,
+          "peak_rss_bytes": 0.9737674739688201
+        }
+      },
+      {
+        "case": "uncaptioned_table",
+        "pair": 2,
+        "ratios": {
+          "p50_ms": 0.6640558168524773,
+          "p95_ms": 0.6725677792888444,
+          "p99_ms": 0.6695891894217446,
+          "cpu_ms_per_operation": 0.665368487197726,
+          "peak_rss_bytes": 0.9736176572019772
+        }
+      },
+      {
+        "case": "figure_caption",
+        "pair": 0,
+        "ratios": {
+          "p50_ms": 0.9993044791825387,
+          "p95_ms": 0.9915223649494462,
+          "p99_ms": 0.9870609581528059,
+          "cpu_ms_per_operation": 0.9949104850466602,
+          "peak_rss_bytes": 1.0000155005115168
+        }
+      },
+      {
+        "case": "figure_caption",
+        "pair": 1,
+        "ratios": {
+          "p50_ms": 0.9838127842082404,
+          "p95_ms": 0.9930673144411197,
+          "p99_ms": 0.9853478804220462,
+          "cpu_ms_per_operation": 0.9847521820403334,
+          "peak_rss_bytes": 0.9995349630295608
+        }
+      },
+      {
+        "case": "figure_caption",
+        "pair": 2,
+        "ratios": {
+          "p50_ms": 0.9906256597179504,
+          "p95_ms": 0.9942528229263641,
+          "p99_ms": 1.020770111954576,
+          "cpu_ms_per_operation": 1.0284413067334597,
+          "peak_rss_bytes": 0.9999534869298273
+        }
+      },
+      {
+        "case": "table_above",
+        "pair": 0,
+        "ratios": {
+          "p50_ms": 0.9994526440504512,
+          "p95_ms": 0.9961271673458393,
+          "p99_ms": 0.9461670585681086,
+          "cpu_ms_per_operation": 1.000783281678691,
+          "peak_rss_bytes": 1.0055625336443568
+        }
+      },
+      {
+        "case": "table_above",
+        "pair": 1,
+        "ratios": {
+          "p50_ms": 0.9993552278110089,
+          "p95_ms": 0.9951714224672759,
+          "p99_ms": 1.0359015160393616,
+          "cpu_ms_per_operation": 1.0024033075923997,
+          "peak_rss_bytes": 1.0014652800114363
+        }
+      },
+      {
+        "case": "table_above",
+        "pair": 2,
+        "ratios": {
+          "p50_ms": 0.9973379532755537,
+          "p95_ms": 1.0050323250310473,
+          "p99_ms": 1.003664537464279,
+          "cpu_ms_per_operation": 0.9978948279956013,
+          "peak_rss_bytes": 1.0038461538461538
+        }
+      },
+      {
+        "case": "table_below",
+        "pair": 0,
+        "ratios": {
+          "p50_ms": 0.9995642538319542,
+          "p95_ms": 0.992599776529394,
+          "p99_ms": 0.9808509534063163,
+          "cpu_ms_per_operation": 0.9977286828073743,
+          "peak_rss_bytes": 1.0039799211186806
+        }
+      },
+      {
+        "case": "table_below",
+        "pair": 1,
+        "ratios": {
+          "p50_ms": 0.9999313677834973,
+          "p95_ms": 0.9927540444639456,
+          "p99_ms": 0.9930441674193423,
+          "cpu_ms_per_operation": 0.9986807360051337,
+          "peak_rss_bytes": 0.9998213009292352
+        }
+      },
+      {
+        "case": "table_below",
+        "pair": 2,
+        "ratios": {
+          "p50_ms": 1.0004750879241764,
+          "p95_ms": 1.0005485980776574,
+          "p99_ms": 0.9970214530279587,
+          "cpu_ms_per_operation": 1.0003191127894582,
+          "peak_rss_bytes": 1.0022532188841202
+        }
+      },
+      {
+        "case": "mixed_captions",
+        "pair": 0,
+        "ratios": {
+          "p50_ms": 1.0034019221787893,
+          "p95_ms": 0.9981495335484395,
+          "p99_ms": 0.9976006995585837,
+          "cpu_ms_per_operation": 1.0019963596958144,
+          "peak_rss_bytes": 1.0004632632261652
+        }
+      },
+      {
+        "case": "mixed_captions",
+        "pair": 1,
+        "ratios": {
+          "p50_ms": 1.003413484387825,
+          "p95_ms": 1.0126179563080193,
+          "p99_ms": 1.0283922892790953,
+          "cpu_ms_per_operation": 1.0054125922136108,
+          "peak_rss_bytes": 0.9998919686400395
+        }
+      },
+      {
+        "case": "mixed_captions",
+        "pair": 2,
+        "ratios": {
+          "p50_ms": 1.0011398641249565,
+          "p95_ms": 1.003273630988599,
+          "p99_ms": 0.9417928668124034,
+          "cpu_ms_per_operation": 0.9960337290911632,
+          "peak_rss_bytes": 0.9988577602840164
+        }
+      },
+      {
+        "case": "embedded_image",
+        "pair": 0,
+        "ratios": {
+          "p50_ms": 0.9103343055374038,
+          "p95_ms": 0.9129463914274089,
+          "p99_ms": 0.9818305479172771,
+          "cpu_ms_per_operation": 0.9133432635348029,
+          "peak_rss_bytes": 1.0029534945650858
+        }
+      },
+      {
+        "case": "embedded_image",
+        "pair": 1,
+        "ratios": {
+          "p50_ms": 0.9161441746108068,
+          "p95_ms": 0.9339483895168726,
+          "p99_ms": 0.9806232171610871,
+          "cpu_ms_per_operation": 0.9209786881476716,
+          "peak_rss_bytes": 0.9996854128351563
+        }
+      },
+      {
+        "case": "embedded_image",
+        "pair": 2,
+        "ratios": {
+          "p50_ms": 0.9120398167463933,
+          "p95_ms": 0.9109604248886405,
+          "p99_ms": 0.9174086976853699,
+          "cpu_ms_per_operation": 0.9131912237871216,
+          "peak_rss_bytes": 1.0023219814241486
+        }
+      },
+      {
+        "case": "chinese_table",
+        "pair": 0,
+        "ratios": {
+          "p50_ms": 0.9985899993177922,
+          "p95_ms": 0.9981885754682802,
+          "p99_ms": 0.9901388212210078,
+          "cpu_ms_per_operation": 0.9988728569596879,
+          "peak_rss_bytes": 0.9995033347523768
+        }
+      },
+      {
+        "case": "chinese_table",
+        "pair": 1,
+        "ratios": {
+          "p50_ms": 0.9905956317887057,
+          "p95_ms": 0.984727029839912,
+          "p99_ms": 0.9819365694919011,
+          "cpu_ms_per_operation": 0.9893669866023281,
+          "peak_rss_bytes": 0.9994323624365843
+        }
+      },
+      {
+        "case": "chinese_table",
+        "pair": 2,
+        "ratios": {
+          "p50_ms": 1.0032236893920623,
+          "p95_ms": 1.0029105149229596,
+          "p99_ms": 1.0009269322411347,
+          "cpu_ms_per_operation": 1.0019110857047049,
+          "peak_rss_bytes": 1.0024901284194798
+        }
+      },
+      {
+        "case": "continuation",
+        "pair": 0,
+        "ratios": {
+          "p50_ms": 0.9943283699677478,
+          "p95_ms": 1.0008090218438568,
+          "p99_ms": 1.0761339101958556,
+          "cpu_ms_per_operation": 0.9988159531595088,
+          "peak_rss_bytes": 1.0021073713158366
+        }
+      }
+    ],
+    "guard_failures": [
+      {
+        "case": "continuation",
+        "pair": 0,
+        "metric": "p99_ms",
+        "ratio": 1.0761339101958556
+      }
+    ],
+    "sources_verified_against_archived_measured_code": true,
+    "raw_artifact": "/tmp/tofu-system-perf-snapshot/pdf-caption-public-process-full.json",
+    "raw_artifact_sha256": "22703b382857b3274056fdd4ffb5d89effb1b82f639227a2ec157c2808ee86dc",
+    "termination": {
+      "scope": "Early-stopped/rejected public PDF warm measurement",
+      "reason": "Complete 6600-worker cold cohort fails seven guards; remaining warm observations cannot admit this candidate.",
+      "completed_pairs": 25,
+      "required_pairs": 33,
+      "owned_processes_quiescent": true,
+      "sources_match_at_stop": true,
+      "sources": {
+        "lib/pdf_parser/images/_detect.py": "3e63a7ca512c13f9c50c98a9eeacab63265972b62d21bea858e4add4c4a3b716",
+        "lib/knowledge/ingest.py": "23cdf55c2a213dec6a4ff2a5778fced9e1b1fef4306035b3c67a818b460168bd",
+        "lib/knowledge/assets.py": "8303eb390e1ff6fa6c3f239964853f63e7f5a319e739b50fd2d46eda1b828766",
+        "lib/pdf_parser/text.py": "4d86fb85c117bcbb1cd80aac7457f474ddc6743249e8abd86ff9d816572cea42",
+        "benchmarks/pdf_batch/caption_detection.py": "a224ec64e3d6b6e379a8d2b469c74ca13656f4f6546955920f553dce23dedf5c",
+        "benchmarks/pdf_batch/caption_measure.py": "574737214895ac35cd7d982a6871e680817fa51955e5f5030827b15757c805f0"
+      },
+      "raw_artifact_sha256": "22703b382857b3274056fdd4ffb5d89effb1b82f639227a2ec157c2808ee86dc",
+      "production_promoted": false,
+      "whole_system_admission": false,
+      "limits": [
+        "Unmeasured warm cases remain incomplete, never a pass."
+      ]
+    }
+  },
+  "cold": {
+    "scope": "Verified public PDF cold evidence; no whole-system admission",
+    "coverage_complete": true,
+    "cases": {
+      "uncaptioned_table": [
+        {
+          "cpu_ms_p50": 0.7685331536273119,
+          "cpu_ms_p95": 0.7726204746733961,
+          "cpu_ms_p99": 0.7651301699221141,
+          "cpu_ms_mean": 0.7681280642605982,
+          "wall_ms_p50": 0.7698340623932005,
+          "wall_ms_p95": 0.7759976908763505,
+          "wall_ms_p99": 0.7943610821291678,
+          "wall_ms_mean": 0.7711969645580605
+        },
+        {
+          "cpu_ms_p50": 0.7664197289715012,
+          "cpu_ms_p95": 0.7539881365756013,
+          "cpu_ms_p99": 0.7833409150385537,
+          "cpu_ms_mean": 0.770886653281005,
+          "wall_ms_p50": 0.7700972189616381,
+          "wall_ms_p95": 0.7563420641738201,
+          "wall_ms_p99": 0.7675003719469811,
+          "wall_ms_mean": 0.7726116235848483
+        },
+        {
+          "cpu_ms_p50": 0.7689508369855136,
+          "cpu_ms_p95": 0.7726003027554753,
+          "cpu_ms_p99": 0.7675661070526523,
+          "cpu_ms_mean": 0.786296812174006,
+          "wall_ms_p50": 0.7696973581546875,
+          "wall_ms_p95": 0.7740706304617143,
+          "wall_ms_p99": 0.7689105977788753,
+          "wall_ms_mean": 0.7879666369123718
+        }
+      ],
+      "body_text": [
+        {
+          "cpu_ms_p50": 0.902680011735092,
+          "cpu_ms_p95": 0.9042425724525059,
+          "cpu_ms_p99": 0.8727475386609581,
+          "cpu_ms_mean": 0.9000799217356634,
+          "wall_ms_p50": 0.9035717826605818,
+          "wall_ms_p95": 0.9313919659256302,
+          "wall_ms_p99": 0.8956757561930232,
+          "wall_ms_mean": 0.898665055131453
+        },
+        {
+          "cpu_ms_p50": 0.9010983856938997,
+          "cpu_ms_p95": 0.8518036938403389,
+          "cpu_ms_p99": 0.8601977830105145,
+          "cpu_ms_mean": 0.8890644516325916,
+          "wall_ms_p50": 0.9045282801838118,
+          "wall_ms_p95": 0.851978418735079,
+          "wall_ms_p99": 0.8647781976562445,
+          "wall_ms_mean": 0.8880326842004199
+        },
+        {
+          "cpu_ms_p50": 0.8989797530062279,
+          "cpu_ms_p95": 0.7631759868393297,
+          "cpu_ms_p99": 0.8868797037617888,
+          "cpu_ms_mean": 0.8915466957315913,
+          "wall_ms_p50": 0.9005850623049287,
+          "wall_ms_p95": 0.7642558937646458,
+          "wall_ms_p99": 0.888342789307067,
+          "wall_ms_mean": 0.8791389143809203
+        }
+      ],
+      "table_below": [
+        {
+          "cpu_ms_p50": 0.9985924544941064,
+          "cpu_ms_p95": 1.0038423117867008,
+          "cpu_ms_p99": 1.0417211062505831,
+          "cpu_ms_mean": 1.0002970406770235,
+          "wall_ms_p50": 1.0040737633578,
+          "wall_ms_p95": 0.9998514928904889,
+          "wall_ms_p99": 1.0123812216121955,
+          "wall_ms_mean": 1.0034599034217033
+        },
+        {
+          "cpu_ms_p50": 0.9987590984617509,
+          "cpu_ms_p95": 0.9811587609610896,
+          "cpu_ms_p99": 0.9035429190780151,
+          "cpu_ms_mean": 0.9930351205299115,
+          "wall_ms_p50": 0.9969840109351883,
+          "wall_ms_p95": 0.9752494181568144,
+          "wall_ms_p99": 0.922330049231418,
+          "wall_ms_mean": 0.9923296846351767
+        },
+        {
+          "cpu_ms_p50": 0.9951884244314557,
+          "cpu_ms_p95": 0.995082922369832,
+          "cpu_ms_p99": 1.0099092195378099,
+          "cpu_ms_mean": 0.9965760646521505,
+          "wall_ms_p50": 0.9922845845166982,
+          "wall_ms_p95": 0.9928927702373437,
+          "wall_ms_p99": 0.9827202842718498,
+          "wall_ms_mean": 0.9914095857520033
+        }
+      ],
+      "embedded_image": [
+        {
+          "cpu_ms_p50": 0.9583509443148729,
+          "cpu_ms_p95": 0.9653132448054091,
+          "cpu_ms_p99": 1.0353514373183599,
+          "cpu_ms_mean": 0.9600994615984517,
+          "wall_ms_p50": 0.960119719003537,
+          "wall_ms_p95": 0.9504128465585621,
+          "wall_ms_p99": 1.0596919546926011,
+          "wall_ms_mean": 0.9707719421885108
+        },
+        {
+          "cpu_ms_p50": 0.9494521799646496,
+          "cpu_ms_p95": 0.9588349563992881,
+          "cpu_ms_p99": 1.1352901180145207,
+          "cpu_ms_mean": 0.956290963758427,
+          "wall_ms_p50": 0.9723298188307804,
+          "wall_ms_p95": 1.0008712192821612,
+          "wall_ms_p99": 0.932203872172529,
+          "wall_ms_mean": 0.9656883129672315
+        },
+        {
+          "cpu_ms_p50": 0.9522629784736255,
+          "cpu_ms_p95": 1.0253771828502436,
+          "cpu_ms_p99": 1.1148734413993984,
+          "cpu_ms_mean": 0.9572702718478389,
+          "wall_ms_p50": 0.9609318111558901,
+          "wall_ms_p95": 1.0266631185586796,
+          "wall_ms_p99": 0.9876832830883299,
+          "wall_ms_mean": 0.9648497324108422
+        }
+      ],
+      "mixed_captions": [
+        {
+          "cpu_ms_p50": 0.9992117757004106,
+          "cpu_ms_p95": 0.990410971710262,
+          "cpu_ms_p99": 1.0145349378472892,
+          "cpu_ms_mean": 0.9986690883373991,
+          "wall_ms_p50": 0.9990691811068412,
+          "wall_ms_p95": 0.9848685440687621,
+          "wall_ms_p99": 0.9997906741106738,
+          "wall_ms_mean": 0.9967250703869511
+        },
+        {
+          "cpu_ms_p50": 0.9996574151543935,
+          "cpu_ms_p95": 1.0049218317579474,
+          "cpu_ms_p99": 1.0004858937022854,
+          "cpu_ms_mean": 1.0015732239033666,
+          "wall_ms_p50": 1.000137605846259,
+          "wall_ms_p95": 0.9864232931695508,
+          "wall_ms_p99": 0.9928419622605857,
+          "wall_ms_mean": 0.9980739083203197
+        },
+        {
+          "cpu_ms_p50": 0.9997779148068994,
+          "cpu_ms_p95": 1.0055486034104657,
+          "cpu_ms_p99": 1.029893320624064,
+          "cpu_ms_mean": 0.9999601966409202,
+          "wall_ms_p50": 0.9982997853228812,
+          "wall_ms_p95": 0.9933973445276071,
+          "wall_ms_p99": 1.0235474375485407,
+          "wall_ms_mean": 0.9985204085761805
+        }
+      ],
+      "malformed": [
+        {
+          "cpu_ms_p50": 1.0009361091309161,
+          "cpu_ms_p95": 0.9918610126616171,
+          "cpu_ms_p99": 1.0003608388863523,
+          "cpu_ms_mean": 0.9899909350347166,
+          "wall_ms_p50": 1.000774950650741,
+          "wall_ms_p95": 0.9905206983636423,
+          "wall_ms_p99": 0.9982924470268436,
+          "wall_ms_mean": 0.9894027914541011
+        },
+        {
+          "cpu_ms_p50": 1.0025920299953068,
+          "cpu_ms_p95": 0.9002929431233996,
+          "cpu_ms_p99": 0.9605422946233024,
+          "cpu_ms_mean": 0.9927817885686318,
+          "wall_ms_p50": 1.0031816064586863,
+          "wall_ms_p95": 0.898474134844311,
+          "wall_ms_p99": 0.9606709997130533,
+          "wall_ms_mean": 0.9930245463903313
+        },
+        {
+          "cpu_ms_p50": 0.9972870567077947,
+          "cpu_ms_p95": 1.0172256403904147,
+          "cpu_ms_p99": 0.9249127261281518,
+          "cpu_ms_mean": 1.0022124059279902,
+          "wall_ms_p50": 0.9973741280340829,
+          "wall_ms_p95": 1.0164248320108389,
+          "wall_ms_p99": 0.9197998173087715,
+          "wall_ms_mean": 1.0026625262551092
+        }
+      ],
+      "table_above": [
+        {
+          "cpu_ms_p50": 0.9967581912426601,
+          "cpu_ms_p95": 0.9975794383746938,
+          "cpu_ms_p99": 1.0257947058120485,
+          "cpu_ms_mean": 0.9980044746294181,
+          "wall_ms_p50": 0.9991400165301975,
+          "wall_ms_p95": 1.0096586646349226,
+          "wall_ms_p99": 1.0099937797040848,
+          "wall_ms_mean": 0.9962058374653574
+        },
+        {
+          "cpu_ms_p50": 0.9992385775971183,
+          "cpu_ms_p95": 0.9992074236819701,
+          "cpu_ms_p99": 1.0017560783144646,
+          "cpu_ms_mean": 0.9985860144753945,
+          "wall_ms_p50": 0.9925101118746579,
+          "wall_ms_p95": 0.9947997711440046,
+          "wall_ms_p99": 1.0040603818430167,
+          "wall_ms_mean": 0.9942853560937462
+        },
+        {
+          "cpu_ms_p50": 1.0020199117293656,
+          "cpu_ms_p95": 1.0028879149920396,
+          "cpu_ms_p99": 1.019544494479244,
+          "cpu_ms_mean": 0.9997528154720118,
+          "wall_ms_p50": 1.0024750033919037,
+          "wall_ms_p95": 1.017932578805908,
+          "wall_ms_p99": 1.0390752050689012,
+          "wall_ms_mean": 1.003801806807741
+        }
+      ],
+      "blank_page": [
+        {
+          "cpu_ms_p50": 1.004522240863832,
+          "cpu_ms_p95": 0.9957241872869664,
+          "cpu_ms_p99": 0.9968843994806561,
+          "cpu_ms_mean": 1.0018927405551346,
+          "wall_ms_p50": 1.0057652204157346,
+          "wall_ms_p95": 0.9892750963165114,
+          "wall_ms_p99": 1.0322735065945166,
+          "wall_ms_mean": 1.0040337136023165
+        },
+        {
+          "cpu_ms_p50": 1.0010454087389482,
+          "cpu_ms_p95": 0.9962431987165418,
+          "cpu_ms_p99": 1.0035121370200544,
+          "cpu_ms_mean": 0.9987243057555556,
+          "wall_ms_p50": 1.0001665992153062,
+          "wall_ms_p95": 0.9925631903459166,
+          "wall_ms_p99": 1.0026282448224537,
+          "wall_ms_mean": 1.0002890436295049
+        },
+        {
+          "cpu_ms_p50": 0.9989187596845919,
+          "cpu_ms_p95": 1.026400073259071,
+          "cpu_ms_p99": 1.0139038747685654,
+          "cpu_ms_mean": 1.0031927275583539,
+          "wall_ms_p50": 0.9955525821576228,
+          "wall_ms_p95": 1.0124892789127036,
+          "wall_ms_p99": 0.9927037651446954,
+          "wall_ms_mean": 1.0011376351157057
+        }
+      ],
+      "figure_caption": [
+        {
+          "cpu_ms_p50": 0.9907787927132079,
+          "cpu_ms_p95": 0.99818367022142,
+          "cpu_ms_p99": 0.9918732395299898,
+          "cpu_ms_mean": 0.9932297840145422,
+          "wall_ms_p50": 0.9909120662021005,
+          "wall_ms_p95": 1.002534826868724,
+          "wall_ms_p99": 0.9876254439945374,
+          "wall_ms_mean": 0.9934759402928898
+        },
+        {
+          "cpu_ms_p50": 0.9924503568419513,
+          "cpu_ms_p95": 0.9846452057548377,
+          "cpu_ms_p99": 1.002715965694779,
+          "cpu_ms_mean": 0.9881178988714364,
+          "wall_ms_p50": 0.9964843727294048,
+          "wall_ms_p95": 0.9771244558600001,
+          "wall_ms_p99": 1.008011060522935,
+          "wall_ms_mean": 0.9906219128135773
+        },
+        {
+          "cpu_ms_p50": 0.9956789840044618,
+          "cpu_ms_p95": 0.9841811553884339,
+          "cpu_ms_p99": 0.9933270476042144,
+          "cpu_ms_mean": 0.9930905355824995,
+          "wall_ms_p50": 0.998063881481233,
+          "wall_ms_p95": 0.9813249188796146,
+          "wall_ms_p99": 0.9921443028693462,
+          "wall_ms_mean": 0.9957186071717821
+        }
+      ],
+      "chinese_table": [
+        {
+          "cpu_ms_p50": 1.0003931999844395,
+          "cpu_ms_p95": 0.9472582045567549,
+          "cpu_ms_p99": 1.2397878176126012,
+          "cpu_ms_mean": 1.0026251193876525,
+          "wall_ms_p50": 0.9973174092530566,
+          "wall_ms_p95": 1.1150776282715595,
+          "wall_ms_p99": 1.2387560790734111,
+          "wall_ms_mean": 1.021054089312305
+        },
+        {
+          "cpu_ms_p50": 0.9987654627141649,
+          "cpu_ms_p95": 1.0223040782209252,
+          "cpu_ms_p99": 1.1132021800015819,
+          "cpu_ms_mean": 1.0037894373702552,
+          "wall_ms_p50": 0.9963604286901724,
+          "wall_ms_p95": 0.8629103587419646,
+          "wall_ms_p99": 0.8505220342057299,
+          "wall_ms_mean": 0.9707846574069866
+        },
+        {
+          "cpu_ms_p50": 1.0002254139010875,
+          "cpu_ms_p95": 1.0092612499516804,
+          "cpu_ms_p99": 1.0089039400785846,
+          "cpu_ms_mean": 1.002491790506873,
+          "wall_ms_p50": 1.0048694952871216,
+          "wall_ms_p95": 1.0016402117985892,
+          "wall_ms_p99": 0.5631104261425944,
+          "wall_ms_mean": 0.97088012237764
+        }
+      ],
+      "continuation": [
+        {
+          "cpu_ms_p50": 0.9944159940394096,
+          "cpu_ms_p95": 0.9983628152461305,
+          "cpu_ms_p99": 0.9886902415603136,
+          "cpu_ms_mean": 0.9943991505501014,
+          "wall_ms_p50": 0.9948698631679428,
+          "wall_ms_p95": 0.9973042514692176,
+          "wall_ms_p99": 0.9893817559945982,
+          "wall_ms_mean": 0.9942481980689188
+        },
+        {
+          "cpu_ms_p50": 0.9937010226774862,
+          "cpu_ms_p95": 0.9916830620874568,
+          "cpu_ms_p99": 0.9933516789618091,
+          "cpu_ms_mean": 0.9941239267471392,
+          "wall_ms_p50": 0.9933713479666103,
+          "wall_ms_p95": 0.9930249908382236,
+          "wall_ms_p99": 0.9922394685377892,
+          "wall_ms_mean": 0.9941232448567648
+        },
+        {
+          "cpu_ms_p50": 0.9941194099846601,
+          "cpu_ms_p95": 0.9768997842142273,
+          "cpu_ms_p99": 0.974471919388445,
+          "cpu_ms_mean": 0.9925159297077998,
+          "wall_ms_p50": 0.9932962139386585,
+          "wall_ms_p95": 0.978318385018982,
+          "wall_ms_p99": 0.9737467442855193,
+          "wall_ms_mean": 0.9920547410957925
+        }
+      ]
+    },
+    "guard_failures": [
+      {
+        "case": "embedded_image",
+        "report": 0,
+        "pair": 0,
+        "metric": "wall_ms_p99",
+        "ratio": 1.0596919546926011
+      },
+      {
+        "case": "chinese_table",
+        "report": 0,
+        "pair": 0,
+        "metric": "cpu_ms_p99",
+        "ratio": 1.2397878176126012
+      },
+      {
+        "case": "chinese_table",
+        "report": 0,
+        "pair": 0,
+        "metric": "wall_ms_p95",
+        "ratio": 1.1150776282715595
+      },
+      {
+        "case": "chinese_table",
+        "report": 0,
+        "pair": 0,
+        "metric": "wall_ms_p99",
+        "ratio": 1.2387560790734111
+      },
+      {
+        "case": "embedded_image",
+        "report": 1,
+        "pair": 0,
+        "metric": "cpu_ms_p99",
+        "ratio": 1.1352901180145207
+      },
+      {
+        "case": "chinese_table",
+        "report": 1,
+        "pair": 0,
+        "metric": "cpu_ms_p99",
+        "ratio": 1.1132021800015819
+      },
+      {
+        "case": "embedded_image",
+        "report": 2,
+        "pair": 0,
+        "metric": "cpu_ms_p99",
+        "ratio": 1.1148734413993984
+      }
+    ],
+    "verdict": "regression",
+    "observations": 6600,
+    "independent_workers": 6600,
+    "sources": {
+      "lib/pdf_parser/images/_detect.py": "3e63a7ca512c13f9c50c98a9eeacab63265972b62d21bea858e4add4c4a3b716",
+      "lib/knowledge/ingest.py": "23cdf55c2a213dec6a4ff2a5778fced9e1b1fef4306035b3c67a818b460168bd",
+      "lib/knowledge/assets.py": "8303eb390e1ff6fa6c3f239964853f63e7f5a319e739b50fd2d46eda1b828766",
+      "lib/pdf_parser/text.py": "4d86fb85c117bcbb1cd80aac7457f474ddc6743249e8abd86ff9d816572cea42",
+      "benchmarks/pdf_batch/caption_detection.py": "a224ec64e3d6b6e379a8d2b469c74ca13656f4f6546955920f553dce23dedf5c",
+      "benchmarks/pdf_batch/caption_measure.py": "574737214895ac35cd7d982a6871e680817fa51955e5f5030827b15757c805f0",
+      "benchmarks/pdf_batch/caption_cold.py": "1b6c6c5d6abf6c0d2f136c9df78b8629ca031bbe9e7b35fb6334f59a7052efbc"
+    },
+    "raw_artifacts": [
+      {
+        "path": "/tmp/tofu-system-perf-snapshot/pdf-caption-cold-pair-0.json",
+        "sha256": "6844486e95516be0e6d665bf2fcf1d987ede783ca92cd8d1f334694a2f625bbc"
+      },
+      {
+        "path": "/tmp/tofu-system-perf-snapshot/pdf-caption-cold-pair-1.json",
+        "sha256": "9e8d85ecd618b0f1b8807eaada2382d16a66c3dfac80e1d730f3541ee74a1414"
+      },
+      {
+        "path": "/tmp/tofu-system-perf-snapshot/pdf-caption-cold-pair-2.json",
+        "sha256": "e379ec19ab8f9d54cba57ea0b177023be87fa684b0bccb4aa2207ab7abdf64a1"
+      }
+    ],
+    "production_promoted": false,
+    "whole_system_admission": false,
+    "limits": [
+      "Raw identity and guards do not establish retained-growth, upload performance or cancellation admission.",
+      "Native verification dependency is a separately frozen working-source snapshot."
+    ]
+  },
+  "residency": {
+    "scope": "Separate-process unique-input PDF residency probe; no timing admission.\n\nWhole frozen corpus rounds use distinct valid trailing PDF comments. Outcomes,\ninput/output traces, source/native/runtime identities and public admission must\nmatch. Post-GC RSS includes interpreter/native code and is not isolated live\napplication bytes; a bounded run cannot prove absence of an unbounded leak.\n",
+    "operations": 6600,
+    "independent_workers": 6,
+    "pairs": [
+      {
+        "pair": 0,
+        "peak_rss_ratio": 1.0024414877965373,
+        "final_post_gc_rss_ratio": 0.997805826276828,
+        "growth_bytes": {
+          "reference": 248786944,
+          "candidate": 244273152
+        }
+      },
+      {
+        "pair": 1,
+        "peak_rss_ratio": 0.9972488047761383,
+        "final_post_gc_rss_ratio": 1.005481153183244,
+        "growth_bytes": {
+          "candidate": 248901632,
+          "reference": 224677888
+        }
+      },
+      {
+        "pair": 2,
+        "peak_rss_ratio": 0.9911943543051573,
+        "final_post_gc_rss_ratio": 1.000245030149362,
+        "growth_bytes": {
+          "reference": 166977536,
+          "candidate": 245022720
+        }
+      }
+    ],
+    "sources": {
+      "lib/pdf_parser/images/_detect.py": "3e63a7ca512c13f9c50c98a9eeacab63265972b62d21bea858e4add4c4a3b716",
+      "lib/knowledge/ingest.py": "23cdf55c2a213dec6a4ff2a5778fced9e1b1fef4306035b3c67a818b460168bd",
+      "lib/knowledge/assets.py": "8303eb390e1ff6fa6c3f239964853f63e7f5a319e739b50fd2d46eda1b828766",
+      "lib/pdf_parser/text.py": "4d86fb85c117bcbb1cd80aac7457f474ddc6743249e8abd86ff9d816572cea42",
+      "benchmarks/pdf_batch/caption_detection.py": "a224ec64e3d6b6e379a8d2b469c74ca13656f4f6546955920f553dce23dedf5c",
+      "benchmarks/pdf_batch/caption_measure.py": "574737214895ac35cd7d982a6871e680817fa51955e5f5030827b15757c805f0",
+      "benchmarks/pdf_batch/caption_retained.py": "7c6b850066c0b1d83c3fcd0e1c737831f0b9c8e5bc6132803ebd895fab90330f"
+    },
+    "raw_artifact": "/tmp/tofu-system-perf-snapshot/pdf-caption-retained-full.json",
+    "raw_artifact_sha256": "7d5be73a9d2b8977e1bfbdd02ebd53576f4e4d3e0dfac0d5bfaf677d61ee46cd",
+    "production_promoted": false,
+    "whole_system_admission": false,
+    "limits": [
+      "Post-GC RSS includes runtime/native allocation reserves, not isolated live application bytes.",
+      "All pairs grow during the cohort; see separate allocator-reclaim diagnostics, not a plateau claim."
+    ]
+  },
+  "allocator_attribution": {
+    "scope": "Full-corpus allocator attribution, two owned diagnostic processes",
+    "operations": 2200,
+    "cases": [
+      {
+        "arm": "reference",
+        "operations": 1100,
+        "baseline_rss_bytes": 158007296,
+        "before_reclaim_rss_bytes": 384434176,
+        "after_store_flush_rss_bytes": 384434176,
+        "after_allocator_trim_rss_bytes": 94789632,
+        "raw_artifact": "/tmp/tofu-system-perf-snapshot/pdf-caption-allocator-full-reference.json",
+        "raw_artifact_sha256": "bcadc3fdca2cc741dd08b69b28770b7f532b5b15d679f382eab2b029ae5ebe22"
+      },
+      {
+        "arm": "candidate",
+        "operations": 1100,
+        "baseline_rss_bytes": 139206656,
+        "before_reclaim_rss_bytes": 383512576,
+        "after_store_flush_rss_bytes": 383512576,
+        "after_allocator_trim_rss_bytes": 94486528,
+        "raw_artifact": "/tmp/tofu-system-perf-snapshot/pdf-caption-allocator-full-candidate.json",
+        "raw_artifact_sha256": "50517a8322552fcd138e83fbb7444cda34eae40ce91dabd4a180b47489b462af"
+      }
+    ],
+    "inference": "In these full-corpus runs, RSS growth is reclaimable allocator retention; clearing native store alone has no observed effect. No production allocator policy is admitted.",
+    "production_promoted": false,
+    "whole_system_admission": false,
+    "limits": [
+      "One process per arm; does not replace the three paired residency cohorts.",
+      "Platform-specific post-run allocator intervention, not latency or unbounded live-byte proof.",
+      "Do not insert per-document allocator trim based on this diagnostic."
+    ]
+  },
+  "functional_checks": {
+    "pdf_receipts": {
+      "scope": "Frozen real-PDF differential oracle for demand-driven caption table search.\n\nThe public knowledge extraction owner retains its admission and all image/OCR\nphases. This isolated process selects a detector through the existing facade;\nproduction globals in other processes and storage configuration are untouched.\n",
+      "reference": "113d71cb8",
+      "reference_detector_sha256": "82444544c0a941b1fe9d9da90309487537d4778679774dd5b2389084176369af",
+      "cases": [
+        {
+          "case": "body_text",
+          "input_sha256": "e8bc8a87f45d53732383c75b3302c9113d6347e0066454c5bb19199851083dcd",
+          "output_sha256": "ca5337a7c23da8b0367d34bfcb23bed8d3bf1eddaea88c99e3367d44a114f997",
+          "ok": true,
+          "asset_count": 0,
+          "method": "pymupdf4llm"
+        },
+        {
+          "case": "uncaptioned_table",
+          "input_sha256": "06f16e2b136c9a0e6531013270ce41dbb2190fc0d6194f0936a5cece21be8274",
+          "output_sha256": "451c12c060ad209e1b040ce62d47183426e2c36d64bb7f9bbb93d95d208a8b18",
+          "ok": true,
+          "asset_count": 0,
+          "method": "pymupdf4llm"
+        },
+        {
+          "case": "figure_caption",
+          "input_sha256": "fa316770b5cad7261563dd0f21c6b6e5c8b86a7dfd287f98ca3f8a6882cece02",
+          "output_sha256": "92a7d83d97d8ec1ddc65421e29937f423b819f9e336c0e4ff191dbde2aca49a1",
+          "ok": true,
+          "asset_count": 1,
+          "method": "pymupdf4llm"
+        },
+        {
+          "case": "table_above",
+          "input_sha256": "79e33346304a51baeb623cc5c4a5572a4d0c6073212c194e79f5108a316f3bf5",
+          "output_sha256": "8fa9b09b9a04984c5b0b46837f6c0aac381a33e6e2b682447d9e18ac424251b5",
+          "ok": true,
+          "asset_count": 1,
+          "method": "pymupdf4llm"
+        },
+        {
+          "case": "table_below",
+          "input_sha256": "d5ff260b0e912a1160fbe456f26de93f3091de706948ef851b467b26ce9e8372",
+          "output_sha256": "f8437e2a707e80b196b5f874e0ce20614029c0b6569c6d7d9dec859606a4c4e6",
+          "ok": true,
+          "asset_count": 1,
+          "method": "pymupdf4llm"
+        },
+        {
+          "case": "mixed_captions",
+          "input_sha256": "1bc3f1655ec7222b854b2096c958cfff96693988f8e54e4ef8cb425356f38a1a",
+          "output_sha256": "69d93d4995676773268aad441d607dc6d4fdd27b859abf943f8fb72ca0511a58",
+          "ok": true,
+          "asset_count": 2,
+          "method": "pymupdf4llm"
+        },
+        {
+          "case": "embedded_image",
+          "input_sha256": "1d983bdf4e48909f904c627c4245004e71036b806b0349b6759399ce848eca09",
+          "output_sha256": "e3d44abf91864ae23ccfefc8c616f786e6428ede64dfc1ab63f92848bf8ae558",
+          "ok": true,
+          "asset_count": 1,
+          "method": "pymupdf4llm"
+        },
+        {
+          "case": "chinese_table",
+          "input_sha256": "790772d10bf774d595064a80f89a2eba467fd9995be4b005ad43add39ddeb0dd",
+          "output_sha256": "b05a969feff153ac31bc25f0b8910ea2f91f778fb35b1d761a9421d1f4bad940",
+          "ok": true,
+          "asset_count": 1,
+          "method": "pymupdf4llm"
+        },
+        {
+          "case": "continuation",
+          "input_sha256": "124db6a78318748bc6bdda030bc033fb4d4a43144433e25df713ee3027e3fedf",
+          "output_sha256": "c5688fc2b8c47f802b5331bd10e5be7323e25455a25cbb6c3b312d0fc7f447e3",
+          "ok": true,
+          "asset_count": 1,
+          "method": "pymupdf4llm"
+        },
+        {
+          "case": "blank_page",
+          "input_sha256": "4718a4a308c6392ceaf6b507261a4d3780ab01d89891337b90d100255bee5692",
+          "output_sha256": "6b6ae3cb7d30071a6d03b918bb2d2f2b3efa7015f3f1aa1b1013e0551d0762ef",
+          "ok": true,
+          "asset_count": 1,
+          "method": "pdf-visual-local"
+        },
+        {
+          "case": "malformed",
+          "input_sha256": "abdfd71cfdca3962fd9f24fe08e03d16c3aef6b12ca74154999d9695973068b1",
+          "output_sha256": "8cbff9c124e3d74c117efe01d2dc621a84a6ec468aa5b5b814256ec24ba95c8d",
+          "ok": false,
+          "asset_count": 0,
+          "method": null
+        }
+      ],
+      "admission_balanced": true,
+      "production_promoted": false,
+      "whole_system_admission": false
+    },
+    "native_upload": {
+      "scope": "Owned native PDF upload/readback/reopen check; no live backend changes.\n\nGenerated document/asset IDs, clocks and owned filesystem roots are normalized\nwhile preserving their reference relationships. Raw PDFs and asset bytes are\nverified separately. Explicit fixture owner identity flows through every call.\n",
+      "cases": 11,
+      "exact_native_projection_and_asset_bytes": true,
+      "duplicate_digest_replay_reopen_integrity_and_admission": "pass",
+      "native_witnesses": [
+        {
+          "arm": "reference",
+          "build_identity": {
+            "source_sha256": "129c2dda2e61a57e89037653b9b69e0e91055c13e7046bdf55252c44c896107e"
+          },
+          "library_sha256": "57864d7c47f32aee3406d8d9b4a5c7fa454fcba05361d4bd2b2c001da13e4e0e"
+        },
+        {
+          "arm": "candidate",
+          "build_identity": {
+            "source_sha256": "129c2dda2e61a57e89037653b9b69e0e91055c13e7046bdf55252c44c896107e"
+          },
+          "library_sha256": "57864d7c47f32aee3406d8d9b4a5c7fa454fcba05361d4bd2b2c001da13e4e0e"
+        }
+      ],
+      "trace_sha256": "b4b1eefe4f5234c5e0a81dd868f30ba35a1c9d7d4d5314c00635c3ce443691ab",
+      "production_promoted": false,
+      "whole_system_admission": false,
+      "limits": [
+        "Owned native fixtures, no HTTP/auth middleware or real model/vision calls.",
+        "Functional evidence only; no upload/cold/latency/memory admission."
+      ]
+    },
+    "native_commit_faults": {
+      "scope": "Owned native PDF commit-rejection cleanup and owner-denial checks.\n\nOnly per-corpus private repository ports are injected. Shared application\nstorage, production globals and selected-backend configuration are untouched.\n",
+      "checks": [
+        {
+          "arm": "reference",
+          "rejected_commits": [
+            "body_text",
+            "embedded_image",
+            "table_above"
+          ],
+          "source_and_asset_bytes_restored": true,
+          "admission_balanced": true,
+          "foreign_owner_denied": true,
+          "build_identity": {
+            "source_sha256": "129c2dda2e61a57e89037653b9b69e0e91055c13e7046bdf55252c44c896107e"
+          }
+        },
+        {
+          "arm": "candidate",
+          "rejected_commits": [
+            "body_text",
+            "embedded_image",
+            "table_above"
+          ],
+          "source_and_asset_bytes_restored": true,
+          "admission_balanced": true,
+          "foreign_owner_denied": true,
+          "build_identity": {
+            "source_sha256": "129c2dda2e61a57e89037653b9b69e0e91055c13e7046bdf55252c44c896107e"
+          }
+        }
+      ],
+      "production_promoted": false,
+      "whole_system_admission": false,
+      "limits": [
+        "Commit rejection is injected before publication; not actual process interruption or HTTP cancellation.",
+        "Native dependency uses a separately frozen working-source snapshot."
+      ],
+      "artifact_sha256": "949deb8e41496a55221b6634671839804d4876816c28be38847f4f06a967e2cc"
+    }
+  },
+  "source_archive": {
+    "path": "/tmp/tofu-system-perf-snapshot/pdf-caption-rejected-complete/owned-candidate-sources.tar",
+    "sha256": "585be45d6a8831d21698c232e86115c5410d957b68b7155886ab4d91b70382cf"
+  },
+  "limits": [
+    "Native upload checks used a frozen shared working-source snapshot; its changes are not integrated by this task.",
+    "Allocator trim was an owned diagnostic, never a production reclamation policy.",
+    "Candidate warm observers stopped after cold rejection; missing cases remain incomplete."
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "corrected_public_client_read_rows": [
+    {
+      "case": "sidebar",
+      "median_window_mean_ms": {
+        "native": 0.3342003871997198,
+        "sqlite": 1.326542099316915
+      },
+      "sqlite_over_native": 3.969301503304863
+    },
+    {
+      "case": "open",
+      "median_window_mean_ms": {
+        "native": 0.41590755184491474,
+        "sqlite": 1.1487082888682685
+      },
+      "sqlite_over_native": 2.7619317893429436
+    },
+    {
+      "case": "hydration",
+      "median_window_mean_ms": {
+        "native": 15.196793898940086,
+        "sqlite": 47.01893602808316
+      },
+      "sqlite_over_native": 3.094003665560177
+    }
+  ],
+  "write_windows": [
+    {
+      "order": "native-first",
+      "conversations": 50,
+      "turns": 2000,
+      "exact_acknowledgements": true,
+      "exact_final_response": true,
+      "rows": [
+        {
+          "backend": "native",
+          "operation": "conversation.create",
+          "count": 50,
+          "mean_ms": 0.34568965435028076,
+          "p50_ms": 0.18919259309768677,
+          "p99_ms": 3.415234386920929,
+          "max_ms": 3.415234386920929
+        },
+        {
+          "backend": "native",
+          "operation": "turn.append_settled",
+          "count": 2000,
+          "mean_ms": 0.26565054431557655,
+          "p50_ms": 0.2209395170211792,
+          "p99_ms": 1.3870149850845337,
+          "max_ms": 4.642106592655182
+        },
+        {
+          "backend": "sqlite",
+          "operation": "conversation.create",
+          "count": 50,
+          "mean_ms": 5.522903501987457,
+          "p50_ms": 0.3360956907272339,
+          "p99_ms": 258.6013674736023,
+          "max_ms": 258.6013674736023
+        },
+        {
+          "backend": "sqlite",
+          "operation": "turn.append_settled",
+          "count": 2000,
+          "mean_ms": 0.721282921731472,
+          "p50_ms": 0.7155388593673706,
+          "p99_ms": 1.4994516968727112,
+          "max_ms": 6.364978849887848
+        }
+      ],
+      "scope": "Fresh fixture, same production semantic create/append; strict WAL durability; no cold/concurrent/soak verdict"
+    },
+    {
+      "order": "sqlite-first",
+      "conversations": 50,
+      "turns": 2000,
+      "exact_acknowledgements": true,
+      "exact_final_response": true,
+      "rows": [
+        {
+          "backend": "native",
+          "operation": "conversation.create",
+          "count": 50,
+          "mean_ms": 0.22271215915679932,
+          "p50_ms": 0.19582360982894897,
+          "p99_ms": 0.661507248878479,
+          "max_ms": 0.661507248878479
+        },
+        {
+          "backend": "native",
+          "operation": "turn.append_settled",
+          "count": 2000,
+          "mean_ms": 0.2901563495397568,
+          "p50_ms": 0.24258345365524292,
+          "p99_ms": 1.4472603797912598,
+          "max_ms": 4.811376333236694
+        },
+        {
+          "backend": "sqlite",
+          "operation": "conversation.create",
+          "count": 50,
+          "mean_ms": 5.96088781952858,
+          "p50_ms": 0.4173964262008667,
+          "p99_ms": 277.6035666465759,
+          "max_ms": 277.6035666465759
+        },
+        {
+          "backend": "sqlite",
+          "operation": "turn.append_settled",
+          "count": 2000,
+          "mean_ms": 0.7094145342707634,
+          "p50_ms": 0.6907731294631958,
+          "p99_ms": 1.2884512543678284,
+          "max_ms": 3.40445339679718
+        }
+      ],
+      "scope": "Fresh fixture, same production semantic create/append; strict WAL durability; no cold/concurrent/soak verdict"
+    }
+  ],
+  "limits": [
+    "Native append P99 exceedsSQLite in reversed window; all-scenes superiority contradicted for sampled tails",
+    "Only simple settled human turns; no rich tools,attachments,branches,search",
+    "SQLite create mean includes initial coldoutlier retained; do not use mean to claim steady-state5ms cost",
+    "Read benchmark prior rawbackend timings remain marked as earlier scope; publicclient rerun provided"
+  ],
+  "artifact_hashes": {
+    "write_semantic_parity_corrected.py": "b764741c37bdd31a17f5d623859a5ddfa0aaa318c56253c8bd861fb076992595",
+    "read_entry_parity_corrected.py": "5e35fda877267c3e6b4b267fbcf15e22ee1f3ced6ef086310ae5635a460792bd",
+    "write-parity-corrected-ns.json": "068defe66ca569608db3a451cd7bb0cde2d61d09d22c65c124f5ec1b9fdc77ad",
+    "write-parity-corrected-sn.json": "c0bd1ee502b5ab9fbdb50b806ffcae47c6f40ca478976604f5deae3fc6a4d973",
+    "read-entry-parity-corrected.json": "a9229f4f38bd0a769288b2ce8f19704a938dccbc1e167784fcf292901e30f0e2"
+  },
+  "native_source": "55180dba6fbc4a94171e3f271a38f59cd8ca605195b9138a2565cf3ba4af4be2",
+  "correction": "Initial write fixture bypassed SQLite public committed-event envelope handling and failed acknowledgement equality; excluded. CorrectedDirectClient overrides _attempt only, retaining retry/public result/notice processing.",
+  "decision": "Sequential fixture mean favors Native across three reads and append; reverse append P99 favorsSQLite, so absolute superiority remains unproven."
+}

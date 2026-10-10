@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tofu-db-client"
+version = "0.1.0"
+description = "Standalone synchronous storage.v2 client for Tofu-DB"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.setuptools]
+packages = ["tofu_db"]
+package-dir = {tofu_db = "."}

@@ -1,0 +1,315 @@
+  <!-- ═══ Paper Mode — Full-page split: PDF (left) + Tabs (right) ═══ -->
+  <div class="paper-mode-container" id="paperModeContainer" style="display:none">
+    <!-- Main split view -->
+    <div class="paper-body" data-paper-view="pdf">
+      <!-- Left: PDF viewer — takes the most space -->
+      <div class="paper-left">
+        <div class="paper-pdf-toolbar">
+          <button class="paper-toolbar-btn icon-box" data-tofu-action="paperFitWidth()" data-i18n-title="paper.fitWidth" title="Fit to width"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg></button>
+          <button class="paper-toolbar-btn icon-box" data-tofu-action="paperZoomOut()" data-i18n-title="paper.zoomOut" title="Zoom out"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg></button>
+          <input type="range" id="paperZoomSlider" class="paper-zoom-slider" min="25" max="400" value="150" step="5" data-tofu-action-input="paperSetScaleFromSlider(this.value)">
+          <input type="text" id="paperZoomLevel" class="paper-toolbar-zoom-input" value="150%" data-tofu-action-change="paperSetScaleFromInput(this.value)" data-tofu-action-keydown="if(event.key==='Enter'){this.blur();}">
+          <button class="paper-toolbar-btn icon-box" data-tofu-action="paperZoomIn()" data-i18n-title="paper.zoomIn" title="Zoom in"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
+        </div>
+        <div class="paper-pdf-container" id="paperPdfViewer">
+          <!-- PDF pages rendered here — vertical scroll -->
+        </div>
+        <!-- Floating selection toolbar (alphaxiv-style) -->
+        <div class="paper-selection-bar" id="paperQuoteBtn" style="display:none">
+          <button class="paper-sel-btn" data-tofu-action="_askAboutPaperSelection()" title="Ask AI about this selection">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            Ask
+          </button>
+          <div class="paper-sel-divider"></div>
+          <button class="paper-sel-btn" data-tofu-action="_quotePaperSelection()" title="Quote selection into Q&A input">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V21z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg>
+            Quote
+          </button>
+        </div>
+      </div>
+      <!-- Resize handle -->
+      <div class="paper-divider" id="paperDivider"></div>
+      <!-- Right: Q&A / Report / Babel PDF -->
+      <div class="paper-right">
+        <!-- Floating selection toolbar for the GENERATED REPORT — lets a
+             confusing report passage become a one-click Q&A question. -->
+        <div class="paper-selection-bar" id="paperReportQuoteBtn" style="display:none">
+          <button class="paper-sel-btn" data-tofu-action="_askAboutPaperSelection()" title="Ask AI about this selection">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            Ask
+          </button>
+          <div class="paper-sel-divider"></div>
+          <button class="paper-sel-btn" data-tofu-action="_quotePaperSelection()" title="Quote selection into Q&A input">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V21z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg>
+            Quote
+          </button>
+          <div class="paper-sel-divider"></div>
+          <button class="paper-sel-btn" data-tofu-action="_paperNoteFromSelection()" data-i18n-title="paper.noteFromSelection" title="Save a margin note on this selection">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+            <span data-i18n="paper.noteBtn">Note</span>
+          </button>
+        </div>
+        <div class="paper-tabs">
+          <button class="paper-tab-btn active" data-tab="qa" data-tofu-action="_switchPaperTab('qa')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span data-i18n="paper.tabQA">Q&A</span>
+          </button>
+          <button class="paper-tab-btn" data-tab="report" data-tofu-action="_switchPaperTab('report')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            <span data-i18n="paper.tabReport">Report</span>
+          </button>
+          <button class="paper-tab-btn" data-tab="review" data-tofu-action="_switchPaperTab('review')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            <span data-i18n="paper.tabReview">Review</span>
+          </button>
+          <button class="paper-tab-btn" data-tab="translate" data-tofu-action="_switchPaperTab('translate')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 21h4l1-4h8l1 4h4"/><path d="M5 17l2-8h10l2 8"/><path d="M8 9l1-4h6l1 4"/></svg>
+            <span data-i18n="paper.tabBabel">Babel PDF</span>
+          </button>
+          <button class="paper-tab-btn" data-tab="podcast" data-tofu-action="_switchPaperTab('podcast')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>
+            <span data-i18n="paper.tabPodcast">Podcast</span>
+          </button>
+          <button class="paper-tab-btn" data-tab="video" data-tofu-action="_switchPaperTab('video')">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 4v16M17 4v16M2 9h5M2 15h5M17 9h5M17 15h5"/></svg>
+            <span data-i18n="paper.tabVideo">Video</span>
+          </button>
+        </div>
+        <!-- QA Panel -->
+        <div class="paper-tab-panel" data-tab="qa">
+          <div class="paper-qa-messages" id="paperQAMessages">
+            <div class="paper-qa-empty">
+              <div class="paper-qa-empty-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"/></svg></div>
+              <p data-i18n="paper.qaEmptyTitle">Ask questions about this paper</p>
+              <p class="paper-qa-hint" data-i18n="paper.qaEmptyHint">Select text in the PDF sidebar to quote it, or type a question below</p>
+            </div>
+          </div>
+          <div class="paper-qa-input-area">
+            <textarea id="paperQAInput" data-i18n-placeholder="paper.qaInputPlaceholder" placeholder="Ask a question about this paper…" rows="2"></textarea>
+            <button class="paper-qa-send-btn" data-tofu-action="_sendPaperQuestion()" data-i18n-title="paper.send" title="Send (Enter)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </div>
+        </div>
+        <!-- Report Panel -->
+        <div class="paper-tab-panel" data-tab="report" style="display:none">
+          <div class="paper-report-toolbar">
+            <div class="paper-report-model-picker" id="paperReportModelPicker">
+              <button class="paper-report-model-btn" data-tofu-action="_togglePaperReportModelDropdown(event)" data-i18n-title="paper.reportSelectModelTitle" title="Select model for report generation">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                <span id="paperReportModelLabel" data-i18n="paper.reportSelectModel">Select model</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="paper-report-model-dropdown" id="paperReportModelDropdown">
+                <!-- Populated by _populatePaperReportModelDropdown() -->
+              </div>
+            </div>
+            <!-- EN / 中 segmented control: per-paper report generation language
+                 (persisted). Switching regenerates/loads in the new language
+                 (cached separately per (paper_hash, lang)). -->
+            <!-- Reader comfort: text-size A−/A+ + reading-width cycle. Drives
+                 --reader-font-scale / --reader-measure on the reader container,
+                 persisted to localStorage (see _applyReaderPrefs). -->
+            <div class="paper-reader-settings" role="group" data-i18n-aria-label="paper.readerSettings" aria-label="Reading comfort">
+              <button type="button" class="paper-reader-set-btn paper-reader-set-dec" data-tofu-action="_readerFontStep(-1)" data-i18n-title="paper.readerFontSmaller" title="Smaller text" aria-label="Decrease text size">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <button type="button" class="paper-reader-set-btn paper-reader-set-inc" data-tofu-action="_readerFontStep(1)" data-i18n-title="paper.readerFontLarger" title="Larger text" aria-label="Increase text size">
+                <span style="font-size:10px;font-weight:700">A</span>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <button type="button" class="paper-reader-set-btn paper-reader-set-width" data-tofu-action="_readerWidthCycle()" data-i18n-title="paper.readerWidth" title="Reading width" aria-label="Cycle reading width">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="7 8 3 12 7 16"/><polyline points="17 8 21 12 17 16"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+                <span class="paper-reader-width-label" data-i18n="paper.readerWidthComfortable">Comfortable</span>
+              </button>
+            </div>
+            <div class="paper-report-lang-toggle" id="reportLangToggle" data-i18n-title="paper.reportLangTitle" title="Report language">
+              <button type="button" class="paper-report-lang-opt" data-lang="en" data-tofu-action="_setReportLang('en','report')">EN</button>
+              <button type="button" class="paper-report-lang-opt" data-lang="zh" data-tofu-action="_setReportLang('zh','report')">中</button>
+            </div>
+            <button class="paper-report-btn paper-report-stop-btn" id="paperReportStopBtn" data-tofu-action="_stopPaperReport()" data-i18n-title="paper.reportStop" title="Stop generation" style="display:none">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+              <span data-i18n="paper.reportStop">Stop</span>
+            </button>
+            <button class="paper-report-btn" id="paperReportRegenBtn" data-tofu-action="_regeneratePaperReport()" data-i18n-title="paper.reportRegenerate" title="Regenerate">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              <span data-i18n="paper.reportRegenerate">Regenerate</span>
+            </button>
+            <button class="paper-report-btn" data-tofu-action="_copyPaperReport()" data-i18n-title="paper.reportCopy" title="Copy">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span id="paperReportCopyLabel" data-i18n="paper.reportCopy">Copy</span>
+            </button>
+            <div class="paper-report-export" id="paperReportExportMenu">
+              <button class="paper-report-btn" data-tofu-action="_togglePaperReportExportMenu(event)" data-i18n-title="paper.reportExport" title="Export">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span data-i18n="paper.reportExport">Export</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="paper-report-export-dropdown" id="paperReportExportDropdown">
+                <button class="paper-report-export-item" data-tofu-action="_exportPaperReport('md')" data-i18n="paper.reportExportMd">Markdown (.md)</button>
+                <button class="paper-report-export-item" data-tofu-action="_exportPaperReport('html')" data-i18n="paper.reportExportHtml">Standalone HTML</button>
+                <button class="paper-report-export-item" data-tofu-action="_exportPaperReport('pdf')" data-i18n="paper.reportExportPdf">Print / Save as PDF</button>
+              </div>
+            </div>
+          </div>
+          <div class="paper-report-content" id="paperReportContent">
+            <div class="paper-report-empty">
+              <p data-i18n="paper.reportEmptyTitle">Ready — click below to generate the analysis report</p>
+              <p class="paper-report-hint" data-i18n="paper.reportEmptyHint">Adjust the model &amp; language above first if needed; the model will search the web for additional context and related work</p>
+              <button class="paper-report-generate-btn" data-tofu-action="_generatePaperReport()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
+                <span data-i18n="paper.reportGenerate">Generate report</span>
+              </button>
+            </div>
+          </div>
+        </div>
+        <!-- Review Panel — venue-aware peer review, reuses the report engine -->
+        <div class="paper-tab-panel" data-tab="review" style="display:none">
+          <div class="paper-report-toolbar">
+            <div class="paper-report-model-picker" id="paperReviewVenuePicker">
+              <button class="paper-report-model-btn" data-tofu-action="_toggleReviewVenueDropdown(event)" data-i18n-title="paper.reviewSelectVenueTitle" title="Select target conference">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V7l8-4v18"/><path d="M19 21V11l-6-4"/><path d="M9 9v.01M9 12v.01M9 15v.01M9 18v.01"/></svg>
+                <span id="paperReviewVenueLabel" data-i18n="paper.reviewSelectVenue">Select venue</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="paper-report-model-dropdown" id="paperReviewVenueDropdown">
+                <!-- Populated by _populateReviewVenueDropdown() -->
+              </div>
+            </div>
+            <div class="paper-report-model-picker" id="paperReviewModelPicker">
+              <button class="paper-report-model-btn" data-tofu-action="_togglePaperReviewModelDropdown(event)" data-i18n-title="paper.reportSelectModelTitle" title="Select model for review generation">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                <span id="paperReviewModelLabel" data-i18n="paper.reportSelectModel">Select model</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="paper-report-model-dropdown" id="paperReviewModelDropdown">
+                <!-- Populated by _populatePaperReportModelDropdown(reviewView) -->
+              </div>
+            </div>
+            <button class="paper-report-btn paper-report-stop-btn" id="paperReviewStopBtn" data-tofu-action="_stopPaperReview()" data-i18n-title="paper.reportStop" title="Stop generation" style="display:none">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+              <span data-i18n="paper.reportStop">Stop</span>
+            </button>
+            <button class="paper-report-btn" id="paperReviewRegenBtn" data-tofu-action="_regeneratePaperReview()" data-i18n-title="paper.reportRegenerate" title="Regenerate">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              <span data-i18n="paper.reportRegenerate">Regenerate</span>
+            </button>
+            <!-- Review is generated + cached + exported in English (submission
+                 language). The EN/中 control is a READING toggle: '中' shows an
+                 on-demand translated view (canonical English is never touched),
+                 'EN' restores the original. Always available (both directions),
+                 independent of the app UI language. Managed by
+                 _syncReviewTranslateBtn; per-paper choice persisted. -->
+            <div class="paper-reader-settings" role="group" data-i18n-aria-label="paper.readerSettings" aria-label="Reading comfort">
+              <button type="button" class="paper-reader-set-btn paper-reader-set-dec" data-tofu-action="_readerFontStep(-1)" data-i18n-title="paper.readerFontSmaller" title="Smaller text" aria-label="Decrease text size">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <button type="button" class="paper-reader-set-btn paper-reader-set-inc" data-tofu-action="_readerFontStep(1)" data-i18n-title="paper.readerFontLarger" title="Larger text" aria-label="Increase text size">
+                <span style="font-size:10px;font-weight:700">A</span>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <button type="button" class="paper-reader-set-btn paper-reader-set-width" data-tofu-action="_readerWidthCycle()" data-i18n-title="paper.readerWidth" title="Reading width" aria-label="Cycle reading width">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="7 8 3 12 7 16"/><polyline points="17 8 21 12 17 16"/><line x1="3" y1="12" x2="21" y2="12"/></svg>
+                <span class="paper-reader-width-label" data-i18n="paper.readerWidthComfortable">Comfortable</span>
+              </button>
+            </div>
+            <div class="paper-report-lang-toggle" id="reviewLangToggle" data-i18n-title="paper.reviewTranslateTitle" title="Review reading language">
+              <button type="button" class="paper-report-lang-opt" data-lang="en" data-tofu-action="_setReportLang('en','review')">EN</button>
+              <button type="button" class="paper-report-lang-opt" data-lang="zh" data-tofu-action="_setReportLang('zh','review')">中</button>
+            </div>
+            <button class="paper-report-btn" data-tofu-action="_copyPaperReview()" data-i18n-title="paper.reportCopy" title="Copy">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span id="paperReviewCopyLabel" data-i18n="paper.reportCopy">Copy</span>
+            </button>
+            <button class="paper-report-btn" id="paperReviewAutofillBtn" data-tofu-action="_autofillOpenReview()" data-i18n-title="paper.autofillTitle" title="Auto-fill on the open OpenReview tab (never submits)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+              <span data-i18n="paper.autofillBtn">Auto-fill OpenReview</span>
+            </button>
+            <div class="paper-report-export" id="paperReviewExportMenu">
+              <button class="paper-report-btn" data-tofu-action="_togglePaperReviewExportMenu(event)" data-i18n-title="paper.reportExport" title="Export">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span data-i18n="paper.reportExport">Export</span>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="paper-report-export-dropdown" id="paperReviewExportDropdown">
+                <button class="paper-report-export-item" data-tofu-action="_exportPaperReview('md')" data-i18n="paper.reportExportMd">Markdown (.md)</button>
+                <button class="paper-report-export-item" data-tofu-action="_exportPaperReview('html')" data-i18n="paper.reportExportHtml">Standalone HTML</button>
+                <button class="paper-report-export-item" data-tofu-action="_exportPaperReview('pdf')" data-i18n="paper.reportExportPdf">Print / Save as PDF</button>
+              </div>
+            </div>
+          </div>
+          <div class="paper-report-content" id="paperReviewContent">
+            <div class="paper-report-empty">
+              <p data-i18n="paper.reviewEmptyTitle">Pick a target conference above, then click below to generate a peer review</p>
+              <p class="paper-report-hint" data-i18n="paper.reviewEmptyHint">The model reviews against the venue's real scorecard and verifies code/data claims via web search</p>
+              <button class="paper-report-generate-btn" data-tofu-action="_generatePaperReview()">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
+                <span data-i18n="paper.reviewGenerate">Generate review</span>
+              </button>
+            </div>
+          </div>
+          <!-- Rebuttal follow-up — author response → reviewer reply + score
+               decision. Reuses the report engine under the sibling composite
+               key rebuttal:<venue>:<uilang>; collapsed until the reviewer opens it. -->
+          <details class="paper-rebuttal-section" id="paperRebuttalSection">
+            <summary class="paper-rebuttal-summary">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              <span data-i18n="paper.rebuttalSectionTitle">Author rebuttal → follow-up reply</span>
+            </summary>
+            <div class="paper-rebuttal-body">
+              <p class="paper-report-hint" data-i18n="paper.rebuttalHint">Paste the authors' rebuttal below. The reviewer replies point by point and decides whether the OA / Confidence score should change (most rebuttals should not).</p>
+              <textarea id="paperRebuttalInput" class="paper-rebuttal-input" rows="6" maxlength="40000" data-i18n-placeholder="paper.rebuttalPlaceholder" placeholder="Paste the author rebuttal here…" data-tofu-action-input="_onRebuttalInputChange(this.value)"></textarea>
+              <div class="paper-rebuttal-actions">
+                <button class="paper-report-generate-btn" id="paperRebuttalGenBtn" data-tofu-action="_generatePaperRebuttal()">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
+                  <span data-i18n="paper.rebuttalGenerate">Generate follow-up</span>
+                </button>
+                <button class="paper-report-btn paper-report-stop-btn" id="paperRebuttalStopBtn" data-tofu-action="_stopPaperRebuttal()" data-i18n-title="paper.reportStop" title="Stop generation" style="display:none">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+                  <span data-i18n="paper.reportStop">Stop</span>
+                </button>
+                <button class="paper-report-btn" id="paperRebuttalRegenBtn" data-tofu-action="_regeneratePaperRebuttal()" data-i18n-title="paper.reportRegenerate" title="Regenerate" style="display:none">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  <span data-i18n="paper.reportRegenerate">Regenerate</span>
+                </button>
+                <button class="paper-report-btn" id="paperRebuttalCopyBtn" data-tofu-action="_copyPaperRebuttal()" data-i18n-title="paper.reportCopy" title="Copy" style="display:none">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  <span id="paperRebuttalCopyLabel" data-i18n="paper.reportCopy">Copy</span>
+                </button>
+              </div>
+              <div class="paper-report-content" id="paperRebuttalContent"></div>
+            </div>
+          </details>
+        </div>
+        <!-- Babel PDF Panel -->
+        <div class="paper-tab-panel" data-tab="translate" style="display:none">
+          <div class="paper-translate-content" id="paperTranslateContent">
+            <!-- Populated by _initBabelPdfTab() -->
+          </div>
+        </div>
+        <!-- Podcast Panel -->
+        <div class="paper-tab-panel" data-tab="podcast" style="display:none">
+          <div class="paper-podcast-content" id="paperPodcastContent">
+            <!-- Populated by _initPodcastTab() -->
+          </div>
+        </div>
+        <!-- Video Abstract Panel -->
+        <div class="paper-tab-panel" data-tab="video" style="display:none">
+          <div class="paper-video-content" id="paperVideoContent">
+            <!-- Populated by _initVideoTab() -->
+          </div>
+        </div>
+      </div>
+      <!-- Mobile-only view switcher: full-screen PDF ⇄ Reader (Q&A/Report/Babel) -->
+      <div class="paper-mobile-switch" id="paperMobileSwitch">
+        <button class="paper-mobile-switch-btn active" data-view="pdf" data-tofu-action="_setPaperMobileView('pdf')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <span data-i18n="paper.viewPdf">PDF</span>
+        </button>
+        <button class="paper-mobile-switch-btn" data-view="reader" data-tofu-action="_setPaperMobileView('reader')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          <span data-i18n="paper.viewReader">Reader</span>
+        </button>
+      </div>
+    </div>
+  </div>

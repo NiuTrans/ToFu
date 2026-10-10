@@ -1,0 +1,36 @@
+/* ═══════════════════════════════════════════
+   ★ Scanning live-progress animation
+   ═══════════════════════════════════════════ */
+   .project-bar.scanning{
+    border-color:rgba(245,158,11,0.5);
+    background:linear-gradient(90deg,rgba(245,158,11,0.06) 0%,rgba(245,158,11,0.12) 50%,rgba(245,158,11,0.06) 100%);
+    background-size:200% 100%;
+    animation:projectScanSweep 1.8s ease-in-out infinite;
+  }
+  @keyframes projectScanSweep{
+    0%{background-position:100% 0}
+    100%{background-position:-100% 0}
+  }
+  .project-bar.scanning .project-bar-stats{
+    color:#fbbf24;
+    font-weight:600;
+    font-family:'JetBrains Mono',monospace;
+    font-size:var(--font-size-xs);
+  }
+  .project-bar.scanning .project-bar-icon{
+    animation:projectIconSpin 2s linear infinite;
+  }
+  @keyframes projectIconSpin{
+    0%{transform:rotate(0deg)}
+    100%{transform:rotate(360deg)}
+  }
+  .project-bar.scanning .project-bar-btn{
+    opacity:0.4;
+    pointer-events:none;
+  }
+  .project-bar.scanning .project-bar-close{
+    opacity:1;
+    pointer-events:all;
+  }
+  
+  

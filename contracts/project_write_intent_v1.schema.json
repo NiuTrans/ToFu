@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "project_write_intent_v1.schema.json",
+  "title": "Bounded durable project file write intent",
+  "x-admission": {
+    "scope": "project-session",
+    "busyErrorKind": "journal-busy",
+    "busyMutationApplied": false,
+    "busyRetryable": true,
+    "retryPolicy": "Re-read and recompute before retry; never replay an applied mutation.",
+    "optionalEffects": "Presentation listeners run after the outermost lock releases, in per-path process-local commit order. File-history staging stays under admission for cross-process order; no second journal flush attaches an optional history version."
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "x-resource-limits": {
+    "pendingIntents": 64,
+    "originalBytes": 1073741824,
+    "postImageBytes": 1073741824,
+    "recordBytes": 1431721304,
+    "lockWaitSeconds": 30,
+    "directoryEntries": 130
+  },
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "changeId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "basePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "stageName": {
+      "type": "string",
+      "pattern": "^\\.tofu_atomic_[0-9a-f]{32}$"
+    },
+    "rootIdentity": {
+      "$ref": "#/$defs/identity"
+    },
+    "stagedIdentity": {
+      "$ref": "#/$defs/identity"
+    },
+    "original": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 1431655768
+    },
+    "postBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1073741824
+    },
+    "postDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "convId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 256
+    },
+    "taskId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 256
+    },
+    "state": {
+      "enum": [
+        "prepared",
+        "aborted"
+      ]
+    },
+    "rootPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    }
+  },
+  "required": [
+    "version",
+    "changeId",
+    "basePath",
+    "path",
+    "stageName",
+    "rootIdentity",
+    "stagedIdentity",
+    "original",
+    "postBytes",
+    "postDigest",
+    "convId",
+    "taskId",
+    "state",
+    "rootPath"
+  ],
+  "x-resource-budget": {
+    "environment": "TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB",
+    "maximumMiB": 1024,
+    "recordEnvelopeBytes": 65536,
+    "policy": "One launch-probed per-file byte budget for reads, preparation, recovery and undo. Durable evidence is never pruned on a smaller budget; access fails visibly."
+  }
+}

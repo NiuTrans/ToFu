@@ -1,0 +1,20 @@
+{
+  "attempt": 1,
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "contentEpoch": 1,
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "kind": "s",
+  "max": 1,
+  "requestId": "s",
+  "seq": 1,
+  "taskId": "s",
+  "turnRole": "s",
+  "type": "retry_reset",
+  "vuMsgId": "s"
+}

@@ -1,0 +1,34 @@
+{
+  "brand": "baiducloud",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "baidu",
+  "category": "official",
+  "name": "Baidu Qianfan (ERNIE)",
+  "base_url": "https://qianfan.baidubce.com/v2",
+  "offering_recipes": [
+    {
+      "model_id": "ernie-5.1",
+      "capabilities": [
+        "text"
+      ]
+    },
+    {
+      "model_id": "ernie-5.0",
+      "capabilities": [
+        "text",
+        "vision",
+        "thinking"
+      ]
+    },
+    {
+      "model_id": "ernie-4.5-turbo-128k",
+      "capabilities": [
+        "text"
+      ]
+    }
+  ],
+  "catalog_source": {
+    "url": "https://intl.cloud.baidu.com/en/doc/qianfan/s/7m95lyy43-intl-en",
+    "checked_at": "2026-09-08"
+  }
+}

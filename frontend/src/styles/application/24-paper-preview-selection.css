@@ -1,0 +1,23 @@
+/* ── Track B: selection bubble menu ── */
+.paper-source-bubble {
+  position: absolute; z-index: var(--z-dropdown);
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1);
+  max-width: 100%; padding: var(--space-1);
+  border: 1px solid var(--border); border-radius: var(--radius-sm, 8px);
+  background: var(--bg-secondary); box-shadow: var(--shadow);
+}
+.paper-source-bubble-action {
+  padding: var(--space-1) var(--space-2);
+  border: 0; border-radius: var(--radius-xs, 6px);
+  background: none; color: var(--text-primary);
+  font-size: var(--font-size-xs); white-space: nowrap; cursor: pointer;
+}
+.paper-source-bubble-action:hover { background: var(--bg-hover); color: var(--accent); }
+.paper-source-bubble-custom {
+  min-width: 9em; padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border); border-radius: var(--radius-xs, 6px);
+  background: var(--bg-primary); color: var(--text-primary);
+  font-size: var(--font-size-xs);
+}
+.paper-source-bubble-custom:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+

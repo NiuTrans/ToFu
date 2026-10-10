@@ -1,0 +1,133 @@
+{
+  "problem": "Projection normalization wall waits despite negligible thread CPU",
+  "decision": "Reject runtime admission of eager lightweight snapshot candidate pending resolution of settlement and application regressions",
+  "alternatives": [
+    "Lazy lightweight helper retained import waits; original model-routing facade imports heavyweight package",
+    "Eager lightweight helper eliminates observed import wait but does not improve both transports"
+  ],
+  "native_source": "55180dba6fbc4a94171e3f271a38f59cd8ca605195b9138a2565cf3ba4af4be2",
+  "tests": {
+    "focused_passed": 127,
+    "semantic_output_parity_cases": 125,
+    "architecture": "fails same HEAD/candidate200 top-level modules; budget194"
+  },
+  "windows": [
+    {
+      "label": "eager-embedded-c0",
+      "report": ".tmp/tofudb-light-snapshot-20261009/eager-embedded-c0.json",
+      "sha256": "fae79d2f2ae6708b9e5b4aea31e14931005dd7e5d8ee5152da3d57df2b9532fb",
+      "scope_sha256": "b24db159e03f16a68b049e1416f7c4fcf878f8dba393e2d757ea5f8dbd92d5aa",
+      "error_count": 0,
+      "latency_passed": true,
+      "p99_ms": {
+        "submit_to_running": 689.7691413760185,
+        "stream_scheduled": 992.066353559494,
+        "settle_scheduled": 3806.0093969106674
+      }
+    },
+    {
+      "label": "eager-embedded-b1",
+      "report": ".tmp/tofudb-history-borrowed-source-20261009/eager-embedded-b1.json",
+      "sha256": "07d21e930715e33d3e70ee1994504c647a05ef880c15c521e38f8093f8a25004",
+      "scope_sha256": "743843522122863744b61e7426d8cac01a3fadd5ee3a34c14357ac269521c0cc",
+      "error_count": 0,
+      "latency_passed": false,
+      "p99_ms": {
+        "submit_to_running": 690.2760863304138,
+        "stream_scheduled": 1245.964653789997,
+        "settle_scheduled": 2803.0024990439415
+      }
+    },
+    {
+      "label": "eager-embedded-c2",
+      "report": ".tmp/tofudb-light-snapshot-20261009/eager-embedded-c2.json",
+      "sha256": "7cb2ce7db10516bb87db16e4330128e0f8d1d0615854d695285309e5d61a2eaa",
+      "scope_sha256": "b24db159e03f16a68b049e1416f7c4fcf878f8dba393e2d757ea5f8dbd92d5aa",
+      "error_count": 0,
+      "latency_passed": true,
+      "p99_ms": {
+        "submit_to_running": 723.8038629293442,
+        "stream_scheduled": 992.5934970378876,
+        "settle_scheduled": 4551.322542130947
+      }
+    },
+    {
+      "label": "eager-embedded-b3",
+      "report": ".tmp/tofudb-history-borrowed-source-20261009/eager-embedded-b3.json",
+      "sha256": "f98524c57a9823a9faeb1705458b0673c8c5eac757ceda537c3e4b28eb951a8d",
+      "scope_sha256": "743843522122863744b61e7426d8cac01a3fadd5ee3a34c14357ac269521c0cc",
+      "error_count": 0,
+      "latency_passed": false,
+      "p99_ms": {
+        "submit_to_running": 687.2215121984482,
+        "stream_scheduled": 1225.982278585434,
+        "settle_scheduled": 2893.7493562698364
+      }
+    },
+    {
+      "label": "eager-application-b0",
+      "report": ".tmp/tofudb-history-borrowed-source-20261009/eager-application-b0.json",
+      "sha256": "3cbcde14385c26a57ce632e01ef8e37f68c69c4edf5c344e664d508b44142ab8",
+      "scope_sha256": "8b015595710f18b7d0abb849271bb207eae9e7940dcf80a87e5c8b75622cd897",
+      "error_count": 0,
+      "latency_passed": false,
+      "p99_ms": {
+        "submit_to_running": 110.10852456092834,
+        "stream_scheduled": 1812.6432001590729,
+        "settle_scheduled": 3209.7123488783836
+      }
+    },
+    {
+      "label": "eager-application-c1",
+      "report": ".tmp/tofudb-light-snapshot-20261009/eager-application-c1.json",
+      "sha256": "7610858c13207d415623d454ffa5fc67d52c832c14ff463e824cbfb98f7b1da5",
+      "scope_sha256": "8d1857b183323dbb8812fe69c612a9d87ce1d6c2e942dd7425d7255f99a6170f",
+      "error_count": 0,
+      "latency_passed": false,
+      "p99_ms": {
+        "submit_to_running": 103.15152257680893,
+        "stream_scheduled": 1903.5992324352264,
+        "settle_scheduled": 4627.640672028065
+      }
+    },
+    {
+      "label": "eager-application-c2",
+      "report": ".tmp/tofudb-light-snapshot-20261009/eager-application-c2.json",
+      "sha256": "6483e3d34ef9330a04dbb93ed56e0b4f4e1f0e42907da1107e88bf205fbb84ee",
+      "scope_sha256": "8d1857b183323dbb8812fe69c612a9d87ce1d6c2e942dd7425d7255f99a6170f",
+      "error_count": 0,
+      "latency_passed": false,
+      "p99_ms": {
+        "submit_to_running": 126.13695114850998,
+        "stream_scheduled": 1888.3112519979477,
+        "settle_scheduled": 4342.735171318054
+      }
+    },
+    {
+      "label": "eager-application-b3",
+      "report": ".tmp/tofudb-history-borrowed-source-20261009/eager-application-b3.json",
+      "sha256": "b948d0dd0a161276c8399283d37c3562ceaff249c90ba8fdef34e63d98c01c88",
+      "scope_sha256": "8b015595710f18b7d0abb849271bb207eae9e7940dcf80a87e5c8b75622cd897",
+      "error_count": 0,
+      "latency_passed": false,
+      "p99_ms": {
+        "submit_to_running": 197.99097627401352,
+        "stream_scheduled": 1822.5670084357262,
+        "settle_scheduled": 3112.762466073036
+      }
+    }
+  ],
+  "diagnostic_reports": [
+    ".tmp/tofudb-client-gc-observation-20261009/import-phase-review.json",
+    ".tmp/tofudb-light-snapshot-20261009/candidate-phase-review.json",
+    ".tmp/tofudb-light-snapshot-20261009/eager-phase-review.json"
+  ],
+  "limits": [
+    "Import interval includes scheduling, not exclusive import lock attribution",
+    "Embedded abandonment is not process crash",
+    "No provider/browser/soak coverage",
+    "No universal SQLite superiority claim",
+    "Maintenance totals inclusive and not direct latency causes"
+  ],
+  "isolated_source_checkpoint": "71d94423e"
+}

@@ -1,0 +1,12 @@
+/* ══════════════════════════════════════
+   Dropdown Visibility — tofu list
+   ══════════════════════════════════════ */
+.stg-dropdown-visibility {
+  max-height: 360px;
+  overflow-y: auto;
+  border: var(--s-border);
+  border-radius: var(--s-radius);
+  box-shadow: var(--s-shadow-xs);
+  padding: 6px;
+  background: #fff;
+}

@@ -1,0 +1,101 @@
+{
+  "pack": "tofu.site-pack/v1",
+  "id": "xiaohongshu",
+  "name": "小红书",
+  "version": 1,
+  "routing_hint": "note keywords",
+  "domains": ["xiaohongshu.com"],
+  "aliases": ["xhs", "red", "小红书"],
+  "auth": {
+    "login_url": "https://www.xiaohongshu.com/explore",
+    "label": "Xiaohongshu / RED",
+    "aliases": ["xhslink.com"],
+    "access_strategy": "browser_first",
+    "risk_notice": "读取带节奏控制；遇到验证或连续空结果时应退避。",
+    "risk_note_key": "settings.authSrcRiskXhs",
+    "fields": [
+      {"name": "web_session", "importance": "required"},
+      {"name": "a1", "importance": "recommended"},
+      {"name": "webId", "importance": "optional"}
+    ]
+  },
+  "operations": [
+    {
+      "name": "search",
+      "description": "站内搜索、翻页并读取笔记卡片",
+      "access": "read",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {"type": "string", "minLength": 1, "maxLength": 512,
+                    "description": "Native keywords, not web operators or a general question."},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 40},
+          "pages": {"type": "integer", "minimum": 1, "maximum": 5}
+        },
+        "required": ["query"]
+      },
+      "output_schema": {"type": "array", "items": {"type": "object"}},
+      "timeout": 35,
+      "min_interval_s": 12,
+      "cooldown_s": 300,
+      "steps": [
+        {"do": "navigate",
+         "url": "https://www.xiaohongshu.com/search_result?keyword={query}&source=web_search_result_notes"},
+        {"do": "ensure_auth"},
+        {"do": "wait",
+         "selector": "a[href*=\"/explore/\"],a[href*=\"/search_result/\"]",
+         "timeout": 12, "optional": true},
+        {"do": "paginate", "mode": "scroll", "amount": 1200,
+         "times_from_param": "pages", "max_times": 4},
+        {"do": "extract",
+         "js": "(() => {\n  const out = [], seen = new Set();\n  for (const a of document.querySelectorAll('a[href*=\"/explore/\"],a[href*=\"/search_result/\"]')) {\n    const url = a.href || ''; if (!url || seen.has(url.split('?')[0])) continue;\n    const card = a.closest('section.note-item,div.note-item,section,div') || a;\n    const lines = (card.innerText || '').split('\\n').map(x => x.trim()).filter(Boolean);\n    if (!lines.length) continue; seen.add(url.split('?')[0]);\n    out.push({title: lines[0].slice(0, 200), snippet: lines.slice(1, 3).join(' · ').slice(0, 300), url});\n    if (out.length >= 30) break;\n  }\n  return out;\n})()",
+         "into": "candidates"},
+        {"do": "normalize", "kind": "search_records",
+         "query_from_param": "query", "limit_from_param": "limit",
+         "limit_max": 30, "source_name": "Xiaohongshu"}
+      ]
+    },
+    {
+      "name": "detail",
+      "description": "读取笔记详情",
+      "access": "read",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {"type": "string", "maxLength": 8192, "pattern": "^https?://"},
+          "max_chars": {"type": "integer", "minimum": 1000, "maximum": 80000}
+        },
+        "required": ["url"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string"},
+          "url": {"type": "string"},
+          "content": {"type": "string"}
+        }
+      },
+      "timeout": 35,
+      "min_interval_s": 12,
+      "cooldown_s": 300,
+      "steps": [
+        {"do": "navigate", "url": "{url|raw}"},
+        {"do": "ensure_auth"},
+        {"do": "extract",
+         "js": "(() => {\n  const text = (sel) => (document.querySelector(sel)?.innerText || '').slice(0, 2000).trim();\n  const tags = Array.from(document.querySelectorAll(\n    'a[href*=\"/search_result?keyword=\"],.tag,.note-tag'))\n    .slice(0, 30).map(el => (el.innerText || '').slice(0, 128).trim()).filter(Boolean);\n  return {\n    title: text('#detail-title,.title,.note-title,h1'),\n    author: text('.author-name,.username,.user-name,[class*=\"author\"]'),\n    published_at: text('.date,.time,.publish-date,[class*=\"date\"]'),\n    likes: text('.like-wrapper,.like-count,[class*=\"like\"] .count'),\n    comments: text('.comments-container .total,.comment-count,[class*=\"comment\"] .count'),\n    tags,\n    content: text('#detail-desc,.desc,.note-content,[class*=\"content\"]'),\n  };\n})()",
+         "into": "fields"},
+        {"do": "normalize", "kind": "detail",
+         "max_chars_from_param": "max_chars",
+         "fields": {
+           "author": 512,
+           "published_at": 128,
+           "likes": 128,
+           "comments": 128,
+           "tags": {"type": "list", "max_items": 30, "max_length": 128}
+         }}
+      ]
+    }
+  ]
+}

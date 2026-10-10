@@ -1,0 +1,881 @@
+{
+  "decision": "admitted scoped FIFO reservation progress and settlement improvement; original stream gate and full SQLite comparison remain open",
+  "problem": "A notified FIFO head can stall reservation progress despite idle capacity.",
+  "implementation": "Assign available capacity under the existing condition in FIFO order before notifying owners. Probe/create/close remain outside the condition; assigned grants own capacity until claim/cancellation.",
+  "alternatives": [
+    "Oldest ticket bypass changes fairness.",
+    "Wake-all without reservation ownership races for capacity.",
+    "Increasing pool capacity does not resolve head scheduling dependence."
+  ],
+  "source": {
+    "baseline_client_sha256": "34de64b92e21a7d7ed938a2d8c47a332d9817553f7255cb73a35dfbc3cca87be",
+    "candidate_client_sha256": "aa542f7eee6e04e10b6a3c6f012273e15d00c16aea362fab1de2a9286f3d76f4",
+    "scope": "FIFO grant assignment decoupled from caller scheduling. Same session/long/retiring limits; socket probe/create/close outside condition; pending and granted tickets cleanup on BaseException. Unverified candidate.",
+    "initial_client_tests": "82passed before restoring explicit immediate long-lane checks with older blocked short tickets",
+    "client_tests": "82passed final candidate in verified worktree cwd",
+    "client_test_log_sha256": "09bf58fc32e1ad660db62776787db6f225a2d80ad1bf0725a9c941fb8bc76dfd",
+    "excluded_test_run": "client-tests-v2.log ran from shared cwd; not candidate proof",
+    "status": "admitted scoped FIFO reservation progress and settlement improvement; original stream gate and full SQLite comparison remain open",
+    "handoff_tests": "5passed0failed",
+    "handoff_test_log_sha256": "17b7082be5e434b348bccb79363dd63126e2f7ccc6ad9ce983ed7fa26bfc5480",
+    "baseline_sessions_doc_sha256": "bac0c65f524f562dfcaaaf663c28528d51c97c98f2af60b8075737bace7d4e17",
+    "candidate_sessions_doc_sha256": "8d85b0fddccc7d22d0b3bced3a68a96457bef976decc5ae23776b4da74c06786",
+    "memory_measurement": {
+      "python": "3.12.13",
+      "ticket_shallow_bytes": 72,
+      "grant_tuple_shallow_bytes": 56,
+      "event_shallow_bytes_unchanged": 48,
+      "scope": "Additional ticket and grant tuple shallow sizes only; excludes payload/session/event internals, existing deadline float and allocator/RSS."
+    },
+    "neighbor_gates": {
+      "initial": "79passed3failed (missingrg/implicitNativeartifact)",
+      "failed_recheck": "3passed with explicitrgPATH and verifiedNative01bb, fullNativeworktreesource aligned",
+      "log_hashes": {
+        "neighbor-tests.log": "ca259ea4d559b211265b205d2debe5ed38ffd54d4a153e546a51ee24a282ca0c",
+        "neighbor-failed-recheck.log": "4ee870ff3ce45a5d6e3b6d5031f1a6572f076956679b19e96be26d298eef5f21"
+      }
+    },
+    "application_contract_tests": "75passed160.87s",
+    "application_contract_log_sha256": "1672de30fcce35f0a1027efee7f9ffcf6aa25525510c77fb17a7361cafee2c3a"
+  },
+  "original_macro": {
+    "rows": [
+      {
+        "label": "handoff-original-embedded-B0",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 700.6603628396988,
+          "stream_scheduled": 1214.4569531083107,
+          "settle": 2979.123704135418
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-current-refresh-20261008/handoff-original-embedded-B0.json",
+          "sha256": "ec657dca5e611e5aa30c0542f41893a2d896384b44d56d5b2df9e523e869c839"
+        },
+        "caller_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      {
+        "label": "handoff-original-embedded-C1",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 695.9568709135056,
+          "stream_scheduled": 1248.8136813044548,
+          "settle": 2131.7946538329124
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-pool-reservation-handoff-20261008/handoff-original-embedded-C1.json",
+          "sha256": "f75f367a99038b10e3e2b287a2d33663b27c483ebd5208271748aaab4a5e5d5e"
+        },
+        "caller_manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1"
+      },
+      {
+        "label": "handoff-original-embedded-C2",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 699.0784034132957,
+          "stream_scheduled": 1229.425087571144,
+          "settle": 3481.112815439701
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-pool-reservation-handoff-20261008/handoff-original-embedded-C2.json",
+          "sha256": "e98aa23ea1c8c6d99964277a8752b54358067a5d8b51fbff20f1b4dee145af17"
+        },
+        "caller_manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1"
+      },
+      {
+        "label": "handoff-original-embedded-B3",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 700.7583826780319,
+          "stream_scheduled": 1214.5566120743752,
+          "settle": 3015.1237174868584
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-current-refresh-20261008/handoff-original-embedded-B3.json",
+          "sha256": "3dd16282742f102618bd0fcb5f2e819f9ac232dbf3973ea923c67dc1e588959e"
+        },
+        "caller_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      {
+        "label": "handoff-original-application-B0",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 531.395211815834,
+          "stream_scheduled": 1852.5353595614433,
+          "settle": 5476.833455264568
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-current-refresh-20261008/handoff-original-application-B0.json",
+          "sha256": "7d58bd6f71208707b92e21db3b2eef375ef72cfc1a40cebd97fbeb48c025f867"
+        },
+        "caller_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      {
+        "label": "handoff-original-application-C1",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 60.08222699165344,
+          "stream_scheduled": 1603.952296078205,
+          "settle": 2616.0845533013344
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-pool-reservation-handoff-20261008/handoff-original-application-C1.json",
+          "sha256": "0031b227472e8d93a9c5ef47e3647590a336460e3700ebbb72ae457348070fd5"
+        },
+        "caller_manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1"
+      },
+      {
+        "label": "handoff-original-application-C2",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 132.28359073400497,
+          "stream_scheduled": 1825.6095573306084,
+          "settle": 2490.0434240698814
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-pool-reservation-handoff-20261008/handoff-original-application-C2.json",
+          "sha256": "91cfa0912d8e9ebdc24c0c077ec3d0f06e4bc4ccbefe39a32e9a18125e5a86af"
+        },
+        "caller_manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1"
+      },
+      {
+        "label": "handoff-original-application-B3",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 58.68353694677353,
+          "stream_scheduled": 1825.0194266438484,
+          "settle": 4257.993832230568
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-current-refresh-20261008/handoff-original-application-B3.json",
+          "sha256": "77321afbe5268493462401ba6c0fb08a9ae82fabf9b6e7734744a7810286f8b4"
+        },
+        "caller_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      {
+        "label": "handoff-original-repeat2-embedded-B0",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 690.0730803608894,
+          "stream_scheduled": 1247.00777977705,
+          "settle": 3628.605477511883
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-current-refresh-20261008/handoff-original-repeat2-embedded-B0.json",
+          "sha256": "1d1f2d8a6ea32d20d3eb32f53cdeba693bbfcf6154a07253f393077f0d431141"
+        },
+        "caller_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      {
+        "label": "handoff-original-repeat2-embedded-C1",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 926.2367859482765,
+          "stream_scheduled": 1301.4049381017685,
+          "settle": 2142.338179051876
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-pool-reservation-handoff-20261008/handoff-original-repeat2-embedded-C1.json",
+          "sha256": "09682574f3abc302cc5c8fd53508a6e43d28b2110571cdfacccca7abccf99ea9"
+        },
+        "caller_manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1"
+      },
+      {
+        "label": "handoff-original-repeat2-embedded-C2",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 681.8603426218033,
+          "stream_scheduled": 1249.814085662365,
+          "settle": 2372.4258318543434
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-pool-reservation-handoff-20261008/handoff-original-repeat2-embedded-C2.json",
+          "sha256": "d7c427b45fbfe834c90fe27b9e867be0ec9b3c30b8be66545a6d89c5e045fd38"
+        },
+        "caller_manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1"
+      },
+      {
+        "label": "handoff-original-repeat2-embedded-B3",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 706.8904489278793,
+          "stream_scheduled": 1211.9338661432266,
+          "settle": 3243.9804673194885
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-current-refresh-20261008/handoff-original-repeat2-embedded-B3.json",
+          "sha256": "a6baffacfcf505db3ced6c7edac1d120583d9d966f33c971b838af56f27cbde1"
+        },
+        "caller_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      {
+        "label": "handoff-original-repeat2-application-B0",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 130.54006546735764,
+          "stream_scheduled": 1832.2336748242378,
+          "settle": 4274.343304336071
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-current-refresh-20261008/handoff-original-repeat2-application-B0.json",
+          "sha256": "29b0380d6576af8232a5617b9f3edceaa2d03c90591f0a3f724ca8c84d0fc3b2"
+        },
+        "caller_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      },
+      {
+        "label": "handoff-original-repeat2-application-C1",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 104.74195331335068,
+          "stream_scheduled": 1812.7374425530434,
+          "settle": 2454.510360956192
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-pool-reservation-handoff-20261008/handoff-original-repeat2-application-C1.json",
+          "sha256": "4d2cd5129d9fb27e4348aaf3f1bf9c30cae52ea1605daa4dddd4a345e21d782c"
+        },
+        "caller_manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1"
+      },
+      {
+        "label": "handoff-original-repeat2-application-C2",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 150.9174183011055,
+          "stream_scheduled": 1812.3227506875992,
+          "settle": 2546.9156354665756
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-pool-reservation-handoff-20261008/handoff-original-repeat2-application-C2.json",
+          "sha256": "cb386777138697f0b2fc7020a01f1fbd6e46a2c7279a64084ff62b947c7480e0"
+        },
+        "caller_manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1"
+      },
+      {
+        "label": "handoff-original-repeat2-application-B3",
+        "exit_code": 1,
+        "correctness": true,
+        "errors": 0,
+        "source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "p99_ms": {
+          "submit_to_running": 117.91394650936127,
+          "stream_scheduled": 1801.028050482273,
+          "settle": 4148.46083521843
+        },
+        "raw_report": {
+          "path": ".tmp/tofudb-current-refresh-20261008/handoff-original-repeat2-application-B3.json",
+          "sha256": "fded77a8a1913c2930e5f6c25050b49a07f3ad6a6b35aeb2912f0d4f71fcd4d9"
+        },
+        "caller_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      }
+    ],
+    "summary": [
+      {
+        "mode": "embedded",
+        "kind": "B",
+        "windows": 4,
+        "median_window_p99_ms": {
+          "submit_to_running": 700.7093727588654,
+          "stream_scheduled": 1214.506782591343,
+          "settle": 3129.5520924031734
+        }
+      },
+      {
+        "mode": "embedded",
+        "kind": "C",
+        "windows": 4,
+        "median_window_p99_ms": {
+          "submit_to_running": 697.5176371634007,
+          "stream_scheduled": 1249.3138834834099,
+          "settle": 2257.3820054531097
+        }
+      },
+      {
+        "mode": "application",
+        "kind": "B",
+        "windows": 4,
+        "median_window_p99_ms": {
+          "submit_to_running": 124.22700598835945,
+          "stream_scheduled": 1828.6265507340431,
+          "settle": 4266.1685682833195
+        }
+      },
+      {
+        "mode": "application",
+        "kind": "C",
+        "windows": 4,
+        "median_window_p99_ms": {
+          "submit_to_running": 118.51277202367783,
+          "stream_scheduled": 1812.5300966203213,
+          "settle": 2518.4795297682285
+        }
+      }
+    ],
+    "scope": "Two sequential B-C-C-B per transport;16 original default-off windows. Medians of4windowP99s, not pooledrequestP99s or confidence intervals. All source/caller guards and correctness pass. Regressions retained.",
+    "decision": "admitted scoped FIFO reservation progress and settlement improvement; original stream gate and full SQLite comparison remain open"
+  },
+  "augmented_query": {
+    "scope": "Observer-enabled augmented1000 harness B-C-C-B each transport; sameNative3e9809. Frozen caller closure, only client differs. All8 originalwrite/replay correctness pass, added read failures retained. Few queries with changed cadence; not original acceptance benchmark or confidence interval.",
+    "rows": [
+      {
+        "label": "handoff-query-embedded-B0",
+        "correctness": true,
+        "harness_errors": 0,
+        "query_samples": 10,
+        "query_errors": 2,
+        "query_max_ms": 1505.0136744976044,
+        "write_p99_ms": {
+          "submit_to_running": 657.6009020209312,
+          "stream_scheduled": 1347.9149639606476,
+          "settle": 3577.3679986596107
+        },
+        "report_path": "/path/to/your/project",
+        "probe_path": "/path/to/your/project",
+        "report_sha256": "11329165d18414e27143236ffdeaf3ed0ef7fe7542b1d0f7256019adc877893e",
+        "query_stages": {
+          "pool:conversation.list": {
+            "count": 18,
+            "total_ms": 5289.089761674404,
+            "max": 510.10702550411224,
+            "p50": 445.79156845259257,
+            "p99": 510.10702550411224
+          },
+          "embedded_wire:conversation.list": {
+            "count": 9,
+            "total_ms": 652.5717750191689,
+            "max": 436.6042912006378,
+            "p50": 4.594972986357222,
+            "p99": 436.6042912006378
+          },
+          "attempt:conversation.list": {
+            "count": 18,
+            "total_ms": 5942.1422109007835,
+            "max": 518.2092636823654,
+            "p50": 445.79156845259257,
+            "p99": 518.2092636823654
+          },
+          "rpc:conversation.list": {
+            "count": 11,
+            "total_ms": 6156.763769686222,
+            "max": 1504.9999877810478,
+            "p50": 228.76156239024755,
+            "p99": 1504.9999877810478
+          }
+        },
+        "failed_probes": [
+          {
+            "active_conversations": 1000,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1500.179149210453,
+            "restart_affected": false
+          },
+          {
+            "active_conversations": 980,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1505.0136744976044,
+            "restart_affected": false
+          }
+        ]
+      },
+      {
+        "label": "handoff-query-embedded-C1",
+        "correctness": true,
+        "harness_errors": 0,
+        "query_samples": 11,
+        "query_errors": 0,
+        "query_max_ms": 1400.0575095415115,
+        "write_p99_ms": {
+          "submit_to_running": 626.9161179661751,
+          "stream_scheduled": 1290.523461997509,
+          "settle": 2162.5672951340675
+        },
+        "report_path": "/path/to/your/project",
+        "probe_path": "/path/to/your/project",
+        "report_sha256": "68ad093c110ad77c49569cfd957b120fc842cbad1e3bab8b8ef45a9547765fba",
+        "query_stages": {
+          "pool:conversation.list": {
+            "count": 15,
+            "total_ms": 2263.300858438015,
+            "max": 510.09294390678406,
+            "p50": 88.19748525897502,
+            "p99": 510.09294390678406
+          },
+          "embedded_wire:conversation.list": {
+            "count": 13,
+            "total_ms": 508.7614208459854,
+            "max": 115.86692929267883,
+            "p50": 1.7715610000000008,
+            "p99": 115.86692929267883
+          },
+          "attempt:conversation.list": {
+            "count": 15,
+            "total_ms": 2772.5231871008873,
+            "max": 585.289403796196,
+            "p50": 207.96505671840686,
+            "p99": 585.289403796196
+          },
+          "rpc:conversation.list": {
+            "count": 13,
+            "total_ms": 2869.993172585964,
+            "max": 1400.0355005264282,
+            "p50": 1.9487171000000012,
+            "p99": 1400.0355005264282
+          }
+        },
+        "failed_probes": []
+      },
+      {
+        "label": "handoff-query-embedded-C2",
+        "correctness": true,
+        "harness_errors": 0,
+        "query_samples": 12,
+        "query_errors": 0,
+        "query_max_ms": 801.0395988821983,
+        "write_p99_ms": {
+          "submit_to_running": 706.8132385611534,
+          "stream_scheduled": 1298.6975833773613,
+          "settle": 2584.8337411880493
+        },
+        "report_path": "/path/to/your/project",
+        "probe_path": "/path/to/your/project",
+        "report_sha256": "95f25f7312f9222d87bf4f3491bbe02b654c273da8a22280b87715c1156f5822",
+        "query_stages": {
+          "pool:conversation.list": {
+            "count": 14,
+            "total_ms": 1772.2097411751747,
+            "max": 500.2102553844452,
+            "p50": 1.0,
+            "p99": 500.2102553844452
+          },
+          "embedded_wire:conversation.list": {
+            "count": 13,
+            "total_ms": 369.5072904229164,
+            "max": 122.28719145059586,
+            "p50": 3.138428376721003,
+            "p99": 122.28719145059586
+          },
+          "attempt:conversation.list": {
+            "count": 14,
+            "total_ms": 2163.040190935135,
+            "max": 500.2349764108658,
+            "p50": 5.054470284992945,
+            "p99": 500.2349764108658
+          },
+          "rpc:conversation.list": {
+            "count": 13,
+            "total_ms": 2197.901837527752,
+            "max": 801.0201379656792,
+            "p50": 5.054470284992945,
+            "p99": 801.0201379656792
+          }
+        },
+        "failed_probes": []
+      },
+      {
+        "label": "handoff-query-embedded-B3",
+        "correctness": true,
+        "harness_errors": 0,
+        "query_samples": 11,
+        "query_errors": 2,
+        "query_max_ms": 1504.1240826249123,
+        "write_p99_ms": {
+          "submit_to_running": 668.809100985527,
+          "stream_scheduled": 1756.246030330658,
+          "settle": 3549.9474331736565
+        },
+        "report_path": "/path/to/your/project",
+        "probe_path": "/path/to/your/project",
+        "report_sha256": "96333eb9c985ea728e0abea30d1a400d523f0fd983b008447c4faf2098d1e06d",
+        "query_stages": {
+          "pool:conversation.list": {
+            "count": 18,
+            "total_ms": 5051.860593259335,
+            "max": 504.8611909151077,
+            "p50": 334.92980349556154,
+            "p99": 504.8611909151077
+          },
+          "embedded_wire:conversation.list": {
+            "count": 11,
+            "total_ms": 669.0430492162704,
+            "max": 303.36403101682663,
+            "p50": 10.834705943388395,
+            "p99": 303.36403101682663
+          },
+          "attempt:conversation.list": {
+            "count": 18,
+            "total_ms": 5721.41357511282,
+            "max": 640.7638639211655,
+            "p50": 445.79156845259257,
+            "p99": 640.7638639211655
+          },
+          "rpc:conversation.list": {
+            "count": 12,
+            "total_ms": 6045.435287058353,
+            "max": 1504.1095316410065,
+            "p50": 228.76156239024755,
+            "p99": 1504.1095316410065
+          }
+        },
+        "failed_probes": [
+          {
+            "active_conversations": 1000,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1500.204212963581,
+            "restart_affected": false
+          },
+          {
+            "active_conversations": 801,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1504.1240826249123,
+            "restart_affected": false
+          }
+        ]
+      },
+      {
+        "label": "handoff-query-application-B0",
+        "correctness": true,
+        "harness_errors": 0,
+        "query_samples": 11,
+        "query_errors": 3,
+        "query_max_ms": 1512.545645236969,
+        "write_p99_ms": {
+          "submit_to_running": 41.80477559566498,
+          "stream_scheduled": 1867.926999926567,
+          "settle": 5854.756847023964
+        },
+        "report_path": "/path/to/your/project",
+        "probe_path": "/path/to/your/project",
+        "report_sha256": "672c03a847c3f612127548f63155ad39e6659a16f8bec13ea7dfa4a8240487b9",
+        "query_stages": {
+          "pool:conversation.list": {
+            "count": 23,
+            "total_ms": 6243.9441084861755,
+            "max": 510.11546701192856,
+            "p50": 445.79156845259257,
+            "p99": 510.11546701192856
+          },
+          "wire:conversation.list": {
+            "count": 11,
+            "total_ms": 50.62280595302582,
+            "max": 15.51731675863266,
+            "p50": 1.4641000000000004,
+            "p99": 15.51731675863266
+          },
+          "attempt:conversation.list": {
+            "count": 23,
+            "total_ms": 6295.609816908836,
+            "max": 510.13437658548355,
+            "p50": 445.79156845259257,
+            "p99": 510.13437658548355
+          },
+          "rpc:conversation.list": {
+            "count": 14,
+            "total_ms": 6587.277390062809,
+            "max": 1512.5310644507408,
+            "p50": 14.420993610649957,
+            "p99": 1512.5310644507408
+          }
+        },
+        "failed_probes": [
+          {
+            "active_conversations": 1000,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1503.5690739750862,
+            "restart_affected": false
+          },
+          {
+            "active_conversations": 1000,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1511.879287660122,
+            "restart_affected": false
+          },
+          {
+            "active_conversations": 673,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1512.545645236969,
+            "restart_affected": false
+          }
+        ]
+      },
+      {
+        "label": "handoff-query-application-C1",
+        "correctness": true,
+        "harness_errors": 0,
+        "query_samples": 11,
+        "query_errors": 1,
+        "query_max_ms": 1500.1740381121635,
+        "write_p99_ms": {
+          "submit_to_running": 47.15150594711304,
+          "stream_scheduled": 1974.0058854222298,
+          "settle": 2502.4516955018044
+        },
+        "report_path": "/path/to/your/project",
+        "probe_path": "/path/to/your/project",
+        "report_sha256": "cc34009a804de0836f6ea668a452a1415f1a26d5261f1b61a71201af5aa8425f",
+        "query_stages": {
+          "pool:conversation.list": {
+            "count": 18,
+            "total_ms": 2619.9276968836784,
+            "max": 586.051881313324,
+            "p50": 1.0,
+            "p99": 586.051881313324
+          },
+          "wire:conversation.list": {
+            "count": 14,
+            "total_ms": 157.54855424165726,
+            "max": 93.42680126428604,
+            "p50": 1.6105100000000006,
+            "p99": 93.42680126428604
+          },
+          "attempt:conversation.list": {
+            "count": 18,
+            "total_ms": 2778.533101081848,
+            "max": 586.080975830555,
+            "p50": 11.918176537727234,
+            "p99": 586.080975830555
+          },
+          "rpc:conversation.list": {
+            "count": 15,
+            "total_ms": 2983.407974243164,
+            "max": 1500.159777700901,
+            "p50": 8.95430243255239,
+            "p99": 1500.159777700901
+          }
+        },
+        "failed_probes": [
+          {
+            "active_conversations": 1000,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1500.1740381121635,
+            "restart_affected": false
+          }
+        ]
+      },
+      {
+        "label": "handoff-query-application-C2",
+        "correctness": true,
+        "harness_errors": 0,
+        "query_samples": 12,
+        "query_errors": 1,
+        "query_max_ms": 1499.3683844804764,
+        "write_p99_ms": {
+          "submit_to_running": 91.33577346801758,
+          "stream_scheduled": 2163.378417491913,
+          "settle": 3441.5996000170708
+        },
+        "report_path": "/path/to/your/project",
+        "probe_path": "/path/to/your/project",
+        "report_sha256": "8158fdb721ec3ff310c309bc54eded0d2ec567fb012dc3833db33f0f82105ff7",
+        "query_stages": {
+          "pool:conversation.list": {
+            "count": 18,
+            "total_ms": 2734.3210205435753,
+            "max": 529.3184518814087,
+            "p50": 1.0,
+            "p99": 529.3184518814087
+          },
+          "wire:conversation.list": {
+            "count": 15,
+            "total_ms": 192.85956770181656,
+            "max": 82.7740952372551,
+            "p50": 5.55991731349224,
+            "p99": 82.7740952372551
+          },
+          "attempt:conversation.list": {
+            "count": 18,
+            "total_ms": 2928.295835852623,
+            "max": 529.3421000242233,
+            "p50": 23.22515441988787,
+            "p99": 529.3421000242233
+          },
+          "rpc:conversation.list": {
+            "count": 15,
+            "total_ms": 3083.787478506565,
+            "max": 1499.353602528572,
+            "p50": 21.113776745352606,
+            "p99": 1499.353602528572
+          }
+        },
+        "failed_probes": [
+          {
+            "active_conversations": 1000,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_timeout",
+            "elapsed_ms": 1499.3683844804764,
+            "restart_affected": false
+          }
+        ]
+      },
+      {
+        "label": "handoff-query-application-B3",
+        "correctness": true,
+        "harness_errors": 0,
+        "query_samples": 12,
+        "query_errors": 3,
+        "query_max_ms": 1502.843901515007,
+        "write_p99_ms": {
+          "submit_to_running": 270.03639936447144,
+          "stream_scheduled": 2178.8116693496704,
+          "settle": 5089.138500392437
+        },
+        "report_path": "/path/to/your/project",
+        "probe_path": "/path/to/your/project",
+        "report_sha256": "242378d3a8916c8ae0fe4501937d8108c6752d8e4369c7b209c194e056e957cb",
+        "query_stages": {
+          "pool:conversation.list": {
+            "count": 24,
+            "total_ms": 6324.321664869785,
+            "max": 502.24077701568604,
+            "p50": 171.87194770116267,
+            "p99": 502.24077701568604
+          },
+          "wire:conversation.list": {
+            "count": 12,
+            "total_ms": 96.62172198295593,
+            "max": 35.23032367229462,
+            "p50": 3.452271214393104,
+            "p99": 35.23032367229462
+          },
+          "attempt:conversation.list": {
+            "count": 24,
+            "total_ms": 6422.134675085545,
+            "max": 502.26008892059326,
+            "p50": 189.05914247127893,
+            "p99": 502.26008892059326
+          },
+          "rpc:conversation.list": {
+            "count": 15,
+            "total_ms": 6710.369423031807,
+            "max": 1502.830095589161,
+            "p50": 34.00394858615784,
+            "p99": 1502.830095589161
+          }
+        },
+        "failed_probes": [
+          {
+            "active_conversations": 1000,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1501.4111623167992,
+            "restart_affected": false
+          },
+          {
+            "active_conversations": 1000,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1502.4319663643837,
+            "restart_affected": false
+          },
+          {
+            "active_conversations": 675,
+            "ok": false,
+            "error_type": "StorageError",
+            "error_code": "database_busy",
+            "elapsed_ms": 1502.843901515007,
+            "restart_affected": false
+          }
+        ]
+      }
+    ],
+    "decision": "Consistent settlement improvement and fewer query refusals warrant default-off original macro validation. Application query errors remain1percandidatewindow. No runtime admission or overall goal completion."
+  },
+  "controlled_handoff": {
+    "before_release_of_paused_head": {
+      "capacity": 4,
+      "used": 3,
+      "waiting": 0,
+      "completed": 3
+    },
+    "follower_blocked_for_100ms": false,
+    "after": {
+      "capacity": 4,
+      "used": 0,
+      "waiting": 0,
+      "completed": 6
+    },
+    "errors": [],
+    "source_sha256": "aa542f7eee6e04e10b6a3c6f012273e15d00c16aea362fab1de2a9286f3d76f4",
+    "scope": "Actual private reservation-handoff candidate with controlled scheduling delay. FIFO grants allocated before caller wake. Synthetic sessions, no macro speed claim."
+  },
+  "memory": {
+    "python": "3.12.13",
+    "ticket_shallow_bytes": 72,
+    "grant_tuple_shallow_bytes": 56,
+    "event_shallow_bytes_unchanged": 48,
+    "scope": "Additional ticket and grant tuple shallow sizes only; excludes payload/session/event internals, existing deadline float and allocator/RSS."
+  },
+  "limitations": [
+    "Window-P99 medians are not pooled request P99 or confidence intervals.",
+    "All 16 original macro processes exit 1 because the original stream gate fails; correctness and no-errors are separate passing checks.",
+    "One embedded settlement pair regresses; all embedded stream pairs regress slightly; application query refusals remain.",
+    "This is a Python admission optimization, not proof of native engine dominance or direct embedded SQLite parity."
+  ],
+  "runtime_change_paths": [
+    "lib/storage/v2_client.py",
+    "tests/storage/test_storage_v2_pool_handoff.py",
+    "docs/STORAGE_NATIVE_SESSIONS.md"
+  ]
+}

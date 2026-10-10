@@ -1,0 +1,6 @@
+success	completed	completed	true		
+hard_failure	completed	failed	false	terminal_resource_invariant_failed	route=failed
+recoverable_failure	completed	completed	true		billing=deferred
+explicit_defer	completed	completed	true		upstream=deferred
+preserved_cause	completed	failed	false	provider_error	route=failed
+ordered_release	completed	completed	true		billing=released,route=released,admission=released

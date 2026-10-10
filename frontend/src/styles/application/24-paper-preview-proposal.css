@@ -1,0 +1,55 @@
+/* ── Track B: paper edit proposal review card ── */
+.paper-proposal-block .ptool-result-body { padding-top: var(--space-1); }
+.paper-proposal-summary {
+  margin: 0 0 var(--space-2); color: var(--text-secondary);
+  font-size: var(--font-size-sm); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.paper-proposal { display: flex; flex-direction: column; gap: var(--space-2); }
+.paper-proposal-loading, .paper-proposal-empty, .paper-proposal-error {
+  margin: 0; color: var(--text-secondary); font-size: var(--font-size-sm);
+}
+.paper-proposal-error { color: var(--error-text); }
+.paper-proposal-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.paper-proposal-title { font-size: var(--font-size-sm); font-weight: var(--weight-semibold, 600); }
+.paper-proposal-status {
+  padding: 0 var(--space-2); border-radius: var(--radius-xs, 6px);
+  border: 1px solid var(--border); background: var(--bg-secondary);
+  color: var(--text-secondary); font-size: var(--font-size-xs); line-height: 1.7;
+}
+.paper-proposal-status-applied { border-color: var(--success-border); background: var(--success-bg); color: var(--success-text); }
+.paper-proposal-status-partial { border-color: var(--warning-border); background: var(--warning-bg); color: var(--warning-text); }
+.paper-proposal-status-rejected, .paper-proposal-status-failed { border-color: var(--error-border); background: var(--error-bg); color: var(--error-text); }
+.paper-proposal-actions { display: inline-flex; align-items: center; gap: var(--space-1); margin-inline-start: auto; }
+.paper-proposal-button {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border); border-radius: var(--radius-xs, 6px);
+  background: var(--bg-secondary); color: var(--text-primary);
+  font-size: var(--font-size-xs); cursor: pointer;
+}
+.paper-proposal-button:hover:not(:disabled) { background: var(--bg-hover); }
+.paper-proposal-button:disabled { opacity: 0.6; cursor: default; }
+.paper-proposal-accept-all, .paper-proposal-accept { border-color: var(--success-border); color: var(--success-text); }
+.paper-proposal-reject-all, .paper-proposal-reject { border-color: var(--error-border); color: var(--error-text); }
+.paper-proposal-busy { opacity: 0.75; }
+.paper-proposal-hunks { display: flex; flex-direction: column; gap: 1px; }
+.paper-proposal-hunk { border: 1px solid var(--border); border-radius: var(--radius-sm, 8px); overflow: hidden; }
+.paper-proposal-hunk + .paper-proposal-hunk { margin-top: var(--space-1); }
+.paper-proposal-hunk-summary {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-secondary); cursor: pointer;
+  font-size: var(--font-size-xs); list-style: none;
+}
+.paper-proposal-hunk-summary::-webkit-details-marker { display: none; }
+.paper-proposal-hunk-idx { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.paper-proposal-hunk-path {
+  color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%;
+}
+.paper-proposal-hunk-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.paper-proposal-hunk-diff { max-height: 320px; overflow: auto; }
+.paper-proposal-hunk-error {
+  padding: var(--space-1) var(--space-2);
+  border-top: 1px solid var(--error-border); background: var(--error-bg);
+  color: var(--error-text); font-size: var(--font-size-xs); white-space: pre-wrap;
+}

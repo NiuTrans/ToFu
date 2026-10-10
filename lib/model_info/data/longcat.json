@@ -1,0 +1,13 @@
+{
+  "brand": "longcat",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "longcat",
+  "category": "official",
+  "name": "LongCat",
+  "base_url": "https://api.longcat.chat/openai/v1",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://longcat.chat/platform/docs/zh/", "checked_at": "2026-09-08"},
+  "offering_recipes": [
+    {"model_id": "LongCat-2.0", "capabilities": ["text"], "context_window": 1000000}
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "format": "tofu.conversation-search.v2",
+  "http": {
+    "path": "/api/v1/conversations/search",
+    "method": "GET",
+    "query": {
+      "q": "trimmed case-insensitive literal text; NUL forbidden",
+      "cursor": "optional opaque continuation bound to owner and normalized query"
+    },
+    "result": {
+      "items": "bounded array of id, matchField (title|id|content|thinking|originalContent|translatedContent), matchSnippet, matchRole (user|assistant|null), conversation (metadata only)",
+      "nextCursor": "string|null; may be present on an empty partial page",
+      "coverage": "ready|indexing|partial",
+      "coverageReasons": "bounded non-sensitive reason codes; no source ids or transcript text"
+    }
+  },
+  "storage": {
+    "operation": "conversation.search",
+    "pageFlag": "page",
+    "pageResult": "items [{id,snippet,role,match_field}], next_cursor, incomplete; projection health added at runtime boundary",
+    "legacyResult": "items array for callers without page=true",
+    "ownership": "required positive user_id, applied before candidates, joins, limits and metadata hydration",
+    "order": "phrase/title/id matches first, then all-whitespace-terms matches; updated_at_ms DESC,id DESC within each phase",
+    "tables": {
+      "headers": "storage_search_conversations: id,user_id,updated_at_ms,generation_token,title (new, default empty)",
+      "chunks": "storage_search_chunks: user_id,conversation_id,turn_id,chunk_index,ordinal,role,match_field,search_text,folded_text,generation_token; primary key(user_id,conversation_id,turn_id,chunk_index)",
+      "sqliteFts": "storage_search_chunks_fts: optional FTS5 trigram index on folded_text, external content storage_search_chunks, content_rowid=rowid; queries must still verify owner"
+    }
+  },
+  "limits": {
+    "queryCharacters": 512,
+    "queryTerms": 32,
+    "cursorBytes": 8192,
+    "pageResults": 50,
+    "maximumPageResults": 200,
+    "candidateScanPage": 256,
+    "chunkScanPage": 512,
+    "chunkScanBatch": 16,
+    "sqliteAcceleratorVmSteps": 500000,
+    "snippetRadius": 40,
+    "chunkCharacters": 4096,
+    "chunkOverlapCharacters": 512,
+    "sourcePageRows": 8,
+    "sourcePageBytes": 2000000,
+    "browserRetainedResults": 500,
+    "browserAutomaticPages": 4,
+    "browserRefreshMilliseconds": 30000,
+    "browserRetryMilliseconds": 1000
+  },
+  "indexing": {
+    "sources": [
+      "settled main-lane turns",
+      "frozen pre-turn conversation messages",
+      "retained compaction archive messages",
+      "conversation titles"
+    ],
+    "textFields": [
+      "originalContent",
+      "content",
+      "translatedContent",
+      "thinking"
+    ],
+    "roles": [
+      "user",
+      "assistant"
+    ],
+    "bounds": "independent background maintenance; bounded source pages and total projection disk budget; oversized or unsupported sources remain explicitly partial, never silently complete",
+    "largeDocuments": "extract searchable fields without hydrating tool payloads where possible; bounded archives may be indexed message-by-message; never unbounded foreground transcript reads",
+    "lifecycle": "dirty markers remain transactional and exact-token acknowledged; disposable format upgrade restarts background backfill; foreground authority writes do not extract text",
+    "query": "SQLite trigram fast path has a VM-step ceiling; if exhausted resume portable scan, bounded by headers and chunks with intra-conversation cursors, preserving phrase and cross-turn word matches; never silently truncate or repeat an unfinishable fast path"
+  },
+  "browser": {
+    "authority": "valid server hits render independently of preloaded local catalog; metadata is batched by the server, no per-hit transcript requests",
+    "requests": "one in-flight request, cancellation and sequence fencing on all outcomes; debounced input; no per-render network request",
+    "failures": "failed search is distinct from successful zero hits; preserve results with visible retry; do not silently substitute local-only history",
+    "pagination": "explicit load more, including empty pages with continuation; bound retained rows and automatic continuation",
+    "refresh": "reconcile local metadata without requery floods; bounded refresh on relevant invalidation and explicit retry; teardown aborts work"
+  },
+  "nativeProjection": {
+    "formatVersion": 2,
+    "headerScanBatch": 16,
+    "invalidationTokenBytes": 16,
+    "legacyInvalidationTokenBytes": 8,
+    "sourceBinding": "explicit-tenant-owner-and-source-authority-uuid",
+    "upgrade": "retire-only-owner-projection-ranges;persist-pending-until-source-backfill-is-durable",
+    "publication": "invisible-generation;atomic-header-and-coverage-counter-swap",
+    "sourceRead": "pinned-turn-and-archive-pages;oversized-archives-remain-partial",
+    "budgetAccounting": "chunks-and-reserved-active-build-headers-and-titles",
+    "emptyGeneration": "exact-generation-bytes-equal-header-reservation;skip-chunk-range-without-changing-format",
+    "continuation": "projection-source-owner-query-bound;keys-and-word-mask;restart-pending-on-generation-change",
+    "invalidation": "fresh-random-token-per-mutation;exact-byte-acknowledgement-including-delete-recreate-cycles"
+  }
+}

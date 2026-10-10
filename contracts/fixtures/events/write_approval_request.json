@@ -1,0 +1,20 @@
+{
+  "approvalId": "s",
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "meta": {},
+  "requestId": "s",
+  "roundNum": 1,
+  "seq": 1,
+  "taskId": "s",
+  "toolCallId": "s",
+  "turnRole": "s",
+  "type": "write_approval_request",
+  "vuMsgId": "s"
+}

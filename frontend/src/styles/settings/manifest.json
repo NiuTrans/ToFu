@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "responsibility": "Ordered authoring sections for the generated settings stylesheet.",
+  "output": "static/settings.css",
+  "sections": [
+    {
+      "path": "01-core-panels.css"
+    },
+    {
+      "path": "02-mcp-apps.css"
+    },
+    {
+      "path": "03-model-visibility.css"
+    },
+    {
+      "path": "04-search-network-advanced.css"
+    },
+    {
+      "path": "05-remote-devices.css"
+    },
+    {
+      "path": "06-model-routing-v2.css"
+    },
+    {
+      "path": "07-access-matrix.css"
+    },
+    {
+      "path": "08-local-deploy.css"
+    },
+    {
+      "path": "09-dropdown.css"
+    },
+    {
+      "path": "10-setting-jump.css"
+    },
+    {
+      "path": "11-database.css"
+    },
+    {
+      "path": "12-codex-shared-login.css"
+    }
+  ],
+  "sourceEntry": "settings.generated.css",
+  "featureEntry": "frontend/src/features/settings.ts"
+}

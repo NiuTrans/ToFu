@@ -1,0 +1,70 @@
+{
+  "format": "tofu.system-performance-application-gates/v1",
+  "targeted_application_node_ids_passed": 100,
+  "single_run_full_suite": false,
+  "stages": [
+    {
+      "scope": "SQLite storage application, Headless server, agent API",
+      "passed": 50,
+      "initial_native_setup_errors": 50,
+      "reason": "Frozen benchmark CLI source identity did not match current isolated application source."
+    },
+    {
+      "scope": "Native daemon storage application",
+      "passed": 25,
+      "embedded_setup_errors": 25,
+      "reason": "Direct Cargo build lacked paired-library deployment receipt."
+    },
+    {
+      "scope": "Native embedded storage application",
+      "passed": 25,
+      "errors": 0,
+      "preparation": "Independently verified compiled CLI and library source identities; standard deployment receipt writer, then standard CLI/library admission checks."
+    },
+    {
+      "scope": "Performance comparison and evidence discovery rules",
+      "passed": 30,
+      "errors": 0
+    }
+  ],
+  "application_sources": {
+    "tests/storage/test_storage_application_contract.py": "aef1fab2c4bce4f19e3669a2a7ebd347508dd6bb7f518808679553c5ce6049a1",
+    "tests/server/test_headless_agent_server.py": "47d641d50e4d69b4b3da62ed8f278503cfd234f7a1ea1676ba10ad28dfa14098",
+    "tests/api/test_api_v1_agent_run.py": "197dafcbe8a22b76a12a252617e0711cb97273cbebba70ff3dc949ea7401a869"
+  },
+  "engine": {
+    "compiled_identity": {
+      "format": "tofu-db-build.v1",
+      "source_sha256": "60313b41783e5a727e84e966212b4afbfcec3cb9f86393efcbec8a8fb04d582d",
+      "version": "0.2.0"
+    },
+    "expected_source_sha256": "60313b41783e5a727e84e966212b4afbfcec3cb9f86393efcbec8a8fb04d582d",
+    "cli_sha256": "fab411a2a32940cd00e1903d515afeb620a81eddc8f4cdd2cdca8145e8f2c47b",
+    "library_sha256": "77340cd225861970f63ff446f3229f1f6d8ab709c59fe84fe94ab26892036ffe",
+    "receipt_sha256": "05589801d80361853a8725ffb524dedad28ffc357520f93fe80ade7cdf5a7cac"
+  },
+  "artifacts": [
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/system-final-api-gates.log",
+      "sha256": "eb1cf98e8e14b880fdd3fde87b5ee77e1fa4363e610b2150e1fc6f91df203149"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/system-final-native-api-gates.log",
+      "sha256": "6c271ae1326690119bb7c68da4bcb32943541b28901317784319a01aa65fc6f5"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/system-final-embedded-api-gates.log",
+      "sha256": "002b944ffd80a823dcdcd824e147f9168620c1670c5d157b43a1bca5d8af85d7"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/system-final-performance-gates.log",
+      "sha256": "208b6ec305d5f1d6bb11b3d89528f25b6941412650ade85cb7f75cbe18323c85"
+    }
+  ],
+  "limits": [
+    "Only the three named application test modules and two performance rule modules were selected.",
+    "Each native/SQLite authority was disposable; no live user storage or backend configuration changed.",
+    "Tests ran against isolated integrated sources; concurrent shared-checkout work was not validated.",
+    "Passing functional gates does not waive performance regressions or prove live inference/long-run retention."
+  ]
+}

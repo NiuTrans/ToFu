@@ -1,0 +1,347 @@
+{
+  "format": "tofu.usage-signature-encoder-admission/v1",
+  "scope": "Public count_tokens usage-cache backend on exact synthetic prompt fixtures; no provider request.",
+  "decision": "Admit request-local canonical JSONEncoder reuse inside complete measured-prefix digest.",
+  "problem": "Each historical message rebuilt identical JSONEncoder configuration during usage validation.",
+  "alternatives_considered": [
+    "Identity-only or sampled checks miss historical mutations.",
+    "A persistent prompt cache adds retained state and invalidation complexity.",
+    "An alternative JSON library changes canonical bytes or unsupported numeric/error semantics."
+  ],
+  "normal_full_comparison": {
+    "complete_coverage_and_source_receipts_verified": true,
+    "observations": 2400,
+    "independent_processes": 48,
+    "pairs": [
+      {
+        "case": "short",
+        "pair": 0,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.8578222662770213,
+          "wall_samples_ms_p95": 0.8426061622671494,
+          "wall_samples_ms_p99": 0.8152398070951125,
+          "cpu_samples_ms_p50": 0.8584433645166751,
+          "cpu_samples_ms_p95": 0.8788096058402317,
+          "cpu_samples_ms_p99": 0.8173726335354959,
+          "completion_wall_ms": 0.8605920757416001,
+          "completion_cpu_ms": 0.8613005859368791,
+          "peak_rss_bytes": 1.0,
+          "post_gc_rss_bytes": 1.0069613259668508,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "short",
+        "pair": 1,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.8524447760126314,
+          "wall_samples_ms_p95": 0.8429716616941979,
+          "wall_samples_ms_p99": 0.9085488980956029,
+          "cpu_samples_ms_p50": 0.8525496401408811,
+          "cpu_samples_ms_p95": 0.8599688732711451,
+          "cpu_samples_ms_p99": 0.8720562633707787,
+          "completion_wall_ms": 0.8567494558705433,
+          "completion_cpu_ms": 0.8557876839777877,
+          "peak_rss_bytes": 1.0,
+          "post_gc_rss_bytes": 1.0,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "short",
+        "pair": 2,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.8555613340404827,
+          "wall_samples_ms_p95": 0.8466840466634158,
+          "wall_samples_ms_p99": 0.6918491198658843,
+          "cpu_samples_ms_p50": 0.855634998199681,
+          "cpu_samples_ms_p95": 0.8389278295757415,
+          "cpu_samples_ms_p99": 0.7157261129770149,
+          "completion_wall_ms": 0.8538841083336997,
+          "completion_cpu_ms": 0.8529067241463726,
+          "peak_rss_bytes": 1.00109409190372,
+          "post_gc_rss_bytes": 1.0040601338746846,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "history",
+        "pair": 0,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.8133433138724732,
+          "wall_samples_ms_p95": 0.8110804490133788,
+          "wall_samples_ms_p99": 0.8091734307763566,
+          "cpu_samples_ms_p50": 0.813856762207099,
+          "cpu_samples_ms_p95": 0.8118022592251062,
+          "cpu_samples_ms_p99": 0.80958346918603,
+          "completion_wall_ms": 0.812904166241105,
+          "completion_cpu_ms": 0.8130374002776415,
+          "peak_rss_bytes": 1.0032317138855973,
+          "post_gc_rss_bytes": 1.0032317138855973,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "history",
+        "pair": 1,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.8144315900830681,
+          "wall_samples_ms_p95": 0.8131801644301644,
+          "wall_samples_ms_p99": 0.8150475451257343,
+          "cpu_samples_ms_p50": 0.8149251854449905,
+          "cpu_samples_ms_p95": 0.8143963828484451,
+          "cpu_samples_ms_p99": 0.8168813106098268,
+          "completion_wall_ms": 0.8136026445330868,
+          "completion_cpu_ms": 0.8141951291388629,
+          "peak_rss_bytes": 1.0001072731173568,
+          "post_gc_rss_bytes": 1.0001072731173568,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "history",
+        "pair": 2,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.8254916502655734,
+          "wall_samples_ms_p95": 0.8956183560879756,
+          "wall_samples_ms_p99": 0.8954755047035198,
+          "cpu_samples_ms_p50": 0.8256373359756067,
+          "cpu_samples_ms_p95": 0.89574526606822,
+          "cpu_samples_ms_p99": 0.8966610772010537,
+          "completion_wall_ms": 0.8345384298297962,
+          "completion_cpu_ms": 0.8344640005296298,
+          "peak_rss_bytes": 1.002377093462993,
+          "post_gc_rss_bytes": 1.002377093462993,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "wide",
+        "pair": 0,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.96618991913481,
+          "wall_samples_ms_p95": 1.0611798157525816,
+          "wall_samples_ms_p99": 1.0814568449509803,
+          "cpu_samples_ms_p50": 0.966395985753756,
+          "cpu_samples_ms_p95": 1.0614612810330393,
+          "cpu_samples_ms_p99": 1.08256450846921,
+          "completion_wall_ms": 0.978405330317959,
+          "completion_cpu_ms": 0.9785333725749605,
+          "peak_rss_bytes": 1.0033866017567996,
+          "post_gc_rss_bytes": 1.0033866017567996,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "wide",
+        "pair": 1,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.9612789455200295,
+          "wall_samples_ms_p95": 0.9737462880707651,
+          "wall_samples_ms_p99": 1.0063543567248983,
+          "cpu_samples_ms_p50": 0.9613105318814519,
+          "cpu_samples_ms_p95": 0.9737341062842554,
+          "cpu_samples_ms_p99": 1.0072009387559053,
+          "completion_wall_ms": 0.9635585534944174,
+          "completion_cpu_ms": 0.9631198860018456,
+          "peak_rss_bytes": 1.0019043588658485,
+          "post_gc_rss_bytes": 1.0019043588658485,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "wide",
+        "pair": 2,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 1.0049395281594904,
+          "wall_samples_ms_p95": 1.0037702974367508,
+          "wall_samples_ms_p99": 1.0293603766278046,
+          "cpu_samples_ms_p50": 1.0040294489908503,
+          "cpu_samples_ms_p95": 1.0033386703876088,
+          "cpu_samples_ms_p99": 1.0305692816286227,
+          "completion_wall_ms": 1.004667637177298,
+          "completion_cpu_ms": 1.0042643982581487,
+          "peak_rss_bytes": 0.9929621848739496,
+          "post_gc_rss_bytes": 0.9929621848739496,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "mixed",
+        "pair": 0,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.8768773055266248,
+          "wall_samples_ms_p95": 0.89384818268806,
+          "wall_samples_ms_p99": 0.9184420107519151,
+          "cpu_samples_ms_p50": 0.8755989872843853,
+          "cpu_samples_ms_p95": 0.8814845524351996,
+          "cpu_samples_ms_p99": 0.9145018951951466,
+          "completion_wall_ms": 0.8781151496167892,
+          "completion_cpu_ms": 0.8773181022102768,
+          "peak_rss_bytes": 1.0,
+          "post_gc_rss_bytes": 1.0059106830122593,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "mixed",
+        "pair": 1,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.8770283286001879,
+          "wall_samples_ms_p95": 0.8761051946773081,
+          "wall_samples_ms_p99": 0.8894837173615561,
+          "cpu_samples_ms_p50": 0.8763051148799904,
+          "cpu_samples_ms_p95": 0.875973733921022,
+          "cpu_samples_ms_p99": 0.8812422356306612,
+          "completion_wall_ms": 0.8769872256296466,
+          "completion_cpu_ms": 0.8770399681606568,
+          "peak_rss_bytes": 1.0,
+          "post_gc_rss_bytes": 1.002296587926509,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "mixed",
+        "pair": 2,
+        "samples_per_arm": 100,
+        "ratios": {
+          "wall_samples_ms_p50": 0.8796504377835583,
+          "wall_samples_ms_p95": 0.8722980168901423,
+          "wall_samples_ms_p99": 0.8941089474185574,
+          "cpu_samples_ms_p50": 0.879265886166336,
+          "cpu_samples_ms_p95": 0.8764572050512072,
+          "cpu_samples_ms_p99": 0.8882466561133945,
+          "completion_wall_ms": 0.8788037257169903,
+          "completion_cpu_ms": 0.8795260165416042,
+          "peak_rss_bytes": 1.0,
+          "post_gc_rss_bytes": 0.9926959555216396,
+          "retained_bytes": 1
+        }
+      }
+    ],
+    "guard_issues": [
+      {
+        "case": "wide",
+        "pair": 0,
+        "metric": "wall_samples_ms_p95",
+        "ratio": 1.0611798157525816
+      },
+      {
+        "case": "wide",
+        "pair": 0,
+        "metric": "wall_samples_ms_p99",
+        "ratio": 1.0814568449509803
+      },
+      {
+        "case": "wide",
+        "pair": 0,
+        "metric": "cpu_samples_ms_p95",
+        "ratio": 1.0614612810330393
+      },
+      {
+        "case": "wide",
+        "pair": 0,
+        "metric": "cpu_samples_ms_p99",
+        "ratio": 1.08256450846921
+      }
+    ],
+    "whole_system_admission": false,
+    "production_promoted": false
+  },
+  "wide_higher_resolution": {
+    "coverage": "wide_only",
+    "complete_coverage_and_source_receipts_verified": true,
+    "observations": 6000,
+    "independent_processes": 12,
+    "pairs": [
+      {
+        "case": "wide",
+        "pair": 0,
+        "samples_per_arm": 1000,
+        "ratios": {
+          "wall_samples_ms_p50": 0.9827468709128502,
+          "wall_samples_ms_p95": 0.9907727524750528,
+          "wall_samples_ms_p99": 1.0240350273309446,
+          "cpu_samples_ms_p50": 0.9829113181435339,
+          "cpu_samples_ms_p95": 0.9905349969032786,
+          "cpu_samples_ms_p99": 1.0231775232457143,
+          "completion_wall_ms": 0.9856422006687501,
+          "completion_cpu_ms": 0.9857444050668325,
+          "peak_rss_bytes": 0.9963072378138847,
+          "post_gc_rss_bytes": 0.9963072378138847,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "wide",
+        "pair": 1,
+        "samples_per_arm": 1000,
+        "ratios": {
+          "wall_samples_ms_p50": 0.98368544699562,
+          "wall_samples_ms_p95": 0.9943212109194133,
+          "wall_samples_ms_p99": 1.0104620281853147,
+          "cpu_samples_ms_p50": 0.9828796541966771,
+          "cpu_samples_ms_p95": 0.9934156251022618,
+          "cpu_samples_ms_p99": 1.0100368988865664,
+          "completion_wall_ms": 0.9839583243286272,
+          "completion_cpu_ms": 0.9832976929641614,
+          "peak_rss_bytes": 0.9995797877928354,
+          "post_gc_rss_bytes": 0.9995797877928354,
+          "retained_bytes": 1
+        }
+      },
+      {
+        "case": "wide",
+        "pair": 2,
+        "samples_per_arm": 1000,
+        "ratios": {
+          "wall_samples_ms_p50": 0.9626709843712562,
+          "wall_samples_ms_p95": 0.9931874600003877,
+          "wall_samples_ms_p99": 1.0287746965787732,
+          "cpu_samples_ms_p50": 0.9614741806413406,
+          "cpu_samples_ms_p95": 0.9916394000483911,
+          "cpu_samples_ms_p99": 1.0283160933651108,
+          "completion_wall_ms": 0.9665047579814252,
+          "completion_cpu_ms": 0.9655977916916444,
+          "peak_rss_bytes": 0.9944339424490654,
+          "post_gc_rss_bytes": 0.9944339424490654,
+          "retained_bytes": 1
+        }
+      }
+    ],
+    "guard_issues": [],
+    "whole_system_admission": false,
+    "production_promoted": false
+  },
+  "admission_policy": "Same 5 percent guards, three complete pairs; 1000-operation wide cohorts resolve the tail quantile concern from smaller cohorts. No uniform short-cohort tail improvement claim.",
+  "functional_tests": {
+    "focused_passed": 22,
+    "neighbor_passed": 78,
+    "neighbor_skipped": 3,
+    "isolated_host_path_failures": 5,
+    "unmodified_root_path_controls_passed": 3,
+    "unmodified_root_credential_assertion_failures": 2
+  },
+  "earlier_failed_cohort_preserved": true,
+  "source_sha256": "a2ffe6771602e3bb6409ba4d79f29062f0797c2966569ca6daec1126d407f514",
+  "archive": "/tmp/tofu-system-perf-snapshot/usage-signature-admission-final-archive",
+  "manifest_sha256": "ce9cd647574c7daae7594274d161ec2b159049111767cae6633ee40e6d388df8",
+  "whole_system_admission": false,
+  "limits": [
+    "Linux synthetic usage-cache fixtures, not inference or full context pipeline.",
+    "Wide P99 increased 1 to 3 percent in higher-resolution cohorts; no claim of universal latency improvement.",
+    "No new cache, pool, thread or retained encoder; memory guards passed.",
+    "Two unchanged rootless trajectory credential-sanitization assertions also fail on root without candidate."
+  ]
+}

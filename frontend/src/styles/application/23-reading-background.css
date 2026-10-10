@@ -1,0 +1,59 @@
+/* Background command completion evidence.
+ * Owner: ConversationSurface; tokens: 00-design-tokens.css.
+ * Delivery: ordered application manifest; neighboring content owners are independent.
+ */
+
+/* Background-command completion turns: machine-authored evidence submitted
+   as turn input, not user prose — caption-sized label, quiet disclosure,
+   mono identifiers. */
+
+.conversation-surface .bgcmd-label {
+  margin: 0 0 var(--space-1);
+  font-size: var(--conversation-font-size-meta);
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+
+.conversation-surface .bgcmd-details {
+  border: 1px solid var(--turn-rule);
+  border-radius: 8px;
+  background: var(--turn-process-surface);
+  padding: var(--space-1) var(--space-2);
+}
+
+.conversation-surface .bgcmd-summary {
+  cursor: pointer;
+  font-size: var(--conversation-font-size-meta);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.conversation-surface .bgcmd-summary::marker {
+  color: var(--text-tertiary);
+}
+
+.conversation-surface .bgcmd-id {
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-caption);
+  color: var(--text-tertiary);
+}
+
+.conversation-surface .bgcmd-command {
+  margin: var(--space-1) 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-caption);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.conversation-surface .bgcmd-details .sw-card-raw-pre {
+  margin-top: var(--space-1);
+}
+
+.conversation-surface .bgcmd-note {
+  margin: var(--space-1) 0 0;
+  font-size: var(--conversation-font-size-caption);
+  color: var(--text-tertiary);
+}

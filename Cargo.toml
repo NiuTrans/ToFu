@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["packages/tofu-runtime", "packages/tofu-runtime/vendor/rayon-core"]
+# Existing engines/prototypes retain their independent lock/build authorities.
+exclude = ["packages/tofu-db", "benchmarks/native_event", "benchmarks/context_compiler/native_json"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

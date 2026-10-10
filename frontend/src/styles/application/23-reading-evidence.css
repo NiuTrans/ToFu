@@ -1,0 +1,254 @@
+/* File changes, live status and alternate-language evidence.
+ * Owner: ConversationSurface; tokens: 00-design-tokens.css.
+ * Delivery: ordered application manifest; neighboring content owners are independent.
+ */
+
+/* File-changes summary joins the process family: one calm card riding the
+ * same spine marker as tool blocks, with undo/redo in the title row instead
+ * of an orphaned footer. The [open] clamp lift also repairs the file list,
+ * which stayed invisible because only the retired .fc-expanded class raised
+ * max-height while the renderer drives native <details open>. The clamp must
+ * carry its own overflow-y:auto — the collapsed base rule keeps overflow:hidden
+ * for the max-height animation, so without it long lists clip at 400px with no
+ * scrollbar. */
+
+.conversation-surface .conversation-block--file-changes {
+  border: 1px solid var(--turn-rule);
+  border-radius: 8px;
+  background: var(--turn-process-surface);
+  box-shadow: none;
+}
+
+.conversation-surface .conversation-file-changes.file-changes-bar,
+.conversation-surface .conversation-file-changes.file-changes-bar:hover {
+  margin-top: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.conversation-surface .conversation-file-changes .fc-summary {
+  min-width: 0;
+  padding: var(--space-2) var(--space-2);
+  border-radius: 7px;
+}
+
+.conversation-surface .conversation-file-changes .fc-summary:hover {
+  background: var(--turn-process-hover);
+}
+
+.conversation-surface .conversation-file-changes[open] .fc-details {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  border-top: 1px solid color-mix(in srgb, var(--turn-rule) 70%, transparent);
+}
+
+.conversation-surface .conversation-file-changes .fc-summary > .fc-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: var(--space-2);
+}
+
+.conversation-surface .conversation-file-changes .fc-summary > .fc-actions:empty {
+  display: none;
+}
+
+.conversation-surface .fc-undo-btn,
+.conversation-surface .fc-redo-btn {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--turn-rule);
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-caption);
+  transition: background var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+
+.conversation-surface .fc-undo-btn:hover,
+.conversation-surface .fc-redo-btn:hover {
+  border-color: var(--turn-rule);
+  background: var(--turn-process-hover);
+  box-shadow: none;
+  color: var(--text-primary);
+  transform: none;
+}
+
+.conversation-surface .msg-video-play svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* Live state is one quiet status line; character counts are implementation noise. */
+
+.conversation-surface .stream-status,
+.conversation-surface .stream-phase {
+  min-height: 28px;
+  margin: 0;
+  padding: var(--space-1) var(--space-1);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-medium);
+}
+
+.conversation-surface .stream-phase-counter {
+  display: none;
+}
+
+/* Error remains unmistakable, but it no longer owns the whole reading column. */
+
+.conversation-surface .error-block {
+  padding: var(--space-2) var(--space-3);
+  border-width: 0 0 0 3px;
+  border-radius: 4px 7px 7px 4px;
+  box-shadow: none;
+}
+
+.conversation-surface .message .error-block {
+  margin: var(--space-1) 0 var(--space-2);
+}
+
+.conversation-surface .error-block-title {
+  margin-bottom: var(--space-1);
+  font-size: var(--conversation-font-size-caption);
+  text-transform: none;
+  letter-spacing: .01em;
+}
+
+.conversation-surface .error-block-message {
+  font-size: var(--conversation-font-size-meta);
+  line-height: 1.5;
+}
+
+/* Provenance and alternate-language content are tertiary disclosures. */
+
+.conversation-surface .turn-prov {
+  margin: 0 0 var(--space-1);
+  padding: var(--space-1) var(--space-1);
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+}
+
+.conversation-surface .bilingual-block {
+  margin: var(--space-3) 0 0;
+  border: 0;
+  border-top: 1px solid var(--turn-rule);
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+[data-theme="tofu"] .conversation-surface :is(.bilingual-original, .bilingual-translated) {
+  border-color: var(--turn-rule);
+  background: transparent;
+}
+
+.conversation-surface .bilingual-header {
+  min-height: 34px;
+  padding: var(--space-1) var(--space-1);
+  background: transparent;
+}
+
+.conversation-surface .bilingual-header:hover {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.conversation-surface .bilingual-label {
+  font-size: var(--conversation-font-size-caption);
+  font-weight: var(--weight-medium);
+}
+
+.conversation-surface .bilingual-body .md-content {
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border-left: 1px solid var(--turn-rule);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-content);
+  opacity: .9;
+}
+
+/* Acquisition provenance belongs to the context disclosure, not turn chrome. */
+.sw-note-provenance-item {
+  min-width: 0;
+  margin-block: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: var(--sans-body, var(--md-sans));
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+.sw-note-provenance-item .tp-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-secondary);
+}
+.sw-note-provenance-item .tp-detail-row {
+  display: flex;
+  min-width: 0;
+  margin-top: var(--space-2);
+}
+.sw-note-provenance-item .mp-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--space-1);
+  flex: 1;
+}
+.sw-note-provenance-item .mp-headline,
+.sw-note-provenance-item .mp-mem-name {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+.sw-note-provenance-item :is(.mp-sub, .mp-mem-scope) {
+  color: var(--text-tertiary);
+}
+.sw-note-provenance-item :is(.mp-mem-list, .rc-list) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0;
+  margin-block: var(--space-2) 0;
+  list-style: none;
+}
+.sw-note-provenance-item .mp-mem-list li {
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.sw-note-provenance-item .mp-mem-desc {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  margin-top: var(--space-1);
+}
+.sw-note-provenance-item :is(.rc-conv-link, .pl-seg-undo) {
+  color: var(--accent);
+}
+.sw-note-provenance-item :is(.tp-failed, .mp-failed) {
+  color: var(--error-text);
+}
+.sw-note-provenance-item code {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* A wrapping reason/badge must not shrink a header's flex:1 label to zero. */
+.sw-note-group .sw-note-group-item-head > .ptool-text {
+  flex: 1 0 12ch;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+.sw-note-group .sw-note-group-item-head > :is(.ptool-icon, .sw-note-badge) {
+  flex-shrink: 0;
+}

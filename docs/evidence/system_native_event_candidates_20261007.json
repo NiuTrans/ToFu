@@ -1,0 +1,1175 @@
+{
+  "format": "tofu.native-event-candidate-experiments/v1",
+  "whole_system_verdict": "incomplete",
+  "production_promotion": false,
+  "experiments": [
+    {
+      "label": "stable_abi",
+      "artifact_sha256": "785aa66d128e8c28b4374f42491cf2242982945ba40ecd27a5c566e8e120ab41",
+      "scope": "buffer append/eviction and detached snapshot mechanisms; no task serialization/durability",
+      "cases": [
+        {
+          "count": 64,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.14529288372142052,
+              "p99_ms": 0.18052437381644965,
+              "cpu_ms_per_operation": 0.145729965870764,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.14611158897936138,
+              "p99_ms": 0.1755343381040963,
+              "cpu_ms_per_operation": 0.14594256950887807,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.1456084779194407,
+              "p99_ms": 0.18042290330244712,
+              "cpu_ms_per_operation": 0.14577285248626046,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.3302685559661322,
+              "p99_ms": 1.275213753792406,
+              "cpu_ms_per_operation": 1.321719609422348,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.32170699312814,
+              "p99_ms": 1.200254118074148,
+              "cpu_ms_per_operation": 1.3106695291997128,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.3370441236157014,
+              "p99_ms": 1.4700076292199122,
+              "cpu_ms_per_operation": 1.3357907509559581,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 3.667732673830235,
+              "p99_ms": 3.241910133136095,
+              "cpu_ms_per_operation": 3.5717133205051224,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 3.4317284128585843,
+              "p99_ms": 1.8828088780713952,
+              "cpu_ms_per_operation": 3.257760284199515,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 3.2686431482947715,
+              "p99_ms": 1.3277708260682268,
+              "cpu_ms_per_operation": 3.111380119947228,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.002418937218888154,
+              "p99_ms": 0.0031340404592060493,
+              "cpu_ms_per_operation": 0.0024494910327625624,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.002457917872136863,
+              "p99_ms": 0.0017697110217172166,
+              "cpu_ms_per_operation": 0.002235923848856799,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.002415693015978686,
+              "p99_ms": 0.001647450167024543,
+              "cpu_ms_per_operation": 0.002247517842611241,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.3140645681072682,
+              "p99_ms": 1.1848122416673996,
+              "cpu_ms_per_operation": 1.313893694664171,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.3053060521709183,
+              "p99_ms": 1.2708730807667847,
+              "cpu_ms_per_operation": 1.2983521170368784,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.3064326479107518,
+              "p99_ms": 1.275774647887324,
+              "cpu_ms_per_operation": 1.3041428373425674,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 3.1437068470011202,
+              "p99_ms": 3.471850219326141,
+              "cpu_ms_per_operation": 3.11621644281522,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 3.1843238397148785,
+              "p99_ms": 3.63660727145842,
+              "cpu_ms_per_operation": 3.179334856540471,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 3.1799231097037364,
+              "p99_ms": 3.6123844604764312,
+              "cpu_ms_per_operation": 3.1627097664252743,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.00016658688069856625,
+              "p99_ms": 0.000250921032251648,
+              "cpu_ms_per_operation": 0.0001715157362226966,
+              "peak_rss_bytes": 1.0078740157480315
+            },
+            {
+              "p50_ms": 0.0001711503522824368,
+              "p99_ms": 0.0002120054187426155,
+              "cpu_ms_per_operation": 0.0001742097709185751,
+              "peak_rss_bytes": 1.0093244194229416
+            },
+            {
+              "p50_ms": 0.00016751917885532536,
+              "p99_ms": 0.0002363102470041966,
+              "cpu_ms_per_operation": 0.00017171779404229223,
+              "peak_rss_bytes": 0.9897033158813263
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.330585870189546,
+              "p99_ms": 1.259260863914042,
+              "cpu_ms_per_operation": 1.3331314279149313,
+              "peak_rss_bytes": 0.999295154185022
+            },
+            {
+              "p50_ms": 1.3044039592597907,
+              "p99_ms": 1.2173072388587596,
+              "cpu_ms_per_operation": 1.3033326954407338,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.2919413079612543,
+              "p99_ms": 1.2698343504795118,
+              "cpu_ms_per_operation": 1.2903669394418646,
+              "peak_rss_bytes": 0.9895306229279358
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 2.4269197672377634,
+              "p99_ms": 2.6224927182690334,
+              "cpu_ms_per_operation": 2.5107232810165456,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 2.346829696498141,
+              "p99_ms": 2.573395935151843,
+              "cpu_ms_per_operation": 2.4296364604533967,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 2.409572003296772,
+              "p99_ms": 2.6460841525657015,
+              "cpu_ms_per_operation": 2.4730066969968685,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        }
+      ],
+      "source_identity": {
+        "src/lib.rs": "4a73c555c6a769e76097fc9c7873605b59cdfba94e67285dab424fcc2f76e89c",
+        "Cargo.toml": "04856b7747bf3f6ef6b2e2ec2b2f535c659caa02cea71b1bfbbbc095cc272ec2",
+        "Cargo.lock": "1fc55508f8877e363aa941b7321465a57085c9591af42c0225ecac6110d68454",
+        "check.py": "1a594b9a068762e771b8ef1cdd82b8805c3e9ce0274e42d66f02efb8b8a90eb1",
+        "measure.py": "0018d3521c0e4b67ccc6dc007e21b225d82e092509debaea014e38818f5a4506"
+      },
+      "verdict": "not admitted"
+    },
+    {
+      "label": "cpython_api",
+      "artifact_sha256": "99e2c90dda2e5a13ce28918866f85abfc3aeaafa668b98a32da1e3beece50ed5",
+      "scope": "buffer append/eviction and detached snapshot mechanisms; no task serialization/durability",
+      "cases": [
+        {
+          "count": 64,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.14195253184747242,
+              "p99_ms": 0.18720915668686713,
+              "cpu_ms_per_operation": 0.14284672009986568,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.1433753791085724,
+              "p99_ms": 0.1648146493083485,
+              "cpu_ms_per_operation": 0.14453563346910522,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.14700844667602223,
+              "p99_ms": 0.14577515822020387,
+              "cpu_ms_per_operation": 0.14693141547749836,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.0014335030132817,
+              "p99_ms": 1.029714951595554,
+              "cpu_ms_per_operation": 0.9985162957118184,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.015044814340589,
+              "p99_ms": 1.0097623283609325,
+              "cpu_ms_per_operation": 1.0138274438026562,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9977291254221498,
+              "p99_ms": 0.9596466843025602,
+              "cpu_ms_per_operation": 0.9972245244217711,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 1.1490456968452438,
+              "p99_ms": 1.1226564209809595,
+              "cpu_ms_per_operation": 1.1423794369128024,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.1655742172372743,
+              "p99_ms": 1.2113757710217716,
+              "cpu_ms_per_operation": 1.146864430568342,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.1888137372088279,
+              "p99_ms": 0.7541383292698576,
+              "cpu_ms_per_operation": 1.1488395253889307,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.002317143242476265,
+              "p99_ms": 0.0028023451938855577,
+              "cpu_ms_per_operation": 0.0023675663544237566,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.002350905337726839,
+              "p99_ms": 0.0027218527997075587,
+              "cpu_ms_per_operation": 0.002386872131603048,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.0023830782762239685,
+              "p99_ms": 0.0033100280930449494,
+              "cpu_ms_per_operation": 0.0024322293851278937,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 0.9896595063985376,
+              "p99_ms": 1.1326046310944917,
+              "cpu_ms_per_operation": 0.988504479185759,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9874246488419717,
+              "p99_ms": 0.9590775600596986,
+              "cpu_ms_per_operation": 0.9875277595410041,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9879732483710784,
+              "p99_ms": 1.1439642909697356,
+              "cpu_ms_per_operation": 1.0051207739374821,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 1.1139229050371258,
+              "p99_ms": 2.002984861796065,
+              "cpu_ms_per_operation": 1.2372363338960735,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.1188743664083294,
+              "p99_ms": 1.6605847658487998,
+              "cpu_ms_per_operation": 1.184886322906407,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.114368374969956,
+              "p99_ms": 1.596494670250665,
+              "cpu_ms_per_operation": 1.1790403797548454,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.00016094934252577136,
+              "p99_ms": 0.00022444310998680643,
+              "cpu_ms_per_operation": 0.0001648829279142741,
+              "peak_rss_bytes": 0.9977064220183486
+            },
+            {
+              "p50_ms": 0.00016265398672028636,
+              "p99_ms": 0.0001976869079503611,
+              "cpu_ms_per_operation": 0.00016589330965767143,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.00016433524082229268,
+              "p99_ms": 0.00022895228860583944,
+              "cpu_ms_per_operation": 0.00016784449791188832,
+              "peak_rss_bytes": 1.0075161685020102
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 0.9839668994052236,
+              "p99_ms": 0.9927059157864822,
+              "cpu_ms_per_operation": 0.9791902056066705,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.962731520576479,
+              "p99_ms": 0.8762614986157007,
+              "cpu_ms_per_operation": 0.9640724681215529,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0031750613364123,
+              "p99_ms": 1.0291622986753073,
+              "cpu_ms_per_operation": 1.0023469352794054,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 1.0776447817955024,
+              "p99_ms": 1.1975290121833455,
+              "cpu_ms_per_operation": 1.1100237913714677,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.1602233888881863,
+              "p99_ms": 1.1856894567307186,
+              "cpu_ms_per_operation": 1.185879327888777,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0722441548271808,
+              "p99_ms": 0.9986795206464946,
+              "cpu_ms_per_operation": 1.112117381697146,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        }
+      ],
+      "source_identity": {
+        "src/lib.rs": "4a73c555c6a769e76097fc9c7873605b59cdfba94e67285dab424fcc2f76e89c",
+        "Cargo.toml": "d3c0d5ef5faa3120c61325921454dc47d7f5ff2388ee15b79a7dbc70a5ab85fc",
+        "Cargo.lock": "1fc55508f8877e363aa941b7321465a57085c9591af42c0225ecac6110d68454",
+        "check.py": "1a594b9a068762e771b8ef1cdd82b8805c3e9ce0274e42d66f02efb8b8a90eb1",
+        "measure.py": "a3350bafec531710b0444a234cf129229a9ac65553be13838ebe9b336974eac8"
+      },
+      "verdict": "not admitted"
+    },
+    {
+      "label": "columns_relaxed_reader",
+      "artifact_sha256": "459ac2d78b5de79df3bee02791b0a728547cbfceaa8877f4641ec5a917024275",
+      "scope": "real TaskRuntime append/detached poll including clock, JSON accounting and publication guards; excludes actual transport and storage",
+      "cases": [
+        {
+          "count": 64,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.952264071843075,
+              "p99_ms": 0.9497051182305705,
+              "cpu_ms_per_operation": 0.9531039069632963,
+              "peak_rss_bytes": 0.9984960666358168
+            },
+            {
+              "p50_ms": 0.9284302786816394,
+              "p99_ms": 0.938945082500129,
+              "cpu_ms_per_operation": 0.9293490592937749,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9901600784775644,
+              "p99_ms": 0.9905457197583083,
+              "cpu_ms_per_operation": 0.9897664416075156,
+              "peak_rss_bytes": 0.9994210282538212
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 0.9460320536980205,
+              "p99_ms": 0.7357548572735912,
+              "cpu_ms_per_operation": 0.9403788215479754,
+              "peak_rss_bytes": 1.0011586142973004
+            },
+            {
+              "p50_ms": 0.9570844666978522,
+              "p99_ms": 0.9562888590451423,
+              "cpu_ms_per_operation": 0.9569125103609017,
+              "peak_rss_bytes": 0.997342269470765
+            },
+            {
+              "p50_ms": 0.9569059653456271,
+              "p99_ms": 1.0165392421330328,
+              "cpu_ms_per_operation": 0.9583930511711523,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 0.9317167065476579,
+              "p99_ms": 0.9376840827303857,
+              "cpu_ms_per_operation": 0.9314767009662678,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9469056649652586,
+              "p99_ms": 0.9284939676455698,
+              "cpu_ms_per_operation": 0.9386294600922173,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9631903673493779,
+              "p99_ms": 0.9607954203747449,
+              "cpu_ms_per_operation": 0.961827345755112,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.4255781946727612,
+              "p99_ms": 0.4340643202148359,
+              "cpu_ms_per_operation": 0.4257359418060519,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.42436291251540925,
+              "p99_ms": 0.4259130527779263,
+              "cpu_ms_per_operation": 0.4248379147165511,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.43129953549933037,
+              "p99_ms": 0.4370088704345945,
+              "cpu_ms_per_operation": 0.43127648724688805,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 0.970111656161766,
+              "p99_ms": 0.9758575290278304,
+              "cpu_ms_per_operation": 0.9688548153876753,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9513428934284786,
+              "p99_ms": 0.9525740823700741,
+              "cpu_ms_per_operation": 0.9519846411657521,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9612660537220633,
+              "p99_ms": 0.9646752632534623,
+              "cpu_ms_per_operation": 0.9621847810059627,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 0.977438725076303,
+              "p99_ms": 0.9780884407854836,
+              "cpu_ms_per_operation": 0.976514027155637,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.986095138282387,
+              "p99_ms": 0.9959878837212082,
+              "cpu_ms_per_operation": 0.9868238087541797,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9888047238570078,
+              "p99_ms": 0.9733451875697277,
+              "cpu_ms_per_operation": 0.9885856804731215,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.43986644454583723,
+              "p99_ms": 0.44223397975537615,
+              "cpu_ms_per_operation": 0.4391846456637355,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.4297629504736864,
+              "p99_ms": 0.43447570292685206,
+              "cpu_ms_per_operation": 0.4297622142916918,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.4330030459602253,
+              "p99_ms": 0.43483891236932926,
+              "cpu_ms_per_operation": 0.4333573538421105,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 0.9458084823797094,
+              "p99_ms": 0.9525969878823175,
+              "cpu_ms_per_operation": 0.9464790483779332,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9660974479477731,
+              "p99_ms": 0.9712680721794229,
+              "cpu_ms_per_operation": 0.9657613088213776,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9622571534533421,
+              "p99_ms": 0.9585299275340026,
+              "cpu_ms_per_operation": 0.9623735060118662,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 0.9654374838108125,
+              "p99_ms": 0.962941669401182,
+              "cpu_ms_per_operation": 0.9661279339913287,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9828338633619049,
+              "p99_ms": 1.037261381671761,
+              "cpu_ms_per_operation": 0.984634153169747,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9974872500425115,
+              "p99_ms": 1.0824803493772948,
+              "cpu_ms_per_operation": 1.0013900191828853,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        }
+      ],
+      "source_identity": {
+        "src/lib.rs": "4589ca55e214141ae29866121a5f7dbcc63648cfdd4bb15742d68726a1ec14e6",
+        "Cargo.toml": "d3c0d5ef5faa3120c61325921454dc47d7f5ff2388ee15b79a7dbc70a5ab85fc",
+        "Cargo.lock": "1fc55508f8877e363aa941b7321465a57085c9591af42c0225ecac6110d68454",
+        "check.py": "1a594b9a068762e771b8ef1cdd82b8805c3e9ce0274e42d66f02efb8b8a90eb1",
+        "runtime.py": "36984cc4c897c3f1045f7a991a2e7d982aebfe3d73eade7915e8457b9a3d6965",
+        "runtime_measure.py": "532deb5381ac02e07ac94fd011607c1d871ba79bbf92c5ec48db533bafdbb87e"
+      },
+      "verdict": "not admitted"
+    },
+    {
+      "label": "columns_canonical_reader",
+      "artifact_sha256": "72e27e8cd36d03a021dfb27ed45056eb0dde9e16a84d18d922d0ce34868ae2c1",
+      "scope": "real TaskRuntime append/detached poll including clock, JSON accounting and publication guards; excludes actual transport and storage",
+      "cases": [
+        {
+          "count": 64,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.9552231052932317,
+              "p99_ms": 1.126237414332854,
+              "cpu_ms_per_operation": 0.9594663613841403,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9856625093273639,
+              "p99_ms": 0.9482491478153083,
+              "cpu_ms_per_operation": 0.9859258067529555,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9693063553278038,
+              "p99_ms": 0.8628724756390341,
+              "cpu_ms_per_operation": 0.9661239464547245,
+              "peak_rss_bytes": 1.0075085324232083
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.059816405093278,
+              "p99_ms": 1.0018118130208962,
+              "cpu_ms_per_operation": 1.0582422019283009,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0769362724075824,
+              "p99_ms": 0.9732528041415013,
+              "cpu_ms_per_operation": 1.072853680913685,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.084310441094361,
+              "p99_ms": 1.1704060949185713,
+              "cpu_ms_per_operation": 1.0823378431571922,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 1.093533389687236,
+              "p99_ms": 1.1277236605998464,
+              "cpu_ms_per_operation": 1.095127971499,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0789717266913497,
+              "p99_ms": 1.05931315124237,
+              "cpu_ms_per_operation": 1.0764373292633331,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0690783951653515,
+              "p99_ms": 1.1201340033500837,
+              "cpu_ms_per_operation": 1.0664979159222847,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.4518349747660346,
+              "p99_ms": 0.533176863712308,
+              "cpu_ms_per_operation": 0.4576320796915371,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.46464201877934275,
+              "p99_ms": 0.5574926856639012,
+              "cpu_ms_per_operation": 0.4704355709891062,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.4398810939357907,
+              "p99_ms": 0.5190569744597249,
+              "cpu_ms_per_operation": 0.44639947499611643,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.0851782203607148,
+              "p99_ms": 1.169452729416661,
+              "cpu_ms_per_operation": 1.0825172620219152,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0803782505910164,
+              "p99_ms": 1.1852685549928095,
+              "cpu_ms_per_operation": 1.0828272773099425,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0745595549186546,
+              "p99_ms": 1.088999805535749,
+              "cpu_ms_per_operation": 1.0714310239210219,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 1.0588134966883653,
+              "p99_ms": 1.0578327551579332,
+              "cpu_ms_per_operation": 1.0558285928343034,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.073287262178995,
+              "p99_ms": 1.0837414079698098,
+              "cpu_ms_per_operation": 1.074007250851744,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.100500381647019,
+              "p99_ms": 1.433298319327731,
+              "cpu_ms_per_operation": 1.2519751609458423,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.4578795722029595,
+              "p99_ms": 0.4955551204229489,
+              "cpu_ms_per_operation": 0.46362291149529533,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.4467265725288831,
+              "p99_ms": 0.48634437293988386,
+              "cpu_ms_per_operation": 0.45320910673867004,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.44353880518986744,
+              "p99_ms": 0.5550912602988134,
+              "cpu_ms_per_operation": 0.4501790915212721,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.0482510543289507,
+              "p99_ms": 1.0555485971943888,
+              "cpu_ms_per_operation": 1.0478452152680633,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0642504118616145,
+              "p99_ms": 1.054756671899529,
+              "cpu_ms_per_operation": 1.0616070146578762,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.1106464832315799,
+              "p99_ms": 1.1266196279666454,
+              "cpu_ms_per_operation": 1.1051413766451201,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 1.0553379730072412,
+              "p99_ms": 1.0357878706440922,
+              "cpu_ms_per_operation": 1.054829562548723,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0623103321137868,
+              "p99_ms": 1.0539388994651437,
+              "cpu_ms_per_operation": 1.0604591668140273,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.063512397870584,
+              "p99_ms": 1.0974044360547428,
+              "cpu_ms_per_operation": 1.0620013093859841,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        }
+      ],
+      "source_identity": {
+        "src/lib.rs": "4589ca55e214141ae29866121a5f7dbcc63648cfdd4bb15742d68726a1ec14e6",
+        "Cargo.toml": "8e85b7cb693fea8454cc56e86beee67e83605b23dff3c2fba89fadfc1d10accd",
+        "Cargo.lock": "1fc55508f8877e363aa941b7321465a57085c9591af42c0225ecac6110d68454",
+        "check.py": "b040794ed19a1cd4aa36590954141297f6914bc4e4482fac5f2d54c863df1eaf",
+        "runtime.py": "90404efab0acac72e1ce00831bd1ca77fd8a5fae589bec5a8951eb7bb28798f7",
+        "runtime_measure.py": "ae9e98d9713c3f1da0d16a12e9a1106c17f8e3f9df5fc8d0f39e7e5c05890801"
+      },
+      "verdict": "not admitted"
+    },
+    {
+      "label": "columns_canonical_reader_finalizer_safe",
+      "artifact_sha256": "99315d952e82042ba51abc909f5433f3412f97edc1d065e8c0d73bc7613582fb",
+      "scope": "real TaskRuntime append/detached poll including clock, JSON accounting and publication guards; excludes actual transport and storage",
+      "source_identity": {
+        "src/lib.rs": "5a1d56b566990203a645ab4b4c08735422b4ee342d4a3e82d1a09ea886571c69",
+        "Cargo.toml": "8e85b7cb693fea8454cc56e86beee67e83605b23dff3c2fba89fadfc1d10accd",
+        "Cargo.lock": "1fc55508f8877e363aa941b7321465a57085c9591af42c0225ecac6110d68454",
+        "check.py": "b657774544f8c8e44c564f7d02f883761c9792120b82475d65ea5d0d1e815ba1",
+        "runtime.py": "90404efab0acac72e1ce00831bd1ca77fd8a5fae589bec5a8951eb7bb28798f7",
+        "runtime_measure.py": "ae9e98d9713c3f1da0d16a12e9a1106c17f8e3f9df5fc8d0f39e7e5c05890801"
+      },
+      "generated_runtime_sha256": "511f484706ad7a21e8d0932f2e1058c6724bb15942f8c42226b30b0343e16d04",
+      "samples_per_variant": 1000,
+      "individual_operations": true,
+      "cases": [
+        {
+          "count": 64,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 1.0022307202039518,
+              "p99_ms": 0.9426128541410042,
+              "cpu_ms_per_operation": 1.000171344201461,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9767135556609242,
+              "p99_ms": 0.9692283661355826,
+              "cpu_ms_per_operation": 0.9775406723756582,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.9749184448366223,
+              "p99_ms": 0.8616491422246818,
+              "cpu_ms_per_operation": 0.9751524701913818,
+              "peak_rss_bytes": 1.0075119508308672
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.0674210076857387,
+              "p99_ms": 1.1175752396068617,
+              "cpu_ms_per_operation": 1.0614434783053766,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0695458057868978,
+              "p99_ms": 0.5816831683168316,
+              "cpu_ms_per_operation": 1.0199542140012812,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0848830233953208,
+              "p99_ms": 2.54070364663585,
+              "cpu_ms_per_operation": 1.1576115063480639,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 64,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 1.0817806255796305,
+              "p99_ms": 1.050905191446414,
+              "cpu_ms_per_operation": 1.0770289686611711,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0840339684819806,
+              "p99_ms": 1.04524089306698,
+              "cpu_ms_per_operation": 1.0784288850514296,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0850694444444444,
+              "p99_ms": 1.051503234809083,
+              "cpu_ms_per_operation": 1.0811977140439542,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.2670347025596517,
+              "p99_ms": 0.3167385057471264,
+              "cpu_ms_per_operation": 0.28395548783456254,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.45049130763416473,
+              "p99_ms": 0.49698674166331863,
+              "cpu_ms_per_operation": 0.4560677412180997,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.46022546646125256,
+              "p99_ms": 0.5435835351089588,
+              "cpu_ms_per_operation": 0.4673025304945802,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.0895688694608725,
+              "p99_ms": 1.0619525199949218,
+              "cpu_ms_per_operation": 1.0879464780564037,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0743563685636854,
+              "p99_ms": 1.0922972896827634,
+              "cpu_ms_per_operation": 1.071447554775738,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.1053565393714093,
+              "p99_ms": 0.8605793578446268,
+              "cpu_ms_per_operation": 1.0772483401553576,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 4096,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 1.0696647032170365,
+              "p99_ms": 1.076392402152417,
+              "cpu_ms_per_operation": 1.069113915266015,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0531559581092556,
+              "p99_ms": 1.1628033567702427,
+              "cpu_ms_per_operation": 1.0680365714267865,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0776618313170114,
+              "p99_ms": 1.0648177859271144,
+              "cpu_ms_per_operation": 1.0763446398941834,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "append",
+          "ratios": [
+            {
+              "p50_ms": 0.45580029368575625,
+              "p99_ms": 0.5246730670459484,
+              "cpu_ms_per_operation": 0.4615300574278783,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.45178050633531847,
+              "p99_ms": 0.49936030705261475,
+              "cpu_ms_per_operation": 0.4512752543734239,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 0.45336073500967117,
+              "p99_ms": 0.5053987877814795,
+              "cpu_ms_per_operation": 0.45834297826243076,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "tail",
+          "ratios": [
+            {
+              "p50_ms": 1.1019920658618778,
+              "p99_ms": 1.0757068452380951,
+              "cpu_ms_per_operation": 1.1204743281085343,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.1066756688328128,
+              "p99_ms": 1.126830494626359,
+              "cpu_ms_per_operation": 1.0695837302888,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.058796604527297,
+              "p99_ms": 0.9601529362566461,
+              "cpu_ms_per_operation": 1.055532704466293,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        },
+        {
+          "count": 65536,
+          "case": "full",
+          "ratios": [
+            {
+              "p50_ms": 1.0580747362167973,
+              "p99_ms": 1.0571810883140054,
+              "cpu_ms_per_operation": 1.0573395881316596,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0644988437024083,
+              "p99_ms": 1.0736141108711303,
+              "cpu_ms_per_operation": 1.0673183605970051,
+              "peak_rss_bytes": 1.0
+            },
+            {
+              "p50_ms": 1.0666137536141507,
+              "p99_ms": 1.0284108931079796,
+              "cpu_ms_per_operation": 1.0670429591285726,
+              "peak_rss_bytes": 1.0
+            }
+          ]
+        }
+      ],
+      "verdict": "rejected for replay regressions; production promotion remains false"
+    }
+  ],
+  "required_remaining": [
+    "legacy adoption and public mutation boundary",
+    "HTTP/SSE transport and durable recovery",
+    "distribution and actual resident memory accounting",
+    "replay regression must be removed before promotion"
+  ],
+  "lifecycle_discovery": "Eviction invoked Python finalizers while holding a mutable PyO3 borrow; retained candidate releases the borrow before dropping retired references. Eviction, clear and cycle teardown checks pass."
+}

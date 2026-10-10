@@ -1,0 +1,1251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/research_action_observation_v1.schema.json",
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "task_id",
+        "direction_hash",
+        "lang",
+        "revision",
+        "basis_digest"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,160}$"
+        },
+        "direction_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "lang": {
+          "enum": [
+            "en",
+            "zh"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "basis_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "ordinal",
+        "call_id",
+        "tool",
+        "result_digest",
+        "result_chars",
+        "part_count",
+        "receipt"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "result_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "result_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "part_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "receipt": {
+          "type": "object"
+        }
+      }
+    },
+    "part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "ordinal",
+        "result_digest",
+        "part",
+        "content"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "result_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "part": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30000
+        }
+      }
+    },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        }
+      }
+    },
+    "recoveryPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "found",
+        "binding",
+        "observations",
+        "next_cursor"
+      ],
+      "properties": {
+        "found": {
+          "type": "boolean"
+        },
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/binding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observations": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/manifest"
+          }
+        },
+        "next_cursor": {
+          "type": "string",
+          "maxLength": 512
+        }
+      }
+    },
+    "frozenBasis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "basis"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "basis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "hypothesis",
+            "protocol"
+          ],
+          "properties": {
+            "hypothesis": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "protocol": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "selected_idea_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "selected_idea_source_task_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            }
+          },
+          "dependentRequired": {
+            "selected_idea_id": [
+              "selected_idea_source_task_id"
+            ],
+            "selected_idea_source_task_id": [
+              "selected_idea_id"
+            ]
+          }
+        }
+      }
+    },
+    "effectIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "ordinal",
+        "call_id",
+        "tool",
+        "arguments_digest",
+        "admission_id"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "arguments_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "admission_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    },
+    "effectState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent",
+        "state",
+        "result_digest",
+        "tool_status",
+        "replay_allowed"
+      ],
+      "properties": {
+        "intent": {
+          "$ref": "#/$defs/effectIntent"
+        },
+        "state": {
+          "enum": [
+            "unresolved_effect",
+            "observation_published"
+          ]
+        },
+        "result_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_status": {
+          "enum": [
+            "done",
+            "error",
+            "rejected",
+            "pending",
+            null
+          ]
+        },
+        "replay_allowed": {
+          "const": false
+        }
+      }
+    },
+    "effectsPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "found",
+        "binding",
+        "effects",
+        "next_cursor"
+      ],
+      "properties": {
+        "found": {
+          "type": "boolean"
+        },
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/binding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effects": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/effectState"
+          }
+        },
+        "next_cursor": {
+          "type": "string",
+          "maxLength": 512
+        }
+      }
+    },
+    "modelIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "ordinal",
+        "round_index",
+        "requested_model",
+        "request_digest",
+        "max_output",
+        "admission_id",
+        "usage_before"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "round_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requested_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "max_output": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "admission_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "usage_before": {
+          "$ref": "#/$defs/modelUsageSnapshot"
+        },
+        "request_snapshot_version": {
+          "const": 1
+        },
+        "response_snapshot_version": {
+          "const": 1
+        },
+        "loop_checkpoint_version": {
+          "const": 1
+        }
+      }
+    },
+    "modelUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "ordinal",
+        "admission_id",
+        "usage_mapping_received",
+        "usage_snapshot"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "admission_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "usage_snapshot": {
+          "$ref": "#/$defs/modelUsageSnapshot"
+        },
+        "usage_mapping_received": {
+          "type": "boolean"
+        },
+        "response_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "modelCallState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent",
+        "state",
+        "usage",
+        "replay_allowed"
+      ],
+      "properties": {
+        "intent": {
+          "$ref": "#/$defs/modelIntent"
+        },
+        "state": {
+          "enum": [
+            "unresolved_usage",
+            "usage_recorded"
+          ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/modelUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "replay_allowed": {
+          "const": false
+        }
+      }
+    },
+    "modelCallsPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "found",
+        "binding",
+        "calls",
+        "next_cursor"
+      ],
+      "properties": {
+        "found": {
+          "type": "boolean"
+        },
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/binding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "calls": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/modelCallState"
+          }
+        },
+        "next_cursor": {
+          "type": "string",
+          "maxLength": 512
+        }
+      }
+    },
+    "modelUsageSnapshot": {
+      "type": "object",
+      "required": [
+        "calls",
+        "agent_dispatches",
+        "agent_tokens",
+        "total_tokens",
+        "agent_token_budget",
+        "agent_dispatch_budget",
+        "unmetered_calls",
+        "version"
+      ],
+      "properties": {
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_dispatches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_token_budget": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_dispatch_budget": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unmetered_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "version": {
+          "type": "string"
+        },
+        "priced_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prompt_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completion_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cost_cny": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cost_estimated": {
+          "type": "boolean"
+        },
+        "budget_ignored": {
+          "type": "boolean"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "actionTerminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "user_id",
+        "task_id",
+        "direction_hash",
+        "lang",
+        "action",
+        "expected_revision",
+        "status",
+        "committed_workspace_revision",
+        "result_digest",
+        "error_kind",
+        "finished_at",
+        "replay_allowed",
+        "artifact_quality"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,160}$"
+        },
+        "direction_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "lang": {
+          "enum": [
+            "en",
+            "zh"
+          ]
+        },
+        "action": {
+          "enum": [
+            "experiment",
+            "analyze",
+            "manuscript",
+            "compile",
+            "publish"
+          ]
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "enum": [
+            "done",
+            "error",
+            "aborted"
+          ]
+        },
+        "committed_workspace_revision": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "result_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_kind": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "finished_at": {
+          "type": "number",
+          "minimum": 0
+        },
+        "replay_allowed": {
+          "const": false
+        },
+        "artifact_quality": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "degraded",
+                "reason"
+              ],
+              "properties": {
+                "degraded": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "usage_snapshot": {
+          "$ref": "#/$defs/modelUsageSnapshot",
+          "description": "Terminal logical-loop accounting and forced-final reason; diagnostic only, not replay or budget-reset authority."
+        },
+        "result": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Exact public action result retained at terminal publication; legacy records may omit it."
+        },
+        "error": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "actionTerminalResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "found",
+        "terminal"
+      ],
+      "properties": {
+        "found": {
+          "type": "boolean"
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/actionTerminal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "requestContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "request_digest",
+        "request_chars",
+        "parts"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "request_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "request_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "action_definition": {
+          "$ref": "#/$defs/actionDefinition"
+        }
+      }
+    },
+    "requestContextPart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "content_digest",
+        "content"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "content_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "content": {
+          "$ref": "#/$defs/part/properties/content"
+        }
+      }
+    },
+    "requestMaterial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "messages",
+        "tools",
+        "max_output"
+      ],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "tools": {
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "max_output": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "action_definition": {
+          "$ref": "#/$defs/actionDefinition"
+        }
+      }
+    },
+    "responseMaterial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message",
+        "finish"
+      ],
+      "properties": {
+        "message": {
+          "type": "object"
+        },
+        "finish": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "modelResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "ordinal",
+        "admission_id",
+        "response_digest",
+        "response_chars",
+        "parts"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "admission_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "response_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "response_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "loopMaterial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "messages",
+        "tool_rounds",
+        "usage_snapshot",
+        "chassis"
+      ],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "tool_rounds": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "usage_snapshot": {
+          "$ref": "#/$defs/modelUsageSnapshot"
+        },
+        "chassis": {
+          "type": "object",
+          "required": [
+            "schema_version",
+            "next_round",
+            "claimed_tool_call_ids"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "next_round": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "claimed_tool_call_ids": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "loopCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "ordinal",
+        "admission_id",
+        "material_digest",
+        "material_chars",
+        "parts"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "admission_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "material_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "material_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parts": {
+          "$ref": "#/$defs/requestContext/properties/parts"
+        }
+      }
+    },
+    "processOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "boot",
+        "pid_namespace",
+        "pid",
+        "started"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "boot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pid_namespace": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[0-9]+$"
+        },
+        "started": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[0-9]+$"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "executionOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "nonce",
+        "process",
+        "replay_allowed"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "nonce": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "process": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/processOwner"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "replay_allowed": {
+          "const": false
+        },
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "generation",
+            "previous_nonce",
+            "checkpoint_ordinal",
+            "material_digest"
+          ],
+          "properties": {
+            "generation": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "previous_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "checkpoint_ordinal": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "material_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "actionLogicalBudget": {
+      "description": "Explicit per-action cumulative logical allowance. Zero means no cumulative cutoff; per-request context admission, cancellation and no-progress protection remain active. Stored meter snapshots retain their frozen allowance.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "token_budget": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "dispatch_budget": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      }
+    },
+    "actionHistoryReference": {
+      "description": "Owner-bound paging reference to an exact message interval in an acknowledged completed-round checkpoint. A cache reference grants no execution or scientific authority.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "task_id",
+        "checkpoint_ordinal",
+        "start",
+        "end",
+        "source_digest",
+        "total_chars",
+        "artifact_ref",
+        "delivery",
+        "instruction"
+      ],
+      "properties": {
+        "user_id": {
+          "$ref": "#/$defs/binding/properties/user_id"
+        },
+        "task_id": {
+          "$ref": "#/$defs/binding/properties/task_id"
+        },
+        "checkpoint_ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "start": {
+          "const": 2
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 3
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "total_chars": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "artifact_ref": {
+          "type": "string",
+          "pattern": "^tool-result:[0-9a-f]{64}$"
+        },
+        "delivery": {
+          "const": "read_tool_artifact"
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "actionDefinition": {
+      "description": "Original research-action launch settings. Retained data is not execution or takeover authority. An empty tool epoch marks missing version evidence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "direction",
+        "lang",
+        "action",
+        "expected_revision",
+        "confirm_external_writes",
+        "model_override",
+        "logical_budget",
+        "tool_epoch_hash"
+      ],
+      "properties": {
+        "direction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "lang": {
+          "$ref": "#/$defs/binding/properties/lang"
+        },
+        "action": {
+          "$ref": "#/$defs/actionTerminal/properties/action"
+        },
+        "expected_revision": {
+          "$ref": "#/$defs/binding/properties/revision"
+        },
+        "confirm_external_writes": {
+          "type": "boolean"
+        },
+        "model_override": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "logical_budget": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/actionLogicalBudget"
+            },
+            {
+              "required": [
+                "token_budget",
+                "dispatch_budget"
+              ]
+            }
+          ]
+        },
+        "tool_epoch_hash": {
+          "type": "string",
+          "maxLength": 160
+        }
+      }
+    }
+  }
+}

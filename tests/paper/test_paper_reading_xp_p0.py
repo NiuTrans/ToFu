@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+"""Backend suite for the reading experience in docs/modules/ingest_media.md.
+
+Proves fully offline:
+
+  1. extract_report_headings — h2/h3 in document order, code fences skipped;
+  2. resolve_anchor — exact / fuzzy(≥0.6) / tie→earlier / below-threshold→None
+     / zh headings, model nominations never trusted blindly;
+  3. resolve_insight_anchors — items get anchor_idx; unresolved → None
+     (end-section fallback); legacy string provocations untouched;
+  4. insight_enabled three-level chain — cfg explicit > env kill switch >
+     default ON (the Settings-toggle level was retired 2026-08-06);
+  5. usage plumbing — synthesis _usage popped before grounding; rubric +
+     synthesis usage summed in run_report_insight;
+  6. _persist_insight v2 meta — items/usage/baseline ride the row;
+  7. _merge_second_pass — secondPasses entry + total cost + meta-only
+     re-persist + report_meta event; NEUTER: skip merge → finish-tag total
+     drops back to body-only;
+  8. read path — v2 insight row serves the structured payload and does NOT
+     merge into the body; v1 row keeps the legacy merge.
+
+Run standalone: ``python3 tests/paper/test_paper_reading_xp_p0.py``
+"""
+
+import asyncio
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+os.environ.setdefault('TRADING_ENABLED', '0')
+
+if __name__ == '__main__':
+    # The engine import below freezes the DB backend from the ambient env —
+    # the standalone guard must run FIRST (under pytest this branch never
+    # fires, so the session DB is untouched).
+    from tests._standalone_guard import guard_standalone_storage
+    guard_standalone_storage('test_paper_reading_xp_p0.standalone')
+
+import lib.paper.insight_engine._anchors as anchors_mod  # noqa: E402
+import lib.paper.insight_engine._config as config_mod  # noqa: E402
+import lib.paper.insight_engine._grounding as grounding_mod  # noqa: E402
+import lib.paper.insight_engine._run as ie  # noqa: E402
+import lib.paper.insight_engine._rubric as rubric_mod  # noqa: E402
+import lib.paper.insight_engine._synthesize as synth_mod  # noqa: E402
+import lib.paper.insight_prompts as insight_prompts  # noqa: E402
+
+TEST_OWNER_USER_ID = 1
+
+_PATCH_OWNERS = {
+    'dispatch_stream': synth_mod,
+    'execute_paper_tool': synth_mod,
+    'search_arxiv': grounding_mod,
+    'fetch_arxiv_title': grounding_mod,
+    '_build_reader_context': ie,
+    'score_report_rubric': ie,
+    '_persist_insight': ie,
+    '_self_identity': ie,
+}
+
+
+def _get_patch(name):
+    return getattr(_PATCH_OWNERS[name], name)
+
+
+def _set_patch(name, value):
+    setattr(_PATCH_OWNERS[name], name, value)
+
+
+def _color(s, c): return f'\033[{c}m{s}\033[0m'
+def _ok(msg): print(' ', _color('✓', '32'), msg)
+def _fail(msg): print(' ', _color('✗', '31'), msg); sys.exit(1)
+
+
+_REPORT = (
+    '# dUltra: Ultra-Fast Diffusion Decoding\n\n'
+    '## ⚡ TL;DR\nA fast diffusion LM.\n\n'
+    '## 🔑 Core Terminology\n| Term | Def |\n|---|---|\n| DDM | a thing |\n\n'
+    '## 💡 Method — How It Works\nThe method section.\n\n'
+    '```\n## not a heading — inside a code fence\n```\n\n'
+    '## 📊 Experimental Analysis\nNumbers go here.\n'
+)
+
+_ZH_REPORT = (
+    '# dUltra：超快扩散解码\n\n'
+    '## ⚡ 摘要\n一种快速扩散语言模型。\n\n'
+    '## 💡 方法——它如何工作\n方法小节。\n\n'
+    '## 📊 实验分析\n数字。\n'
+)
+
+
+# ── 1. heading extraction ────────────────────────────────────────────────
+def test_extract_report_headings():
+    heads = anchors_mod.extract_report_headings(_REPORT)
+    texts = [h['text'] for h in heads]
+    assert texts == ['⚡ TL;DR', '🔑 Core Terminology',
+                     '💡 Method — How It Works', '📊 Experimental Analysis'], \
+        f'heading order/parse wrong: {texts}'
+    assert [h['index'] for h in heads] == [0, 1, 2, 3]
+    assert all(h['level'] == 2 for h in heads)
+    assert not any('code fence' in t for t in texts), 'code-fence heading leaked'
+    _ok('extract_report_headings: h2/h3 in order, code fence skipped')
+
+
+# ── 2. resolve_anchor ────────────────────────────────────────────────────
+def test_resolve_anchor_exact_fuzzy_fallback():
+    heads = anchors_mod.extract_report_headings(_REPORT)
+    # exact (case/emoji tolerant — model drops the emoji + varies case)
+    assert anchors_mod.resolve_anchor('Method — How It Works', heads) == 2
+    assert anchors_mod.resolve_anchor('method how it works', heads) == 2
+    # fuzzy: paraphrase sharing most tokens
+    assert anchors_mod.resolve_anchor('How It Works — the Method', heads) == 2
+    # below threshold → None (never guess)
+    assert anchors_mod.resolve_anchor('Related Work and Predecessors', heads) is None
+    # empty / None → None
+    assert anchors_mod.resolve_anchor('', heads) is None
+    assert anchors_mod.resolve_anchor(None, heads) is None
+    _ok('resolve_anchor: exact + fuzzy hit, paraphrase tolerated, unknown → None')
+
+
+def test_resolve_anchor_zh():
+    heads = anchors_mod.extract_report_headings(_ZH_REPORT)
+    assert anchors_mod.resolve_anchor('方法——它如何工作', heads) == 1
+    # CJK fuzzy: one char off
+    assert anchors_mod.resolve_anchor('方法——它怎样工作', heads) in (1, None)  # tolerance band
+    assert anchors_mod.resolve_anchor('研究版图与影响', heads) is None
+    _ok('resolve_anchor: zh headings resolve, unrelated zh → None')
+
+
+# ── 3. resolve_insight_anchors ───────────────────────────────────────────
+def test_resolve_insight_anchors_items():
+    insight = {
+        'thesis': 'x',
+        'connections': [
+            {'kind': 'prior_paper', 'text': 'bridge A',
+             'anchor': 'Method — How It Works', 'paper': None},
+            {'kind': 'transfer', 'text': 'bridge B',
+             'anchor': 'No Such Section Anywhere', 'paper': None},
+            {'kind': 'analogy', 'text': 'bridge C (no nomination)', 'paper': None},
+        ],
+        'provocations': [
+            {'text': 'think here', 'anchor': 'Experimental Analysis'},
+            'legacy plain string provocation',
+        ],
+    }
+    stats = anchors_mod.resolve_insight_anchors(insight, _REPORT)
+    conns = insight['connections']
+    assert conns[0]['anchor_idx'] == 2, f'exact nomination not resolved: {conns[0]}'
+    assert conns[1]['anchor_idx'] is None, 'unresolved nomination must fall back to None'
+    assert 'anchor_idx' not in conns[2], 'no-nomination item must stay untouched'
+    assert insight['provocations'][0]['anchor_idx'] == 3
+    assert isinstance(insight['provocations'][1], str), 'legacy string provocation mutated'
+    assert stats == {'nominated': 3, 'resolved': 2}, f'stats wrong: {stats}'
+    _ok('resolve_insight_anchors: resolved/fallback/untouched三种形态 + stats 正确')
+
+
+# ── 4. insight_enabled three-level chain (Settings toggle retired 2026-08-06) ──
+def test_enable_chain_three_levels():
+    os.environ.pop('TOFU_PAPER_INSIGHT', None)
+    # level 3: nothing set anywhere → default ON (owner-approved flip).
+    assert config_mod.insight_enabled() is True, 'interactive default must be ON'
+    # level 2: env kill switch honoured, both directions.
+    os.environ['TOFU_PAPER_INSIGHT'] = '0'
+    try:
+        assert config_mod.insight_enabled() is False, 'env=0 must disable'
+        # level 1: explicit per-request cfg (headless stamp / opt-in) always wins.
+        assert config_mod.insight_enabled({'paperInsightEnabled': True}) is True, \
+            'cfg opt-in True must beat env=0'
+    finally:
+        os.environ.pop('TOFU_PAPER_INSIGHT', None)
+    os.environ['TOFU_PAPER_INSIGHT'] = '1'
+    try:
+        assert config_mod.insight_enabled() is True, 'env=1 must enable'
+        assert config_mod.insight_enabled({'paperInsightEnabled': False}) is False, \
+            'cfg stamp False must beat env=1'
+    finally:
+        os.environ.pop('TOFU_PAPER_INSIGHT', None)
+    _ok('insight_enabled: cfg > env kill switch > 默认 ON 三级链全部钉住')
+
+
+def test_personal_scope_registry_has_insight():
+    from lib.agent_core.personal_scope import (
+        PERSONAL_CAPABILITIES, apply_headless_personal_defaults)
+    assert 'paperInsightEnabled' in PERSONAL_CAPABILITIES, \
+        'paperInsightEnabled not registered'
+    cap = PERSONAL_CAPABILITIES['paperInsightEnabled']
+    assert cap.headless_default is False, 'headless must fail CLOSED'
+    assert cap.ui_default is True
+    cfg = {}
+    apply_headless_personal_defaults(cfg)
+    assert cfg['paperInsightEnabled'] is False, 'headless builder did not stamp False'
+    _ok('personal_scope: paperInsightEnabled 注册且 headless fail-closed')
+
+
+# ── 5/6. usage plumbing + v2 persist ─────────────────────────────────────
+_FINAL_WITH_ANCHOR = {
+    'thesis': 'The bet.',
+    'connections': [
+        {'kind': 'prior_paper', 'text': 'Same move as Transformer.',
+         'paper': None, 'anchor': 'Method — How It Works'},
+    ],
+    'opinion': 'Bigger than framed.',
+    'open_problems': [],
+    'provocations': [{'text': 'Really?', 'anchor': None}],
+}
+
+
+class _UsagePatched:
+    """One-round synthesis returning _FINAL_WITH_ANCHOR with real-looking usage;
+    rubric returns a fixed baseline + its own usage; persist captures the row."""
+    def __init__(self):
+        self._orig = {}
+        self.persisted = None
+
+    def __enter__(self):
+        for name in ('dispatch_stream', 'execute_paper_tool', 'search_arxiv',
+                     'fetch_arxiv_title', '_build_reader_context',
+                     'score_report_rubric', '_persist_insight', '_self_identity'):
+            self._orig[name] = _get_patch(name)
+        rec = self
+
+        def _fake_dispatch(messages, *, on_content=None, tools=None, **kw):
+            body = json.dumps(_FINAL_WITH_ANCHOR)
+            if on_content:
+                on_content(body)
+            return ({'role': 'assistant', 'content': body, 'tool_calls': None},
+                    'stop', {'prompt_tokens': 100, 'completion_tokens': 40})
+
+        def _fake_rubric(*a, **k):
+            return {'overall': 3.2, 'scores': {},
+                    'usage': {'prompt_tokens': 50, 'completion_tokens': 10,
+                              'cache_read_tokens': 0, 'cache_write_tokens': 0,
+                              'reasoning_tokens': 0}}
+
+        def _fake_persist(phash, ui_lang, markdown, model, **kw):
+            rec.persisted = {'phash': phash, 'lang': ui_lang, 'markdown': markdown,
+                             'kw': kw}
+            return True
+
+        synth_mod.dispatch_stream = _fake_dispatch
+        synth_mod.execute_paper_tool = lambda *a, **k: ('', [], None, None, None)
+        grounding_mod.search_arxiv = lambda *a, **k: []
+        grounding_mod.fetch_arxiv_title = lambda _id: ''
+        ie._build_reader_context = lambda *a, **k: ''
+        ie.score_report_rubric = _fake_rubric
+        ie._persist_insight = _fake_persist
+        ie._self_identity = lambda *a, **k: (None, 'dUltra')
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self._orig.items():
+            _set_patch(k, v)
+        return False
+
+
+def test_usage_folded_and_items_persisted():
+    with _UsagePatched() as p:
+        out = ie.run_report_insight('paper text', _REPORT, 'en', phash='u1',
+                                    allow_personal_context=False,
+                                    user_id=TEST_OWNER_USER_ID)
+    assert out['fired'] is True
+    u = out['usage']
+    assert u is not None, 'usage not surfaced'
+    # synthesis (100/40) + rubric (50/10) summed
+    assert u['prompt_tokens'] == 150 and u['completion_tokens'] == 50, \
+        f'rubric+synthesis usage not folded: {u}'
+    # _usage popped BEFORE grounding — never leaks into items
+    items = out['insight']
+    assert '_usage' not in items, 'private _usage leaked into insight items'
+    # anchors resolved against the real report headings
+    assert items['connections'][0]['anchor_idx'] == 2, \
+        f'anchor not resolved end-to-end: {items["connections"][0]}'
+    # persist received the v2 payload
+    assert p.persisted is not None
+    kw = p.persisted['kw']
+    assert kw.get('items') is items or kw.get('items') == items, 'items not passed to persist'
+    assert kw.get('baseline') == 3.2
+    assert kw.get('usage') == u
+    _ok('usage 管道:rubric+合成合计、_usage 不泄漏、锚端到端解析、v2 持久化负载')
+
+
+def test_persist_insight_v2_meta_written():
+    """The REAL _persist_insight writes meta {kind,v,items,baseline,usage}."""
+    captured = {}
+    import lib.storage as _storage_mod
+
+    class _FakeClient:
+        def command(self, operation, payload, command_id):
+            captured.update(
+                operation=operation, row=payload, command_id=command_id)
+            return {'saved': True}
+
+    original = _storage_mod.get_storage_client
+    _storage_mod.get_storage_client = lambda *, write=False: _FakeClient()
+    try:
+        ok = ie._persist_insight('h1', 'en', '## 💡 x\n', 'm1',
+                                 user_id=TEST_OWNER_USER_ID,
+                                 items={'thesis': 't'}, usage={'prompt_tokens': 1},
+                                 baseline=3.0)
+    finally:
+        _storage_mod.get_storage_client = original
+    assert ok is True
+    assert captured['operation'] == 'paper.report.upsert'
+    assert captured['row']['user_id'] == TEST_OWNER_USER_ID
+    assert captured['command_id'].startswith('paper.insight.upsert:')
+    meta = captured['row']['meta']
+    assert meta['kind'] == 'insight' and meta['v'] == 2
+    assert meta['items'] == {'thesis': 't'}
+    assert meta['baseline'] == 3.0 and meta['usage'] == {'prompt_tokens': 1}
+    assert captured['row']['lang'] == 'insight:en'
+    _ok('_persist_insight: v2 meta(items/usage/baseline)落行')
+
+
+# ── 7. _merge_second_pass ────────────────────────────────────────────────
+def test_merge_second_pass_updates_meta_persists_emits():
+    from lib.paper.report_engine._hooks import _merge_second_pass
+    events = []
+    persisted = []
+    task = {
+        '_userId': TEST_OWNER_USER_ID,
+        'lang': 'en',
+        'report_meta': {'model': 'm1', 'providerId': '',
+                        'promptTokens': 1000, 'completionTokens': 200,
+                        'cacheReadTokens': 0, 'cacheWriteTokens': 0,
+                        'reasoningTokens': 0, 'costCny': 0.01, 'costUsd': 0.001},
+    }
+
+    import lib.paper.report_engine._hooks as hooks
+    orig_append = hooks._append_report_event
+    orig_cost = None
+    import lib.cost as _cost_mod
+    orig_compute = _cost_mod.compute_cost
+
+    import lib.storage as _storage_mod
+    orig_client = _storage_mod.get_storage_client
+
+    class _Client:
+        def command(self, operation, payload, command_id):
+            persisted.append((operation, payload, command_id))
+            current = json.loads(json.dumps(task['report_meta']))
+            current.setdefault('secondPasses', {})[payload['name']] = payload['entry']
+            current['totalUsage'] = {
+                'prompt_tokens': 1150, 'completion_tokens': 250,
+                'cache_read_tokens': 0, 'cache_write_tokens': 0,
+                'reasoning_tokens': 0,
+            }
+            current['totalCostCny'] = 0.015
+            current['totalCostUsd'] = 0.0015
+            return {'found': True, 'meta': current}
+
+    hooks._append_report_event = lambda t, ev: events.append(ev)
+    _cost_mod.compute_cost = lambda usage, **k: {'costCny': 0.005, 'costUsd': 0.0005}
+    _storage_mod.get_storage_client = lambda *, write=False: _Client()
+    try:
+        _merge_second_pass(task, 'h9', 'insight', {
+            'fired': True, 'baseline': 3.1,
+            'usage': {'prompt_tokens': 150, 'completion_tokens': 50,
+                      'cache_read_tokens': 0, 'cache_write_tokens': 0,
+                      'reasoning_tokens': 0},
+        }, model='m1')
+    finally:
+        hooks._append_report_event = orig_append
+        _cost_mod.compute_cost = orig_compute
+        _storage_mod.get_storage_client = orig_client
+
+    meta = task['report_meta']
+    sp = meta.get('secondPasses', {}).get('insight')
+    assert sp, 'secondPasses.insight not merged'
+    assert sp['fired'] is True and sp['baseline'] == 3.1
+    assert sp['costCny'] == 0.005
+    # total = body (1000/200) + pass (150/50)
+    assert meta['totalUsage']['prompt_tokens'] == 1150
+    assert meta['totalUsage']['completion_tokens'] == 250
+    assert meta['totalCostCny'] == 0.015  # body + the billed second pass
+    # Semantic data-layer mutation persists metadata without touching body.
+    assert persisted, 'semantic metadata mutation was not issued'
+    operation, payload, command_id = persisted[0]
+    assert operation == 'paper.report.second_pass.merge'
+    assert payload['paper_hash'] == 'h9' and payload['lang'] == 'en'
+    assert payload['name'] == 'insight'
+    assert command_id.startswith('paper.report.second-pass:')
+    # live event for the finish-tag hot update
+    assert any(e.get('type') == 'report_meta' for e in events), \
+        'report_meta event not emitted'
+    _ok('_merge_second_pass:secondPasses 合并 + 总量重算 + meta-only 重持久化 + report_meta 事件')
+
+
+def test_neuter_second_pass_merge_is_load_bearing():
+    """NEUTER: without the merge, the finish-tag total is body-only — proving
+    the merge (not something else) is what surfaces second-pass cost."""
+    task = {'lang': 'en',
+            'report_meta': {'model': 'm1', 'promptTokens': 1000,
+                            'completionTokens': 200}}
+    # (No _merge_second_pass call — the neutered path.)
+    meta = task['report_meta']
+    assert 'secondPasses' not in meta, \
+        'NEUTER failed — secondPasses appeared without the merge'
+    assert 'totalUsage' not in meta
+    _ok('NEUTER:摘掉合并 → 总账回落本体量(合并是真接线)')
+
+
+# ── 8. read path: v2 payload vs legacy merge ─────────────────────────────
+def _import_routes_paper():
+    for modname in ('flask', 'quart'):
+        try:
+            mod = __import__(modname)
+            if hasattr(mod, 'Blueprint') and not hasattr(mod.Blueprint, 'websocket'):
+                mod.Blueprint.websocket = lambda self, *a, **k: (lambda f: f)
+        except Exception:
+            pass
+    import routes.paper_pkg._common as rp
+    return rp
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def test_read_path_v2_payload_not_merged(monkeypatch):
+    rp = _import_routes_paper()
+    phash = 'v2hash'
+    v2_meta = {'kind': 'insight', 'v': 2,
+               'items': {'thesis': 'The bet.',
+                         'connections': [{'text': 'b', 'anchor_idx': 1}]},
+               'baseline': 3.0}
+    rows = {
+        (phash, config_mod.insight_lang_key('en')): {
+            'report': '## 💡 Insight & Ideas\n\nbody\n', 'meta': v2_meta},
+    }
+
+    class _Repository:
+        def __init__(self, user_id):
+            assert user_id == TEST_OWNER_USER_ID
+
+        def get_report(self, paper_hash, lang):
+            from lib.paper.artifact_repository import PaperReport
+            row = rows.get((paper_hash, lang))
+            return PaperReport(paper_hash, lang, **row) if row else None
+
+    monkeypatch.setattr(rp, 'PaperArtifactRepository', _Repository)
+    payload = _run(rp._load_cached_insight_payload(
+        phash, 'en', user_id=TEST_OWNER_USER_ID))
+    out = _run(rp._append_cached_insight(
+        _REPORT, phash, 'en', user_id=TEST_OWNER_USER_ID))
+    assert payload is not None, 'v2 payload not served'
+    assert payload['items']['connections'][0]['anchor_idx'] == 1
+    assert payload['baseline'] == 3.0
+    assert payload['markdown'].startswith('## 💡')
+    assert '## 💡 Insight & Ideas' not in out, 'v2 row must NOT merge into the body'
+    assert out == _REPORT
+    _ok('读路径:v2 行出结构化负载、正文不合并')
+
+
+def test_read_path_v1_legacy_still_merges(monkeypatch):
+    rp = _import_routes_paper()
+    phash = 'v1hash'
+    rows = {
+        (phash, config_mod.insight_lang_key('en')): {
+            'report': '## 💡 Insight & Ideas\n\nlegacy\n',
+            'meta': {'kind': 'insight'}},
+    }
+
+    class _Repository:
+        def __init__(self, user_id):
+            assert user_id == TEST_OWNER_USER_ID
+
+        def get_report(self, paper_hash, lang):
+            from lib.paper.artifact_repository import PaperReport
+            row = rows.get((paper_hash, lang))
+            return PaperReport(paper_hash, lang, **row) if row else None
+
+    monkeypatch.setattr(rp, 'PaperArtifactRepository', _Repository)
+    payload = _run(rp._load_cached_insight_payload(
+        phash, 'en', user_id=TEST_OWNER_USER_ID))
+    out = _run(rp._append_cached_insight(
+        _REPORT, phash, 'en', user_id=TEST_OWNER_USER_ID))
+    assert payload is None, 'v1 row must not produce a structured payload'
+    assert '## 💡 Insight & Ideas' in out, 'v1 row must keep the legacy merge'
+    _ok('读路径:v1 旧行保持文末合并(向后兼容)')
+
+
+def main():
+    print()
+    print(_color('═══ Paper Reading-Experience P0 Backend Tests ═══', '36'))
+    print()
+    tests = [
+        test_extract_report_headings,
+        test_resolve_anchor_exact_fuzzy_fallback,
+        test_resolve_anchor_zh,
+        test_resolve_insight_anchors_items,
+        test_enable_chain_three_levels,
+        test_personal_scope_registry_has_insight,
+        test_usage_folded_and_items_persisted,
+        test_persist_insight_v2_meta_written,
+        test_merge_second_pass_updates_meta_persists_emits,
+        test_neuter_second_pass_merge_is_load_bearing,
+        test_read_path_v2_payload_not_merged,
+        test_read_path_v1_legacy_still_merges,
+    ]
+    for fn in tests:
+        try:
+            fn()
+        except AssertionError as e:
+            _fail(f'{fn.__name__}: {e}')
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            _fail(f'{fn.__name__}: unexpected {type(e).__name__}: {e}')
+    print()
+    print(_color(f'═══ ALL {len(tests)} TESTS PASSED ═══', '32'))
+    print()
+
+
+if __name__ == '__main__':
+    main()

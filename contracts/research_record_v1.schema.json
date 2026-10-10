@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/research_record_v1.schema.json",
+  "title": "Durable Research run snapshot",
+  "type": "object",
+  "required": ["schema_version", "task_id", "direction", "lang", "status", "created_at", "updated_at", "research_progress", "resumable"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "maxLength": 160},
+    "evolution_run_id": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": "\\S", "description": "Server-derived immutable owning Evolution run; absent on legacy or bare research tasks. Cancellation uses this run's owner-scoped authority."},
+    "direction": {"type": "string"},
+    "lang": {"enum": ["en", "zh"]},
+    "status": {"enum": ["pending", "running", "interrupted", "done", "degraded", "error", "aborted"]},
+    "created_at": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "integer", "minimum": 0},
+    "resumable": {"type": "boolean"},
+    "research_progress": {"anyOf": [{"type": "null"}, {"$ref": "research_progress_v1.schema.json"}]},
+    "result": {"type": "object", "description": "Exact run-scoped published artifact; never hydrated from a different run of the same direction."},
+    "error": {"type": "string", "maxLength": 2000},
+    "failed_stage": {"type": "string", "maxLength": 80},
+
+    "survey_batch_failures": {"type": "array", "maxItems": 200, "items": {"type": "object", "required": ["batch", "paper_ids", "error"], "properties": {"batch": {"type": "integer", "minimum": 0, "maximum": 199}, "paper_ids": {"type": "array", "maxItems": 25, "items": {"type": "string", "maxLength": 160}}, "error": {"type": "string", "maxLength": 300}}, "additionalProperties": false}},
+    "citation_edges": {"type": "array", "maxItems": 320, "items": {"type": "object", "required": ["from", "to", "relation"], "properties": {"from": {"type": "string", "maxLength": 320}, "to": {"type": "string", "maxLength": 320}, "relation": {"const": "cites"}}, "additionalProperties": false}},
+    "source_statuses": {"type": "array", "maxItems": 64, "items": {"type": "object", "properties": {"source": {"type": "string", "maxLength": 80}, "operation": {"type": "string", "maxLength": 80}, "status": {"type": "string", "maxLength": 80}, "error": {"type": "string", "maxLength": 500}, "retrieved": {"type": "integer", "minimum": 0}}, "additionalProperties": false}},
+    "papers": {
+      "type": "array", "maxItems": 200,
+      "items": {
+        "type": "object",
+        "properties": {
+          "arxivId": {"type": "string", "maxLength": 160},
+          "paperId": {"type": "string", "maxLength": 320},
+          "doi": {"type": "string", "maxLength": 256},
+          "semanticScholarId": {"type": "string", "maxLength": 64},
+          "year": {"type": ["integer", "null"], "minimum": 0, "maximum": 9999},
+          "venue": {"type": "string", "maxLength": 500},
+          "citationCount": {"type": ["integer", "null"], "minimum": 0},
+          "metadataSource": {"type": "string", "maxLength": 80},
+          "citationCountSource": {"type": "string", "maxLength": 80},
+          "phash": {"type": "string", "maxLength": 128},
+          "title": {"type": "string", "maxLength": 500},
+          "status": {"type": "string", "maxLength": 40},
+          "error": {"type": "string", "maxLength": 500},
+          "pageCount": {"type": "integer", "minimum": 0},
+          "textLength": {"type": "integer", "minimum": 0},
+          "degraded": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

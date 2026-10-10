@@ -1,0 +1,558 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   TOFU UI KIT — shared component layer (composed LAST, see manifest.json)
+
+   Rules (enforced by review + the phase-3 style gate):
+   - Every rule consumes design tokens ONLY (00-design-tokens.css + the
+     legacy color contract). No raw hex, no raw px margins/padding, no
+     one-off font stacks. Pixel geometry that has no token (border widths,
+     chevron size) is stated once, locally, with a reason.
+   - Class contract is `.ui-*` (BEM-ish: __element, --modifier). Feature
+     CSS must NOT restyle .ui-* classes; extend the kit here instead.
+   - Theme adaptation happens exclusively through tokens — there is no
+     [data-theme] selector in this file and there never should be.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Layout primitives ─────────────────────────────────────────────────────
+   Alignment is a construction property: stacks/rows/grids take their rhythm
+   from --ui-gap (any --space-* step), never from ad-hoc margins. Children
+   of these primitives carry NO outer margins. */
+.ui-stack{
+  display:flex;flex-direction:column;align-items:stretch;
+  gap:var(--ui-gap,var(--space-3));
+}
+.ui-stack--tight{--ui-gap:var(--space-1)}
+.ui-stack--loose{--ui-gap:var(--space-6)}
+
+.ui-row{
+  display:flex;align-items:center;
+  gap:var(--ui-gap,var(--space-3));
+}
+.ui-row--tight{--ui-gap:var(--space-1)}
+.ui-row--loose{--ui-gap:var(--space-6)}
+.ui-row--between{justify-content:space-between}
+.ui-row--end{justify-content:flex-end}
+.ui-row--wrap{flex-wrap:wrap}
+.ui-row--top{align-items:flex-start}
+
+.ui-grid{
+  display:grid;gap:var(--ui-gap,var(--space-4));
+  grid-template-columns:repeat(auto-fit,minmax(var(--ui-grid-min,240px),1fr));
+}
+
+/* Toolbar: a row of controls sharing one height ramp → aligned by default */
+.ui-toolbar{display:flex;align-items:center;gap:var(--space-2)}
+.ui-toolbar--between{justify-content:space-between}
+
+/* ── Button ────────────────────────────────────────────────────────────── */
+.ui-btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  gap:var(--space-2);
+  height:var(--control-h-md);
+  padding:0 var(--space-4);
+  border:1px solid transparent;border-radius:var(--radius-sm);
+  background:transparent;color:var(--text-secondary);
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  font-weight:var(--weight-semibold);line-height:1;
+  white-space:nowrap;user-select:none;cursor:pointer;
+  transition:background var(--motion-base) var(--ease-standard),
+    border-color var(--motion-base) var(--ease-standard),
+    color var(--motion-base) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.ui-btn:hover{background:var(--bg-hover);color:var(--text-primary)}
+.ui-btn:active{background:var(--bg-active)}
+.ui-btn:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.ui-btn:disabled{opacity:0.5;cursor:default;pointer-events:none}
+
+.ui-btn--primary{
+  background:var(--accent);color:var(--text-on-accent);
+}
+.ui-btn--primary:hover{background:var(--accent-hover);color:var(--text-on-accent)}
+.ui-btn--primary:active{background:var(--accent-hover)}
+
+.ui-btn--secondary{
+  background:var(--bg-tertiary);color:var(--text-primary);
+  border-color:var(--border);
+}
+.ui-btn--secondary:hover{background:var(--bg-hover);color:var(--text-primary)}
+.ui-btn--secondary:active{background:var(--bg-active)}
+
+.ui-btn--ghost{background:transparent;color:var(--text-secondary)}
+.ui-btn--ghost:hover{background:var(--bg-hover);color:var(--text-primary)}
+
+.ui-btn--danger{
+  background:transparent;color:var(--error-text);
+  border-color:var(--error-border);
+}
+.ui-btn--danger:hover{background:var(--error-bg);color:var(--error-text)}
+
+.ui-btn--sm{
+  height:var(--control-h-sm);padding:0 var(--space-3);
+  font-size:var(--font-size-sm);border-radius:var(--radius-xs);
+}
+.ui-btn--lg{
+  height:var(--control-h-lg);padding:0 var(--space-5);
+  font-size:var(--font-size-lg);
+}
+
+/* Icon-only button: square on the same height ramp */
+.ui-icon-btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:var(--control-h-md);height:var(--control-h-md);padding:0;
+  border:1px solid transparent;border-radius:var(--radius-sm);
+  background:transparent;color:var(--text-secondary);cursor:pointer;
+  transition:background var(--motion-base) var(--ease-standard),
+    color var(--motion-base) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.ui-icon-btn:hover{background:var(--bg-hover);color:var(--text-primary)}
+.ui-icon-btn:active{background:var(--bg-active)}
+.ui-icon-btn:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.ui-icon-btn:disabled{opacity:0.5;cursor:default;pointer-events:none}
+.ui-icon-btn--sm{width:var(--control-h-sm);height:var(--control-h-sm);border-radius:var(--radius-xs)}
+.ui-icon-btn--lg{width:var(--control-h-lg);height:var(--control-h-lg)}
+
+/* ── Field: label + control + hint/error ───────────────────────────────── */
+.ui-field{display:flex;flex-direction:column;gap:var(--space-2)}
+.ui-field__label{
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  font-weight:var(--weight-medium);color:var(--text-primary);
+}
+.ui-field__label-required{color:var(--error-text)}
+.ui-field__hint{
+  font-family:var(--font-ui);font-size:var(--font-size-sm);
+  color:var(--text-tertiary);line-height:var(--leading-title);
+}
+.ui-field__error{
+  display:none;
+  font-family:var(--font-ui);font-size:var(--font-size-sm);
+  font-weight:var(--weight-medium);color:var(--error-text);
+  line-height:var(--leading-title);
+}
+.ui-field--error .ui-field__error{display:block}
+.ui-field--error .ui-field__hint{display:none}
+.ui-field--error .ui-input,
+.ui-field--error .ui-select{border-color:var(--error-text)}
+
+/* ── Text input / textarea ─────────────────────────────────────────────── */
+.ui-input{
+  width:100%;height:var(--control-h-md);
+  padding:0 var(--space-3);
+  background:var(--bg-primary);
+  border:1px solid var(--border);border-radius:var(--radius-xs);
+  color:var(--text-primary);
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  line-height:var(--leading-title);
+  outline:none;
+  transition:border-color var(--motion-base) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.ui-input::placeholder{color:var(--text-tertiary)}
+.ui-input:hover:not(:disabled):not(:focus){border-color:var(--text-tertiary)}
+.ui-input:focus{border-color:var(--accent);box-shadow:var(--focus-ring)}
+.ui-input:disabled{background:var(--bg-tertiary);color:var(--text-tertiary);cursor:not-allowed}
+
+textarea.ui-input{
+  height:auto;min-height:80px;
+  padding:var(--space-2) var(--space-3);
+  line-height:var(--leading-body);resize:vertical;
+}
+
+/* ── Select (native element, custom chevron via currentColor mask) ────── */
+.ui-select{
+  position:relative;display:inline-block;width:100%;
+}
+.ui-select>select{
+  width:100%;height:var(--control-h-md);
+  padding:0 var(--space-8) 0 var(--space-3);
+  appearance:none;-webkit-appearance:none;
+  background:var(--bg-primary);
+  border:1px solid var(--border);border-radius:var(--radius-xs);
+  color:var(--text-primary);
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  outline:none;cursor:pointer;
+  transition:border-color var(--motion-base) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.ui-select>select:hover:not(:disabled):not(:focus){border-color:var(--text-tertiary)}
+.ui-select>select:focus{border-color:var(--accent);box-shadow:var(--focus-ring)}
+.ui-select>select:disabled{background:var(--bg-tertiary);color:var(--text-tertiary);cursor:not-allowed}
+/* Chevron: one inline SVG, masked through currentColor → theme-adaptive
+   without a single per-theme rule. */
+.ui-select::after{
+  content:"";position:absolute;top:50%;right:var(--space-3);
+  width:12px;height:12px; /* chevron glyph size — no token by design */
+  transform:translateY(-50%);
+  background:currentColor;color:var(--text-tertiary);
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  pointer-events:none;
+}
+
+/* ── Card ──────────────────────────────────────────────────────────────── */
+.ui-card{
+  background:var(--bg-secondary);
+  border:1px solid var(--border);border-radius:var(--radius);
+  padding:var(--space-5);
+}
+.ui-card--flush{padding:0}
+
+/* ── Badge ─────────────────────────────────────────────────────────────── */
+.ui-badge{
+  display:inline-flex;align-items:center;gap:var(--space-1);
+  height:20px;padding:0 var(--space-2); /* one-off chip height: between space-4 steps by design */
+  border-radius:999px;
+  border:1px solid var(--border);
+  background:var(--bg-tertiary);color:var(--text-secondary);
+  font-family:var(--font-ui);font-size:var(--font-size-xs);
+  font-weight:var(--weight-semibold);line-height:1;white-space:nowrap;
+}
+.ui-badge--success{background:var(--success-bg);border-color:var(--success-border);color:var(--success-text)}
+.ui-badge--warning{background:var(--warning-bg);border-color:var(--warning-border);color:var(--warning-text)}
+.ui-badge--error{background:var(--error-bg);border-color:var(--error-border);color:var(--error-text)}
+.ui-badge--info{background:var(--info-bg);border-color:var(--info-border);color:var(--info-text)}
+
+/* ── Dialog (native <dialog> → focus trap, Esc, top layer for free) ───── */
+dialog.ui-dialog{
+  /* The app-wide reset `*{margin:0}` (01-shell-navigation.css) strips the UA
+     stylesheet's `margin:auto` that centers a native dialog — without this
+     line every modal renders pinned to the top-left corner. */
+  margin:auto;
+  width:min(480px,calc(100vw - 2 * var(--space-4)));
+  max-height:calc(100dvh - 2 * var(--space-6));
+  padding:0;
+  background:var(--bg-secondary);color:var(--text-primary);
+  border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  font-family:var(--font-ui);
+}
+dialog.ui-dialog::backdrop{background:var(--backdrop)}
+dialog.ui-dialog[open]{animation:ui-dialog-in var(--motion-base) var(--ease-standard)}
+@keyframes ui-dialog-in{
+  from{opacity:0;transform:translateY(var(--space-2)) scale(0.98)}
+  to{opacity:1;transform:none}
+}
+.ui-dialog__header{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:var(--space-3);
+  padding:var(--space-4) var(--space-5) 0;
+}
+.ui-dialog__title{
+  margin:0;
+  font-size:var(--font-size-xl);font-weight:var(--weight-semibold);
+  line-height:var(--leading-title);color:var(--text-primary);
+}
+.ui-dialog__body{
+  padding:var(--space-4) var(--space-5);
+  font-size:var(--font-size-lg);line-height:var(--leading-body);
+  color:var(--text-secondary);
+  overflow-y:auto;
+}
+.ui-dialog__footer{
+  display:flex;justify-content:flex-end;gap:var(--space-2);
+  padding:0 var(--space-5) var(--space-4);
+}
+
+/* ── Drawer: dialog variant docked to the right edge ───────────────────── */
+dialog.ui-drawer{
+  margin:0 0 0 auto;
+  width:min(420px,100vw);
+  height:100dvh;max-height:none;
+  border:none;border-left:1px solid var(--border);border-radius:0;
+}
+dialog.ui-drawer[open]{animation:ui-drawer-in var(--motion-slow) var(--ease-standard)}
+@keyframes ui-drawer-in{
+  from{transform:translateX(var(--space-8))}
+  to{transform:none}
+}
+dialog.ui-drawer .ui-dialog__body{flex:1}
+dialog.ui-drawer{display:flex;flex-direction:column}
+/* Drawer is hidden until [open]; native dialog display rules handle that,
+   but flex must only apply when open or the closed drawer would flash. */
+dialog.ui-drawer:not([open]){display:none}
+
+/* ── Choice controls: checkbox / radio / switch (native inputs) ──────────
+   16px box = --space-4; check/dot glyphs are component-internal geometry
+   (like the select chevron), stated once here. */
+.ui-choice{
+  display:inline-flex;align-items:center;gap:var(--space-2);
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  color:var(--text-primary);cursor:pointer;user-select:none;
+}
+.ui-choice:has(:disabled){color:var(--text-tertiary);cursor:not-allowed}
+.ui-choice>input{
+  appearance:none;-webkit-appearance:none;
+  width:var(--space-4);height:var(--space-4);flex-shrink:0;margin:0;
+  border:1px solid var(--border);border-radius:var(--radius-xs);
+  background:var(--bg-primary);cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;
+  transition:background var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.ui-choice>input:hover:not(:disabled):not(:checked){border-color:var(--text-tertiary)}
+.ui-choice>input:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.ui-choice>input:checked{background:var(--accent);border-color:var(--accent)}
+.ui-choice>input:disabled{background:var(--bg-tertiary);cursor:not-allowed}
+.ui-choice>input:checked:disabled{opacity:0.5}
+/* Checkmark: one masked SVG through --text-on-accent, same technique as
+   the select chevron. */
+.ui-choice>input[type="checkbox"]:checked::after{
+  content:"";width:10px;height:10px;
+  background:var(--text-on-accent);
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3L13 4.5' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3L13 4.5' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+.ui-choice>input[type="radio"]{border-radius:50%}
+.ui-choice>input[type="radio"]:checked::after{
+  content:"";width:var(--space-2);height:var(--space-2);border-radius:50%;
+  background:var(--text-on-accent);
+}
+/* Switch: 32×18 track, 14px knob — component-internal geometry. */
+.ui-choice>input.ui-switch{
+  width:var(--space-8);height:18px;border-radius:999px;
+  background:var(--bg-active);border-color:var(--bg-active);
+  position:relative;
+  transition:background var(--motion-base) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.ui-choice>input.ui-switch::after{
+  content:"";position:absolute;top:var(--control-edge-inset);left:var(--control-edge-inset);
+  width:14px;height:14px;border-radius:50%;
+  background:var(--text-on-accent);
+  box-shadow:var(--knob-shadow);
+  transition:transform var(--motion-base) var(--ease-standard);
+}
+.ui-choice>input.ui-switch:checked{background:var(--accent);border-color:var(--accent)}
+.ui-choice>input.ui-switch:checked::after{transform:translateX(14px)}
+
+/* ── Tabs ──────────────────────────────────────────────────────────────── */
+.ui-tabs__list{
+  display:flex;gap:var(--space-1);
+  border-bottom:1px solid var(--border);
+}
+.ui-tabs__tab{
+  padding:var(--space-2) var(--space-3);
+  margin-bottom:calc(-1 * var(--control-edge-inset)); /* overlap the list's bottom border */
+  border:none;border-bottom:2px solid transparent;
+  background:transparent;color:var(--text-secondary);
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  font-weight:var(--weight-medium);cursor:pointer;
+  transition:color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.ui-tabs__tab:hover{color:var(--text-primary)}
+.ui-tabs__tab:focus-visible{outline:none;box-shadow:var(--focus-ring);border-radius:var(--radius-xs)}
+.ui-tabs__tab[aria-selected="true"]{
+  color:var(--accent);border-bottom-color:var(--accent);
+  font-weight:var(--weight-semibold);
+}
+.ui-tabs__tab:disabled{color:var(--text-tertiary);cursor:not-allowed}
+.ui-tabs__panel{padding-top:var(--space-4)}
+.ui-tabs__panel:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+
+/* ── Dropdown menu ─────────────────────────────────────────────────────── */
+.ui-dropdown{position:relative;display:inline-block}
+.ui-menu{
+  position:absolute;top:calc(100% + var(--space-1));left:0;
+  min-width:160px;max-width:280px;
+  padding:var(--space-1);
+  background:var(--bg-secondary);
+  border:1px solid var(--border);border-radius:var(--radius-sm);
+  box-shadow:var(--shadow);
+  z-index:var(--z-dropdown);
+  display:flex;flex-direction:column;
+}
+.ui-menu[hidden]{display:none}
+.ui-menu--align-end{left:auto;right:0}
+.ui-menu__item{
+  display:flex;align-items:center;gap:var(--space-2);
+  padding:var(--space-2) var(--space-3);
+  border:none;border-radius:var(--radius-xs);
+  background:transparent;color:var(--text-primary);
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  text-align:left;cursor:pointer;white-space:nowrap;
+}
+.ui-menu__item:hover,.ui-menu__item:focus-visible{background:var(--bg-hover);outline:none}
+.ui-menu__item:disabled{color:var(--text-tertiary);cursor:not-allowed;background:transparent}
+.ui-menu__item--danger{color:var(--error-text)}
+.ui-menu__item--danger:hover,.ui-menu__item--danger:focus-visible{background:var(--error-bg)}
+.ui-menu__separator{
+  height:1px;margin:var(--space-1) 0;
+  background:var(--border-light);border:none;
+}
+
+/* ── Tooltip (CSS-only; anchor wraps the trigger) ─────────────────────── */
+.ui-tooltip-anchor{position:relative;display:inline-flex}
+.ui-tooltip-anchor::after{
+  content:attr(data-tooltip);
+  position:absolute;bottom:calc(100% + var(--space-2));left:50%;
+  transform:translateX(-50%);
+  padding:var(--space-1) var(--space-2);
+  border-radius:var(--radius-xs);
+  background:var(--text-primary);color:var(--bg-primary);
+  font-family:var(--font-ui);font-size:var(--font-size-xs);
+  font-weight:var(--weight-medium);line-height:var(--leading-title);
+  white-space:nowrap;pointer-events:none;
+  z-index:var(--z-tooltip);
+  opacity:0;visibility:hidden;
+  transition:opacity var(--motion-fast) var(--ease-standard) 0.3s,
+    visibility 0s linear 0.45s;
+}
+.ui-tooltip-anchor:hover::after,
+.ui-tooltip-anchor:focus-within::after{
+  opacity:1;visibility:visible;
+  transition:opacity var(--motion-fast) var(--ease-standard) 0.3s,
+    visibility 0s;
+}
+.ui-tooltip-anchor--bottom::after{
+  bottom:auto;top:calc(100% + var(--space-2));
+}
+
+/* ── Toast ─────────────────────────────────────────────────────────────── */
+.ui-toast-region{
+  position:fixed;right:var(--space-4);bottom:var(--space-4);
+  display:flex;flex-direction:column;gap:var(--space-2);
+  z-index:var(--z-toast);
+  max-width:min(380px,calc(100vw - 2 * var(--space-4)));
+}
+.ui-toast{
+  display:flex;align-items:flex-start;gap:var(--space-3);
+  min-width:260px;
+  padding:var(--space-3) var(--space-4);
+  background:var(--bg-secondary);
+  border:1px solid var(--border);border-left-width:3px;border-radius:var(--radius-sm);
+  box-shadow:var(--shadow);
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  color:var(--text-primary);line-height:var(--leading-title);
+  animation:ui-toast-in var(--motion-slow) var(--ease-standard);
+}
+@keyframes ui-toast-in{
+  from{opacity:0;transform:translateY(var(--space-3))}
+  to{opacity:1;transform:none}
+}
+.ui-toast__body{flex:1;min-width:0}
+.ui-toast__title{font-weight:var(--weight-semibold);margin-bottom:var(--space-1)}
+.ui-toast--success{border-left-color:var(--success-text)}
+.ui-toast--warning{border-left-color:var(--warning-text)}
+.ui-toast--error{border-left-color:var(--error-text)}
+.ui-toast--info{border-left-color:var(--info-text)}
+
+/* ── Alert (inline feedback banner) ────────────────────────────────────── */
+.ui-alert{
+  position:relative;
+  padding:var(--space-3) var(--space-4);
+  border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--bg-tertiary);color:var(--text-primary);
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  line-height:var(--leading-title);
+}
+.ui-alert__title{font-weight:var(--weight-semibold);margin-bottom:var(--space-1)}
+.ui-alert--info{background:var(--info-bg);border-color:var(--info-border)}
+.ui-alert--info .ui-alert__title{color:var(--info-text)}
+.ui-alert--success{background:var(--success-bg);border-color:var(--success-border)}
+.ui-alert--success .ui-alert__title{color:var(--success-text)}
+.ui-alert--warning{background:var(--warning-bg);border-color:var(--warning-border)}
+.ui-alert--warning .ui-alert__title{color:var(--warning-text)}
+.ui-alert--error{background:var(--error-bg);border-color:var(--error-border)}
+.ui-alert--error .ui-alert__title{color:var(--error-text)}
+.ui-alert__dismiss{
+  position:absolute;top:var(--space-2);right:var(--space-2);
+}
+
+/* ── Table ─────────────────────────────────────────────────────────────── */
+.ui-table{
+  width:100%;border-collapse:collapse;
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  color:var(--text-primary);
+}
+.ui-table>thead>tr>th{
+  padding:var(--space-2) var(--space-3);
+  border-bottom:1px solid var(--border);
+  font-size:var(--font-size-sm);font-weight:var(--weight-semibold);
+  color:var(--text-secondary);text-align:left;
+  white-space:nowrap;
+}
+.ui-table>tbody>tr>td{
+  padding:var(--space-2) var(--space-3);
+  border-bottom:1px solid var(--border-light);
+  line-height:var(--leading-title);
+}
+.ui-table>tbody>tr:last-child>td{border-bottom:none}
+.ui-table>tbody>tr:hover{background:var(--bg-hover)}
+.ui-table__cell--num{text-align:right;font-variant-numeric:tabular-nums}
+
+/* ── Spinner ─────────────────────────────────────────────────────────────
+   16px ring = --space-4; sm 12px / lg 24px stated locally. */
+.ui-spinner{
+  width:var(--space-4);height:var(--space-4);flex-shrink:0;
+  border:2px solid var(--border);border-top-color:var(--accent);
+  border-radius:50%;
+  animation:ui-spin 0.8s linear infinite;
+}
+.ui-spinner--sm{width:var(--space-3);height:var(--space-3)}
+.ui-spinner--lg{width:var(--space-6);height:var(--space-6);border-width:3px}
+@keyframes ui-spin{to{transform:rotate(360deg)}}
+
+/* ── Skeleton ──────────────────────────────────────────────────────────── */
+.ui-skeleton{
+  border-radius:var(--radius-xs);
+  background:linear-gradient(90deg,
+    var(--bg-tertiary) 25%,var(--bg-hover) 50%,var(--bg-tertiary) 75%);
+  background-size:200% 100%;
+  animation:ui-shimmer 1.4s ease-in-out infinite;
+}
+.ui-skeleton--text{height:1em;margin:var(--space-1) 0}
+@keyframes ui-shimmer{
+  from{background-position:200% 0}
+  to{background-position:-200% 0}
+}
+
+/* ── Progress ────────────────────────────────────────────────────────────
+   6px track is component-internal geometry (between scale steps). */
+.ui-progress{
+  height:6px;border-radius:999px;
+  background:var(--bg-tertiary);overflow:hidden;
+}
+.ui-progress__bar{
+  height:100%;width:var(--ui-progress-value,0%);
+  background:var(--accent);border-radius:inherit;
+  transition:width var(--motion-base) var(--ease-standard);
+}
+.ui-progress--indeterminate .ui-progress__bar{
+  width:40%;
+  animation:ui-progress-slide 1.2s var(--ease-standard) infinite;
+}
+@keyframes ui-progress-slide{
+  from{transform:translateX(-100%)}
+  to{transform:translateX(250%)}
+}
+
+/* ── Divider ─────────────────────────────────────────────────────────────
+   margin:0 — spacing belongs to the parent stack/row, per the layout
+   contract (children carry no outer margins). */
+.ui-divider{border:none;border-top:1px solid var(--border);margin:0}
+.ui-divider--vertical{
+  border-top:none;border-left:1px solid var(--border);
+  align-self:stretch;margin:0;
+}
+
+/* ── Empty state ───────────────────────────────────────────────────────── */
+.ui-empty{
+  display:flex;flex-direction:column;align-items:center;
+  gap:var(--space-2);
+  padding:var(--space-10) var(--space-6);
+  text-align:center;
+}
+.ui-empty__icon{color:var(--text-tertiary);margin-bottom:var(--space-2)}
+.ui-empty__title{
+  font-family:var(--font-ui);font-size:var(--font-size-lg);
+  font-weight:var(--weight-semibold);color:var(--text-primary);
+}
+.ui-empty__description{
+  font-family:var(--font-ui);font-size:var(--font-size-md);
+  color:var(--text-secondary);line-height:var(--leading-body);
+  max-width:40ch;
+}
+.ui-empty__action{margin-top:var(--space-3)}

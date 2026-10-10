@@ -1,0 +1,182 @@
+{
+  "schema": "tofudb.benchmark-accounting/v1",
+  "problem": "Embedded lifecycle resets lost earlier proc IO windows because folding read a nonexistent daemon PID. Real full16 retained1.71GB but the reset-only estimate was12KiB.",
+  "decision": "Observe harness PID, fold close/abandon windows before reopen, clear folded baseline, include runtime open, preserve close errors, mark unavailable/decreasing counters incomplete and report observed zero.",
+  "alternatives_considered": [
+    "Treating12KiB as low write volume contradicts window conservation.",
+    "Footprint is not cumulative device IO.",
+    "Overlapping in-process engines cannot yield DB-only IO attribution."
+  ],
+  "verification": {
+    "focused_tests": 5,
+    "full_benchmark_tests": 67,
+    "full16_errors": 0,
+    "native_runtime_changed": false,
+    "documentation_check": "Baseline and candidate fail existing catalog/link/line-budget issues; charter shrinks1322to1321 lines."
+  },
+  "measurement": {
+    "decision": "Historical embedded write totals reset across lifecycle windows are invalid. Corrected full16 supports investigating projection/history footprint first; process IO remains an upper bound.",
+    "native_pair": {
+      "source_sha256": "7d38c76a7bb9c298b639113b40117b9270e8424508652137b09d3544a11e7e58",
+      "binary_sha256": "e6025352a6375944b590128a0fc2e2a68d7737ed7e008d4d7ac69f0e492a516c",
+      "library_sha256": "2318509b4c58ce12ec612b44237ab0f6669eab5b385879ba5e9a7493ac6b2464",
+      "scope": "Independent projection history retention and shared online GC lifecycle; actual CLI/library identity and allocator checked; frozen current Native and SDK, no deployment"
+    },
+    "benchmark_source_sha256": "7e03face1bee16c88b49cf7396c04b16b26d173e4b4a4fb18dfce5469fdfe47a",
+    "all16_no_errors": true,
+    "before_close": {
+      "authority_data_size_bytes": 655335839,
+      "authority_directory": "/tmp/tofudb-perf-authority-fh58vakm",
+      "data_size_bytes": 655335839,
+      "engine_write_bytes": 2835398656,
+      "engine_write_bytes_complete": true,
+      "engine_write_bytes_scope": "harness-process upper bound; serving windows include embedded open, close, abandon and reopen; authority-init subprocess excluded",
+      "filesystem": "xfs",
+      "last_live_window_write_bytes": 12288,
+      "projection_data_size_bytes": 1057189229,
+      "projection_directory": "/tmp/tofudb-perf-proj-g1so98va/projection",
+      "total_data_size_bytes": 1712525068
+    },
+    "post_close": {
+      "data_size_bytes": 661560799,
+      "authority_directory": "/tmp/tofudb-perf-authority-fh58vakm",
+      "filesystem": "xfs",
+      "engine_write_bytes": 2846683136,
+      "engine_write_bytes_complete": true,
+      "engine_write_bytes_scope": "harness-process upper bound; serving windows include embedded open, close, abandon and reopen; authority-init subprocess excluded",
+      "authority_data_size_bytes": 661560799,
+      "projection_data_size_bytes": 1057189229,
+      "total_data_size_bytes": 1718750028,
+      "projection_directory": "/tmp/tofudb-perf-proj-g1so98va/projection",
+      "last_live_window_write_bytes": null
+    },
+    "phases": [
+      {
+        "phase": "record_put_burst",
+        "authority_growth_bytes": 912472,
+        "projection_growth_bytes": 1804,
+        "process_write_growth_bytes": 5054464,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "record_get_points",
+        "authority_growth_bytes": 2700239,
+        "projection_growth_bytes": 0,
+        "process_write_growth_bytes": 10919936,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "conversation_create_burst",
+        "authority_growth_bytes": 10365207,
+        "projection_growth_bytes": 0,
+        "process_write_growth_bytes": 14495744,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "sidebar_list_page",
+        "authority_growth_bytes": 7527241,
+        "projection_growth_bytes": 830866,
+        "process_write_growth_bytes": 10694656,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "conversation_open",
+        "authority_growth_bytes": 4440566,
+        "projection_growth_bytes": 0,
+        "process_write_growth_bytes": 6492160,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "turn_append_burst",
+        "authority_growth_bytes": 37432971,
+        "projection_growth_bytes": 0,
+        "process_write_growth_bytes": 73605120,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "conversation_search",
+        "authority_growth_bytes": 37218545,
+        "projection_growth_bytes": 766707163,
+        "process_write_growth_bytes": 1221754880,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "mixed_80_10_10",
+        "authority_growth_bytes": 17776116,
+        "projection_growth_bytes": 16464,
+        "process_write_growth_bytes": 61575168,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "open_windowed_long_history",
+        "authority_growth_bytes": 52371961,
+        "projection_growth_bytes": 4140073,
+        "process_write_growth_bytes": 95719424,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "sidebar_with_history",
+        "authority_growth_bytes": 104475743,
+        "projection_growth_bytes": 20947677,
+        "process_write_growth_bytes": 207884288,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "transcript_bulk_hydration",
+        "authority_growth_bytes": 119768803,
+        "projection_growth_bytes": 244391708,
+        "process_write_growth_bytes": 610013184,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "concurrent_read",
+        "authority_growth_bytes": 24885803,
+        "projection_growth_bytes": 0,
+        "process_write_growth_bytes": 39645184,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "swarm_write",
+        "authority_growth_bytes": 72949249,
+        "projection_growth_bytes": 0,
+        "process_write_growth_bytes": 152539136,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "turn_append_large",
+        "authority_growth_bytes": 14718192,
+        "projection_growth_bytes": 0,
+        "process_write_growth_bytes": 15171584,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "maintenance_reopen",
+        "authority_growth_bytes": 68215457,
+        "projection_growth_bytes": 20145282,
+        "process_write_growth_bytes": 177283072,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      },
+      {
+        "phase": "crash_recovery",
+        "authority_growth_bytes": 76765129,
+        "projection_growth_bytes": 0,
+        "process_write_growth_bytes": 131502080,
+        "scope": "Includes background work progressing in this interval, not causal operation-only attribution."
+      }
+    ],
+    "window_count": 11,
+    "legacy_reset_only_estimate_bytes": 12288,
+    "corrected_to_last_window_ratio": 230745.33333333334,
+    "next": "Separate live projection pages/index data from retained history and reclaimable physical contents; do not assume loose/packed files duplicate each other.",
+    "limits": [
+      "No latency admission or paired SQLite comparison in this diagnostic.",
+      "Native-only run avoids another in-process database contaminating this harness IO upper bound.",
+      "64 newly seeded search conversations plus accumulated earlier corpus; 767MB growth must not be divided by64 and claimed as per-document cost.",
+      "Background and per-phase file snapshots are asynchronous.",
+      "No steady-state bounded-growth proof."
+    ]
+  },
+  "scope_receipt_sha256": "f1bfb0ad3ea5fca65859c32499e63caf5c47e9980436abc66627a8add2689aba",
+  "raw_report_sha256": "c50510111f37a04c779346d900e6240e26338a3b41ea81e0647024f3a844e655",
+  "raw_evidence_directory": "/path/to/your/project"
+}

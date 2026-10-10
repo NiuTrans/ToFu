@@ -1,0 +1,32 @@
+
+/* ── Attach file button (+) — the leftmost control in the toolbar row (was a
+   floating child of .input-row). A quiet ghost-icon peer of the mic button, so
+   tablets forced into PC mode (where drag-and-drop is unavailable) still have a
+   click-to-upload affordance. Sized 32px to match the toolbar band; mobile
+   enlarges it to 40px. ── */
+.attach-btn{display:inline-flex;width:32px;height:32px;min-width:32px;background:none;border:none;border-radius:8px;cursor:pointer;align-items:center;justify-content:center;color:var(--text-tertiary);transition:color .2s,background-color .2s,transform .15s;flex-shrink:0;padding:0;-webkit-tap-highlight-color:transparent}
+.attach-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
+.attach-btn:active{transform:scale(.9)}
+.attach-btn svg{width:18px;height:18px;stroke-width:2}
+/* ── Voice-input mic button — visible on desktop + mobile when a transcription
+   model is configured (voice.js toggles inline display). States: idle / recording
+   (pulsing accent) / transcribing (dimmed + spin). ── */
+.mic-btn{position:relative;display:inline-flex;width:32px;height:32px;min-width:32px;background:none;border:none;border-radius:8px;cursor:pointer;align-items:center;justify-content:center;color:var(--text-tertiary);transition:color .2s,background-color .2s,transform .15s;flex-shrink:0;padding:0;-webkit-tap-highlight-color:transparent}
+.mic-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
+.mic-btn:active{transform:scale(.9)}
+.mic-btn svg{width:18px;height:18px;stroke-width:2}
+.mic-btn:disabled{cursor:default;opacity:.6}
+.mic-btn.recording{color:var(--error-text,#e5484d);background:var(--error-subtle,rgba(229,72,77,0.12));animation:micPulse 1.4s ease-in-out infinite}
+/* Transcribing: hide the mic glyph, show a spinning ring in its place
+   (spinning the mic glyph itself reads as a strange rotating icon). */
+.mic-btn.transcribing{color:var(--accent,#7c6cff)}
+.mic-btn.transcribing svg{visibility:hidden}
+.mic-btn.transcribing::after{content:'';position:absolute;width:15px;height:15px;border:2px solid var(--accent-subtle,rgba(124,108,255,0.25));border-top-color:var(--accent,#7c6cff);border-radius:50%;animation:micSpin .7s linear infinite}
+@keyframes micPulse{0%,100%{opacity:1}50%{opacity:.55}}
+@keyframes micSpin{to{transform:rotate(360deg)}}
+/* Mobile-only "more" button — hidden on desktop */
+.mobile-more-btn{display:none}
+.mobile-bottom-sheet,.mobile-bottom-sheet-backdrop{display:none}
+
+/* ── Toolbar Sub-menus ── */
+.toolbar-submenu{position:relative;flex-shrink:0}

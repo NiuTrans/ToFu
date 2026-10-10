@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_distillation_v1.schema.json",
+  "title": "Self-evolution distillation receipt: a verified-trajectory dataset built for weight-level training",
+  "type": "object",
+  "required": ["schema_version", "dataset_id", "domain", "samples", "verdict_floor", "episode_ids", "sha256", "created_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "dataset_id": {"type": "string", "maxLength": 160},
+    "domain": {"type": "string", "minLength": 1, "maxLength": 80},
+    "samples": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "verdict_floor": {"const": "checker", "description": "Only checker-verified verdicts enter training data; human or unassessed outcomes never do."},
+    "episode_ids": {"type": "array", "maxItems": 200, "items": {"type": "string", "maxLength": 160}},
+    "sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+    "created_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

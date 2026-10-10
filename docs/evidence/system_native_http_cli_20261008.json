@@ -1,0 +1,363 @@
+{
+  "format": "tofu.native-http-cli-evidence/v1",
+  "scope": "Normal Granian CLI vs owned server: same Headless compute/auth/SSE port.\n\nAccount for the CLI leader and worker together. CPU includes declared warmups;\nRSS runs separately. No full-app, scaled-workers, cold or recovery admission.\n",
+  "whole_system_verdict": "incomplete",
+  "candidate_verdict": "do_not_promote_current_normal_cli_configuration",
+  "production_promoted": false,
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/native-http-cli-full.json",
+  "raw_artifact_sha256": "c8bc3db1bee697b5fc6df13f0caf93a7ccd5346786b89cb8bc539c42859839a7",
+  "contract": "benchmarks/system_performance_contract.json",
+  "contract_sha256": "0918786a22fbad385391f9754c6520b012b78d2d1b6b088ec0ae70a13c52fac0",
+  "sources": {
+    "benchmarks/native_http_cli_measure.py": "5617d714f4874090c4786dc0ebf49a71ed28c36707d73d236dd157da2cf75413",
+    "benchmarks/native_http_cli.py": "873063d9e44789ccf1f5dc333f66de5922e6d19b0e70e3cd4ac76314038080d4",
+    "benchmarks/native_http.py": "4651d4ae3ede1e95a3854ceee52b07d6598a866e9c519ba0119dcbbcc48a47be",
+    "benchmarks/http_runtime.py": "c579b5fe817427140e14b51dd4bdd0935098ce11861ba9ea7240ebae178c3f22",
+    "tofu_agent/server.py": "ca3f880ba023e575e6011003583818558c126511468973e0d4e69cf86c896d36",
+    "lib/hypercorn_runtime.py": "54721dee72fcf8fb2f2baf6c016f8a5213f91fc2053aadedb47214c7df334a68"
+  },
+  "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+  "affinity": [
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    144,
+    148,
+    149,
+    150,
+    151,
+    152,
+    153,
+    154,
+    155,
+    156,
+    157,
+    158,
+    159,
+    160,
+    161,
+    162,
+    163,
+    164,
+    165,
+    166,
+    167,
+    168,
+    169,
+    170,
+    171,
+    172,
+    173,
+    174,
+    175,
+    176,
+    177,
+    178
+  ],
+  "latency_observations": 36000,
+  "independent_latency_memory_server_trials": 72,
+  "request_oracles": "Both arms use canonical protocol/status/content/sequence checks; all cohorts completed.",
+  "cli_cleanup": "Every recorded latency CLI owner returned zero and joined descendants; memory trial results were admitted only after checked cleanup.",
+  "process_observation": "Original supervisor PID 15242 is absent and final checkpoint contains all eighteen paired cohorts. Supervisor terminal exit was not observed.",
+  "cases": [
+    {
+      "protocol": "h1",
+      "case": "short_requests",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9650420945933,
+            "p95_ms": 0.9634140184664984,
+            "p99_ms": 1.0105551363273333,
+            "cpu_ms_per_request_process_tree": 0.634920634920635,
+            "sampled_peak_process_tree_rss_bytes": 1.840385327899222
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9552992638929095,
+            "p95_ms": 0.985610039201254,
+            "p99_ms": 0.947420180957142,
+            "cpu_ms_per_request_process_tree": 0.6607142857142857,
+            "sampled_peak_process_tree_rss_bytes": 1.719628920630246
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.0785057593593241,
+            "p95_ms": 0.9875245322988919,
+            "p99_ms": 0.9522462127981668,
+            "cpu_ms_per_request_process_tree": 0.6727272727272728,
+            "sampled_peak_process_tree_rss_bytes": 1.726703959958781
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "protocol": "h1",
+      "case": "authentication",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 1.0690400495377508,
+            "p95_ms": 0.9839904875423836,
+            "p99_ms": 0.9604365672814472,
+            "cpu_ms_per_request_process_tree": 0.6274509803921569,
+            "sampled_peak_process_tree_rss_bytes": 1.723203769140165
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.0632699548254663,
+            "p95_ms": 0.9731728640255067,
+            "p99_ms": 0.952724009680305,
+            "cpu_ms_per_request_process_tree": 0.6470588235294118,
+            "sampled_peak_process_tree_rss_bytes": 1.726831063673169
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.011065033264509,
+            "p95_ms": 0.8247818183288936,
+            "p99_ms": 0.9488553900748247,
+            "cpu_ms_per_request_process_tree": 0.64,
+            "sampled_peak_process_tree_rss_bytes": 1.7254194877833382
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "protocol": "h1",
+      "case": "sse_fanout",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9377436932049454,
+            "p95_ms": 0.8524178865033617,
+            "p99_ms": 0.898419983791621,
+            "cpu_ms_per_request_process_tree": 0.7500000000000001,
+            "sampled_peak_process_tree_rss_bytes": 1.7000361663652803
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9730910427646063,
+            "p95_ms": 0.9790917352262765,
+            "p99_ms": 1.0145128314140728,
+            "cpu_ms_per_request_process_tree": 0.7656250000000002,
+            "sampled_peak_process_tree_rss_bytes": 1.7138207854198308
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9882937721880193,
+            "p95_ms": 0.9773414193041591,
+            "p99_ms": 0.9683505928017215,
+            "cpu_ms_per_request_process_tree": 0.748091603053435,
+            "sampled_peak_process_tree_rss_bytes": 1.7079032840129917
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "protocol": "h2",
+      "case": "short_requests",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9088154085137468,
+            "p95_ms": 0.8513813498121737,
+            "p99_ms": 1.0470618645244063,
+            "cpu_ms_per_request_process_tree": 0.5166666666666665,
+            "sampled_peak_process_tree_rss_bytes": 1.7817381425731327
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.8906585064080947,
+            "p95_ms": 0.9636298571032272,
+            "p99_ms": 0.9076477876562808,
+            "cpu_ms_per_request_process_tree": 0.5166666666666664,
+            "sampled_peak_process_tree_rss_bytes": 1.7253325745180337
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.8904991868882425,
+            "p95_ms": 0.8557685167570231,
+            "p99_ms": 0.901763165099567,
+            "cpu_ms_per_request_process_tree": 0.5254237288135593,
+            "sampled_peak_process_tree_rss_bytes": 1.766600454029512
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "protocol": "h2",
+      "case": "authentication",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9080055714848824,
+            "p95_ms": 0.8668436834767635,
+            "p99_ms": 0.9145588481201943,
+            "cpu_ms_per_request_process_tree": 0.4999999999999999,
+            "sampled_peak_process_tree_rss_bytes": 1.7172745264348317
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9028063018505287,
+            "p95_ms": 0.8482495895782923,
+            "p99_ms": 0.9301164688058338,
+            "cpu_ms_per_request_process_tree": 0.49090909090909096,
+            "sampled_peak_process_tree_rss_bytes": 1.7283854535163437
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.901430533861792,
+            "p95_ms": 0.9403376170955966,
+            "p99_ms": 1.0197701523691798,
+            "cpu_ms_per_request_process_tree": 0.47368421052631576,
+            "sampled_peak_process_tree_rss_bytes": 1.7173433833463698
+          },
+          "failed_measured_guards": [
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "protocol": "h2",
+      "case": "sse_fanout",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 1.215129594562486,
+            "p95_ms": 0.9147267924359085,
+            "p99_ms": 1.1411109255599439,
+            "cpu_ms_per_request_process_tree": 0.5827338129496401,
+            "sampled_peak_process_tree_rss_bytes": 1.7152110321771834
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p99_ms",
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.2220462399500494,
+            "p95_ms": 1.1357027218656754,
+            "p99_ms": 1.1701278542838744,
+            "cpu_ms_per_request_process_tree": 0.572463768115942,
+            "sampled_peak_process_tree_rss_bytes": 1.6924521739130434
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p95_ms",
+            "p99_ms",
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.2186723541142572,
+            "p95_ms": 0.9015191319930173,
+            "p99_ms": 1.0457434992695789,
+            "cpu_ms_per_request_process_tree": 0.6014492753623187,
+            "sampled_peak_process_tree_rss_bytes": 1.7177875549968573
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "sampled_peak_process_tree_rss_bytes"
+          ]
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "one CLI worker/one native runtime thread, explicit asyncio task and loop",
+    "CPU includes request warmups, no per-operation raw CPU vector",
+    "independent RSS run includes CLI leader and worker;5ms sampling may miss short peaks",
+    "same Headless fixture, not full durable app or model inference",
+    "No raw CPU/op vector; means include declared warmups.",
+    "One earlier same-connection H2 abort timeout remains unresolved despite ten subsequent passing independent lifecycle trials.",
+    "PID uniqueness denotes server trial leaders, not total resident processes; CLI resource metrics include leader and worker."
+  ],
+  "decision_reason": "CPU improves, but every process-tree RSS cohort violates the 1.05 guard; H2 SSE P50 also regresses 21-22%. This rejects the measured configuration, not all native HTTP designs."
+}

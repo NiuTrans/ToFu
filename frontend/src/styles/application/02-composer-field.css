@@ -1,0 +1,56 @@
+/* Composer field and send/stop intent. Scope never reaches editors in other features. */
+.input-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: var(--space-3);
+  transition: border-color var(--motion-base) ease, box-shadow var(--motion-base) ease;
+  isolation: isolate;
+}
+.input-area .input-box::before { display: none; animation: none; }
+.input-area .input-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+.input-row { position: relative; display: flex; align-items: flex-end; gap: 0; }
+.input-area .input-box textarea {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--font-size-xl);
+  line-height: var(--leading-body);
+  padding: var(--space-3) var(--space-4);
+  resize: none;
+  max-height: 200px;
+  min-height: var(--control-h-lg);
+}
+.input-area .input-box textarea::placeholder { color: var(--text-secondary); }
+.send-btn {
+  width: var(--control-h-md);
+  height: var(--control-h-md);
+  padding: 0;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--motion-fast) ease, opacity var(--motion-fast) ease;
+  flex-shrink: 0;
+  margin-left: var(--space-1);
+}
+.send-btn:hover:not(:disabled) { background: var(--accent-hover, var(--accent)); }
+.send-btn:active:not(:disabled) { opacity: .85; }
+.send-btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; background: var(--border); }
+.send-btn.stop-btn { background: var(--error-text); box-shadow: none; }
+.send-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-stop-btn[hidden] { display: none; }
+.input-actions-right.composer-dual-actions > .send-btn { margin-left: 0; }

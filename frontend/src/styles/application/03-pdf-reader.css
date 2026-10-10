@@ -1,0 +1,63 @@
+/* Shared instantiated reader; page geometry is owned by pdf-reader.ts. */
+.paper-reader {
+  position: relative;
+  overflow: auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  background: var(--bg-secondary, #f1f2f4);
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  touch-action: pan-x pan-y;
+}
+.paper-reader-pages { position: relative; width: max-content; min-width: 100%; padding: var(--space-4); box-sizing: border-box; }
+.paper-reader .paper-reader-page {
+  position: relative;
+  box-sizing: content-box;
+  margin: 0 auto var(--space-4);
+  border: 0;
+  border-radius: 0;
+  background: white;
+  box-shadow: 0 1px 5px rgb(0 0 0 / 12%);
+  overflow: hidden;
+  contain: layout paint;
+}
+.paper-reader-surface { position: absolute; inset: 0 auto auto 0; transform-origin: 0 0; }
+.paper-reader-surface canvas { display: block; }
+.paper-reader-text {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  text-align: initial;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  z-index: 2;
+}
+.paper-reader-text :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+.paper-reader-text .markedContent { display: contents; }
+.paper-reader-surface .paper-reader-text ::selection { background: rgb(75 131 245 / 35%); color: transparent; }
+.paper-reader-links { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+.paper-reader-links a { position: absolute; pointer-events: auto; border-radius: 2px; }
+.paper-reader-links a:hover { background: rgb(75 131 245 / 12%); }
+.paper-reader-links a:focus-visible { outline: 2px solid var(--accent, #5274df); outline-offset: 1px; }
+.paper-reader-highlight {
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  background: rgb(246 190 57 / 28%);
+  outline: 1px solid rgb(230 172 40 / 50%);
+  border-radius: 2px;
+  animation: paper-reader-mark 2.6s ease-out forwards;
+}
+@keyframes paper-reader-mark { 0%, 35% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .paper-reader-highlight { animation: none; } }

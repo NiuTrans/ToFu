@@ -1,0 +1,990 @@
+{
+  "contract_version": "tofu.resource-policy/v1",
+  "objective": "Complete user tasks efficiently without reducing correctness, quality or durability.",
+  "control": {
+    "sample_seconds": 5,
+    "healthy_samples_before_growth": 2,
+    "cooldown_seconds": 15,
+    "evaluation_seconds": 30,
+    "stagnation_backoff_seconds": 60,
+    "growth_fraction": 0.25,
+    "pressure_fraction": 0.75,
+    "restore_capacity_after_pressure": true
+  },
+  "launch_settings": {
+    "TOFU_AGENT_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 16
+      }
+    },
+    "TOFU_ATTEMPT_EVENT_TTL_DAYS": {
+      "unit": "days",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 7
+      }
+    },
+    "TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 64,
+        "distributed": 2048
+      }
+    },
+    "TOFU_BROWSER_POLL_BODY_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 32,
+        "distributed": 64
+      }
+    },
+    "TOFU_BROWSER_STAGING_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 256,
+        "distributed": 4096
+      }
+    },
+    "TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 600,
+        "distributed": 3600
+      }
+    },
+    "TOFU_COMMAND_SNAPSHOT_MAX_ENTRIES": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 5000,
+        "distributed": 20000
+      }
+    },
+    "TOFU_COMMAND_SNAPSHOT_MAX_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 5
+      }
+    },
+    "TOFU_CONTROL_RPC_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 4,
+        "distributed": 32
+      }
+    },
+    "TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 4,
+        "distributed": 16
+      }
+    },
+    "TOFU_EXECUTOR_IDLE_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 600,
+        "distributed": 3600
+      }
+    },
+    "TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 30,
+        "distributed": 60
+      }
+    },
+    "TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 1
+      }
+    },
+    "TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 256,
+        "distributed": 256
+      }
+    },
+    "TOFU_KNOWLEDGE_ENRICH_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 8
+      }
+    },
+    "TOFU_KNOWLEDGE_ENRICH_WORKER_IDLE_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 60,
+        "distributed": 600
+      }
+    },
+    "TOFU_LOG_TOTAL_BUDGET_MB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 128,
+        "distributed": 512
+      }
+    },
+    "TOFU_MALLOC_ARENA_MAX": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 8
+      }
+    },
+    "TOFU_MAX_INFLIGHT_TASKS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 16
+      }
+    },
+    "TOFU_MAX_SSE_PER_PRINCIPAL": {
+      "unit": "count",
+      "scope": "principal",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 12,
+        "distributed": 64
+      }
+    },
+    "TOFU_MCP_DISPLAY_CACHE_ENTRIES": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 256,
+        "distributed": 2000
+      }
+    },
+    "TOFU_MCP_STDIO_IDLE_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 300,
+        "distributed": 1800
+      }
+    },
+    "TOFU_MEMORY_METADATA_CACHE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 512,
+        "distributed": 8192
+      }
+    },
+    "TOFU_MEMORY_METADATA_CACHE_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 4,
+        "distributed": 64
+      }
+    },
+    "TOFU_MODEL_REPLAY_CACHE_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 32,
+        "distributed": 256
+      }
+    },
+    "TOFU_NUMERIC_THREADS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 4
+      }
+    },
+    "TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 2,
+        "distributed": 8
+      }
+    },
+    "TOFU_PAPER_BUILD_CACHE_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 256,
+        "distributed": 2048
+      }
+    },
+    "TOFU_PAPER_BUILD_CACHE_RECORDS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 16,
+        "distributed": 128
+      }
+    },
+    "TOFU_PAPER_BUILD_COMPILE_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 256,
+        "distributed": 1024
+      }
+    },
+    "TOFU_PAPER_BUILD_QUEUE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 4,
+        "distributed": 16
+      }
+    },
+    "TOFU_PAPER_BUILD_VALIDATION_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 128,
+        "distributed": 512
+      }
+    },
+    "TOFU_PAPER_BUILD_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 4
+      }
+    },
+    "TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 8
+      }
+    },
+    "TOFU_PDF_MAX_PAGES": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 256,
+        "distributed": 2048
+      }
+    },
+    "TOFU_PDF_MAX_TEXT_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 2,
+        "distributed": 16
+      }
+    },
+    "TOFU_PDF_PARSE_TIMEOUT": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 300,
+        "distributed": 3600
+      }
+    },
+    "TOFU_PDF_PROCESSES": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 4
+      }
+    },
+    "TOFU_PDF_VLM_CALL_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 8
+      }
+    },
+    "TOFU_PDF_VLM_MAX_429_ATTEMPTS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 4,
+        "distributed": 16
+      }
+    },
+    "TOFU_PDF_VLM_TASK_TIMEOUT_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1920,
+        "distributed": 14400
+      }
+    },
+    "TOFU_PDF_VLM_TASK_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 4
+      }
+    },
+    "TOFU_PDF_VLM_WORKER_IDLE_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 60,
+        "distributed": 600
+      }
+    },
+    "TOFU_PDF_WORKER_IDLE_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 60,
+        "distributed": 600
+      }
+    },
+    "TOFU_PROCESS_RSS_RECYCLE_MB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1536,
+        "distributed": 8192
+      }
+    },
+    "TOFU_PROCESS_RSS_RELIEF_MB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1024,
+        "distributed": 4096
+      }
+    },
+    "TOFU_PRODUCTION_IMAGE_FANOUT": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 4
+      }
+    },
+    "TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 4,
+        "distributed": 16
+      }
+    },
+    "TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 4,
+        "distributed": 16
+      }
+    },
+    "TOFU_PRODUCTION_TTS_FANOUT": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 4
+      }
+    },
+    "TOFU_PROJECT_REFRESH_IDLE_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 60,
+        "distributed": 600
+      }
+    },
+    "TOFU_PROJECT_REFRESH_QUEUE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 16,
+        "distributed": 512
+      }
+    },
+    "TOFU_PROJECT_UNDO_CACHE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 64,
+        "distributed": 512
+      }
+    },
+    "TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 512,
+        "distributed": 4096
+      }
+    },
+    "TOFU_RAW_ARCHIVE_BUDGET_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 256,
+        "distributed": 4096
+      }
+    },
+    "TOFU_RUN_PYTHON_CACHE_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 64,
+        "distributed": 128
+      }
+    },
+    "TOFU_SERVER_PYTHON_CACHE_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 64,
+        "distributed": 128
+      }
+    },
+    "TOFU_STORAGE_FASTPATH_WAL_REBASE_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 512,
+        "distributed": 16384
+      }
+    },
+    "TOFU_STORAGE_MIN_FREE_BYTES": {
+      "unit": "bytes",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 268435456,
+        "distributed": 1073741824
+      }
+    },
+    "TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 65536,
+        "distributed": 1048576
+      }
+    },
+    "TOFU_STORAGE_RPC_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 2,
+        "distributed": 64
+      }
+    },
+    "TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 128,
+        "distributed": 1024
+      }
+    },
+    "TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 5896,
+        "distributed": 21600
+      }
+    },
+    "TOFU_STORAGE_SQLITE_READ_POOL": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 2,
+        "distributed": 16
+      }
+    },
+    "TOFU_STORAGE_SQLITE_WRITER_CACHE_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 32,
+        "distributed": 64
+      }
+    },
+    "TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 8,
+        "distributed": 128
+      }
+    },
+    "TOFU_STORAGE_TURN_PROJECTION_CACHE_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 16,
+        "distributed": 256
+      }
+    },
+    "TOFU_SWARM_GLOBAL_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 0,
+        "distributed": 0
+      }
+    },
+    "TOFU_SWARM_MAX_AGENTS_PER_SESSION": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 6,
+        "distributed": 64
+      }
+    },
+    "TOFU_SWARM_MAX_AGENTS_PER_WAVE": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 2,
+        "distributed": 16
+      }
+    },
+    "TOFU_SWARM_MAX_PARALLEL": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 8
+      }
+    },
+    "TOFU_SWARM_MAX_RETRIES": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 2
+      }
+    },
+    "TOFU_SWARM_SESSION_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 2,
+        "distributed": 32
+      }
+    },
+    "TOFU_SYNC_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 2,
+        "distributed": 16
+      }
+    },
+    "TOFU_TASK_RSS_RESERVE_MB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1024,
+        "distributed": 512
+      }
+    },
+    "TOFU_TIMER_LIVE_CAP": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 8,
+        "distributed": 64
+      }
+    },
+    "TOFU_TOKEN_COUNT_CACHE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 128,
+        "distributed": 1024
+      }
+    },
+    "TOFU_TOOL_RESULT_CACHE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 64,
+        "distributed": 512
+      }
+    },
+    "TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 512,
+        "distributed": 4096
+      }
+    },
+    "TOFU_TRANSLATE_CACHE_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 128,
+        "distributed": 1024
+      }
+    },
+    "TOFU_TRANSLATE_MAX_429_ATTEMPTS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 4,
+        "distributed": 16
+      }
+    },
+    "TOFU_TRANSLATE_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 16
+      }
+    },
+    "TOFU_TRANSLATE_WORKER_IDLE_SECONDS": {
+      "unit": "seconds",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 60,
+        "distributed": 600
+      }
+    },
+    "TOFU_TREE_INDEX_MAX_ENTRIES": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 100000,
+        "distributed": 600000
+      }
+    },
+    "TOFU_TREE_INDEX_MEM_ROOTS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 2,
+        "distributed": 4
+      }
+    },
+    "TOFU_TREE_INDEX_WALK_JOBS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 2,
+        "distributed": 16
+      }
+    },
+    "TOFU_USAGE_CACHE_CAPACITY": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 128,
+        "distributed": 4096
+      }
+    },
+    "TOOL_MAX_PARALLEL_WORKERS": {
+      "unit": "count",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 1,
+        "distributed": 8
+      }
+    },
+    "TOFU_TASK_INSPECTOR_CACHE_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 16,
+        "distributed": 256
+      }
+    },
+    "TOFU_PROGRAM_HEAP_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 32,
+        "distributed": 256
+      }
+    },
+    "TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB": {
+      "unit": "MiB",
+      "scope": "process",
+      "update_mode": "restart",
+      "policy_owner": "runtime_guards",
+      "defaults": {
+        "personal": 4,
+        "distributed": 16
+      }
+    }
+  },
+  "resources": [
+    {
+      "id": "execution.root",
+      "unit": "count",
+      "kind": "execution",
+      "scope": "process",
+      "update_mode": "drain",
+      "dependencies": [
+        "model.routes",
+        "model.requests",
+        "storage.rpc"
+      ],
+      "description": "Demand-driven root execution and exact ownership accounting; resize controls idle thread reuse"
+    },
+    {
+      "id": "execution.child",
+      "unit": "count",
+      "kind": "execution",
+      "scope": "process",
+      "update_mode": "drain",
+      "dependencies": [
+        "model.routes",
+        "model.requests",
+        "storage.rpc"
+      ],
+      "description": "Demand-driven child execution; owner accounting cannot wait or refuse work"
+    },
+    {
+      "id": "model.requests",
+      "unit": "count",
+      "kind": "execution",
+      "scope": "process",
+      "update_mode": "drain",
+      "dependencies": [],
+      "description": "Model request ownership accounting without a local execution ceiling"
+    },
+    {
+      "id": "model.routes",
+      "unit": "count",
+      "kind": "buffer",
+      "scope": "process",
+      "update_mode": "live",
+      "dependencies": [],
+      "description": "Request-owned route handles; registration has no count rejection"
+    },
+    {
+      "id": "storage.rpc",
+      "unit": "count",
+      "kind": "execution",
+      "scope": "process",
+      "update_mode": "drain",
+      "dependencies": [],
+      "description": "Native session pool within the selected authority advertised budget"
+    },
+    {
+      "id": "storage.frames",
+      "unit": "bytes",
+      "kind": "buffer",
+      "scope": "process",
+      "update_mode": "drain",
+      "dependencies": [],
+      "description": "Serialized RPC response bytes shared by storage protocols"
+    }
+  ]
+}

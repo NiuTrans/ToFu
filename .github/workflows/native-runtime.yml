@@ -1,0 +1,72 @@
+name: Native Rust runtime
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'VERSION'
+      - 'packages/tofu-runtime/**'
+      - 'contracts/native_agent_stdio_v1.schema.json'
+      - 'contracts/native_runtime_artifact_v1.json'
+      - 'scripts/build_native_runtime.py'
+      - 'scripts/gen_rust_execution_contract.py'
+      - 'scripts/check_rust_usage_oracle.py'
+      - 'scripts/check_rust_model_account.py'
+      - 'scripts/check_rust_token_ingress.py'
+      - 'lib/token_counter/base.py'
+      - 'lib/token_counter/tiktoken_counter.py'
+      - 'lib/agent_core/execution_budget.py'
+      - 'lib/agent_core/execution_limits.py'
+      - 'lib/cost.py'
+      - 'tests/release/test_native_runtime_archive.py'
+      - 'lib/agent_core/native_process.py'
+      - 'tests/agent_core/test_native_process.py'
+      - 'tests/support/native_process_probe.py'
+      - '.github/workflows/native-runtime.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native-archive:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: '1.85.1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install minimum supported Rust
+        run: rustup toolchain install 1.85.1 --profile minimal
+      - name: Check generated native vocabulary
+        run: python scripts/gen_rust_execution_contract.py --check
+      - name: Check current canonical usage evidence
+        run: python scripts/check_rust_usage_oracle.py
+      - name: Check current canonical model account
+        run: python scripts/check_rust_model_account.py
+      - name: Verify archive failures
+        run: python -m unittest discover -s tests/release -p test_native_runtime_archive.py
+      - name: Verify native host admission and executable ownership
+        run: python -m unittest discover -s tests/agent_core -p test_native_process.py
+      - name: Verify native runtime and private scheduler core
+        run: |
+          cargo test --locked -p tofu-runtime
+          cargo test --locked -p tofu-rayon-core --lib -- --test-threads=1
+      - name: Install pinned token oracle engine
+        run: python -m pip install 'tiktoken==0.14.0'
+      - name: Check current canonical local token ingress
+        run: python scripts/check_rust_token_ingress.py
+      - name: Build and verify standalone runtime
+        run: python scripts/build_native_runtime.py --output /tmp/tofu-native-dist
+      - name: Verify real native host/provider/tool composition
+        run: python -m tests.support.native_process_probe --archive /tmp/tofu-native-dist/tofu-native-$(cat VERSION)-x86_64-unknown-linux-gnu.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tofu-native-linux-x86_64
+          path: /tmp/tofu-native-dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,191 @@
+
+/* Diff preview */
+.ptool-diff-preview {
+  padding: 6px 0;
+  max-height: 340px;
+  overflow-y: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.ptool-diff-line {
+  display: flex;
+  padding: 1px var(--space-3) 1px 10px;
+  min-height: 20px;
+}
+.ptool-diff-sign {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-weight: 700;
+  user-select: none;
+}
+.ptool-diff-code {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ptool-diff-del {
+  background: rgba(239,68,68,0.1);
+  color: #fca5a5;
+}
+.ptool-diff-del .ptool-diff-sign {
+  color: #f87171;
+}
+.ptool-diff-add {
+  background: rgba(34,197,94,0.1);
+  color: #86efac;
+}
+.ptool-diff-add .ptool-diff-sign {
+  color: #4ade80;
+}
+.ptool-diff-ellipsis {
+  opacity: 0.55;
+  font-style: italic;
+}
+.ptool-diff-separator {
+  height: 1px;
+  margin: var(--space-1) var(--space-3);
+  background: rgba(255,255,255,0.08);
+}
+
+/* Batch apply_diff */
+.ptool-batch-preview {
+  padding: var(--space-1) 0;
+}
+.ptool-batch-header {
+  padding: 6px var(--space-3);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.ptool-batch-edit {
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.ptool-batch-edit[open] {
+  background: rgba(0,0,0,0.08);
+}
+.ptool-batch-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px var(--space-3);
+  font-size: 11.5px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  user-select: none;
+  transition: background .15s;
+}
+.ptool-batch-summary:hover {
+  background: rgba(255,255,255,0.04);
+}
+.ptool-batch-idx {
+  color: var(--accent);
+  font-weight: 700;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  min-width: 22px;
+}
+.ptool-batch-path {
+  color: #93c5fd;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: var(--font-size-xs);
+}
+.ptool-batch-desc {
+  flex: 1;
+  color: var(--text-tertiary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ptool-batch-stats {
+  color: var(--text-tertiary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  opacity: 0.7;
+}
+.ptool-batch-edit .ptool-diff-preview {
+  max-height: 200px;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
+.ptool-batch-more {
+  padding: 5px var(--space-3);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+/* ── Batch tool done state — collapsible per-edit list ── */
+.ptool-batch-done-block {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ptool-batch-done-block > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.ptool-batch-done-block > summary::-webkit-details-marker { display: none; }
+.ptool-batch-done-block > summary::marker { display: none; content: ""; }
+.ptool-batch-done-block > summary .ptool-text::after {
+  content: " ▸";
+  font-size: 10px;
+  opacity: 0.5;
+}
+.ptool-batch-done-block[open] > summary .ptool-text::after {
+  content: " ▾";
+}
+.ptool-batch-done-list {
+  padding: 6px var(--space-2) var(--space-2) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* Each edit is a nested <details> with summary + optional diff preview */
+.ptool-batch-done-edit {
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.06);
+  overflow: hidden;
+}
+.ptool-batch-done-edit[open] {
+  border-color: rgba(255,255,255,0.1);
+}
+
+/* Failed edit body — the exact per-edit line the tool returned to the model
+   (or the metadata detail fallback when the raw text was compacted away). */
+.ptool-batch-fail-detail {
+  padding: 6px 11px var(--space-2) 34px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--accent-red, #f87171);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
+/* Inline failure reason — shown on the failed edit's summary line and on
+   the collapsed batch header so a gate/executor refusal is visible without
+   expanding anything. Truncated with ellipsis; full text lives in the title
+   tooltip and the .ptool-batch-fail-detail block. */
+.ptool-batch-fail-reason {
+  display: inline-block;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: baseline;
+  color: var(--accent-red, #f87171);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  opacity: 0.85;
+}
+.ptool-batch-done-single {
+  border-radius: 6px;
+  overflow: hidden;
+}

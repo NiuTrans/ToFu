@@ -1,0 +1,85 @@
+name: Publish workspace package
+
+on:
+  push:
+    tags:
+      - 'search-v*.*.*'
+      - 'trading-v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.member.outputs.package }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - id: member
+        name: Resolve and validate tagged member
+        shell: bash
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            search-v*)
+              package=tofu-search
+              project=packages/tofu-search/pyproject.toml
+              expected="${GITHUB_REF_NAME#search-v}"
+              ;;
+            trading-v*)
+              package=tofu-trading
+              project=plugins/tofu-trading/pyproject.toml
+              expected="${GITHUB_REF_NAME#trading-v}"
+              ;;
+            *) exit 2 ;;
+          esac
+          actual="$(python -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$project")"
+          test "$actual" = "$expected"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+      - name: Verify lock and monorepo boundary
+        run: uv lock --check && python3 scripts/check_monorepo.py
+      - name: Test tagged member
+        shell: bash
+        run: |
+          if [ "${{ steps.member.outputs.package }}" = tofu-search ]; then
+            uv sync --frozen --package tofu-search --extra test --extra mcp
+            uv run --frozen --package tofu-search pytest \
+              -c packages/tofu-search/pyproject.toml packages/tofu-search/tests
+          else
+            uv sync --frozen --package tofu-trading --extra dev
+            uv run --frozen --package tofu-trading pytest \
+              -c plugins/tofu-trading/pyproject.toml plugins/tofu-trading/tests
+          fi
+      - name: Build tagged wheel and source distribution
+        run: uv build --package "${{ steps.member.outputs.package }}" --out-dir dist
+      - name: Validate distributions
+        run: uvx --from 'twine>=6,<7' twine check dist/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: workspace-package-${{ github.ref_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish-pypi:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/${{ needs.build-and-test.outputs.package }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: workspace-package-${{ github.ref_name }}
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist

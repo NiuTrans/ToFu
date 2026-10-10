@@ -1,0 +1,136 @@
+
+/* ── Multiple-choice options grid ── */
+.hg-options-grid {
+  display: grid;
+  /* auto-fit (not auto-fill): empty tracks collapse so the actual
+     option groups stretch to fill the full row width — no dead space
+     on the right when there are fewer options than columns. */
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  align-items: start;
+  gap: 10px;
+  padding: var(--space-1) 14px 14px;
+}
+.hg-option-group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 6px;
+}
+.hg-option-group > .hg-option-card {
+  width: 100%;
+  min-height: 100%;
+}
+.hg-option-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  /* Grid/flex items default to min-width:auto, which lets long
+     unbroken tokens (file paths, URLs) force the card wider than its
+     track; min-width:0 + overflow-wrap keeps text inside the card. */
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
+  padding: var(--space-3) 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  background: rgba(99, 102, 241, 0.06);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: inherit;
+  text-align: left;
+  color: #e2e8f0;
+}
+.hg-option-card:hover {
+  border-color: rgba(99, 102, 241, 0.5);
+  background: rgba(99, 102, 241, 0.14);
+  box-shadow: 0 2px 12px -3px rgba(99, 102, 241, 0.2);
+  transform: translateY(-1px);
+}
+/* ── Choice notes input (one optional draft per option) ── */
+.hg-option-note-input {
+  min-height: 44px;
+  max-height: 120px;
+  font-size: var(--font-size-sm);
+  resize: vertical;
+}
+.hg-option-card:active {
+  transform: translateY(0);
+}
+.hg-option-card.hg-selected {
+  border-color: rgba(34, 197, 94, 0.6);
+  background: rgba(34, 197, 94, 0.15);
+  box-shadow: 0 0 16px -4px rgba(34, 197, 94, 0.3);
+}
+.hg-option-card.hg-selected .hg-opt-label::before {
+  content: '✓ ';
+  color: #4ade80;
+}
+.hg-option-card:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+.hg-opt-label {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: #c7d2fe;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.hg-opt-desc {
+  font-size: 11.5px;
+  color: #94a3b8;
+  line-height: 1.5;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+/* Long inline code spans (paths, schema filenames) must wrap too. */
+.hg-opt-desc code {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+/* ── Submitted HG round — compact collapsed line with spinner ── */
+.hg-submitted-line {
+  background: rgba(34, 197, 94, 0.04);
+  border-color: rgba(34, 197, 94, 0.15);
+}
+.hg-submitted-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid rgba(74, 222, 128, 0.25);
+  border-top-color: #4ade80;
+  border-radius: 50%;
+  animation: hgSpin 0.8s linear infinite;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* ── Shake animation for empty submit ── */
+@keyframes hgShake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-4px); }
+  40%, 80% { transform: translateX(4px); }
+}
+.hg-shake {
+  animation: hgShake 0.4s ease;
+  border-color: rgba(239, 68, 68, 0.5) !important;
+}
+
+/* ── Spinner for translate button ── */
+.hg-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(165, 180, 252, 0.3);
+  border-top-color: #a5b4fc;
+  border-radius: 50%;
+  animation: hgSpin 0.6s linear infinite;
+}
+@keyframes hgSpin {
+  to { transform: rotate(360deg); }
+}

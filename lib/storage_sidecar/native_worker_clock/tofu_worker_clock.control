@@ -1,0 +1,6 @@
+comment = 'Shared monotonic worker lease authority for Tofu SQL storage'
+default_version = '1.0'
+module_pathname = '$libdir/tofu_worker_clock'
+relocatable = false
+schema = 'public'
+superuser = true

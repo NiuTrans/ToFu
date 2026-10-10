@@ -1,0 +1,40 @@
+; Tofu system-supervisord program template.
+;
+; This file is intentionally host-neutral and is not itself installable.
+; `deploy/supervisor/install.sh` resolves the checkout, interpreter, account,
+; home directory, port, browser-library directory, and log path on the target
+; host, then renders an ordinary tofu.conf/tofu.ini in supervisord's include
+; directory. Never replace these tokens by hand or commit a rendered file.
+
+[program:tofu]
+command=@@TOFU_COMMAND@@
+directory=@@TOFU_PROJECT_DIR@@
+user=@@TOFU_RUN_USER@@
+umask=077
+
+; Start on boot and restore service after a crash/OOM. A bounded retry window
+; keeps a broken release from becoming an unbounded restart storm.
+autostart=true
+autorestart=true
+startsecs=15
+startretries=10
+
+; server.py drains in-flight work on SIGTERM. Stop the whole group so MCP and
+; browser children cannot survive a deployment restart as orphans.
+stopsignal=TERM
+stopwaitsecs=30
+stopasgroup=true
+killasgroup=true
+
+; The renderer always supplies PORT, BIND_HOST, HOME, PYTHONUTF8 and lifecycle
+; ownership. It adds the local Chromium/fontconfig overrides only when that
+; target-host bundle is actually present.
+environment=@@TOFU_ENVIRONMENT@@
+
+redirect_stderr=true
+stdout_logfile=@@TOFU_LOG_PATH@@
+stdout_logfile_maxbytes=16MB
+stdout_logfile_backups=3
+
+; Higher values start later and stop earlier relative to infrastructure jobs.
+priority=500

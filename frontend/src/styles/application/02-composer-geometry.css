@@ -1,0 +1,62 @@
+
+/* ── COMPOSER LEFT-EDGE LOCK (2026-08-03 owner report) ──────────────────
+ * The composer used to be centred in the pane (margin:0 auto), ~(band−820)/2
+ * RIGHT of the avatar column in every roomy state — the input box "swam"
+ * under the conversation, and the rail zone beside it could never host
+ * anything. The composer now sits ON the message column: its LEFT edge is
+ * the avatar line and its right edge is the text column's right edge, in
+ * every pane state.
+ *
+ * margin-left REPLAYS .chat-inner's own centering math (same max-width
+ * formula — including its 48px inset cap when the rail is granted.
+ * `min(48px, --rail-w)` resolves to zero with no rail, retaining the old
+ * centering/compact-fold geometry) + the same 24px inset, so
+ * the two can never drift. The rail grant
+ * (--rail-w/--rail-gap) is mirrored from .chat-inner by main.js
+ * (_mirrorRailGeometry): the chatpane container query cannot reach this
+ * subtree, and cannot be extended to it — container-type's layout
+ * containment would re-parent the mobile bottom-sheet dropdowns'
+ * position:fixed from the viewport to this band. Zero-grant defaults
+ * degrade to the no-rail geometry, i.e. exactly the old centering.
+ *
+ * Width: 52px + --toolbar-w (avatar track + reading track) so BOTH edges
+ * align; the middle term keeps the composer on the reading track
+ * (min(52 + measure, pane − 48 − furniture)) even when --toolbar-w's floor
+ * shrinks; the outer min(…, 100% − 48px) is the viewport cap (a genuinely
+ * fat toolbar may still outgrow the track — it grows RIGHT, into the empty
+ * rail zone, never past the viewport). --toolbar-w is a RESOLVED pixel
+ * value written by main.js from the toolbar's natural width at
+ * max-width:9999px — blind to the rail furniture, so with the adaptive
+ * rail (2026-09-24) the fat-toolbar term can outgrow the text column and
+ * let the composer extend into the rail zone — the documented fat-toolbar
+ * escape, not a desync: the geometry sweep's composer formula was updated
+ * to the furniture-aware cap for exactly this.
+ * .input-area carries NO horizontal padding so 100% here IS the pane width.
+ *
+ * min-width:300px is the HOPELESS-PANE floor: with the inspector drawer
+ * open beside a wide sidebar the pane can drop below 100px, where the
+ * track math would squeeze the composer to a useless sliver (and the
+ * status strip's gauge/dots would spill out of it). The floor keeps the
+ * textarea usable; the right side simply continues under the fixed
+ * drawer — exactly what the whole composer did before the margin-right,
+ * now bounded to one small overrun. Mobile (≤768px) resets it to 0 — the
+ * drawer is a full-width overlay there and every px counts.
+ * Guarded by the composer_left_off / composer_off assertions in
+ * tests/turn_lifecycle/test_turn_ctx_rail_geometry.py. */
+.input-area{flex-shrink:0;background:var(--bg-primary);padding:var(--space-3) 0 var(--space-5);border-top:1px solid var(--border)}
+.input-inner{
+  --rail-w:0px;
+  --rail-gap:0px;
+  min-width:300px;
+  max-width:min(max(calc(52px + var(--toolbar-w,820px)), min(calc(52px + var(--msg-measure,820px)), calc(100% - 48px - var(--rail-w) - var(--rail-gap)))), calc(100% - 48px));
+  margin-left:max(24px, calc((100% - min(calc(100% - min(48px, var(--rail-w))), calc(var(--msg-measure,820px) + 52px + var(--rail-gap) + var(--rail-w) + 48px))) / 2 + 24px));
+  margin-right:max(var(--space-6), calc((100% - min(calc(100% - min(48px, var(--rail-w))), calc(var(--msg-measure,820px) + 52px + var(--rail-gap) + var(--rail-w) + 48px))) / 2 + 24px));
+  transition:max-width .4s ease;
+}.image-previews{display:flex;gap:var(--space-2);margin-bottom:var(--space-2);flex-wrap:wrap}.img-preview{position:relative;width:64px;height:64px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border);cursor:pointer;transition:border-color .2s,box-shadow .2s,transform .12s}.img-preview:hover{border-color:var(--accent)}.img-preview[data-img-idx]{cursor:pointer}.img-preview[data-img-idx]:active{cursor:pointer}.img-preview img{width:100%;height:100%;object-fit:cover}.img-preview .remove-img{position:absolute;top:2px;right:2px;width:18px;height:18px;background:rgba(0,0,0,0.7);color:white;border:none;border-radius:50%;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center}.img-preview .img-size{position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.7);color:#aaa;font-size:9px;text-align:center;padding:1px 0;font-family:'JetBrains Mono',monospace}.img-preview.pdf-page{border-color:rgba(207,167,56,0.35)}.img-preview .pdf-badge{position:absolute;top:2px;left:2px;background:rgba(207,167,56,0.9);color:#fff;font-size:7px;font-weight:700;padding:1px var(--space-1);border-radius:3px;font-family:'JetBrains Mono',monospace}.img-preview.img-dragging{opacity:.4;cursor:move}.img-preview[data-img-idx].img-drop-target{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent);transform:translateY(-2px) scale(1.04)}
+.img-preview.img-processing{cursor:default}.img-preview .img-processing-overlay{position:absolute;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(1px)}.img-preview .img-processing-spinner{width:20px;height:20px;border:2px solid rgba(255,255,255,0.35);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
+
+/* Drag-reorder follow indicator — a small dashed square trailing the cursor
+   like a subscript, signalling "repositioning this image". pointer-events:none
+   so it never intercepts drop targeting. */
+.img-drag-ghost{position:fixed;z-index:10000;width:30px;height:30px;border:2px dashed var(--accent);border-radius:6px;background:rgba(110,86,207,0.10);pointer-events:none;opacity:.95;left:-9999px;top:-9999px}
+.pdf-progress{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-2) var(--space-3);background:var(--thinking-bg);border:1px solid var(--thinking-border);border-radius:var(--radius-sm);margin-bottom:var(--space-2);font-size:var(--font-size-sm);color:var(--thinking-text);animation:fadeIn .3s ease}.pdf-progress .pulse{width:6px;height:6px;background:var(--thinking-text);border-radius:50%;animation:pulse 1.5s infinite;flex-shrink:0}.pdf-progress-bar{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden}.pdf-progress-fill{height:100%;background:var(--thinking-text);border-radius:2px;transition:width .3s ease}

@@ -1,0 +1,258 @@
+/* Turn layout, reading measure and prose typography.
+ * Owner: ConversationSurface; tokens: 00-design-tokens.css.
+ * Delivery: ordered application manifest; neighboring content owners are independent.
+ */
+
+/*
+ * Turn reading system.
+ *
+ * Responsibility: turn layout and round boundaries. Prose, process, evidence,
+ * actions, responsive behavior and editing have separate manifest owners.
+ */
+
+.conversation-surface {
+  font-family: var(--font-ui);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+  --turn-rule: color-mix(in srgb, var(--border) 78%, transparent);
+  --turn-spine: color-mix(in srgb, var(--text-tertiary) 24%, transparent);
+  --turn-process-surface: color-mix(in srgb, var(--bg-secondary) 62%, transparent);
+  --turn-process-hover: color-mix(in srgb, var(--bg-hover) 70%, transparent);
+}
+
+[data-theme="tofu"] .conversation-surface {
+  --turn-rule: var(--border);
+  --turn-spine: var(--border-light);
+  --turn-process-surface: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
+  --turn-process-hover: color-mix(in srgb, var(--bg-hover) 78%, transparent);
+}
+
+.conversation-surface :is(summary, button) {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* One calm reading column: compact identity at the left, prose on the page. */
+
+.conversation-surface .conversation-turn.message {
+  grid-template-columns: var(--control-h-md) minmax(0, 1fr) var(--rail-w);
+  column-gap: var(--space-3);
+  margin-bottom: var(--space-10);
+  overflow: visible;
+}
+
+.conversation-surface .conversation-turn-avatar.message-avatar {
+  width: 34px;
+  height: 34px;
+  margin-top: 0;
+  opacity: .9;
+  color: var(--text-secondary);
+}
+
+.conversation-surface .conversation-turn-avatar.message-avatar :is(img, svg) {
+  max-width: 32px;
+  max-height: 32px;
+}
+
+.conversation-surface .conversation-turn-content.message-content {
+  overflow: visible;
+  max-width: var(--msg-measure);
+  min-width: 0;
+  font-size: var(--conversation-font-size-body);
+}
+
+.conversation-surface .conversation-turn-header.message-header {
+  justify-content: flex-start;
+  min-height: 20px;
+  margin: 0 0 var(--space-2);
+  gap: var(--space-2);
+  line-height: 1.25;
+}
+
+.conversation-surface .message-role {
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-content);
+  font-weight: var(--weight-bold);
+  letter-spacing: .006em;
+}
+
+.conversation-surface .message-time {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--conversation-font-size-caption);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .015em;
+  white-space: nowrap;
+}
+
+.conversation-surface .message-time::before {
+  width: 2px;
+  height: 2px;
+  margin-right: var(--space-2);
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+  opacity: .56;
+}
+
+.conversation-surface .conversation-turn-blocks {
+  overflow: visible;
+}
+
+.conversation-surface .conversation-turn-blocks > .conversation-block {
+  margin: 0 0 var(--space-2);
+}
+
+.conversation-surface .conversation-turn-blocks > .conversation-block:last-child {
+  margin-bottom: 0;
+}
+
+/* Round sections are semantic boundaries, not a decorative per-block spine.
+ * Leaves remain direct keyed children so streaming never reparents live cards. */
+
+.conversation-surface .conversation-turn-blocks {
+  min-width: 0;
+  padding-inline-start: 0;
+}
+
+.conversation-surface .conversation-round-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block: var(--space-2) var(--space-3);
+}
+
+.conversation-surface .conversation-round-toolbar__label {
+  margin-inline-end: auto;
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-semibold);
+}
+
+.conversation-surface .conversation-round-header {
+  margin: var(--space-1) 0 var(--space-2);
+  font: inherit;
+}
+
+.conversation-surface .conversation-round-header__toggle {
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  justify-content: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  text-align: start;
+  white-space: normal;
+}
+
+.conversation-surface .conversation-round-header__chevron {
+  width: var(--space-4);
+  height: var(--space-4);
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  transform: rotate(0deg);
+}
+
+.conversation-surface .conversation-round-header__toggle[aria-expanded="true"] .conversation-round-header__chevron {
+  transform: rotate(90deg);
+}
+
+.conversation-surface .conversation-round-header__title {
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--conversation-font-size-content);
+}
+
+.conversation-surface .conversation-round-header__summary {
+  flex-shrink: 0;
+}
+
+.conversation-surface .conversation-round-header__summary,
+.conversation-surface .conversation-round-header__status {
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+}
+
+.conversation-surface .conversation-round-header__status {
+  margin-inline-start: auto;
+  text-align: end;
+}
+
+.conversation-surface [data-round-state="active"] .conversation-round-header__status {
+  color: var(--accent);
+}
+
+.conversation-surface [data-round-state="attention"] .conversation-round-header__status {
+  color: var(--warning-text);
+}
+
+.conversation-surface .conversation-round-header__toggle:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+/* Hidden disclosures must win over card display:flex/grid rules. */
+
+.conversation-surface .conversation-round-toolbar[hidden],
+.conversation-surface .conversation-block[hidden] {
+  display: none;
+}
+
+.conversation-surface .conversation-block--text[data-deliverable="true"] {
+  margin-block-start: var(--space-6);
+}
+
+.conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content {
+  font-size: var(--conversation-font-size-body);
+  line-height: var(--leading-body);
+  letter-spacing: .002em;
+}
+
+/* Routine success is quiet; errors and active states remain visible. */
+.conversation-surface .conversation-tool-card__chip {
+  font-size: var(--conversation-font-size-caption);
+  line-height: 1.4;
+  padding: var(--control-edge-inset) var(--space-2);
+  border-radius: 4px;
+}
+.conversation-surface .conversation-tool-card__chip--ok {
+  color: var(--text-tertiary);
+  background: transparent;
+}
+.conversation-surface .conversation-tool-card__chip--err {
+  color: var(--error-text);
+  background: color-mix(in srgb, var(--error-text) 8%, transparent);
+}
+.conversation-surface .conversation-tool-card__chip--active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.conversation-surface .conversation-tool-card__chip--muted {
+  color: var(--text-tertiary);
+  background: transparent;
+}
+
+/* Action state indicator on generic result summaries. */
+.conversation-surface .conversation-action-state {
+  font-size: var(--conversation-font-size-caption);
+  line-height: 1.4;
+  padding: var(--control-edge-inset) var(--space-2);
+  border-radius: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.conversation-surface .conversation-action-state[data-state="active"] {
+  color: var(--accent);
+}
+.conversation-surface .conversation-action-state[data-state="attention"] {
+  color: var(--error-text);
+}
+.conversation-surface .conversation-action-state[data-state="background"] {
+  color: var(--text-tertiary);
+}

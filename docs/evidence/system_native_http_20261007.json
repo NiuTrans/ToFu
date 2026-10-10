@@ -1,0 +1,622 @@
+{
+  "scope": "Granian embedded ASGI vs owned Hypercorn; same Headless application and compute.\n\nInherited sockets, app/loop/thread policy and teardown are experiment-owned.\nEmbedded Granian is diagnostic, not CLI/full-app deployment admission.\n",
+  "whole_system_verdict": "incomplete",
+  "source_sha256": "e4b425c0fa4c71f17dad3a5e55d89f6859c89267b16c5a31073eb28fe8e25624",
+  "limitations": [
+    "Granian2.8.4 embedded mode and inherited-socket adapter, not CLI deployment",
+    "same Python asyncio app loop, one native runtime thread",
+    "RSS sampled5ms in independent process, spikes may be missed",
+    "CPU includes warmup/cohort requests; cold startup not statistically admitted"
+  ],
+  "checks": [
+    {
+      "protocol": "h1",
+      "case": "short_requests",
+      "pair": 0,
+      "measurements": {
+        "owned": {
+          "p50_ms": 16.8232425,
+          "p95_ms": 25.028635,
+          "p99_ms": 25.582591,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.5092592592592593,
+          "sampled_peak_server_rss_bytes": 54923264,
+          "rss_samples": 327,
+          "pid": 2146430,
+          "memory_pid": 2146680
+        },
+        "granian": {
+          "p50_ms": 16.4111895,
+          "p95_ms": 23.601961,
+          "p99_ms": 31.264804,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.3518518518518519,
+          "sampled_peak_server_rss_bytes": 62910464,
+          "rss_samples": 325,
+          "pid": 2146960,
+          "memory_pid": 2148343
+        }
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "short_requests",
+      "pair": 1,
+      "measurements": {
+        "granian": {
+          "p50_ms": 16.175446,
+          "p95_ms": 23.244158,
+          "p99_ms": 24.040347,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.33333333333333337,
+          "sampled_peak_server_rss_bytes": 62640128,
+          "rss_samples": 344,
+          "pid": 2148855,
+          "memory_pid": 2149386
+        },
+        "owned": {
+          "p50_ms": 15.3640385,
+          "p95_ms": 24.856364,
+          "p99_ms": 25.222462,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.5,
+          "sampled_peak_server_rss_bytes": 55164928,
+          "rss_samples": 325,
+          "pid": 2149497,
+          "memory_pid": 2149701
+        }
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "short_requests",
+      "pair": 2,
+      "measurements": {
+        "owned": {
+          "p50_ms": 15.2744015,
+          "p95_ms": 25.020027,
+          "p99_ms": 25.2907,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.5092592592592593,
+          "sampled_peak_server_rss_bytes": 55177216,
+          "rss_samples": 330,
+          "pid": 2149805,
+          "memory_pid": 2149859
+        },
+        "granian": {
+          "p50_ms": 14.471655,
+          "p95_ms": 23.29496,
+          "p99_ms": 23.640409,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.33333333333333337,
+          "sampled_peak_server_rss_bytes": 62873600,
+          "rss_samples": 333,
+          "pid": 2150000,
+          "memory_pid": 2150254
+        }
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "authentication",
+      "pair": 0,
+      "measurements": {
+        "owned": {
+          "p50_ms": 14.901793999999999,
+          "p95_ms": 23.565333,
+          "p99_ms": 25.106503,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.4722222222222222,
+          "sampled_peak_server_rss_bytes": 54935552,
+          "rss_samples": 321,
+          "pid": 2150427,
+          "memory_pid": 2150774
+        },
+        "granian": {
+          "p50_ms": 16.053776499999998,
+          "p95_ms": 23.766851,
+          "p99_ms": 25.538669,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.3240740740740741,
+          "sampled_peak_server_rss_bytes": 62717952,
+          "rss_samples": 318,
+          "pid": 2151379,
+          "memory_pid": 2151836
+        }
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "authentication",
+      "pair": 1,
+      "measurements": {
+        "granian": {
+          "p50_ms": 16.063814999999998,
+          "p95_ms": 23.057356,
+          "p99_ms": 23.66945,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.2962962962962963,
+          "sampled_peak_server_rss_bytes": 62898176,
+          "rss_samples": 323,
+          "pid": 2152023,
+          "memory_pid": 2152180
+        },
+        "owned": {
+          "p50_ms": 15.854152500000001,
+          "p95_ms": 25.145834,
+          "p99_ms": 27.225364,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.4722222222222222,
+          "sampled_peak_server_rss_bytes": 55107584,
+          "rss_samples": 327,
+          "pid": 2152451,
+          "memory_pid": 2152993
+        }
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "authentication",
+      "pair": 2,
+      "measurements": {
+        "owned": {
+          "p50_ms": 14.885936000000001,
+          "p95_ms": 23.459324,
+          "p99_ms": 24.911115,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.4537037037037038,
+          "sampled_peak_server_rss_bytes": 55042048,
+          "rss_samples": 324,
+          "pid": 2153509,
+          "memory_pid": 2153764
+        },
+        "granian": {
+          "p50_ms": 15.9687415,
+          "p95_ms": 22.894847,
+          "p99_ms": 23.276946,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.28703703703703703,
+          "sampled_peak_server_rss_bytes": 62296064,
+          "rss_samples": 318,
+          "pid": 2153908,
+          "memory_pid": 2154210
+        }
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "sse_fanout",
+      "pair": 0,
+      "measurements": {
+        "owned": {
+          "p50_ms": 32.17091,
+          "p95_ms": 45.448703,
+          "p99_ms": 46.583413,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 1.2129629629629628,
+          "sampled_peak_server_rss_bytes": 55902208,
+          "rss_samples": 620,
+          "pid": 2154375,
+          "memory_pid": 2154652
+        },
+        "granian": {
+          "p50_ms": 47.885645499999995,
+          "p95_ms": 61.145153,
+          "p99_ms": 70.161202,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.8796296296296297,
+          "sampled_peak_server_rss_bytes": 63832064,
+          "rss_samples": 789,
+          "pid": 2155784,
+          "memory_pid": 2156236
+        }
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "sse_fanout",
+      "pair": 1,
+      "measurements": {
+        "granian": {
+          "p50_ms": 48.890655499999994,
+          "p95_ms": 62.180398,
+          "p99_ms": 70.29626,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.8796296296296297,
+          "sampled_peak_server_rss_bytes": 63840256,
+          "rss_samples": 815,
+          "pid": 2156413,
+          "memory_pid": 2157587
+        },
+        "owned": {
+          "p50_ms": 32.2338585,
+          "p95_ms": 45.36677,
+          "p99_ms": 47.288565,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 1.1944444444444444,
+          "sampled_peak_server_rss_bytes": 56225792,
+          "rss_samples": 609,
+          "pid": 2158162,
+          "memory_pid": 2158237
+        }
+      }
+    },
+    {
+      "protocol": "h1",
+      "case": "sse_fanout",
+      "pair": 2,
+      "measurements": {
+        "owned": {
+          "p50_ms": 32.1777365,
+          "p95_ms": 45.404798,
+          "p99_ms": 47.047991,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 1.1851851851851851,
+          "sampled_peak_server_rss_bytes": 56487936,
+          "rss_samples": 610,
+          "pid": 2158551,
+          "memory_pid": 2159005
+        },
+        "granian": {
+          "p50_ms": 39.9264375,
+          "p95_ms": 60.667906,
+          "p99_ms": 69.301619,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.8703703703703703,
+          "sampled_peak_server_rss_bytes": 63672320,
+          "rss_samples": 804,
+          "pid": 2160116,
+          "memory_pid": 2160452
+        }
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "short_requests",
+      "pair": 0,
+      "measurements": {
+        "owned": {
+          "p50_ms": 11.078721999999999,
+          "p95_ms": 12.786576,
+          "p99_ms": 21.236456,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.5648148148148149,
+          "sampled_peak_server_rss_bytes": 57233408,
+          "rss_samples": 204,
+          "pid": 2160707,
+          "memory_pid": 2160763
+        },
+        "granian": {
+          "p50_ms": 8.754421,
+          "p95_ms": 47.341881,
+          "p99_ms": 56.056109,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.2962962962962963,
+          "sampled_peak_server_rss_bytes": 65286144,
+          "rss_samples": 657,
+          "pid": 2161120,
+          "memory_pid": 2162476
+        }
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "short_requests",
+      "pair": 1,
+      "measurements": {
+        "granian": {
+          "p50_ms": 8.9332975,
+          "p95_ms": 47.144588,
+          "p99_ms": 48.787186,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.28703703703703703,
+          "sampled_peak_server_rss_bytes": 65470464,
+          "rss_samples": 656,
+          "pid": 2162874,
+          "memory_pid": 2163688
+        },
+        "owned": {
+          "p50_ms": 11.12947,
+          "p95_ms": 12.727323,
+          "p99_ms": 18.264275,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.5555555555555557,
+          "sampled_peak_server_rss_bytes": 57176064,
+          "rss_samples": 204,
+          "pid": 2163983,
+          "memory_pid": 2163989
+        }
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "short_requests",
+      "pair": 2,
+      "measurements": {
+        "owned": {
+          "p50_ms": 10.950986499999999,
+          "p95_ms": 12.731531,
+          "p99_ms": 20.738473,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.5370370370370371,
+          "sampled_peak_server_rss_bytes": 56979456,
+          "rss_samples": 202,
+          "pid": 2164042,
+          "memory_pid": 2164094
+        },
+        "granian": {
+          "p50_ms": 9.239992999999998,
+          "p95_ms": 47.154864,
+          "p99_ms": 56.825303,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.3055555555555556,
+          "sampled_peak_server_rss_bytes": 65376256,
+          "rss_samples": 660,
+          "pid": 2164122,
+          "memory_pid": 2164369
+        }
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "authentication",
+      "pair": 0,
+      "measurements": {
+        "owned": {
+          "p50_ms": 10.309607,
+          "p95_ms": 11.513884,
+          "p99_ms": 20.77713,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.5,
+          "sampled_peak_server_rss_bytes": 57139200,
+          "rss_samples": 193,
+          "pid": 2165204,
+          "memory_pid": 2165717
+        },
+        "granian": {
+          "p50_ms": 8.7365935,
+          "p95_ms": 46.652424,
+          "p99_ms": 47.568128,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.2685185185185186,
+          "sampled_peak_server_rss_bytes": 64958464,
+          "rss_samples": 644,
+          "pid": 2166159,
+          "memory_pid": 2166601
+        }
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "authentication",
+      "pair": 1,
+      "measurements": {
+        "granian": {
+          "p50_ms": 8.8699675,
+          "p95_ms": 46.387433,
+          "p99_ms": 47.214953,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.24999999999999994,
+          "sampled_peak_server_rss_bytes": 65372160,
+          "rss_samples": 644,
+          "pid": 2166825,
+          "memory_pid": 2167088
+        },
+        "owned": {
+          "p50_ms": 13.288789000000001,
+          "p95_ms": 17.302787,
+          "p99_ms": 22.34395,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.7777777777777779,
+          "sampled_peak_server_rss_bytes": 57073664,
+          "rss_samples": 198,
+          "pid": 2167204,
+          "memory_pid": 2167417
+        }
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "authentication",
+      "pair": 2,
+      "measurements": {
+        "owned": {
+          "p50_ms": 10.43647,
+          "p95_ms": 11.639302,
+          "p99_ms": 20.460113,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.5092592592592593,
+          "sampled_peak_server_rss_bytes": 57184256,
+          "rss_samples": 191,
+          "pid": 2167545,
+          "memory_pid": 2167566
+        },
+        "granian": {
+          "p50_ms": 8.819519,
+          "p95_ms": 46.335641,
+          "p99_ms": 46.705567,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.2685185185185186,
+          "sampled_peak_server_rss_bytes": 64950272,
+          "rss_samples": 643,
+          "pid": 2167647,
+          "memory_pid": 2167816
+        }
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "sse_fanout",
+      "pair": 0,
+      "measurements": {
+        "owned": {
+          "p50_ms": 25.9564255,
+          "p95_ms": 32.164939,
+          "p99_ms": 39.61315,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 1.3055555555555558,
+          "sampled_peak_server_rss_bytes": 58494976,
+          "rss_samples": 361,
+          "pid": 2168128,
+          "memory_pid": 2169393
+        },
+        "granian": {
+          "p50_ms": 70.5441615,
+          "p95_ms": 73.286821,
+          "p99_ms": 79.553985,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.7870370370370371,
+          "sampled_peak_server_rss_bytes": 66400256,
+          "rss_samples": 793,
+          "pid": 2170160,
+          "memory_pid": 2170424
+        }
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "sse_fanout",
+      "pair": 1,
+      "measurements": {
+        "granian": {
+          "p50_ms": 70.204943,
+          "p95_ms": 71.982878,
+          "p99_ms": 80.9339,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.7870370370370371,
+          "sampled_peak_server_rss_bytes": 66203648,
+          "rss_samples": 813,
+          "pid": 2170873,
+          "memory_pid": 2171256
+        },
+        "owned": {
+          "p50_ms": 26.336014,
+          "p95_ms": 34.397773,
+          "p99_ms": 43.532464,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 1.3425925925925926,
+          "sampled_peak_server_rss_bytes": 58310656,
+          "rss_samples": 363,
+          "pid": 2173651,
+          "memory_pid": 2173970
+        }
+      }
+    },
+    {
+      "protocol": "h2",
+      "case": "sse_fanout",
+      "pair": 2,
+      "measurements": {
+        "owned": {
+          "p50_ms": 26.059798999999998,
+          "p95_ms": 29.642438,
+          "p99_ms": 38.157477,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 1.3240740740740742,
+          "sampled_peak_server_rss_bytes": 58265600,
+          "rss_samples": 357,
+          "pid": 2174090,
+          "memory_pid": 2174308
+        },
+        "granian": {
+          "p50_ms": 70.09463600000001,
+          "p95_ms": 72.195952,
+          "p99_ms": 79.497742,
+          "warmups": 80,
+          "server_cpu_ms_per_request": 0.7685185185185186,
+          "sampled_peak_server_rss_bytes": 66600960,
+          "rss_samples": 804,
+          "pid": 2174397,
+          "memory_pid": 2174779
+        }
+      }
+    }
+  ],
+  "raw_sha256": "7e186a15abd3c89d541d00060965b587305320b2f35b5f4fa48ab57d5769c248",
+  "runtime": {
+    "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+    "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.17",
+    "affinity": [
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      144,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      178
+    ],
+    "granian": "2.8.4"
+  },
+  "production_promotion": false,
+  "decision": "no default switch: CPU gains do not meet latency/tail/memory gates; embedded-only diagnostic cannot reject all native server designs",
+  "correctness": "12 H1/H2 short/auth/SSE smoke gates,4 real backpressure/disconnect/cursor/abort/H2 RST lifecycle gates,18 paired workload rows each1000 observations plus independent memory trials pass",
+  "official_source": "https://github.com/emmett-framework/granian",
+  "task_mode_admission": {
+    "scope": "installed Server.serve admission; transport startup intercepted; no performance evidence",
+    "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+    "granian": "2.8.4",
+    "requested": "rust",
+    "effective": "asyncio",
+    "server_source_sha256": "abd0b8b8cb752a0916115b3b7dd7ae6a0345ce629afb1faf2550b94adb7c001f",
+    "project_source_sha256": "f37322f04047b8d317c987a6fe3e4363b446b296417bec6278cf51481be6ed49",
+    "project_python_requirement": ">=3.12",
+    "verdict": "unsupported_on_current_runtime",
+    "runner_source_sha256": "837acc863537888625289216c215f2dfbcc003653dcecf9cb8a69392843cb60b"
+  }
+}

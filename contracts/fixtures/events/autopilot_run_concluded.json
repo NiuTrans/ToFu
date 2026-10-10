@@ -1,0 +1,18 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "record": {},
+  "requestId": "s",
+  "runId": "s",
+  "seq": 1,
+  "taskId": "s",
+  "turnRole": "s",
+  "type": "autopilot_run_concluded",
+  "vuMsgId": "s"
+}

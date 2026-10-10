@@ -1,0 +1,1535 @@
+# ═══════════════════════════════════════════════════════════════
+#  Tofu (豆腐) — Desktop Installer Build
+# ═══════════════════════════════════════════════════════════════
+#
+#  Triggered on:
+#    - Push to main whose VERSION file names a version that has no RELEASE
+#      yet (the NORMAL path — `export.py --push` publishes main, and the
+#      version number alone decides whether an installer gets built)
+#    - Manual dispatch (workflow_dispatch), for a rebuild/re-release
+#
+#  ── Why VERSION and not a `v*` tag push ──
+#  This used to trigger ONLY on `refs/tags/v*`, which made a release depend on
+#  remembering `export.py --bump` (a plain `--push` creates no tag at all, so
+#  no installer was ever built). The VERSION file is already the project's
+#  single source of truth for the version, so it — not the operator's memory —
+#  is what gates a build. The release step creates the `v<VERSION>` tag if it
+#  does not already exist, so tags still mark every release.
+#
+#  ── Why the gate asks about the RELEASE, never about the tag ──
+#  A tag is a PRODUCT of releasing, not evidence of it, and using it as a
+#  proxy fails in both directions: measured on the remote 2026-07-29, v0.15.0
+#  and v0.15.2 are tagged with NO release behind either (the starved macOS leg
+#  skipped `release`), and on the `--bump` path the tag is pushed milliseconds
+#  after the branch — so a tag-based gate races its own trigger and refuses to
+#  build precisely on the most formal release path. See the `version` job.
+#
+#  Deliberately ONE trigger: adding `tags: v*` back would double-fire for a
+#  `--bump` push (which pushes the branch AND the tag), racing two runs to
+#  publish the same release.
+#
+#  Produces:
+#    - Windows: Tofu-Setup-x.y.z-win64.exe (Inno Setup installer)
+#    - macOS:   Tofu-x.y.z-macos.dmg       (disk image)
+#    - Linux:   Tofu-x.y.z-linux.tar.gz    (portable archive)
+#
+#  All artifacts are uploaded to the GitHub Release.
+#
+# ═══════════════════════════════════════════════════════════════
+
+name: Build Desktop
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version_override:
+        description: 'Version override (e.g. 0.10.0-beta1). Leave empty to read from VERSION file.'
+        required: false
+        type: string
+
+permissions:
+  contents: write   # needed for creating releases
+
+# ── Only one release run per branch at a time ──
+#
+# This became load-bearing the moment the trigger moved from `refs/tags/v*` to
+# `push: branches: [main]`. Under the tag trigger a run happened once or twice
+# a day; now EVERY push into the window where VERSION has no release starts a
+# full four-platform build. Measured on this repo's own history (2026-07-28
+# 00:00 onward, 339 commits): median gap between commits is 165 s.
+#
+# Without a group, concurrent runs collide on shared, mutable remote state:
+# each release job independently probes the tag, gets 404, and force-moves
+# v<VERSION> to ITS OWN github.sha, then each calls action-gh-release for the
+# same tag. Last writer wins the ref while an earlier run may already have
+# uploaded its assets — reintroducing exactly the binaries/source mismatch the
+# retarget step was added to eliminate, only now caused by a race instead of a
+# stale tag. `github.ref` is the right grain because the contended resource is
+# the per-branch release (tag + Release), not the individual commit.
+#
+# ── cancel-in-progress is deliberately FALSE, and this is the opposite of
+#    the usual CI default ──
+# The usual argument for cancelling ("newer commit supersedes the older") is
+# about feedback latency, where being wrong costs a re-run. Here it would cost
+# the release itself. A build takes up to 30 min/leg; in the measured history
+# only 8 of 338 gaps (2.4%) are >= 30 min. So with cancel-in-progress a build
+# would be superseded before finishing on ~97.6% of pushes and an installer
+# would only ever ship during a rare quiet spell — the SAME user-visible
+# symptom this workflow exists to fix ("version changed, nothing was built"),
+# just with a new cause. Cancellation would also be able to kill the release
+# job between the tag force-push and the asset upload, leaving a Release the
+# version gate then reads as 200 and never retries.
+#
+# Queueing gets the mutual exclusion without either hazard. With the default
+# `queue: single` at most one run is pending: a burst of N pushes collapses to
+# "one running + the newest one waiting", and the newest run's `version` job
+# then probes 200 and skips in seconds. So the storm costs one full build plus
+# some trivial ubuntu-latest jobs — the gate is what dedupes, which is what it
+# was written to do.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ── Read version ─────────────────────────────────────────────
+  version:
+    name: Determine version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      should_release: ${{ steps.ver.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ver
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version_override }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${VERSION_OVERRIDE}" ]; then
+            VER="${VERSION_OVERRIDE}"
+          else
+            VER="$(cat VERSION | tr -d '[:space:]')"
+          fi
+          # Fail fast: an empty version silently produces a malformed installer
+          # named "Tofu-Setup--win64.exe" with a blank AppVersion.
+          if [ -z "$VER" ]; then
+            echo "::error::Could not determine version (VERSION file empty and no override)."
+            exit 1
+          fi
+          echo "Resolved version: $VER"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+          # ── Should this run actually build + publish? ──
+          #
+          # The question is "has v$VER been RELEASED?", and the only honest
+          # answer to it is the Release itself. An earlier version of this gate
+          # asked "does the tag v$VER exist?" instead — a proxy that is wrong in
+          # both directions:
+          #
+          #   * A tag can exist with NO release. That is exactly the state this
+          #     repo was left in: measured on the remote 2026-07-29, v0.15.0
+          #     and v0.15.2 are both tagged and both return 404 from
+          #     GET /releases/tags/{tag} (the macos-13 leg starved, so
+          #     `release` was skipped; v0.15.1 never got as far as a tag).
+          #     Asking about tags declares those versions "already released"
+          #     and they can never be published — the very symptom this
+          #     workflow exists to fix.
+          #
+          #   * The tag arrives BEFORE the release, from the same push.
+          #     `export.py::_git_push` runs `_push_branch` then `_push_tag`
+          #     back-to-back in one loop, so on the `--bump` path the tag lands
+          #     on the remote within milliseconds of the branch that triggered
+          #     this run. A tag-based gate therefore loses a race against
+          #     itself: the more formal the release path, the more reliably it
+          #     refuses to build. Asking about the Release has no such race,
+          #     because the Release is created at the END of this workflow.
+          #
+          # GET /releases/tags/{tag} answers it, but the STATUS CODE ALONE does
+          # not: 200 proves a release OBJECT exists, not that a user can
+          # download an installer from it. action-gh-release creates the
+          # release first and uploads assets afterwards, so an interruption in
+          # between (cancelled run, dead runner, network blip, an internal
+          # failure in the action) leaves a release that is addressable,
+          # tagged, and EMPTY. A status-only gate then reads 200 forever and
+          # this version can NEVER rebuild — there is no self-heal path short
+          # of a human deleting the release or bumping VERSION.
+          #
+          # That is the tag defect one level down: the gate was upgraded from
+          # "does the tag exist?" to "does the Release exist?", which is the
+          # right direction but still a proxy for what a user actually needs —
+          # "can I download an installer for my platform?". Only the asset list
+          # answers that. So the verdict is:
+          #
+          #   200 + every required asset -> released, skip
+          #   200 + assets missing       -> PARTIAL release, rebuild to repair
+          #   404                        -> not released, build
+          #
+          # The expected-asset list is deliberately NOT written here. It lives
+          # once in scripts/release_assets.py, which the release job's own
+          # completeness gate also calls. Two copies would let a new platform
+          # be added to one gate and silently forgotten by the other — and
+          # both copies would keep passing on the platforms they still know
+          # about, so the drift would be invisible.
+          #
+          # `gh release view` is NOT usable here: it exits 1 for BOTH "no such
+          # release" and "the API call failed" (cli/cli#6024, and that mapping
+          # is explicitly undocumented), so it cannot express the fail-open
+          # rule below.
+          #
+          # ── Failure direction is deliberately asymmetric ──
+          # Only a definite "200 AND complete" skips. Rate limit, network blip,
+          # 5xx, unparsable body, partial assets — all build. Building once
+          # more costs four runners; NOT building is a silent non-release,
+          # which is the original defect. So uncertainty resolves toward
+          # shipping.
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch — building v$VER."
+          else
+            api="${GITHUB_API_URL:-https://api.github.com}"
+            # Capture the BODY as well as the status: the asset list is the
+            # actual evidence. `|| true` because `set -e` would abort the whole
+            # step on a transport failure — and a transport failure must FALL
+            # THROUGH to the build, not kill the run.
+            body="$(mktemp)"
+            code="$(curl -sS -o "$body" -w '%{http_code}' \
+                      -H "Authorization: Bearer ${GH_TOKEN}" \
+                      -H "Accept: application/vnd.github+json" \
+                      -H "X-GitHub-Api-Version: 2022-11-28" \
+                      "${api}/repos/${GITHUB_REPOSITORY}/releases/tags/v${VER}" \
+                    || true)"
+            echo "Release probe: GET /releases/tags/v${VER} -> HTTP ${code:-<none>}"
+            if [ "$code" = "200" ]; then
+              # Exit codes: 0 complete, 1 incomplete, 2 undetermined.
+              set +e
+              python3 scripts/release_assets.py --release-json "$body" --require-checksums
+              assets_rc=$?
+              set -e
+              if [ "$assets_rc" -eq 0 ]; then
+                echo "should_release=false" >> "$GITHUB_OUTPUT"
+                echo "v$VER is already released with a complete asset set — nothing to build."
+                echo "::notice::VERSION is still $VER (already released). Bump VERSION to publish a new installer."
+              elif [ "$assets_rc" -eq 1 ]; then
+                echo "should_release=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::Release v$VER exists but is INCOMPLETE (see missing assets above) — rebuilding to repair it. This happens when a previous run was interrupted between creating the release and finishing the uploads."
+              else
+                echo "should_release=true" >> "$GITHUB_OUTPUT"
+                echo "::warning::Release v$VER returned 200 but its asset list could not be read. Building anyway — a missed release is worse than a redundant build."
+              fi
+            elif [ "$code" = "404" ]; then
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "v$VER has no release yet — building."
+            else
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::Release probe for v$VER returned HTTP ${code:-<none>} (expected 200 or 404). Building anyway — a missed release is worse than a redundant build."
+            fi
+            rm -f "$body"
+          fi
+
+      # ── Is this version DOCUMENTED? ──
+      #
+      # Every other release invariant here was long ago moved out of a human's
+      # memory and into a gate: the tag is not trusted, the Release object is
+      # not trusted, the asset list is checked, the asset SIZES are checked.
+      # "Remember to write the CHANGELOG" was the one that stayed in memory,
+      # and it drifted for NINE consecutive versions — measured 2026-07-31,
+      # CHANGELOG.md's newest heading was [0.10.0] while VERSION said 0.15.2,
+      # with 91 lines stranded under [Unreleased] — without a single failure
+      # anywhere, because NOTHING in the repo referenced CHANGELOG.md
+      # (`grep -rl CHANGELOG tests/ scripts/` returned nothing).
+      #
+      # That is worse than ordinary doc drift because releasing here is a
+      # TRIGGER, not a deliberate act: this workflow fires on any push to main
+      # whose VERSION lacks a complete release, and the release step sets
+      # make_latest=true. So an undocumented version does not wait for anyone
+      # to decide to ship it — it becomes the release users SEE, on the next
+      # push by anyone, and retracting a published Latest is far more
+      # expensive than the one commit that would have documented it.
+      #
+      # Gated on should_release so an already-published version is never
+      # re-litigated. The rule itself lives in scripts/changelog_gate.py, NOT
+      # inline here, for exactly the reason release_assets.py exists: two
+      # copies of a release rule drift, and both keep passing on the cases they
+      # still know about.
+      - name: Require a CHANGELOG entry for this version
+        id: changelog_gate
+        if: steps.ver.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          python3 scripts/changelog_gate.py --version "${{ steps.ver.outputs.version }}"
+
+      # ── Did that gate actually RUN? ──
+      #
+      # A skipped step is SILENT: GitHub renders it grey next to the green ones
+      # and the job still succeeds. So a gate whose `if:` stops matching — a
+      # renamed output, a refactor of this job, an inverted condition — decays
+      # into nothing without a single red mark, and the release publishes
+      # undocumented exactly as before while the run log looks fine.
+      #
+      # The acceptance checklist for this gate originally said "a human
+      # confirms in the run log that the step is success, not skipped". That is
+      # the same shape as the defect the gate itself exists to fix: an
+      # invariant kept in someone's memory instead of in a check. So the
+      # workflow asserts it on its own.
+      #
+      # Scoped to the SAME condition as the gate: a checker with a narrower
+      # domain than the thing it checks would leave release runs where the gate
+      # could skip unobserved.
+      - name: Assert the CHANGELOG gate actually ran
+        if: steps.ver.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          outcome="${{ steps.changelog_gate.outcome }}"
+          echo "changelog gate outcome: ${outcome:-<empty>}"
+          if [ "$outcome" = "skipped" ] || [ -z "$outcome" ]; then
+            echo "::error::The CHANGELOG gate did NOT run on a release build (outcome=${outcome:-<empty>}). A skipped gate is indistinguishable from no gate — refusing to publish. Check the step's if: condition against steps.ver.outputs.should_release."
+            exit 1
+          fi
+
+  # ── Shared prebuilt frontend ─────────────────────────────────
+  frontend-dist:
+    name: Build frontend artifact
+    runs-on: ubuntu-latest
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install frontend contract and browser-canary dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install 'PyYAML>=6,<7' 'playwright>=1.56,<2'
+          python -m playwright install --with-deps chromium
+      - name: Build and verify the Vite graph once
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run check:frontend
+          python3 scripts/verify_frontend_dist.py
+      - name: Pack frontend graph and SHA-256
+        env:
+          VER: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="frontend-dist-${VER}.tar.gz"
+          tar -czf "$name" static/vite
+          sha256sum "$name" > "${name}.sha256"
+      - name: Upload shared frontend graph
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: |
+            frontend-dist-${{ needs.version.outputs.version }}.tar.gz
+            frontend-dist-${{ needs.version.outputs.version }}.tar.gz.sha256
+          if-no-files-found: error
+
+  # ── Windows ──────────────────────────────────────────────────
+  build-windows:
+    name: Windows Installer
+    runs-on: windows-latest
+    needs: [version, frontend-dist]
+    if: needs.version.outputs.should_release == 'true'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Consume the shared frontend graph
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-artifact
+      - name: Verify and install the frontend graph
+        shell: bash
+        env:
+          VER: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd frontend-artifact && sha256sum -c "frontend-dist-${VER}.tar.gz.sha256")
+          tar xzf "frontend-artifact/frontend-dist-${VER}.tar.gz"
+          python scripts/verify_frontend_dist.py
+
+      # ── shell: bash is LOAD-BEARING on Windows, not a style choice ──
+      #
+      # Measured on run 30601806258: this step reported SUCCESS while
+      # `pip install -r requirements.txt` had FAILED. Windows runners default to
+      # pwsh, which does not abort a multi-line `run:` when a native command
+      # exits non-zero — only the LAST command's exit code becomes the step
+      # result. So line 1 failed (tofu-search>=0.5.3 is unsatisfiable on public
+      # PyPI), line 2 succeeded, and the step went green.
+      #
+      # The build then continued with the project's dependencies MISSING and
+      # still produced an installer: 48,960,018 bytes, against 115,342,167 for
+      # the last good v0.14.2 build. A 49 MB "Tofu installer" containing
+      # essentially none of Tofu was uploaded as a release artifact. Linux and
+      # macOS use bash (`set -e` semantics), which is why they failed honestly
+      # in 2 seconds while Windows shipped a hollow binary.
+      #
+      # This is strictly worse than the missing package: an unsatisfiable pin is
+      # loud everywhere except here, where it became a silent corrupt artifact.
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          # tofu-search FIRST from the bundled wheel: the requirements floor
+          # (>=0.5.3) is on no public index (PyPI tops at 0.5.1), so the
+          # export bundles the verified wheel under vendor/. Installing it
+          # first lets pip see the floor as already satisfied. If the wheel
+          # is absent AND the index lacks the floor, the requirements
+          # install below fails LOUD — never a hollow build (run 30601806258).
+          if ls vendor/tofu_search-*.whl >/dev/null 2>&1; then
+            pip install --no-deps vendor/tofu_search-*.whl
+          fi
+          pip install -r requirements.txt
+          pip install pyinstaller pystray pillow psycopg2-binary pyautogui pyperclip psutil
+
+      - name: Generate icons
+        run: python scripts/gen_desktop_icons.py
+
+      - name: Smoke test native Windows log handles
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          from lib.log_retention import (
+              ensure_private_log_directory, ensure_private_log_file,
+              append_bytes_locked, copytruncate_if_oversize,
+          )
+          with TemporaryDirectory(prefix='tofu-log-smoke-') as temporary:
+              root = Path(temporary) / 'logs'
+              ensure_private_log_directory(root)
+              target = root / 'app.log'
+              ensure_private_log_file(target, create=True)
+              append_bytes_locked(target, b'first\n')
+              append_bytes_locked(target, b'second\n')
+              assert target.read_bytes() == b'first\nsecond\n'
+              result = copytruncate_if_oversize(target, max_bytes=7, backup_count=1)
+              assert not result['errors'], result['errors']
+              assert target.read_bytes() == b''
+              assert target.with_name('app.log.1').read_bytes() == b'second\n'
+          print('WINDOWS_LOG_SMOKE_OK')
+          PY
+
+      - name: Verify build inputs
+        shell: bash
+        run: |
+          # The Inno SetupIconFile + WizardImageFile / WizardSmallImageFile
+          # are HARD requirements — a missing asset aborts the compile. Fail
+          # here with a clear message instead of a cryptic ISCC error later.
+          test -f static/icons/tofu.ico || {
+            echo "::error::static/icons/tofu.ico not generated — gen_desktop_icons.py failed."
+            exit 1
+          }
+          echo "Icon present: $(ls -l static/icons/tofu.ico)"
+          for bmp in wizard-large.bmp wizard-small.bmp; do
+            test -f "static/icons/installer/$bmp" || {
+              echo "::error::static/icons/installer/$bmp not generated — gen_desktop_icons.py failed."
+              exit 1
+            }
+          done
+          echo "Wizard bitmaps present: $(ls -l static/icons/installer/)"
+
+      # ── Build the tofu-db storage engine ──
+      # tofu.spec refuses to package without it (a bundle that cannot start its
+      # storage backend is a hollow artifact), so it is built BEFORE PyInstaller
+      # and bundled into dist/. windows-latest ships rustup preinstalled; pin a
+      # default toolchain so `cargo` is never "no default toolchain configured".
+      - name: Build the tofu-db storage engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup default stable
+          cargo build --release --manifest-path packages/tofu-db/Cargo.toml
+          test -f packages/tofu-db/target/release/tofu-db.exe || {
+            echo "::error::tofu-db engine build produced no tofu-db.exe."
+            exit 1
+          }
+
+      - name: Build with PyInstaller
+        run: pyinstaller tofu.spec
+
+      - name: Verify PyInstaller output
+        shell: bash
+        run: |
+          test -f "dist/Tofu/Tofu.exe" || {
+            echo "::error::PyInstaller did not produce dist/Tofu/Tofu.exe."
+            exit 1
+          }
+          echo "Built: $(ls -l dist/Tofu/Tofu.exe)"
+
+      # ── Smoke: the binary must actually START, not merely exist ──
+      #
+      # The gates above prove the artifact exists and (at release time) is of a
+      # plausible size. Neither can see a MISSING HIDDEN IMPORT: tofu.spec
+      # declares 48 of them, and dropping one changes no byte count and no
+      # PyInstaller exit code — it fails at the instant a user double-clicks,
+      # with a ModuleNotFoundError nobody is there to read. Size is sensitive
+      # to a whole missing dependency TREE (measured: 49 MB hollow vs 115 MB
+      # healthy) and blind to one absent module.
+      #
+      # TOFU_SMOKE=1 makes the launcher import `server` — which builds the
+      # Quart app and runs routes.register_all() at module level — then exit.
+      # One import therefore exercises the blueprint tree and the transitive
+      # graph the hiddenimports exist to preserve.
+      #
+      # THE VERDICT IS THE EXIT CODE PLUS THE ABSENCE OF A TRACEBACK. "The
+      # process stayed up for N seconds" would be a green light by construction
+      # here: the build is console=False, so a windowed binary detaches and
+      # lingers whether or not anything imported. Asserting on liveness would
+      # measure the wrong thing entirely.
+      #
+      # It is NOT "stderr is empty" either, and that was MEASURED rather than
+      # assumed: a healthy boot writes diagnostics to fd 2 on purpose (the
+      # mlockall notice, the `[boot]` progress lines, and the libstdc++ soname
+      # forensics line that another epic added precisely so a crash is
+      # diagnosable). Demanding empty stderr would fail every healthy build —
+      # a permanently-red gate, which is how a suite gets muted.
+      - name: Smoke test the built binary
+        shell: bash
+        env:
+          TOFU_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/Tofu/Tofu.exe > /tmp/smoke.out 2> /tmp/smoke.err || rc=$?
+          echo "── stdout ──"; cat /tmp/smoke.out || true
+          echo "── stderr ──"; cat /tmp/smoke.err || true
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built Tofu.exe failed to start (exit $rc). A user double-clicking this installer would get the same failure."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/smoke.err; then
+            echo "::error::Tofu.exe exited 0 but its stderr carries a traceback — something failed and was swallowed."
+            exit 1
+          fi
+          grep -q 'TOFU_SMOKE_OK' /tmp/smoke.out || {
+            echo "::error::Tofu.exe exited 0 without emitting TOFU_SMOKE_OK — the smoke branch did not run, so this proved nothing."
+            exit 1
+          }
+
+      - name: Create Inno Setup script
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Unquoted heredoc so bash expands $APP_VERSION directly — no fragile
+          # post-hoc sed pass. APP_VERSION is guaranteed non-empty by the
+          # `version` job (which fails fast otherwise).
+          #
+          # Design notes (fixes for previously-broken installer):
+          #   * PrivilegesRequired=lowest paired with a PER-USER install dir
+          #     ({localappdata}\Programs\Tofu) — a standard user can write there
+          #     with no UAC elevation, and the app's portable data/ + logs/ dirs
+          #     (created next to the exe) are therefore writable too. The old
+          #     {autopf}=Program Files dir was NOT writable under `lowest`, so
+          #     the app crashed on first launch trying to create data/.
+          #   * NO [Run] step shells out to a bundled python.exe — PyInstaller
+          #     --onedir has no standalone python.exe (the interpreter is inside
+          #     Tofu.exe). Chromium/PostgreSQL are offered by the app's OWN
+          #     first-launch dialog (desktop/post_install.py), which invokes the
+          #     frozen interpreter correctly. The installer just ships files and
+          #     launches the app.
+          cat > installer.iss << INNO_EOF
+          [Setup]
+          AppName=Tofu
+          AppVersion=${APP_VERSION}
+          AppPublisher=Tofu Project
+          AppPublisherURL=https://github.com/rangehow/ToFu
+          DefaultDirName={localappdata}\\Programs\\Tofu
+          DefaultGroupName=Tofu
+          DisableProgramGroupPage=yes
+          UninstallDisplayIcon={app}\\Tofu.exe
+          OutputDir=installer_output
+          OutputBaseFilename=Tofu-Setup-${APP_VERSION}-win64
+          Compression=lzma2/ultra64
+          SolidCompression=yes
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          SetupIconFile=static\\icons\\tofu.ico
+          PrivilegesRequired=lowest
+          ; Running-app guard (parity with the NSIS authoring's
+          ; TOFU_CLOSE_RUNNING_APP): upgrading over a running Tofu must
+          ; offer to close it, never die on a file-in-use error. These
+          ; ARE Inno's defaults — pinned explicitly because the contract
+          ; test binds them and a default flip would ship silently.
+          CloseApplications=yes
+          RestartApplications=no
+          WizardStyle=modern
+          WizardImageFile=static\\icons\\installer\\wizard-large.bmp
+          WizardSmallImageFile=static\\icons\\installer\\wizard-small.bmp
+
+          [Files]
+          Source: "dist\\Tofu\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+
+          [Icons]
+          Name: "{autoprograms}\\Tofu"; Filename: "{app}\\Tofu.exe"
+          Name: "{autodesktop}\\Tofu"; Filename: "{app}\\Tofu.exe"; Tasks: desktopicon
+
+          [Tasks]
+          Name: desktopicon; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+          [Run]
+          Filename: "{app}\\Tofu.exe"; Description: "Launch Tofu"; Flags: nowait postinstall skipifsilent
+          INNO_EOF
+
+          echo "── Generated installer.iss ──"
+          cat installer.iss
+
+      - name: Build installer with Inno Setup
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.4
+        with:
+          path: installer.iss
+
+      # ── Code signing (INERT until secrets are provided) ──
+      # Without an Authenticode signature, Windows SmartScreen warns
+      # ("Windows protected your PC") on first launch. To sign the installer,
+      # add these repo secrets and uncomment the step below:
+      #   WIN_CERT_PFX        base64 of your code-signing .pfx
+      #   WIN_CERT_PASSWORD   the .pfx password
+      # - name: Sign installer
+      #   shell: pwsh
+      #   env:
+      #     WIN_CERT_PFX: ${{ secrets.WIN_CERT_PFX }}
+      #     WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+      #   run: |
+      #     # [IO.File]::WriteAllBytes('cert.pfx', [Convert]::FromBase64String($env:WIN_CERT_PFX))
+      #     # & signtool sign /f cert.pfx /p $env:WIN_CERT_PASSWORD /fd SHA256 `
+      #     #   /tr http://timestamp.digicert.com /td SHA256 installer_output\*.exe
+      #     Write-Host "signing configured"
+
+      - name: Verify installer output
+        shell: bash
+        run: |
+          ls -l installer_output/ || true
+          test -n "$(ls installer_output/*.exe 2>/dev/null)" || {
+            echo "::error::Inno Setup did not produce an installer .exe."
+            exit 1
+          }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer_output/*.exe
+          retention-days: 30
+
+      # ── The AGENT component (docs/DESKTOP_AGENT_DIST_DESIGN.md §5.3) ──
+      # Same leg, smaller spec: the agent closure is a strict subset of the
+      # full payload's deps EXCEPT curl_cffi (the egress TLS fingerprint),
+      # which the full venv does not carry. Inno is native here — the wine
+      # 32-bit trap that forced NSIS on the server build does not exist on a
+      # real runner. The two authorings (this Inno, the server's NSIS) are
+      # bound by tests/desktop_dist/test_installer_parity.py: 2 components × 2 tools, one
+      # contract — including the autostart semantics below.
+      - name: Install agent dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install curl_cffi
+
+      - name: Build agent with PyInstaller
+        run: pyinstaller tofu-agent.spec
+
+      - name: Verify agent PyInstaller output
+        shell: bash
+        run: |
+          test -f "dist/TofuAgent/TofuAgent.exe" || {
+            echo "::error::PyInstaller did not produce dist/TofuAgent/TofuAgent.exe."
+            exit 1
+          }
+          echo "Built: $(ls -l dist/TofuAgent/TofuAgent.exe)"
+
+      # Same verdict discipline as the full smoke above: exit code + no
+      # traceback + the marker — never liveness (console=False lingers by
+      # construction), and the agent's own gate additionally asserts the
+      # server stack is ABSENT from the frozen bundle (the size claim of
+      # this component, proven at build time rather than on a user's PC).
+      - name: Smoke test the built agent
+        shell: bash
+        env:
+          TOFU_AGENT_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/TofuAgent/TofuAgent.exe > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
+          echo "── stdout ──"; cat /tmp/agent_smoke.out || true
+          echo "── stderr ──"; cat /tmp/agent_smoke.err || true
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built TofuAgent.exe failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/agent_smoke.err; then
+            echo "::error::TofuAgent.exe exited 0 but its stderr carries a traceback."
+            exit 1
+          fi
+          grep -q 'TOFU_AGENT_SMOKE_OK' /tmp/agent_smoke.out || {
+            echo "::error::TofuAgent.exe exited 0 without emitting TOFU_AGENT_SMOKE_OK — the smoke branch did not run, so this proved nothing."
+            exit 1
+          }
+
+      - name: Create agent Inno Setup script
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The autostart contract (owner amendment ①): offered, DEFAULT ON
+          # (an unattended relay machine must survive a Windows Update
+          # reboot — without it the bridge silently dies until someone
+          # notices failed traffic), HKCU ⇒ UAC-free under
+          # PrivilegesRequired=lowest, removed at uninstall
+          # (uninsdeletevalue — a removed app must not leave a dead autorun
+          # pointing at a missing exe). ValueName must equal
+          # desktop/agent_launcher.py's _RUN_VALUE: the installer's task,
+          # the tray toggle and the reconcile logic all write ONE key.
+          cat > agent_installer.iss << INNO_EOF
+          [Setup]
+          AppName=Tofu Agent
+          AppVersion=${APP_VERSION}
+          AppPublisher=Tofu Project
+          AppPublisherURL=https://github.com/rangehow/ToFu
+          DefaultDirName={localappdata}\\Programs\\TofuAgent
+          DefaultGroupName=Tofu Agent
+          DisableProgramGroupPage=yes
+          UninstallDisplayIcon={app}\\TofuAgent.exe
+          OutputDir=agent_installer_output
+          OutputBaseFilename=TofuAgent-Setup-${APP_VERSION}-win64
+          Compression=lzma2/ultra64
+          SolidCompression=yes
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          SetupIconFile=static\\icons\\tofu.ico
+          PrivilegesRequired=lowest
+          ; Running-app guard — same contract as the full app above and
+          ; the NSIS authoring's TOFU_CLOSE_RUNNING_APP macro.
+          CloseApplications=yes
+          RestartApplications=no
+          WizardStyle=modern
+          WizardImageFile=static\\icons\\installer\\wizard-large.bmp
+          WizardSmallImageFile=static\\icons\\installer\\wizard-small.bmp
+
+          [Files]
+          Source: "dist\\TofuAgent\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+
+          [Tasks]
+          Name: desktopicon; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+          Name: autostart; Description: "Start Tofu Agent with Windows"; GroupDescription: "Additional shortcuts:"
+
+          [Icons]
+          Name: "{autoprograms}\\Tofu Agent"; Filename: "{app}\\TofuAgent.exe"
+          Name: "{autodesktop}\\Tofu Agent"; Filename: "{app}\\TofuAgent.exe"; Tasks: desktopicon
+
+          [Registry]
+          Root: HKCU; Subkey: "Software\\Microsoft\\Windows\\CurrentVersion\\Run"; ValueType: string; ValueName: "TofuAgent"; ValueData: """{app}\\TofuAgent.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+
+          [Run]
+          Filename: "{app}\\TofuAgent.exe"; Description: "Launch Tofu Agent"; Flags: nowait postinstall skipifsilent
+          INNO_EOF
+
+          echo "── Generated agent_installer.iss ──"
+          cat agent_installer.iss
+
+      - name: Build agent installer with Inno Setup
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.4
+        with:
+          path: agent_installer.iss
+
+      - name: Verify agent installer output
+        shell: bash
+        run: |
+          ls -l agent_installer_output/ || true
+          test -n "$(ls agent_installer_output/*.exe 2>/dev/null)" || {
+            echo "::error::Inno Setup did not produce an agent installer .exe."
+            exit 1
+          }
+
+      - name: Upload Windows agent installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-agent-installer
+          path: agent_installer_output/*.exe
+          retention-days: 30
+
+  # ── macOS ────────────────────────────────────────────────────
+  # Build a NATIVE single-arch DMG per macOS architecture via a runner matrix:
+  #   - macos-15        → Apple Silicon (arm64)
+  #   - macos-15-intel  → Intel (x86_64)
+  # We deliberately do NOT use PyInstaller target_arch='universal2': the
+  # setup-python interpreter on the runners is single-arch, and several C
+  # extensions we bundle (psycopg2-binary, pymupdf, lxml, cryptography) do not
+  # publish universal2 wheels — so a universal2 build aborts at COLLECT with
+  # "<lib>.so is not a fat binary!" (pyinstaller#7354). Two native DMGs, each
+  # built with arch-matching wheels, is the reliable path. Previously only the
+  # arm64 DMG shipped (runs-on: macos-latest), so Intel Macs could not install
+  # Tofu at all.
+  #
+  # ── Runner labels are PERISHABLE — this matrix already died once ──
+  # The legs were macos-14 (arm64) and macos-13 (x86_64). GitHub RETIRED
+  # macos-13 on 2025-12-08 (actions/runner-images#13046). A retired label does
+  # not fail — it is simply never scheduled: the x86_64 leg sat QUEUED with no
+  # runner for exactly 24 h, GitHub auto-cancelled it, and because `release`
+  # has `needs: build-macos`, the release job was SKIPPED. Net effect: v0.15.0,
+  # v0.15.1 and v0.15.2 each built three of four platforms and published
+  # NOTHING, while the Releases page still showed v0.14.2. `timeout-minutes`
+  # does NOT protect against this — it measures execution, not queue time.
+  # macos-14 is on the same path (deprecation began 2026-07-06, unsupported
+  # 2026-11-02), so it is moved off pre-emptively rather than after it starves.
+  #
+  # tests/desktop/test_desktop_build_workflow.py pins both labels against a dated
+  # allowlist and FAILS BEFORE each one's retirement date — so the next
+  # rotation is a red test on a normal working day, not a silent non-release.
+  # macos-15-intel is the LAST Intel image (available until 2027-08); after
+  # that, x86_64 macOS must be dropped or moved off GitHub-hosted runners.
+  build-macos:
+    name: macOS DMG (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: [version, frontend-dist]
+    if: needs.version.outputs.should_release == 'true'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Consume and verify the shared frontend graph
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-artifact
+      - name: Install the frontend graph
+        shell: bash
+        env:
+          VER: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd frontend-artifact && shasum -a 256 -c "frontend-dist-${VER}.tar.gz.sha256")
+          tar xzf "frontend-artifact/frontend-dist-${VER}.tar.gz"
+          python3 scripts/verify_frontend_dist.py
+
+      # shell pinned for the same reason as the Windows leg: `runs-on` here is
+      # `${{ matrix.runner }}`, so the shell this step gets is decided by a
+      # matrix value rather than by anything visible at this line. Today both
+      # legs are macOS (bash), but the matrix is the part of this workflow that
+      # has already been re-pointed once, and a Windows leg added later would
+      # silently inherit pwsh's discard-earlier-failures semantics.
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          # tofu-search FIRST from the bundled wheel: the requirements floor
+          # (>=0.5.3) is on no public index (PyPI tops at 0.5.1), so the
+          # export bundles the verified wheel under vendor/. Installing it
+          # first lets pip see the floor as already satisfied. If the wheel
+          # is absent AND the index lacks the floor, the requirements
+          # install below fails LOUD — never a hollow build (run 30601806258).
+          if ls vendor/tofu_search-*.whl >/dev/null 2>&1; then
+            pip install --no-deps vendor/tofu_search-*.whl
+          fi
+          pip install -r requirements.txt
+          pip install pyinstaller pystray pillow psycopg2-binary pyautogui pyperclip psutil
+
+      - name: Generate icons
+        run: python scripts/gen_desktop_icons.py
+
+      # ── Build the tofu-db storage engine (see the Windows leg) ──
+      - name: Build the tofu-db storage engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup default stable
+          cargo build --release --manifest-path packages/tofu-db/Cargo.toml
+          test -f packages/tofu-db/target/release/tofu-db || {
+            echo "::error::tofu-db engine build produced no tofu-db binary."
+            exit 1
+          }
+
+      - name: Build with PyInstaller
+        run: pyinstaller tofu.spec
+
+      - name: Smoke test the built macOS binary
+        shell: bash
+        timeout-minutes: 2
+        env:
+          TOFU_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/Tofu.app/Contents/MacOS/Tofu > /tmp/smoke.out 2> /tmp/smoke.err || rc=$?
+          cat /tmp/smoke.out /tmp/smoke.err
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built macOS app failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/smoke.err; then
+            echo "::error::The macOS app emitted a traceback."
+            exit 1
+          fi
+          grep -q 'TOFU_SMOKE_OK' /tmp/smoke.out || {
+            echo "::error::The macOS app did not emit TOFU_SMOKE_OK."
+            exit 1
+          }
+
+      # ── Code signing / notarization (INERT until secrets are provided) ──
+      # macOS Gatekeeper blocks unsigned apps ("Tofu is damaged / cannot be
+      # opened"). To sign + notarize, add these repo secrets and uncomment the
+      # step below (it runs on the app in dist/Tofu.app BEFORE the DMG is made):
+      #   MACOS_CERT_P12        base64 of a "Developer ID Application" .p12
+      #   MACOS_CERT_PASSWORD   the .p12 export password
+      #   MACOS_NOTARY_APPLE_ID / MACOS_NOTARY_TEAM_ID / MACOS_NOTARY_PASSWORD
+      # - name: Sign & notarize app
+      #   env:
+      #     MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      #     MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      #     MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+      #     MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+      #     MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+      #   run: |
+      #     # security create-keychain + import the .p12, then:
+      #     #   codesign --deep --force --options runtime \
+      #     #     --sign "Developer ID Application: <NAME> (<TEAM_ID>)" dist/Tofu.app
+      #     #   xcrun notarytool submit dist/Tofu.app --wait \
+      #     #     --apple-id "$MACOS_NOTARY_APPLE_ID" --team-id "$MACOS_NOTARY_TEAM_ID" \
+      #     #     --password "$MACOS_NOTARY_PASSWORD"
+      #     #   xcrun stapler staple dist/Tofu.app
+      #     echo "signing configured"
+
+      - name: Create DMG
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # No `set -e` here on purpose: the create-dmg invocation below is
+          # deliberately paired with a `|| { ... }` zip fallback, and the whole
+          # point is that its failure is HANDLED rather than fatal.
+          #
+          # The window art is a GENERATED input (gen_desktop_icons.py), so a
+          # missing file means the icon step broke — that is a build error,
+          # not a create-dmg failure, and must fail loudly here rather than
+          # fall through to the zip fallback with an unbranded window.
+          test -f static/icons/installer/dmg-background.png || {
+            echo "::error::static/icons/installer/dmg-background.png not generated — gen_desktop_icons.py failed."
+            exit 1
+          }
+          brew install create-dmg || true
+          create-dmg \
+            --volname "Tofu" \
+            --volicon "static/icons/tofu.icns" \
+            --background "static/icons/installer/dmg-background.png" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Tofu.app" 150 190 \
+            --app-drop-link 450 190 \
+            --hide-extension "Tofu.app" \
+            "Tofu-${APP_VERSION}-macos-${ARCH}.dmg" \
+            "dist/Tofu.app/" \
+          || {
+            # Fallback: plain zip if create-dmg fails
+            cd dist && zip -r "../Tofu-${APP_VERSION}-macos-${ARCH}.zip" Tofu.app/
+          }
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-${{ matrix.arch }}
+          path: Tofu-*.dmg
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload macOS ZIP (fallback)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-zip-${{ matrix.arch }}
+          path: Tofu-*.zip
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # ── The AGENT component — the ONLY macOS agent supply that can ever
+      # exist (server-side macOS builds are structurally impossible; every
+      # server's mirror picks these DMGs up from here). Same single-arch
+      # native discipline as the full DMG above.
+      - name: Install agent dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install curl_cffi
+
+      - name: Build agent with PyInstaller
+        run: pyinstaller tofu-agent.spec
+
+      - name: Smoke test the built macOS agent
+        shell: bash
+        env:
+          TOFU_AGENT_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/TofuAgent.app/Contents/MacOS/TofuAgent > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
+          cat /tmp/agent_smoke.out /tmp/agent_smoke.err
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built macOS agent failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/agent_smoke.err; then
+            echo "::error::The macOS agent emitted a traceback."
+            exit 1
+          fi
+          grep -q 'TOFU_AGENT_SMOKE_OK' /tmp/agent_smoke.out || {
+            echo "::error::The macOS agent did not execute its smoke gate."
+            exit 1
+          }
+
+      - name: Create agent DMG
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # Same no-set-e rationale and zip fallback as the full DMG step.
+          brew install create-dmg || true
+          create-dmg \
+            --volname "Tofu Agent" \
+            --volicon "static/icons/tofu.icns" \
+            --background "static/icons/installer/dmg-background.png" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "TofuAgent.app" 150 190 \
+            --app-drop-link 450 190 \
+            --hide-extension "TofuAgent.app" \
+            "TofuAgent-${APP_VERSION}-macos-${ARCH}.dmg" \
+            "dist/TofuAgent.app/" \
+          || {
+            cd dist && zip -r "../TofuAgent-${APP_VERSION}-macos-${ARCH}.zip" TofuAgent.app/
+          }
+
+      - name: Upload macOS agent DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-agent-dmg-${{ matrix.arch }}
+          path: TofuAgent-*.dmg
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload macOS agent ZIP (fallback)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-agent-zip-${{ matrix.arch }}
+          path: TofuAgent-*.zip
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ── Linux ────────────────────────────────────────────────────
+  build-linux:
+    name: Linux Archive
+    runs-on: ubuntu-latest
+    needs: [version, frontend-dist]
+    if: needs.version.outputs.should_release == 'true'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Consume and verify the shared frontend graph
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-artifact
+      - name: Install the frontend graph
+        env:
+          VER: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          (cd frontend-artifact && sha256sum -c "frontend-dist-${VER}.tar.gz.sha256")
+          tar xzf "frontend-artifact/frontend-dist-${VER}.tar.gz"
+          python3 scripts/verify_frontend_dist.py
+
+      - name: Install dependencies
+        run: |
+          # tofu-search FIRST from the bundled wheel: the requirements floor
+          # (>=0.5.3) is on no public index (PyPI tops at 0.5.1), so the
+          # export bundles the verified wheel under vendor/. Installing it
+          # first lets pip see the floor as already satisfied. If the wheel
+          # is absent AND the index lacks the floor, the requirements
+          # install below fails LOUD — never a hollow build (run 30601806258).
+          if ls vendor/tofu_search-*.whl >/dev/null 2>&1; then
+            pip install --no-deps vendor/tofu_search-*.whl
+          fi
+          pip install -r requirements.txt
+          pip install pyinstaller pystray pillow psycopg2-binary pyautogui pyperclip psutil
+
+      - name: Generate icons
+        run: python scripts/gen_desktop_icons.py
+
+      # ── Build the tofu-db storage engine (see the Windows leg) ──
+      - name: Build the tofu-db storage engine
+        run: |
+          set -euo pipefail
+          rustup default stable
+          cargo build --release --manifest-path packages/tofu-db/Cargo.toml
+          test -f packages/tofu-db/target/release/tofu-db || {
+            echo "::error::tofu-db engine build produced no tofu-db binary."
+            exit 1
+          }
+
+      - name: Build with PyInstaller
+        run: pyinstaller tofu.spec
+
+      # Same contract as the Windows leg — see the comment there for why the
+      # verdict is exit-code + no-traceback (never liveness, and never "stderr
+      # is empty": a healthy boot writes diagnostics to fd 2 by design). Runs
+      # BEFORE the archive step so a bundle that cannot boot is never packaged.
+      - name: Smoke test the built binary
+        shell: bash
+        env:
+          TOFU_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/Tofu/Tofu > /tmp/smoke.out 2> /tmp/smoke.err || rc=$?
+          echo "── stdout ──"; cat /tmp/smoke.out || true
+          echo "── stderr ──"; cat /tmp/smoke.err || true
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built Tofu binary failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/smoke.err; then
+            echo "::error::Tofu exited 0 but its stderr carries a traceback — something failed and was swallowed."
+            exit 1
+          fi
+          grep -q 'TOFU_SMOKE_OK' /tmp/smoke.out || {
+            echo "::error::Tofu exited 0 without emitting TOFU_SMOKE_OK — the smoke branch did not run, so this proved nothing."
+            exit 1
+          }
+
+      - name: Add Linux desktop integration
+        # The tarball is the WHOLE Linux install UX (no .deb/.AppImage yet —
+        # tracked separately), so it must carry the pieces that register the
+        # app with the desktop environment: install.sh (per-user, no sudo)
+        # and the .desktop template it renders. Verified present before
+        # archiving — a tarball without them is a silent UX regression.
+        run: |
+          set -euo pipefail
+          cp desktop/install-linux.sh dist/Tofu/install.sh
+          chmod +x dist/Tofu/install.sh
+          cp desktop/tofu.desktop dist/Tofu/tofu.desktop
+          test -x dist/Tofu/install.sh
+          test -f dist/Tofu/tofu.desktop
+
+      - name: Create archive
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd dist
+          tar czf "../Tofu-${APP_VERSION}-linux-x86_64.tar.gz" Tofu/
+
+      - name: Build .deb package
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        # The PRIMARY Linux installer (pt_a64216b959694605): dpkg-deb ships
+        # in the runner base image, no FUSE at build or run time, native apt
+        # lifecycle. The tarball stays as the no-sudo / non-Debian fallback.
+        run: bash desktop/build-deb.sh dist/Tofu "$APP_VERSION" .
+
+      - name: Upload Linux archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-archive
+          path: |
+            Tofu-*.tar.gz
+            Tofu-*.deb
+          retention-days: 30
+
+      # ── The AGENT component — tar.gz ONLY (.deb stays full-only: a relay
+      # machine is an ops user's machine, and this keeps the releases page
+      # from doubling; design doc §5.3).
+      - name: Install agent dependencies
+        run: |
+          pip install curl_cffi
+
+      - name: Build agent with PyInstaller
+        run: pyinstaller tofu-agent.spec
+
+      # Same contract as the full smoke above (exit code + no traceback +
+      # marker). The agent's gate additionally asserts no server-stack
+      # module is importable in the frozen bundle.
+      - name: Smoke test the built agent
+        shell: bash
+        env:
+          TOFU_AGENT_SMOKE: '1'
+        run: |
+          set -uo pipefail
+          rc=0
+          ./dist/TofuAgent/TofuAgent > /tmp/agent_smoke.out 2> /tmp/agent_smoke.err || rc=$?
+          echo "── stdout ──"; cat /tmp/agent_smoke.out || true
+          echo "── stderr ──"; cat /tmp/agent_smoke.err || true
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::The built TofuAgent binary failed to start (exit $rc)."
+            exit 1
+          fi
+          if grep -qE 'Traceback \(most recent call last\)|ModuleNotFoundError|ImportError' /tmp/agent_smoke.err; then
+            echo "::error::TofuAgent exited 0 but its stderr carries a traceback."
+            exit 1
+          fi
+          grep -q 'TOFU_AGENT_SMOKE_OK' /tmp/agent_smoke.out || {
+            echo "::error::TofuAgent exited 0 without emitting TOFU_AGENT_SMOKE_OK."
+            exit 1
+          }
+
+      - name: Create agent archive
+        env:
+          APP_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd dist
+          tar czf "../TofuAgent-${APP_VERSION}-linux-x86_64.tar.gz" TofuAgent/
+
+      - name: Upload Linux agent archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-agent-archive
+          path: TofuAgent-*.tar.gz
+          retention-days: 30
+
+  # ── Release ──────────────────────────────────────────────────
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [version, frontend-dist, build-windows, build-macos, build-linux]
+    if: needs.version.outputs.should_release == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find release-assets -type f | head -20
+
+      - name: Assert all platform assets present
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Completeness gate: refuse to publish a partial release. Because the
+          # macOS matrix is fail-fast:false and DMG upload is
+          # if-no-files-found:warn (and create-dmg falls back to a .zip on
+          # failure), a broken Intel leg could otherwise let a release ship with
+          # ONLY the arm64 DMG — and make_latest would pin that half-built set as
+          # Latest, silently reintroducing the "Intel Macs can't install" bug.
+          # So we assert every required per-platform / per-arch asset exists;
+          # missing any one fails the whole release ("all four platforms, or a
+          # loud failure — never a silent partial Latest").
+          #
+          # The required-asset list is NOT inlined here. scripts/release_assets.py
+          # owns it, and the `version` job's gate calls the same script to judge
+          # an ALREADY-PUBLISHED release. Keeping one list is what stops a new
+          # platform from being added to one gate and silently missed by the
+          # other. --require-checksums is deliberately omitted: SHA256SUMS is
+          # generated by the NEXT step, so it cannot exist yet.
+          python3 scripts/release_assets.py --dir release-assets || {
+            echo "::error::Refusing to publish an incomplete release. See missing assets above."
+            exit 1
+          }
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+          files=( *.exe *.dmg *.tar.gz *.deb )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No release assets found to checksum — build jobs produced nothing."
+            exit 1
+          fi
+          # Basenames only (not ./path) so end users can verify with
+          # `shasum -a 256 -c SHA256SUMS` from their download folder.
+          shasum -a 256 "${files[@]}" > SHA256SUMS
+          echo "── SHA256SUMS ──"
+          cat SHA256SUMS
+
+      # ── Sign the checksum manifest (fail-closed) ──
+      # SHA256SUMS proves INTEGRITY (bytes match the builder's hash) but not
+      # AUTHENTICITY: anyone who can edit the release page can regenerate a
+      # matching manifest. The Ed25519 signature over SHA256SUMS closes that
+      # gap with a single offline check that works on every platform —
+      # including Linux and Android/Termux, which have no OS code-signing path.
+      # The rule lives in scripts/release_sign.py (never inline here) so the
+      # sign and verify steps can never drift; tests/release/test_release_sign.py pins
+      # the fail-closed contract.
+      #
+      # Signing needs the RELEASE_SIGNING_PRIVATE_KEY repo secret (PKCS8 PEM).
+      # A release is REFUSED when the secret is absent — shipping an unsigned
+      # release silently is exactly the defect this gate exists to prevent.
+      # Generate a keypair once with:
+      #   python3 scripts/release_sign.py keygen \
+      #     --private release_private.pem --public release_signing_public_key.pem
+      # then store the PRIVATE pem as the secret and keep the public key for
+      # users to pin. The public key is published beside the assets.
+      - name: Sign SHA256SUMS with the release key
+        shell: bash
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::RELEASE_SIGNING_PRIVATE_KEY is not set — refusing to publish an UNSIGNED release."
+            echo "::error::Generate a keypair with scripts/release_sign.py keygen and store the private PEM as this secret."
+            exit 1
+          fi
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$RELEASE_SIGNING_PRIVATE_KEY" > "$key_file"
+          python3 scripts/release_sign.py sign \
+            --manifest release-assets/SHA256SUMS \
+            --private "$key_file" \
+            --out release-assets/SHA256SUMS.sig
+
+      # Publish the public key next to the assets so a first-time user needs
+      # nothing but the release page to verify. The CI runner has no private
+      # key in the repo, so the public half comes from the same-named secret.
+      - name: Stage the release public key
+        shell: bash
+        env:
+          RELEASE_SIGNING_PUBLIC_KEY: ${{ secrets.RELEASE_SIGNING_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_SIGNING_PUBLIC_KEY:-}" ]; then
+            echo "::error::RELEASE_SIGNING_PUBLIC_KEY is not set — users could not verify the signature."
+            exit 1
+          fi
+          printf '%s' "$RELEASE_SIGNING_PUBLIC_KEY" > release-assets/release_signing_public_key.pem
+
+      # Verify what we just signed BEFORE publishing: a release whose own
+      # signature does not verify must never reach users. This catches a
+      # mismatched keypair secret pair immediately, at the gate.
+      - name: Verify the release signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release_sign.py verify \
+            --manifest release-assets/SHA256SUMS \
+            --signature release-assets/SHA256SUMS.sig \
+            --public release-assets/release_signing_public_key.pem
+
+      # ── An orphan tag must be moved to the commit we actually built ──
+      #
+      # This step exists because `target_commitish` below CANNOT do the job on
+      # its own. The GitHub REST docs say so in as many words:
+      #
+      #   target_commitish — "Specifies the commitish value that determines
+      #   where the Git tag is created from. [...] **Unused if the Git tag
+      #   already exists.**"
+      #
+      # And on this repo the tag routinely DOES already exist without a
+      # release, for two independent reasons:
+      #   * `export.py --bump` pushes the tag itself, before this workflow
+      #     reaches the release step;
+      #   * a starved runner leg skips `release`, leaving the tag behind with
+      #     nothing published on it — measured 2026-07-29: v0.15.0 and v0.15.2
+      #     are tagged on the remote and both return 404 from
+      #     GET /releases/tags/{tag}.
+      #
+      # In that state action-gh-release finds no matching release
+      # (findTagFromReleases scans RELEASES, not git refs), so it CREATES one —
+      # silently anchored to whatever commit the stale tag points at. The
+      # result is a release whose installers come from `github.sha` while its
+      # Source-code archives and generated notes come from the old commit, then
+      # `make_latest` hands that mismatch to every user. Nothing errors.
+      #
+      # ── Why forcing the tag here is safe, and where the limit is ──
+      # This mirrors `export.py::_tag_push_action`, which refuses to MOVE a
+      # published tag without an explicit human `--force` (moving one breaks
+      # every downstream pin). The same four verdicts apply — absent -> let the
+      # action create it; same commit -> nothing to do; different commit ->
+      # move only if the tag is provably an orphan; otherwise keep.
+      #
+      # The authorisation to move is NOT "should_release is true". That would
+      # be wrong: `workflow_dispatch` sets should_release=true WITHOUT probing
+      # (it is the deliberate re-release escape hatch), so a manual re-run on a
+      # shipped version reaches this step, and force-moving there would rewrite
+      # a published tag. So this step re-probes the Release API itself and only
+      # moves a tag that has NO release behind it. A tag nobody has released
+      # has no downstream pin to break; a tag with a release is left alone and
+      # the action updates that release in place.
+      #
+      # Failure direction is the opposite of the version gate's, on purpose:
+      # that gate fails open toward BUILDING because a redundant build is
+      # cheap, whereas moving a published tag is destructive and hard to undo.
+      # So an unreadable probe here declines to move and says so loudly.
+      - name: Retarget an orphan tag to the commit that was built
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VER}"
+
+          # Peeled ref first: an annotated tag's own object is not the commit.
+          remote_sha="$(git ls-remote --tags origin "refs/tags/${tag}^{}" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
+          if [ -z "$remote_sha" ]; then
+            remote_sha="$(git ls-remote --tags origin "refs/tags/${tag}" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
+          fi
+
+          if [ -z "$remote_sha" ]; then
+            echo "Tag ${tag} does not exist yet — action-gh-release will create it from ${GITHUB_SHA}."
+            exit 0
+          fi
+          if [ "$remote_sha" = "${GITHUB_SHA}" ]; then
+            echo "Tag ${tag} already points at the built commit ${GITHUB_SHA} — nothing to do."
+            exit 0
+          fi
+
+          echo "Tag ${tag} points at ${remote_sha}, but this run built ${GITHUB_SHA}."
+          api="${GITHUB_API_URL:-https://api.github.com}"
+          # Capture the BODY too: on 200 the asset list decides whether this is
+          # a published release (leave the tag alone) or a partial one this run
+          # is repairing (the tag must follow the new commit).
+          body="$(mktemp)"
+          code="$(curl -sS -o "$body" -w '%{http_code}' \
+                    -H "Authorization: Bearer ${GH_TOKEN}" \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                    "${api}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+                  || true)"
+          echo "Release probe: GET /releases/tags/${tag} -> HTTP ${code:-<none>}"
+
+          if [ "$code" = "404" ]; then
+            echo "No release behind ${tag} — it is an orphan, so no downstream pin can break."
+            git push --force origin "${GITHUB_SHA}:refs/tags/${tag}"
+            echo "Moved ${tag} -> ${GITHUB_SHA}."
+          elif [ "$code" = "200" ]; then
+            # A release EXISTS — but "exists" is not "was published". If its
+            # asset set is incomplete, this run is a repair run: the version
+            # gate only let us get here because those installers are missing.
+            # Leaving the tag on the old commit would then hand users a release
+            # whose binaries come from GITHUB_SHA while its Source-code archives
+            # and notes come from ${remote_sha} — the very mismatch this step
+            # exists to prevent, arriving through the repair path instead of the
+            # orphan path. So a partial release's tag is treated like an orphan's.
+            #
+            # This branch became REACHABLE when the version gate learned to
+            # rebuild partial releases; before that, a 200 always meant "done"
+            # and no repair run could reach this step.
+            #
+            # Exit codes: 0 complete, 1 incomplete, 2 undetermined. Only a
+            # definite 1 moves the tag — an unreadable asset list is treated
+            # exactly like an unreadable probe below, because force-moving a tag
+            # that turns out to be published is destructive and hard to undo.
+            set +e
+            python3 scripts/release_assets.py --release-json "$body" --require-checksums
+            assets_rc=$?
+            set -e
+            if [ "$assets_rc" -eq 1 ]; then
+              echo "${tag} has a release, but it is INCOMPLETE (missing assets above) — this run is repairing it, so the tag must follow the commit that produced the new assets."
+              git push --force origin "${GITHUB_SHA}:refs/tags/${tag}"
+              echo "Moved ${tag} -> ${GITHUB_SHA}."
+            elif [ "$assets_rc" -eq 0 ]; then
+              echo "::notice::${tag} already has a COMPLETE Release — leaving the published tag where it is; the existing release will be updated in place."
+            else
+              echo "::warning::${tag} has a Release but its asset list could not be read, so it cannot be shown to be incomplete. NOT moving a possibly-published tag. The release may be cut from ${remote_sha} instead of ${GITHUB_SHA} — verify the Source code archives before announcing it."
+            fi
+          else
+            echo "::warning::Could not confirm whether ${tag} has a Release (HTTP ${code:-<none>}). NOT moving a possibly-published tag. The release may be cut from ${remote_sha} instead of ${GITHUB_SHA} — verify the Source code archives before announcing it."
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Tofu v${{ needs.version.outputs.version }}
+          # The release is cut from the VERSION file on main, so it must carry
+          # its own tag: this run was triggered by a branch push, not by a tag.
+          # `target_commitish` is only honoured when the tag does NOT already
+          # exist ("Unused if the Git tag already exists" — GitHub REST docs),
+          # which is why the step above has to move an orphan tag first. Both
+          # entry paths then converge on one published release per version,
+          # anchored to the commit that produced the binaries: `--bump` pushes
+          # the tag itself, a plain `--push` lets this step create it.
+          tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          # Publish immediately. This was draft:true, which required a manual
+          # "Publish release" click in the GitHub UI that never happened —
+          # v0.12/v0.13/v0.14 all sat as invisible drafts while users at the
+          # Releases page only ever saw v0.11.0.
+          draft: false
+          # Promote this tag to the repo's "Latest" release so the README's
+          # /releases/latest links (and any /releases/latest/download/<asset>
+          # deep links) resolve to it. "true" forces latest even for a
+          # pre-1.0 version string.
+          make_latest: "true"
+          generate_release_notes: true
+          body: |
+            ## Downloads
+
+            | OS | File | Notes |
+            | --- | --- | --- |
+            | Windows (x64) | `Tofu-Setup-${{ needs.version.outputs.version }}-win64.exe` | Recommended |
+            | macOS (Apple Silicon) | `Tofu-${{ needs.version.outputs.version }}-macos-arm64.dmg` | |
+            | macOS (Intel) | `Tofu-${{ needs.version.outputs.version }}-macos-x86_64.dmg` | |
+            | Linux (x64) | `Tofu-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz` | Portable archive; run `install.sh` inside for desktop integration |
+
+            ## Tofu Remote Endpoint (Agent)
+
+            For IT/ops headless machines — this is the relay agent, **not** the full Tofu app.
+
+            | OS | File |
+            | --- | --- |
+            | Windows (x64) | `TofuAgent-Setup-${{ needs.version.outputs.version }}-win64.exe` |
+            | macOS (Apple Silicon) | `TofuAgent-${{ needs.version.outputs.version }}-macos-arm64.dmg` |
+            | macOS (Intel) | `TofuAgent-${{ needs.version.outputs.version }}-macos-x86_64.dmg` |
+            | Linux (x64) | `TofuAgent-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz` |
+
+            ## First-run notes — binaries are unsigned
+
+            The installers are not code-signed yet. If the OS blocks first launch:
+
+            - **Windows**: SmartScreen shows "Windows protected your PC" — choose **More info → Run anyway**.
+            - **macOS**: Gatekeeper may block the app — **right-click → Open**, or run `xattr -cr /Applications/Tofu.app` if "damaged" appears.
+          files: |
+            release-assets/**/*.exe
+            release-assets/**/*.dmg
+            release-assets/**/*.tar.gz
+            release-assets/**/*.tar.gz.sha256
+            release-assets/**/*.deb
+            release-assets/SHA256SUMS
+            release-assets/SHA256SUMS.sig
+            release-assets/release_signing_public_key.pem

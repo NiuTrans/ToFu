@@ -1,0 +1,71 @@
+/* Mission workspace: ordinary controls retain UI-kit styling; these rules own
+   only information layout. No scene coordinates, animation or sprite rules. */
+.evo-workspace.evo-studio{--evo-rail-width:calc(var(--space-16)*3);}
+.evo-workspace.evo-studio .evo-main{grid-template-columns:var(--evo-rail-width) minmax(0,1fr) minmax(calc(var(--space-16)*5),30%);grid-template-rows:calc(var(--space-16)*2) minmax(0,1fr) auto;}
+.evo-workspace.evo-studio .evo-live-ledger{grid-column:2/4;grid-template-rows:var(--space-16) var(--space-16);}
+
+.evo-workspace.evo-studio .evo-ledger-head{padding-block:var(--space-2);align-content:center;}
+.evo-workspace.evo-studio .evo-studio-grid{grid-column:2;grid-row:2;}
+.evo-workspace.evo-studio .evo-bottom-chrome{grid-column:2/4;grid-row:3;padding:var(--space-3) var(--space-4);gap:var(--space-3);}
+.evo-workspace.evo-studio .evo-mission-panel{grid-column:3;grid-row:2;margin:0;justify-self:stretch;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;background:var(--bg-primary);color:var(--text-primary);border-inline-start:1px solid var(--border);font-family:var(--font-ui);}
+.evo-mission-header{padding:var(--space-5);background:var(--bg-secondary);border-bottom:1px solid var(--border);}
+.evo-mission-eyebrow{margin:0 0 var(--space-2);font-size:var(--font-size-sm);font-weight:600;color:var(--accent);}
+.evo-mission-header h2{margin:0;font-size:var(--font-size-2xl);line-height:1.5;overflow-wrap:anywhere;}
+.evo-mission-status{margin:var(--space-3) 0;font-size:var(--font-size-lg);font-weight:600;}
+.evo-mission-status[data-state=failed],.evo-mission-status[data-state=needs_attention]{color:var(--error-text);}
+.evo-mission-status[data-state=completed]{color:var(--success-text);}
+.evo-mission-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);}
+.evo-mission-notice{margin:var(--space-3) 0 0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:1.6;}
+.evo-mission-body{padding:0 var(--space-5) var(--space-5);}
+.evo-mission-section{padding:var(--space-4) 0;border-bottom:1px solid var(--border);overflow-wrap:anywhere;}
+.evo-mission-section:last-child{border-bottom:0;}
+.evo-mission-section h3{margin:0 0 var(--space-3);font-size:var(--font-size-lg);font-weight:600;}
+.evo-mission-section p{margin:var(--space-2) 0;font-size:var(--font-size-md);line-height:1.65;}
+.evo-mission-section small,.evo-mission-empty{font-size:var(--font-size-sm);color:var(--text-secondary);line-height:1.6;}
+.evo-mission-steps,.evo-mission-checks{padding-inline-start:var(--space-5);margin:0;display:grid;gap:var(--space-3);font-size:var(--font-size-md);line-height:1.6;}
+.evo-mission-steps li::marker{color:var(--accent);font-weight:600;}
+.evo-mission-checks li>span{display:block;color:var(--text-secondary);}
+.evo-mission-prose{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:var(--font-size-md);line-height:1.7;}
+.evo-mission-diagnosis{margin-top:var(--space-4);padding:var(--space-3);background:var(--bg-secondary);border-inline-start:var(--space-1) solid var(--error-text);border-radius:var(--radius);font-size:var(--font-size-md);line-height:1.6;}
+.evo-mission-diagnosis p{margin:var(--space-2) 0 0;}
+.evo-mission-diagnosis pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:var(--font-size-sm);}
+.evo-mission-telemetry{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-3);margin:0 0 var(--space-3);}
+.evo-mission-telemetry>div{display:grid;gap:var(--space-1);padding:var(--space-3);background:var(--bg-secondary);border-radius:var(--radius);}
+.evo-mission-telemetry dt{color:var(--text-secondary);font-size:var(--font-size-sm);}
+.evo-mission-telemetry dd{margin:0;font-size:var(--font-size-2xl);font-variant-numeric:tabular-nums;font-weight:600;}
+.evo-mission-records,.evo-mission-record{display:grid;gap:var(--space-2);}
+.evo-mission-record{justify-items:start;padding-block:var(--space-2);}
+.evo-workspace.evo-studio wa-drawer.evo-workbench-drawer{--size:min(calc(var(--space-16)*10),94vw);}
+.evo-workspace.evo-studio wa-drawer.evo-workbench-drawer::part(body){padding:var(--space-5);}
+.evo-workspace.evo-studio .evo-room-rail{padding-inline:var(--space-2);}
+.evo-workspace.evo-studio .evo-room-tab{min-height:var(--space-16);padding:var(--space-2);gap:var(--space-2);}
+.evo-workspace.evo-studio .evo-room-tab img{width:var(--space-12);height:var(--space-12);}
+.evo-workspace.evo-studio .evo-room-tab-copy{gap:var(--space-1);}
+.evo-workspace.evo-studio .evo-room-tab-copy strong{font-size:var(--font-size-md);}
+.evo-workspace.evo-studio .evo-ledger-error{display:none;}
+@media(max-width:1100px){
+ .evo-workspace.evo-studio{--evo-rail-width:calc(var(--space-16)*2 + var(--space-12));}
+ .evo-workspace.evo-studio .evo-main{grid-template-columns:var(--evo-rail-width) minmax(0,1fr) minmax(calc(var(--space-16)*5),38%);}
+ .evo-workspace.evo-studio .evo-room-tab img{width:var(--space-8);height:var(--space-8);}
+ .evo-workspace.evo-studio .evo-ledger-facts{display:none;}
+}
+@media(max-width:850px){
+ .evo-workspace.evo-studio .evo-main{overflow:auto;grid-template-columns:minmax(0,1fr);grid-template-rows:max-content max-content minmax(calc(var(--space-16)*5),45vh) max-content;align-content:start;}
+ .evo-workspace.evo-studio .evo-live-ledger{grid-column:1;grid-row:1;min-height:calc(var(--space-16)*2);}
+ .evo-workspace.evo-studio .evo-mission-panel{grid-column:1;grid-row:2;min-height:min-content;overflow:visible;border-inline-start:0;border-bottom:1px solid var(--border);}
+ .evo-workspace.evo-studio .evo-studio-grid{grid-column:1;grid-row:3;}
+ .evo-workspace.evo-studio .evo-bottom-chrome{grid-column:1;grid-row:4;flex-wrap:wrap;}
+ .evo-workspace.evo-studio .evo-room-rail{--evo-rail-width:calc(var(--space-16)*3);}
+ .evo-mission-body{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:var(--space-5);}
+ .evo-mission-diagnosis{grid-column:1/-1;}
+}
+@media(max-width:650px){
+ .evo-workspace.evo-studio .evo-live-ledger{grid-template-rows:calc(var(--space-16) + var(--space-4)) var(--space-10) var(--space-12);min-height:calc(var(--space-16)*2 + var(--space-10));}
+}
+@media(max-width:550px){
+ .evo-mission-body{display:block;}
+ .evo-mission-header{padding:var(--space-4);}
+ .evo-mission-body{padding-inline:var(--space-4);}
+ .evo-workspace.evo-studio .evo-bottom-chrome .evo-game-dock{flex-wrap:wrap;}
+ .evo-workspace.evo-studio .evo-bottom-chrome .evo-place-shortcuts{flex-wrap:wrap;}
+}

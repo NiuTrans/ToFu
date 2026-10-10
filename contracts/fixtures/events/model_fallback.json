@@ -1,0 +1,21 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "emittedAt": 1.5,
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "fallbackFrom": "s",
+  "fallbackKind": "s",
+  "fallbackModel": "s",
+  "fallbackReason": "s",
+  "flowProjection": "s",
+  "requestId": "s",
+  "seq": 1,
+  "taskId": "s",
+  "turnRole": "s",
+  "type": "model_fallback",
+  "vuMsgId": "s"
+}

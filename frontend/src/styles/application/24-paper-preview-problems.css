@@ -1,0 +1,17 @@
+/* ── Problems (structured build diagnostics) ── */
+.paper-preview-problems { display: flex; flex-direction: column; gap: 1px; padding: var(--space-2) 0; }
+.paper-preview-problem {
+  display: block; width: 100%; text-align: start;
+  padding: var(--space-2) var(--space-3);
+  border: 0; border-inline-start: 3px solid transparent; border-radius: 0;
+  background: none; color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--font-size-xs); line-height: 1.5;
+  overflow-wrap: anywhere; white-space: pre-wrap;
+}
+button.paper-preview-problem { cursor: pointer; }
+button.paper-preview-problem:hover { background: var(--bg-hover); }
+.paper-preview-problem-error { border-inline-start-color: var(--error, #d33); }
+.paper-preview-problem-warning { border-inline-start-color: var(--warning, #b80); }
+.paper-preview-problems > :not(.paper-preview-problem) { padding: var(--space-2) var(--space-3); color: var(--text-secondary); }
+

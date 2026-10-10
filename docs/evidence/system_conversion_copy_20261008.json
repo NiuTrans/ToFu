@@ -1,0 +1,473 @@
+{
+  "format": "tofu.checked-conversion-copy-evidence/v1",
+  "scope": "Actual body and checked-protocol comparison changing whole-body snapshot copying.\n\nBoth arms retain canonical build_body and raw histories. Reuse existing paired\nworker accounting; synthetic opaque fixtures are not live cryptographic proof.\n",
+  "whole_system_verdict": "incomplete",
+  "candidate_verdict": "do_not_promote_from_current_measurement",
+  "production_promoted": false,
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/context-conversion-copy-full.json",
+  "raw_artifact_sha256": "51b010da883893796c0a8c1187d7ddd71695e5cf5d5dd37989de57e61282a3b4",
+  "sources": {
+    "benchmarks/context_compiler/conversion_copy_measure.py": "1162d89cb4c56176f45e8df0b86bd5d31b26956f46735e5dd95a5b1c949da34f",
+    "benchmarks/context_compiler/conversion_copy.py": "959ef0631d454f3a5d9d533fe47bf6bc12c1f2cbbc03f639391db4e99154de47",
+    "lib/llm/conversion.py": "e7f1af3a953003e59fef32958f4de00994bf825583266558b29341987ff00f10",
+    "benchmarks/context_compiler/native_copy_measure.py": "a1f20c4bef8db56c913cbabd91cd2e3f0a7c4c991440b8e5dbfe54144acdd45c",
+    "benchmarks/context_compiler/native_copy.py": "b5c6cbfe10dcbb895c14fcdd7f9ab7876402d787cee9e1dc2335a8468f6c219c",
+    "benchmarks/context_compiler/provider_measure.py": "cfd99610f8b561bb0b9e3cf5b088ee1448edf7fd16a59aa90a9060c175f1bb6c",
+    "benchmarks/context_compiler/compiler.py": "04e1810549db5a834049b51a6147736b500206c1632de9403fa7eb8bc46eaf0b",
+    "lib/llm/body/_build.py": "16cb25deba99fb428d8dbabb632bb956b60239b54d5e23fec58dad3e977d4f79",
+    "lib/llm_sanitize/_fields.py": "7c37db9e62667dcbdef4e2c8c1d53b3aa56dbd3d7ea51fa65944912c291e16d4",
+    "lib/llm/responses_outbound/_to_responses.py": "cd92d86401580d40c437efd6bba1256144765ba64c68d9c00a73f0012aa550c2",
+    "lib/llm/anthropic_outbound/_to_anthropic.py": "c25e116b4fe6c3c27d3a69ff9d4411ca2a1d73ca6734d3e9cedda9fa4ab5db83"
+  },
+  "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+  "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+  "affinity": [
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    144,
+    148,
+    149,
+    150,
+    151,
+    152,
+    153,
+    154,
+    155,
+    156,
+    157,
+    158,
+    159,
+    160,
+    161,
+    162,
+    163,
+    164,
+    165,
+    166,
+    167,
+    168,
+    169,
+    170,
+    171,
+    172,
+    173,
+    174,
+    175,
+    176,
+    177,
+    178
+  ],
+  "latency_observations": 5400,
+  "independent_latency_memory_workers": 108,
+  "exact_all_trace_oracles": true,
+  "memory_scope": "separate worker high-water including imports, fixtures and preflight",
+  "fixture_sha256": {
+    "openai/heavy": "d2d41e81b4146a120f3924ba17d42d4b3d01e94d4eda13ce3d7b64ee0300e4af",
+    "openai/sparse": "8225efbc6d0ddefc5de05339779c012df670b6e889e35464f379b84a919a48c0",
+    "openai/none": "3a48de6814f654d251c8b478e093465041d6d8d3402f9244f7b532925531525b",
+    "compatible/heavy": "d2d41e81b4146a120f3924ba17d42d4b3d01e94d4eda13ce3d7b64ee0300e4af",
+    "compatible/sparse": "8225efbc6d0ddefc5de05339779c012df670b6e889e35464f379b84a919a48c0",
+    "compatible/none": "3a48de6814f654d251c8b478e093465041d6d8d3402f9244f7b532925531525b",
+    "anthropic/heavy": "16237ead83ad3941a9d635b8a24ef24033bbe8b8c3f04c76492e704027a3798d",
+    "anthropic/sparse": "d9f61ba05b6a2c4051a3a5eda2313f39cee93bfa574788cc8dc0e603b76bd0b3",
+    "anthropic/none": "3a48de6814f654d251c8b478e093465041d6d8d3402f9244f7b532925531525b"
+  },
+  "cases": [
+    {
+      "profile": "openai",
+      "density": "heavy",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9385565134544618,
+            "p95_ms": 0.9375504881607977,
+            "p99_ms": 0.9532439838456199,
+            "cpu_ms_per_operation": 0.94091296161539,
+            "peak_process_rss_bytes": 1.0100818526652027
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "170d8a3a23e411fda2d69ceb07af972537ff3cac37ea4b98c905a4943bad3b9d"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9344901498456698,
+            "p95_ms": 0.9363805765044744,
+            "p99_ms": 0.9468186861933723,
+            "cpu_ms_per_operation": 0.9356507542665706,
+            "peak_process_rss_bytes": 0.9932746513697953
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "170d8a3a23e411fda2d69ceb07af972537ff3cac37ea4b98c905a4943bad3b9d"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9355591098291502,
+            "p95_ms": 0.941601122340669,
+            "p99_ms": 0.9778885334886899,
+            "cpu_ms_per_operation": 0.9391682255264864,
+            "peak_process_rss_bytes": 0.9958448753462604
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "170d8a3a23e411fda2d69ceb07af972537ff3cac37ea4b98c905a4943bad3b9d"
+        }
+      ]
+    },
+    {
+      "profile": "openai",
+      "density": "sparse",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9534075247274622,
+            "p95_ms": 0.9917126330201906,
+            "p99_ms": 0.9783061049474938,
+            "cpu_ms_per_operation": 0.9683429449486295,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "903a252b0c53478f475b300b3bad3f358041d2e6f1e0a82fadbd1cfbac4eede9"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9505013741333347,
+            "p95_ms": 0.9562777807861168,
+            "p99_ms": 1.0007501918630424,
+            "cpu_ms_per_operation": 0.9659771941348122,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "903a252b0c53478f475b300b3bad3f358041d2e6f1e0a82fadbd1cfbac4eede9"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9496390422640536,
+            "p95_ms": 0.9475413208770642,
+            "p99_ms": 0.9865285750800388,
+            "cpu_ms_per_operation": 0.9511326320293962,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "903a252b0c53478f475b300b3bad3f358041d2e6f1e0a82fadbd1cfbac4eede9"
+        }
+      ]
+    },
+    {
+      "profile": "openai",
+      "density": "none",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9541752480606015,
+            "p95_ms": 0.9546186959474221,
+            "p99_ms": 0.9923899786930969,
+            "cpu_ms_per_operation": 0.9558503066051056,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "436fbf49b263c9511542919fcfd9ade35141421eebb2d1ce5425d0e0e1b0a715"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9469446778785556,
+            "p95_ms": 0.9637906827523555,
+            "p99_ms": 0.9796843445612329,
+            "cpu_ms_per_operation": 0.9604595062446896,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "436fbf49b263c9511542919fcfd9ade35141421eebb2d1ce5425d0e0e1b0a715"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.962266675037384,
+            "p95_ms": 1.5282155129839672,
+            "p99_ms": 0.9870404146269321,
+            "cpu_ms_per_operation": 1.180030066705138,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [
+            "p95_ms",
+            "cpu_ms_per_operation"
+          ],
+          "trace_sha256": "436fbf49b263c9511542919fcfd9ade35141421eebb2d1ce5425d0e0e1b0a715"
+        }
+      ]
+    },
+    {
+      "profile": "compatible",
+      "density": "heavy",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9114869689061833,
+            "p95_ms": 0.9108857593278031,
+            "p99_ms": 0.9694261618217391,
+            "cpu_ms_per_operation": 0.9160266789169327,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.4014717341762846,
+            "p95_ms": 1.4821356074000216,
+            "p99_ms": 0.9990177491197118,
+            "cpu_ms_per_operation": 1.222384221712583,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p95_ms",
+            "cpu_ms_per_operation"
+          ],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9070418760220743,
+            "p95_ms": 0.9141682831116543,
+            "p99_ms": 0.9728311814143216,
+            "cpu_ms_per_operation": 0.9128618206415663,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        }
+      ]
+    },
+    {
+      "profile": "compatible",
+      "density": "sparse",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9192046330638439,
+            "p95_ms": 0.9220463677011729,
+            "p99_ms": 0.9270870325555967,
+            "cpu_ms_per_operation": 0.9231210172147897,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9221537461377439,
+            "p95_ms": 0.9174084391327231,
+            "p99_ms": 0.9073153604923475,
+            "cpu_ms_per_operation": 0.922007579534406,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9152144245941921,
+            "p95_ms": 0.9280966269207384,
+            "p99_ms": 0.9237750132654342,
+            "cpu_ms_per_operation": 0.9188576426572679,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        }
+      ]
+    },
+    {
+      "profile": "compatible",
+      "density": "none",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9444576805692149,
+            "p95_ms": 0.9732624441015127,
+            "p99_ms": 0.998860480124363,
+            "cpu_ms_per_operation": 0.9510204603213595,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "27f0b9947ea611970dc57ae135d420a360476968e02ed1e159905bfa2b329993"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9401596369894788,
+            "p95_ms": 0.9359040076948025,
+            "p99_ms": 0.9525574210062171,
+            "cpu_ms_per_operation": 0.9427309611548969,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "27f0b9947ea611970dc57ae135d420a360476968e02ed1e159905bfa2b329993"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.8973260384434241,
+            "p95_ms": 0.8833289332493058,
+            "p99_ms": 0.9692828875440785,
+            "cpu_ms_per_operation": 0.9025583803074315,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "27f0b9947ea611970dc57ae135d420a360476968e02ed1e159905bfa2b329993"
+        }
+      ]
+    },
+    {
+      "profile": "anthropic",
+      "density": "heavy",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9382506514881648,
+            "p95_ms": 0.940306123422999,
+            "p99_ms": 0.9645307262458487,
+            "cpu_ms_per_operation": 0.9390793949184296,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "97bb5eeaaa353b85b4964f19adcaaa6d7eac90db08a7a7ec16ef03c2edec2095"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9237509301474669,
+            "p95_ms": 0.9170946234189568,
+            "p99_ms": 0.8898851643214784,
+            "cpu_ms_per_operation": 0.9223460239653097,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "97bb5eeaaa353b85b4964f19adcaaa6d7eac90db08a7a7ec16ef03c2edec2095"
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.024546303555299,
+            "p95_ms": 1.1437590850136115,
+            "p99_ms": 1.0439667092892326,
+            "cpu_ms_per_operation": 1.0417798814041932,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [
+            "p95_ms"
+          ],
+          "trace_sha256": "97bb5eeaaa353b85b4964f19adcaaa6d7eac90db08a7a7ec16ef03c2edec2095"
+        }
+      ]
+    },
+    {
+      "profile": "anthropic",
+      "density": "sparse",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9529364999788779,
+            "p95_ms": 0.9513794046693935,
+            "p99_ms": 0.9976623759621761,
+            "cpu_ms_per_operation": 0.9547507090473043,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "edc3462be9ffdafd6a4320e2021396d47828e7495197a657c2f392e67f4f1e36"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.948493829308881,
+            "p95_ms": 0.957488329626991,
+            "p99_ms": 0.9448445721048743,
+            "cpu_ms_per_operation": 0.948476726962444,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "edc3462be9ffdafd6a4320e2021396d47828e7495197a657c2f392e67f4f1e36"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9423022119448892,
+            "p95_ms": 0.9342002825186064,
+            "p99_ms": 0.9666951081397448,
+            "cpu_ms_per_operation": 0.9444431136995208,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "edc3462be9ffdafd6a4320e2021396d47828e7495197a657c2f392e67f4f1e36"
+        }
+      ]
+    },
+    {
+      "profile": "anthropic",
+      "density": "none",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9354623899134237,
+            "p95_ms": 0.9347722807680099,
+            "p99_ms": 0.9615829441451338,
+            "cpu_ms_per_operation": 0.9353964644694621,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "73f6519cad8e66b94af1043e083768abdbe00a7dd0f478618f007e8a3501b2a6"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9418124349352488,
+            "p95_ms": 0.9469102331316247,
+            "p99_ms": 1.0112242040353991,
+            "cpu_ms_per_operation": 0.9426182418199264,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "73f6519cad8e66b94af1043e083768abdbe00a7dd0f478618f007e8a3501b2a6"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9349767841209707,
+            "p95_ms": 0.9400908245820588,
+            "p99_ms": 0.9191218844473134,
+            "cpu_ms_per_operation": 0.9341416394281223,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "73f6519cad8e66b94af1043e083768abdbe00a7dd0f478618f007e8a3501b2a6"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Includes recursive dataclasses.asdict receipt projection inside timed operation; not just production checked conversion.",
+    "Synthetic opaque native carriers; token counts supplied, no live model/provider/compaction authority.",
+    "GC and competing-host-work provenance unavailable; observed adverse pairs remain failures, not discarded outliers."
+  ],
+  "reason": "Most P50 ratios improve5-9%, but compatible/heavy pair1 hasP50+40%/CPU+22% and openai/none pair2 CPU+18%. Original10% primary threshold not consistently met. Further accounting/integration is required.",
+  "terminal_exit_code": 0
+}

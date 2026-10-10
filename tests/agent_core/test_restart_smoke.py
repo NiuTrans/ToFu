@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""Server-restart smoke test for the native Quart + Hypercorn stack.
+
+What this guarantees on every fresh `python server.py` boot:
+  1. Critical async-stack deps import (`quart`, `hypercorn`, `httpx`).
+  2. The process-global Flask module is untouched, while Quart's async
+     ``Request`` accessors remain sync-safe for legacy thread-pool routes.
+  3. ``server.app`` constructs and registers the full blueprint set,
+     including the ``push`` and ``api_v1`` headless surface.
+  4. The unified push channel route ``/api/push`` is registered as a
+     WebSocket and exposes the global ``PushHub`` singleton.
+  5. The unified ``TaskRuntime`` lifecycle (create / append_event /
+     finish / poll / abort) is wired correctly and pushes events
+     through ``lib.agent_core.push.push_event``.
+  6. Retired per-chat WebSocket/SSE routes stay removed; task replay streams
+     use ``/api/v1/tasks/<id>/stream`` and native conversation state uses v3.
+  7. JSON error handlers go through the unified ``api_response``
+     helpers so their shape is ``{ok: False, error: ...}``.
+  8. Server startup never invokes the retired classic JS bundler; release
+     artifacts are validated separately before packaging.
+  9. Sync legacy routes still work under the Quart thread-pool
+     dispatcher (the migration's main compatibility promise).
+
+Run:
+    pytest tests/agent_core/test_restart_smoke.py -v
+    python tests/agent_core/test_restart_smoke.py        # standalone
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+import pytest
+from tests.support.envelope import v1_get_json
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+pytestmark = pytest.mark.unit
+pytest_plugins = ('tests._chat_sidecar',)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Fixtures — load server.py exactly the way `python server.py` does
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture(scope='module')
+def deps_available():
+    try:
+        import hypercorn  # noqa: F401
+        import httpx      # noqa: F401
+        import quart      # noqa: F401
+    except ImportError as e:
+        pytest.skip(f'async deps unavailable: {e}')
+    return True
+
+
+@pytest.fixture(scope='module')
+def server_module(deps_available, _chat_sidecar_runtime):
+    """Import server.py and return the module (NOT the if-name-main block)."""
+    spec = importlib.util.spec_from_file_location(
+        'server',
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'server.py'),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__name__ = 'server'  # keeps the __main__ block dormant
+    # Save + restore the prior registration: an unrestored re-exec POISONS
+    # sys.modules['server'] for every later suite in the worker — their
+    # monkeypatches land on THIS module while the session flask_app keeps
+    # serving the original one (d820520 unit leg: test_static_route_offload's
+    # 503/206 patches never bit → got 200s).
+    prev = sys.modules.get('server')
+    sys.modules['server'] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except SystemExit as e:
+        sys.modules.pop('server', None)
+        if prev is not None:
+            sys.modules['server'] = prev
+        pytest.skip(f'server.py exited at import: {e}')
+    yield mod
+    sys.modules.pop('server', None)
+    if prev is not None:
+        sys.modules['server'] = prev
+
+
+@pytest.fixture(scope='module')
+def app(server_module):
+    return server_module.app
+
+
+@pytest.fixture
+def client(app):
+    return app.test_client()
+
+
+def _auth_headers():
+    """Mint a real admin credential for smoke requests in every auth mode."""
+    from lib.api_keys import create_key
+    _row, token = create_key(owner_user_id=1, name='restart-smoke', scopes=[], admin=True)
+    return {'Authorization': f'Bearer {token}'}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  1. Async stack imports
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_application_no_longer_installs_flask_module_alias(server_module):
+    """The production entry must not mutate Python's global Flask imports."""
+    source = Path(server_module.__file__).read_text(encoding='utf-8')
+    assert "sys.modules['flask']" not in source
+    assert 'sys.modules["flask"]' not in source
+
+
+def test_quart_request_remains_native_async(server_module):
+    """Importing the app must not monkey-patch Quart's Request class."""
+    from quart.wrappers import Request as _QReq
+    assert asyncio.iscoroutinefunction(_QReq.get_json)
+    source = Path(server_module.__file__).read_text(encoding='utf-8')
+    assert '_QuartRequest.get_json =' not in source
+    assert 'quart.make_response =' not in source
+    assert 'Quart.default_config =' not in source
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  2. Blueprint registration
+# ═══════════════════════════════════════════════════════════════════════
+
+
+# Domains that must always be registered. Under the release major (4) the
+# native API domains serve through the v4 projection (``<name>_v4``); the
+# legacy blueprint names appear only on the retired TOFU_API_MAJOR=1 lane.
+_ALWAYS_ON = {
+    'common', 'upload', 'translate', 'browser', 'desktop',
+    'oauth', 'paper', 'push', 'artifacts', 'metrics',
+}
+_NATIVE_DOMAINS = {
+    'api_v1_chat', 'api_v1_config', 'api_v1_conversations', 'api_v1_project',
+    'api_v1_memory', 'api_v1_scheduler', 'api_v1_mcp', 'api_v1_optimizer',
+}
+
+
+def required_blueprints(app) -> set[str]:
+    if int(app.config.get('ACTIVE_API_MAJOR', 4)) >= 4:
+        return _ALWAYS_ON | {f'{name}_v4' for name in _NATIVE_DOMAINS}
+    return _ALWAYS_ON | _NATIVE_DOMAINS
+
+
+def test_all_required_blueprints_registered(app):
+    missing = required_blueprints(app) - set(app.blueprints.keys())
+    assert not missing, f'Missing blueprints: {missing}'
+
+
+def test_api_v1_blueprints_registered(app):
+    """Headless API (api_v1) blueprints must be present after migration."""
+    v1_bps = [name for name in app.blueprints if name.startswith('api_v1_')]
+    assert len(v1_bps) >= 3, f'Expected ≥3 api_v1_* blueprints, got {v1_bps}'
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  3. Unified server-push channel — /api/push WebSocket
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_push_websocket_route_registered(app):
+    """The unified /api/push WS endpoint must exist."""
+    rules = [r for r in app.url_map.iter_rules() if r.rule == '/api/push']
+    assert rules, '/api/push WebSocket route is missing'
+
+
+def test_per_task_chat_ws_removed(app):
+    """Per-task /api/chat/ws/<task_id> was removed — chat uses SSE only."""
+    rules = [r.rule for r in app.url_map.iter_rules()]
+    assert '/api/chat/ws/<task_id>' not in rules, (
+        'per-task chat WS should be removed (chat uses SSE exclusively)')
+
+
+def test_push_hub_singleton_present():
+    """The PushHub singleton must be importable and have its public API."""
+    from lib.agent_core.push import hub, push_event, PushClient
+    assert hub is not None
+    # Public callables
+    assert callable(push_event)
+    assert callable(PushClient)
+    # The methods used by routes/push.py and TaskRuntime must exist
+    for attr in ('register', 'unregister', 'subscribe', 'unsubscribe',
+                 'push_event', 'add_listener', 'remove_listener'):
+        assert hasattr(hub, attr), f'PushHub missing {attr}'
+
+
+def test_push_hub_add_listener():
+    """add_listener hooks every push_event so webhooks/observers work
+    without monkey-patching."""
+    from lib.agent_core.push import hub
+    captured = []
+    def listener(ch, tid, payload):
+        captured.append((ch, tid, payload))
+    hub.add_listener(listener)
+    try:
+        hub.push_event('test-ch', 'tid-1', {'x': 42}, user_id=1)
+        assert len(captured) == 1
+        assert captured[0] == (
+            'test-ch', 'tid-1', {'x': 42, '_ownerUserId': '1'},
+        )
+    finally:
+        hub.remove_listener(listener)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  4. Unified TaskRuntime — covers chat / paper / translate task surface
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_task_runtime_lifecycle_pushes_events(monkeypatch, server_module):
+    """create → append_event → finish must walk through the runtime AND
+    fire push_event so frontend WS subscribers receive frames.
+    """
+    # TaskRuntime.append_event resolves push_event from its canonical home
+    # (lib.agent_core.push) after the 2026-06 leaf relocation, so patch there.
+    import lib.agent_core.push as push_mod
+    from lib.agent_core.task_runtime import TaskRuntime
+
+    captured: list[tuple] = []
+
+    def fake_push(channel, task_id, payload, *, user_id):
+        captured.append((channel, task_id, dict(payload), user_id))
+
+    monkeypatch.setattr(push_mod, 'push_event', fake_push)
+
+    rt = TaskRuntime('smoke-test', ttl=60, push_channel='smoke')
+    task = rt.create(user_id=1)
+    rt.append_event(task['id'], {'type': 'progress', 'pct': 10})
+    rt.finish(task['id'], result={'ok': True})
+
+    # Status transitions
+    assert rt.get(task['id'])['status'] == 'done'
+
+    # Poll-as-replay returns events in seq order
+    poll = rt.poll(task['id'], cursor=0)
+    assert poll['ok'] is True
+    assert poll['done'] is True
+    seqs = [e['seq'] for e in poll['events']]
+    assert seqs == sorted(seqs)
+    types = [e['type'] for e in poll['events']]
+    assert 'progress' in types and 'done' in types
+
+    # And every event was fanned out to the push channel
+    channels = {channel for channel, _, _, _ in captured}
+    assert channels == {'smoke'}
+    assert {user_id for _, _, _, user_id in captured} == {1}
+
+
+def test_task_runtime_abort(server_module):
+    from lib.agent_core.task_runtime import TaskRuntime
+
+    rt = TaskRuntime('smoke-abort', ttl=60, push_channel=None)
+    task = rt.create(user_id=1)
+    assert rt.abort(task['id']) is True
+    assert task['abort_event'].is_set() is True
+    # Aborting again on the same task is a no-op (still running until
+    # the worker finishes and calls finish()), and finish() should
+    # transition to 'aborted' since abort_event is set.
+    rt.finish(task['id'])
+    assert rt.get(task['id'])['status'] == 'aborted'
+
+
+def test_chat_runtime_registry_is_not_exported():
+    """The manager exports the runtime, never its backing map or lock."""
+    from lib.tasks_pkg import manager
+    from lib.tasks_pkg.manager.runtime import chat_task_runtime
+
+    assert manager.chat_task_runtime is chat_task_runtime
+    assert not hasattr(manager, 'tasks')
+    assert not hasattr(manager, 'tasks_lock')
+    assert not hasattr(manager, '_chat_runtime')
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  5. Sync routes still dispatch under Quart's thread pool
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _run_async(coro):
+    """Run an async test body without requiring pytest-asyncio."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_sync_route_runs_under_quart(client):
+    """The canonical task-list route is served through Quart."""
+    async def go():
+        resp = await client.get('/api/v4/tasks', headers=_auth_headers())
+        assert resp.status_code == 200
+        data = await v1_get_json(resp)
+        assert data.get('ok') is True
+        assert isinstance(data.get('tasks'), list)
+    _run_async(go())
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  6. Error handlers go through api_response helpers
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_404_api_uses_unified_envelope(client):
+    async def go():
+        resp = await client.get('/api/this-route-does-not-exist',
+                                headers=_auth_headers())
+        assert resp.status_code == 404
+        data = await v1_get_json(resp)
+        assert data['ok'] is False
+        assert 'error' in data
+    _run_async(go())
+
+
+def test_404_html_for_browser(client):
+    async def go():
+        resp = await client.get('/no-such-page', headers=_auth_headers())
+        assert resp.status_code == 404
+        body = (await resp.get_data()).decode()
+        assert '404' in body
+    _run_async(go())
+
+
+def test_405_uses_unified_envelope(client):
+    async def go():
+        resp = await client.post('/api/v4/tasks',
+                                 headers=_auth_headers())  # GET-only route
+        assert resp.status_code == 405
+        data = await v1_get_json(resp)
+        assert data['ok'] is False
+    _run_async(go())
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  7. Prebuilt frontend boundary
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_server_never_builds_or_imports_the_retired_classic_graph(server_module):
+    root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    with open(os.path.join(root, 'server.py'), encoding='utf-8') as handle:
+        source = handle.read()
+    assert 'js_bundler' not in source
+    assert not os.path.exists(os.path.join(root, 'lib', 'js_bundler.py'))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Standalone runner
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _standalone():
+    """Run a quick verification without pytest. Returns exit code."""
+    print('=== Tofu restart smoke test ===\n')
+    # ⚠️ DATA-LOSS GUARD: standalone mode does NOT load conftest, so the
+    # force-sqlite shim + pytest_configure gate never ran. Refuse to boot the
+    # real app against a non-test DB here too (the keystone principle).
+    try:
+        from tests.conftest import _assert_isolated_storage
+    except Exception:
+        from conftest import _assert_isolated_storage  # when run from tests/ cwd
+    _assert_isolated_storage('test_restart_smoke._standalone')
+    try:
+        import hypercorn  # noqa: F401
+        import httpx      # noqa: F401
+        import quart      # noqa: F401
+        from importlib.metadata import version as _v
+        try:
+            print(f'✓ quart {_v("quart")}, hypercorn {_v("hypercorn")}, '
+                  f'httpx {_v("httpx")}')
+        except Exception:
+            print('✓ async deps imported (versions unavailable)')
+    except ImportError as e:
+        print(f'✗ async deps missing: {e}')
+        return 1
+
+    spec = importlib.util.spec_from_file_location(
+        'server',
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'server.py'),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__name__ = 'server'
+    sys.modules['server'] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        print(f'✗ server.py import failed: {e}')
+        import traceback
+        traceback.print_exc()
+        return 1
+    print('✓ server.py imported (Flask→Quart shim installed)')
+
+    app = mod.app
+    bp_names = set(app.blueprints.keys())
+    missing = required_blueprints(app) - bp_names
+    assert not missing, f'Missing blueprints: {missing}'
+    print(f'✓ {len(bp_names)} blueprints registered '
+          f'(required surface present)')
+
+    rules = {r.rule for r in app.url_map.iter_rules()}
+    assert '/api/push' in rules, '/api/push missing'
+    assert '/api/chat/ws/<task_id>' not in rules, 'per-task chat WS should be gone'
+    print('✓ /api/push WS route present; per-task /api/chat/ws removed (SSE only)')
+
+    from lib.agent_core.push import hub
+    from lib.agent_core.task_runtime import TaskRuntime
+    rt = TaskRuntime('standalone-smoke', ttl=10, push_channel=None)
+    t = rt.create(user_id=1)
+    rt.append_event(t['id'], {'type': 'progress'})
+    rt.finish(t['id'], result={'ok': True})
+    assert rt.get(t['id'])['status'] == 'done'
+    print('✓ TaskRuntime lifecycle (create→append_event→finish) works')
+    print(f'✓ PushHub singleton ready (clients={hub.client_count})')
+
+    _h = _auth_headers()
+
+    async def _check_routes():
+        async with app.test_client() as c:
+            r = await c.get('/api/v4/tasks', headers=_h)
+            assert r.status_code == 200, r.status_code
+            r = await c.get('/api/nope', headers=_h)
+            assert r.status_code == 404
+            data = await v1_get_json(r)
+            assert data['ok'] is False
+            r = await c.post('/api/v4/tasks', headers=_h)
+            assert r.status_code == 405
+        return True
+
+    asyncio.run(_check_routes())
+    print('✓ Sync routes serve under Quart (200/404/405 envelopes verified)')
+
+    from lib.vite_assets import validate_vite_artifact
+    manifest = validate_vite_artifact()
+    print(f'✓ Prebuilt Vite graph valid: {len(manifest)} manifest rows')
+
+    print('\n=== restart smoke test PASSED ===')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(_standalone())

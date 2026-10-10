@@ -1,0 +1,18 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "content": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "requestId": "s",
+  "seq": 1,
+  "taskId": "s",
+  "thinking": "s",
+  "turnRole": "s",
+  "type": "delta",
+  "vuMsgId": "s"
+}

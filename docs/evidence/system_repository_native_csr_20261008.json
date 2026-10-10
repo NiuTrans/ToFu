@@ -1,0 +1,761 @@
+{
+  "format": "tofu.repository-sparse-ranking/v1",
+  "scope": "Controlled public scan/rank/render comparison for direct CSR ranking.\n\nEntry: CLI --output outside checkout; worker subprocess mode. Independent\nlatency/memory processes, exact output traces, complete source witnesses. No\nHTTP, durable task publication, live model or whole-system performance claim.\n",
+  "production_promoted": false,
+  "whole_system_verdict": "incomplete",
+  "sources": {
+    "benchmarks/repository_index/sparse_rank.py": "d89ae59e6d77031f9610f2492eb8c271210130f2d414a58c28c90b5a3b70ba2e",
+    "benchmarks/repository_index/sparse_rank_measure.py": "b9c1ec1ac339d5c8399d14ca6ca8425b8a0001d868b196590195c72da403f39d",
+    "lib/repo_map/rank.py": "27bdaf45d1634206c1c6ccd1fa10ffa7621e5ffbaa0d014573ad0f37386efe37",
+    "lib/repo_map/api.py": "d63b031e48ef9c0acd15f8de8abc2be76a32247ce98e04a699913056ac5aa0f1",
+    "lib/repo_map/outline.py": "644d9a94c2c536e8203c4bca5c4819f25edbd33eaf782f06da11359899bc64ea",
+    "lib/repo_map/render.py": "19bead94f351edba38fd9518a0a507f84b7b849ab990980a256b0e1059989fbc",
+    "benchmarks/repository_index/native_csr.py": "dd1a91675de6dc1373b0ae386589565c0e1f9701397379675c57d4a31be53ffb",
+    "benchmarks/repository_index/native_csr_kernel.rs": "22ed8aa94423748d0212d20f0c2bb9a8dd3f88354bda624d1e47fc1ff6f1ee97",
+    "benchmarks/repository_index/native_repo_rank.py": "35daa84b47920d48ed1189e3db0ebb6174410724c4169506d4f7f7525a55d936"
+  },
+  "runtime": {
+    "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+    "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+    "affinity": [
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      144,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      178
+    ],
+    "dependencies": {
+      "networkx": "3.6.1",
+      "numpy": "2.5.3",
+      "scipy": "1.18.1",
+      "tree-sitter-language-pack": "1.20.0"
+    }
+  },
+  "samples": 100,
+  "required_pairs": 3,
+  "cases": [
+    {
+      "case": "small",
+      "pairs": [
+        {
+          "reference": {
+            "pid": 1518641,
+            "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+            "cold_diagnostic_ms": 953.633629,
+            "warmup_operations": 20,
+            "p50_ms": 13.776435500000002,
+            "p95_ms": 16.175848,
+            "p99_ms": 28.514004,
+            "cpu_ms_per_operation": 8.54316907,
+            "peak_rss_bytes": 77299712,
+            "baseline_rss_bytes": 75988992,
+            "post_cleanup_rss_bytes": 77299712,
+            "retained_bytes": 1310720,
+            "memory": {
+              "pid": 1521217,
+              "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+              "cold_diagnostic_ms": 630.797003,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 76460032,
+              "baseline_rss_bytes": 76185600,
+              "post_cleanup_rss_bytes": 76460032,
+              "retained_bytes": 274432
+            }
+          },
+          "candidate": {
+            "pid": 1523205,
+            "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+            "cold_diagnostic_ms": 50.007268,
+            "warmup_operations": 20,
+            "p50_ms": 11.1800775,
+            "p95_ms": 12.746761,
+            "p99_ms": 16.044364,
+            "cpu_ms_per_operation": 5.72608435,
+            "peak_rss_bytes": 38400000,
+            "baseline_rss_bytes": 34713600,
+            "post_cleanup_rss_bytes": 34713600,
+            "retained_bytes": 0,
+            "memory": {
+              "pid": 1525315,
+              "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+              "cold_diagnostic_ms": 48.263064,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 38707200,
+              "baseline_rss_bytes": 35028992,
+              "post_cleanup_rss_bytes": 35028992,
+              "retained_bytes": 0
+            }
+          }
+        },
+        {
+          "candidate": {
+            "pid": 1527304,
+            "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+            "cold_diagnostic_ms": 65.322398,
+            "warmup_operations": 20,
+            "p50_ms": 11.628057,
+            "p95_ms": 13.301543,
+            "p99_ms": 16.379835,
+            "cpu_ms_per_operation": 5.74061377,
+            "peak_rss_bytes": 38535168,
+            "baseline_rss_bytes": 34844672,
+            "post_cleanup_rss_bytes": 34844672,
+            "retained_bytes": 0,
+            "memory": {
+              "pid": 1529192,
+              "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+              "cold_diagnostic_ms": 54.116612,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 38440960,
+              "baseline_rss_bytes": 34783232,
+              "post_cleanup_rss_bytes": 34783232,
+              "retained_bytes": 0
+            }
+          },
+          "reference": {
+            "pid": 1531682,
+            "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+            "cold_diagnostic_ms": 896.6836,
+            "warmup_operations": 20,
+            "p50_ms": 14.053014000000001,
+            "p95_ms": 15.426706,
+            "p99_ms": 28.231752,
+            "cpu_ms_per_operation": 8.44915052,
+            "peak_rss_bytes": 77561856,
+            "baseline_rss_bytes": 76267520,
+            "post_cleanup_rss_bytes": 77561856,
+            "retained_bytes": 1294336,
+            "memory": {
+              "pid": 1533681,
+              "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+              "cold_diagnostic_ms": 634.774635,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 76677120,
+              "baseline_rss_bytes": 76414976,
+              "post_cleanup_rss_bytes": 76677120,
+              "retained_bytes": 262144
+            }
+          }
+        },
+        {
+          "reference": {
+            "pid": 1535651,
+            "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+            "cold_diagnostic_ms": 663.854018,
+            "warmup_operations": 20,
+            "p50_ms": 14.1213195,
+            "p95_ms": 16.060896,
+            "p99_ms": 28.617143,
+            "cpu_ms_per_operation": 8.65799437,
+            "peak_rss_bytes": 77340672,
+            "baseline_rss_bytes": 76021760,
+            "post_cleanup_rss_bytes": 77340672,
+            "retained_bytes": 1318912,
+            "memory": {
+              "pid": 1539059,
+              "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+              "cold_diagnostic_ms": 615.655847,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 76349440,
+              "baseline_rss_bytes": 76070912,
+              "post_cleanup_rss_bytes": 76349440,
+              "retained_bytes": 278528
+            }
+          },
+          "candidate": {
+            "pid": 1541661,
+            "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+            "cold_diagnostic_ms": 49.608949,
+            "warmup_operations": 20,
+            "p50_ms": 11.526888,
+            "p95_ms": 12.725483,
+            "p99_ms": 17.55941,
+            "cpu_ms_per_operation": 5.99113551,
+            "peak_rss_bytes": 38391808,
+            "baseline_rss_bytes": 34709504,
+            "post_cleanup_rss_bytes": 34709504,
+            "retained_bytes": 0,
+            "memory": {
+              "pid": 1543639,
+              "trace_sha256": "578bb3324e31fd5819ca9a642973f3b290117916199b9b584613ec69fae1222d",
+              "cold_diagnostic_ms": 48.563273,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 38453248,
+              "baseline_rss_bytes": 34783232,
+              "post_cleanup_rss_bytes": 34783232,
+              "retained_bytes": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "case": "dense",
+      "pairs": [
+        {
+          "reference": {
+            "pid": 1545485,
+            "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+            "cold_diagnostic_ms": 889.273485,
+            "warmup_operations": 20,
+            "p50_ms": 40.0169145,
+            "p95_ms": 55.378527,
+            "p99_ms": 56.790366,
+            "cpu_ms_per_operation": 36.17794215,
+            "peak_rss_bytes": 82657280,
+            "baseline_rss_bytes": 80281600,
+            "post_cleanup_rss_bytes": 82657280,
+            "retained_bytes": 2375680,
+            "memory": {
+              "pid": 1548852,
+              "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+              "cold_diagnostic_ms": 697.199948,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 82739200,
+              "baseline_rss_bytes": 80900096,
+              "post_cleanup_rss_bytes": 82739200,
+              "retained_bytes": 1839104
+            }
+          },
+          "candidate": {
+            "pid": 1552018,
+            "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+            "cold_diagnostic_ms": 86.994515,
+            "warmup_operations": 20,
+            "p50_ms": 35.651301000000004,
+            "p95_ms": 39.783908,
+            "p99_ms": 40.896636,
+            "cpu_ms_per_operation": 29.90746856,
+            "peak_rss_bytes": 40579072,
+            "baseline_rss_bytes": 37720064,
+            "post_cleanup_rss_bytes": 37990400,
+            "retained_bytes": 270336,
+            "memory": {
+              "pid": 1553937,
+              "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+              "cold_diagnostic_ms": 86.039905,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 40247296,
+              "baseline_rss_bytes": 37363712,
+              "post_cleanup_rss_bytes": 37634048,
+              "retained_bytes": 270336
+            }
+          }
+        },
+        {
+          "candidate": {
+            "pid": 1557867,
+            "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+            "cold_diagnostic_ms": 76.282727,
+            "warmup_operations": 20,
+            "p50_ms": 36.766326,
+            "p95_ms": 43.018541,
+            "p99_ms": 48.471143,
+            "cpu_ms_per_operation": 31.45111453,
+            "peak_rss_bytes": 40579072,
+            "baseline_rss_bytes": 37724160,
+            "post_cleanup_rss_bytes": 37994496,
+            "retained_bytes": 270336,
+            "memory": {
+              "pid": 1559945,
+              "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+              "cold_diagnostic_ms": 89.660372,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 40226816,
+              "baseline_rss_bytes": 37376000,
+              "post_cleanup_rss_bytes": 37376000,
+              "retained_bytes": 0
+            }
+          },
+          "reference": {
+            "pid": 1562651,
+            "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+            "cold_diagnostic_ms": 870.892858,
+            "warmup_operations": 20,
+            "p50_ms": 39.823094499999996,
+            "p95_ms": 54.014263,
+            "p99_ms": 58.586244,
+            "cpu_ms_per_operation": 35.78701164,
+            "peak_rss_bytes": 82763776,
+            "baseline_rss_bytes": 80916480,
+            "post_cleanup_rss_bytes": 82763776,
+            "retained_bytes": 1847296,
+            "memory": {
+              "pid": 1565239,
+              "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+              "cold_diagnostic_ms": 747.972846,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 82591744,
+              "baseline_rss_bytes": 81027072,
+              "post_cleanup_rss_bytes": 82591744,
+              "retained_bytes": 1564672
+            }
+          }
+        },
+        {
+          "reference": {
+            "pid": 1570660,
+            "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+            "cold_diagnostic_ms": 725.723817,
+            "warmup_operations": 20,
+            "p50_ms": 41.3393375,
+            "p95_ms": 57.718632,
+            "p99_ms": 59.093488,
+            "cpu_ms_per_operation": 37.44988407,
+            "peak_rss_bytes": 82587648,
+            "baseline_rss_bytes": 81010688,
+            "post_cleanup_rss_bytes": 82587648,
+            "retained_bytes": 1576960,
+            "memory": {
+              "pid": 1573480,
+              "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+              "cold_diagnostic_ms": 679.041628,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 82735104,
+              "baseline_rss_bytes": 81154048,
+              "post_cleanup_rss_bytes": 82735104,
+              "retained_bytes": 1581056
+            }
+          },
+          "candidate": {
+            "pid": 1575633,
+            "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+            "cold_diagnostic_ms": 79.206169,
+            "warmup_operations": 20,
+            "p50_ms": 35.798895,
+            "p95_ms": 41.083865,
+            "p99_ms": 42.027409,
+            "cpu_ms_per_operation": 30.125184009999998,
+            "peak_rss_bytes": 40222720,
+            "baseline_rss_bytes": 37339136,
+            "post_cleanup_rss_bytes": 37609472,
+            "retained_bytes": 270336,
+            "memory": {
+              "pid": 1578764,
+              "trace_sha256": "db4e38cf8bad22fa107410a577e980dd2663d050e47cdcbfbcd0edfcbbe0bf13",
+              "cold_diagnostic_ms": 89.447737,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 40247296,
+              "baseline_rss_bytes": 37392384,
+              "post_cleanup_rss_bytes": 37662720,
+              "retained_bytes": 270336
+            }
+          }
+        }
+      ]
+    },
+    {
+      "case": "multilingual",
+      "pairs": [
+        {
+          "reference": {
+            "pid": 1580981,
+            "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+            "cold_diagnostic_ms": 872.831924,
+            "warmup_operations": 20,
+            "p50_ms": 30.867231500000003,
+            "p95_ms": 43.744095,
+            "p99_ms": 46.746577,
+            "cpu_ms_per_operation": 25.98923693,
+            "peak_rss_bytes": 80416768,
+            "baseline_rss_bytes": 79503360,
+            "post_cleanup_rss_bytes": 80416768,
+            "retained_bytes": 913408,
+            "memory": {
+              "pid": 1583999,
+              "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+              "cold_diagnostic_ms": 661.715202,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 81960960,
+              "baseline_rss_bytes": 79433728,
+              "post_cleanup_rss_bytes": 81960960,
+              "retained_bytes": 2527232
+            }
+          },
+          "candidate": {
+            "pid": 1588324,
+            "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+            "cold_diagnostic_ms": 76.870458,
+            "warmup_operations": 20,
+            "p50_ms": 28.772085500000003,
+            "p95_ms": 33.750114,
+            "p99_ms": 39.81163,
+            "cpu_ms_per_operation": 23.33191531,
+            "peak_rss_bytes": 41377792,
+            "baseline_rss_bytes": 37675008,
+            "post_cleanup_rss_bytes": 37978112,
+            "retained_bytes": 303104,
+            "memory": {
+              "pid": 1590901,
+              "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+              "cold_diagnostic_ms": 68.521874,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 41271296,
+              "baseline_rss_bytes": 37519360,
+              "post_cleanup_rss_bytes": 37888000,
+              "retained_bytes": 368640
+            }
+          }
+        },
+        {
+          "candidate": {
+            "pid": 1592980,
+            "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+            "cold_diagnostic_ms": 79.096004,
+            "warmup_operations": 20,
+            "p50_ms": 28.7632985,
+            "p95_ms": 31.386919,
+            "p99_ms": 34.388936,
+            "cpu_ms_per_operation": 22.70655361,
+            "peak_rss_bytes": 41353216,
+            "baseline_rss_bytes": 37654528,
+            "post_cleanup_rss_bytes": 37986304,
+            "retained_bytes": 331776,
+            "memory": {
+              "pid": 1595467,
+              "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+              "cold_diagnostic_ms": 73.583196,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 41291776,
+              "baseline_rss_bytes": 37531648,
+              "post_cleanup_rss_bytes": 37892096,
+              "retained_bytes": 360448
+            }
+          },
+          "reference": {
+            "pid": 1597312,
+            "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+            "cold_diagnostic_ms": 869.260049,
+            "warmup_operations": 20,
+            "p50_ms": 30.6502625,
+            "p95_ms": 42.302754,
+            "p99_ms": 45.624624,
+            "cpu_ms_per_operation": 25.69378177,
+            "peak_rss_bytes": 80359424,
+            "baseline_rss_bytes": 79433728,
+            "post_cleanup_rss_bytes": 80359424,
+            "retained_bytes": 925696,
+            "memory": {
+              "pid": 1599720,
+              "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+              "cold_diagnostic_ms": 723.345015,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 82235392,
+              "baseline_rss_bytes": 79687680,
+              "post_cleanup_rss_bytes": 82235392,
+              "retained_bytes": 2547712
+            }
+          }
+        },
+        {
+          "reference": {
+            "pid": 1602670,
+            "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+            "cold_diagnostic_ms": 887.397517,
+            "warmup_operations": 20,
+            "p50_ms": 31.184398,
+            "p95_ms": 44.702773,
+            "p99_ms": 47.204986,
+            "cpu_ms_per_operation": 26.25182735,
+            "peak_rss_bytes": 80965632,
+            "baseline_rss_bytes": 79302656,
+            "post_cleanup_rss_bytes": 80965632,
+            "retained_bytes": 1662976,
+            "memory": {
+              "pid": 1604641,
+              "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+              "cold_diagnostic_ms": 649.918474,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 81924096,
+              "baseline_rss_bytes": 79396864,
+              "post_cleanup_rss_bytes": 81924096,
+              "retained_bytes": 2527232
+            }
+          },
+          "candidate": {
+            "pid": 1606915,
+            "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+            "cold_diagnostic_ms": 66.63584,
+            "warmup_operations": 20,
+            "p50_ms": 27.878774999999997,
+            "p95_ms": 29.925747,
+            "p99_ms": 32.51851,
+            "cpu_ms_per_operation": 21.96483353,
+            "peak_rss_bytes": 41369600,
+            "baseline_rss_bytes": 37605376,
+            "post_cleanup_rss_bytes": 37998592,
+            "retained_bytes": 393216,
+            "memory": {
+              "pid": 1608795,
+              "trace_sha256": "9efabcc26314399dc6c8fd0ac6aaf3b2185e82f3ff4956d713e7a9dfdba58eeb",
+              "cold_diagnostic_ms": 65.211302,
+              "warmup_operations": 20,
+              "p50_ms": null,
+              "p95_ms": null,
+              "p99_ms": null,
+              "cpu_ms_per_operation": null,
+              "peak_rss_bytes": 41181184,
+              "baseline_rss_bytes": 37416960,
+              "post_cleanup_rss_bytes": 37801984,
+              "retained_bytes": 385024
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "backend": "native",
+  "library": "/tmp/tofu-system-perf-snapshot/libtofu_repo_csr.so",
+  "library_sha256": "eb0da2a0a699922d034ccbb215e47d61c3d9262765e4cd0ef4f168ec7b454670",
+  "reference_revision": "a90b3facc",
+  "reference_source_sha256": "27bdaf45d1634206c1c6ccd1fa10ffa7621e5ffbaa0d014573ad0f37386efe37",
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/native-csr-pipeline-full.json",
+  "raw_artifact_sha256": "fbf05b228bb172e217d9984297a2131174c6b67d0ff15dcd27ce6f6ba974d89c",
+  "observations": 1800,
+  "independent_processes": 36,
+  "summary": [
+    {
+      "case": "small",
+      "candidate_over_reference": {
+        "p50_ms": [
+          0.8115363005183741,
+          0.8274422127523675,
+          0.8162755612179159
+        ],
+        "p95_ms": [
+          0.788011917520491,
+          0.8622412976561555,
+          0.7923270905932023
+        ],
+        "p99_ms": [
+          0.5626836553715852,
+          0.5801919413290397,
+          0.6135975907867532
+        ],
+        "cpu_ms_per_operation": [
+          0.6702529591867249,
+          0.6794308796383001,
+          0.691977293350908
+        ],
+        "peak_rss_bytes": [
+          0.5062409599828575,
+          0.5013354700854701,
+          0.5036480686695279
+        ],
+        "retained_bytes": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "case": "dense",
+      "candidate_over_reference": {
+        "p50_ms": [
+          0.8909057943485374,
+          0.9232413116464367,
+          0.8659765048242489
+        ],
+        "p95_ms": [
+          0.7183995341732364,
+          0.7964292875753947,
+          0.7117955429019871
+        ],
+        "p99_ms": [
+          0.7201333409261705,
+          0.8273468256473311,
+          0.7112020363394356
+        ],
+        "cpu_ms_per_operation": [
+          0.8266768860428398,
+          0.8788415989125601,
+          0.8044132781209967
+        ],
+        "peak_rss_bytes": [
+          0.4864356435643564,
+          0.4870561396548304,
+          0.4864597257289965
+        ],
+        "retained_bytes": [
+          0.14699331848552338,
+          0.0,
+          0.17098445595854922
+        ]
+      }
+    },
+    {
+      "case": "multilingual",
+      "candidate_over_reference": {
+        "p50_ms": [
+          0.9321239418572411,
+          0.9384356333000411,
+          0.8939975368451877
+        ],
+        "p95_ms": [
+          0.7715353123661606,
+          0.741959235089044,
+          0.6694382695230114
+        ],
+        "p99_ms": [
+          0.851648025480026,
+          0.753736315722843,
+          0.6888787129393492
+        ],
+        "cpu_ms_per_operation": [
+          0.8977529957052109,
+          0.8837373109672831,
+          0.8366973177583389
+        ],
+        "peak_rss_bytes": [
+          0.5035482258870565,
+          0.502116850127011,
+          0.5026748662566871
+        ],
+        "retained_bytes": [
+          0.1458670988654781,
+          0.1414790996784566,
+          0.15235008103727715
+        ]
+      }
+    }
+  ],
+  "guard_failures": [],
+  "scoped_verdict": "all_observed_guards_pass",
+  "performance_admission": "scoped comparison only; no production packaging or task publication",
+  "profiler_enabled": false,
+  "tracemalloc_enabled": false,
+  "gc": "memory workers only, before warmed baseline and after final output disposal",
+  "build": {
+    "command": "rustc --edition=2021 --crate-type cdylib -C opt-level=3 benchmarks/repository_index/native_csr_kernel.rs -o /tmp/tofu-system-perf-snapshot/libtofu_repo_csr.so",
+    "correctness": "300 weighted/dangling/personalized graphs; 300 concurrent calls; invalid buffer rejection and nonconverged output withholding; 300 repository/focus oracle cases",
+    "neighbor_tests_passed": 43,
+    "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)"
+  }
+}

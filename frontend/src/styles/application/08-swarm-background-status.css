@@ -1,0 +1,24 @@
+/* ── Swarm init (pre-agent-list) ── */
+.sw-spinner{width:16px;height:16px;border:2px solid rgba(251,191,36,0.2);border-top-color:#fbbf24;border-radius:50%;animation:spin .8s linear infinite;margin-left:auto}
+/* ── Async swarm: "running in background" pill on the panel header ─────────── */
+/*    Shown when the panel is no longer the active tool round but agents are   */
+/*    still working — gives the user a quiet "still cooking" indicator.        */
+.sw-status-pill.sw-pill-async{color:#fbbf24;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.18)}
+.sw-status-pill.sw-pill-async .sw-async-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#fbbf24;margin-right:var(--space-1);animation:swAsyncDot 1.4s ease-in-out infinite}
+@keyframes swAsyncDot{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.15)}}
+/* ── Stale pill: a swarm panel that never received its completion signal ── */
+/*    (server restart / dropped SSE). Muted slate — reads as 'unconfirmed',   */
+/*    distinct from running (blue), async (amber), done (green), error (red).  */
+.sw-status-pill.sw-pill-stale{color:#94a3b8;background:rgba(148,163,184,0.10);border:1px solid rgba(148,163,184,0.20)}
+[data-theme="light"] .sw-status-pill.sw-pill-stale{color:#64748b;background:rgba(100,116,139,0.10)}
+[data-theme="tofu"] .sw-status-pill.sw-pill-stale{color:#8a7d63;background:rgba(138,125,99,0.10)}
+/* ── Inbox-inject chip: "📨 N swarm-update arrived" between messages ──────── */
+/*    Compact, monospace, amber-green to mark "the model just received async   */
+/*    notifications before this turn". Same vocabulary as .sw-status-pill.     */
+.sw-inbox-chip{display:inline-flex;align-items:center;gap:6px;margin:var(--space-2) 0 6px;padding:var(--space-1) 10px;border-radius:10px;font-family:'JetBrains Mono',monospace;font-size:var(--font-size-xs);font-weight:500;color:#fbbf24;background:linear-gradient(135deg,rgba(251,191,36,0.06),rgba(74,222,128,0.04));border:1px solid rgba(251,191,36,0.18);letter-spacing:0.02em;animation:swInboxChipFlash 1.6s ease-out 1}
+.sw-inbox-chip-icon{display:inline-flex;align-items:center;color:#fbbf24;flex-shrink:0;animation:swInboxChipBounce .9s ease-out 1}
+.sw-inbox-chip-text{color:var(--text-secondary)}
+.sw-inbox-chip-count{color:#4ade80;font-weight:700}
+.sw-inbox-chip-ids{color:var(--text-tertiary);font-size:10px;margin-left:2px;opacity:0.85}
+@keyframes swInboxChipFlash{0%{box-shadow:0 0 0 0 rgba(251,191,36,0.3)}40%{box-shadow:0 0 14px 0 rgba(251,191,36,0.18)}100%{box-shadow:0 0 0 0 rgba(251,191,36,0)}}
+@keyframes swInboxChipBounce{0%{transform:translateY(-3px) scale(.7);opacity:0}60%{transform:translateY(1px) scale(1.05);opacity:1}100%{transform:translateY(0) scale(1);opacity:1}}

@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/project_file_receipts_v1.schema.json",
+  "title": "ProjectFileReceiptsV1",
+  "description": "Committed project write facts. Receiving tasks bind paths and ownership before canonical turn projection.",
+  "x-resource-limits": {
+    "files_per_command": 30,
+    "files_per_turn": 512,
+    "overleaf_file_bytes": 16777216,
+    "overleaf_write_seconds": 120,
+    "overleaf_pack_window_bytes": 33554432,
+    "overleaf_pack_delta_bytes": 8388608,
+    "overleaf_git_request_bytes": 54525952,
+    "overleaf_git_response_bytes": 2097152,
+    "overleaf_git_workspace_bytes": 268435456,
+    "overleaf_git_workspace_files": 8192,
+    "overleaf_git_workspace_jobs": 32,
+    "overleaf_git_memory_bytes": 536870912,
+    "overleaf_git_processes": 16
+  },
+  "x-mcp-git-read-tools": [
+    "list_files",
+    "read_file",
+    "verify_citations",
+    "get_sections",
+    "get_section_content",
+    "list_history",
+    "get_diff",
+    "status_summary",
+    "sync_project"
+  ],
+  "x-mcp-write-tools": {
+    "create_file": "created",
+    "edit_file": "patched",
+    "rewrite_file": "written",
+    "update_section": "modified",
+    "upload_file": "written",
+    "delete_file": "deleted"
+  },
+  "x-mcp-write-protocol": {
+    "control_field": "tofu_write_receipt",
+    "metadata_key": "tofu/project-file-receipts"
+  },
+  "$defs": {
+    "OverleafWriteControlV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "owner_user_id"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "OverleafWriteReceiptV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_receipts_version",
+        "source",
+        "project_id",
+        "request_id",
+        "owner_user_id",
+        "source_revision",
+        "file_changes",
+        "output"
+      ],
+      "properties": {
+        "file_receipts_version": {
+          "type": "integer",
+          "const": 1
+        },
+        "source": {
+          "type": "string",
+          "const": "overleaf"
+        },
+        "project_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{24}$"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "owner_user_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "source_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "file_changes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/FileCommitV1"
+          }
+        },
+        "output": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "FileCommitV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "changeId",
+        "path",
+        "action"
+      ],
+      "properties": {
+        "changeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "action": {
+          "enum": [
+            "created",
+            "written",
+            "patched",
+            "inserted",
+            "modified",
+            "deleted"
+          ]
+        },
+        "sourceHash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "file_receipts_version",
+    "output",
+    "file_changes"
+  ],
+  "properties": {
+    "file_receipts_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "output": {},
+    "file_changes": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "$ref": "#/$defs/FileCommitV1"
+      }
+    }
+  }
+}

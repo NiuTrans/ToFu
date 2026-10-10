@@ -1,0 +1,392 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.automation/v1",
+  "title": "Versioned automation definition",
+  "x-limits": {
+    "definitionBytes": 131072,
+    "recordBytes": 524288,
+    "jsonDepth": 24,
+    "jsonNodes": 16384,
+    "recordDepth": 40,
+    "recordNodes": 65536,
+    "pageRows": 64,
+    "triggerChain": 16,
+    "safeIntegerMax": 9007199254740991
+  },
+  "x-runtime": {
+    "contract": "tofu.automation-run/v1",
+    "runStates": [
+      "queued",
+      "running",
+      "waiting_agent",
+      "waiting_permission",
+      "reconciliation_required",
+      "cancelling",
+      "succeeded",
+      "failed",
+      "cancelled"
+    ],
+    "terminalRunStates": [
+      "succeeded",
+      "failed",
+      "cancelled"
+    ],
+    "stepStates": [
+      "pending",
+      "dispatching",
+      "waiting_agent",
+      "waiting_permission",
+      "reconciliation_required",
+      "succeeded",
+      "failed",
+      "skipped",
+      "cancelled"
+    ],
+    "terminalStepStates": [
+      "succeeded",
+      "failed",
+      "skipped",
+      "cancelled"
+    ],
+    "activeEffectStepStates": [
+      "dispatching",
+      "waiting_agent",
+      "reconciliation_required"
+    ],
+    "cancellablePendingStepStates": [
+      "pending",
+      "waiting_permission"
+    ]
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "enabled",
+    "trigger",
+    "steps",
+    "policy"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "$ref": "#/$defs/id"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 4000
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "projectId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "trigger": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "schedule",
+            "timezone",
+            "catchUp"
+          ],
+          "properties": {
+            "kind": {
+              "const": "schedule"
+            },
+            "schedule": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "catchUp": {
+              "enum": [
+                "skip",
+                "latest"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "event",
+            "scope"
+          ],
+          "properties": {
+            "kind": {
+              "const": "event"
+            },
+            "event": {
+              "enum": [
+                "task.started",
+                "skills.updated"
+              ]
+            },
+            "scope": {
+              "enum": [
+                "human",
+                "automation",
+                "all"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "manual"
+            }
+          }
+        }
+      ]
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "action",
+          "arguments",
+          "after"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id"
+          },
+          "action": {
+            "$ref": "#/$defs/id"
+          },
+          "arguments": {
+            "type": "object"
+          },
+          "after": {
+            "type": "array",
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/id"
+            }
+          },
+          "when": {
+            "$ref": "#/$defs/condition"
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxRuntimeSeconds",
+        "maxModelTokens",
+        "overlap",
+        "permissionMode"
+      ],
+      "properties": {
+        "maxRuntimeSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "maxModelTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000000
+        },
+        "overlap": {
+          "enum": [
+            "serialize",
+            "coalesce"
+          ]
+        },
+        "permissionMode": {
+          "enum": [
+            "auto",
+            "manual"
+          ]
+        },
+        "maxStepAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16,
+          "default": 3
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}(?![\\s\\S])"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "pointer"
+      ],
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^(event|steps/[A-Za-z0-9][A-Za-z0-9_.-]{0,159})(?![\\s\\S])"
+        },
+        "pointer": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^(?:|/(?:[^~]|~[01])*)(?![\\s\\S])"
+        }
+      }
+    },
+    "condition": {
+      "oneOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "operator"
+          ],
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/source"
+            },
+            "operator": {
+              "enum": [
+                "exists",
+                "eq",
+                "ne",
+                "gt",
+                "gte",
+                "lt",
+                "lte",
+                "contains"
+              ]
+            },
+            "value": {}
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "operator": {
+                    "const": "exists"
+                  }
+                }
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "value"
+                  ]
+                }
+              },
+              "else": {
+                "required": [
+                  "value"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/condition"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/condition"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "not"
+          ],
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/condition"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "x-schedule": {
+    "planContract": "tofu.automation-calendar/v1",
+    "calendarCycleYears": 400,
+    "precision": "local calendar minute; identity is the exact UTC instant",
+    "dayOfMonthAndWeek": "and",
+    "nonexistentLocalTime": "skip",
+    "repeatedLocalTime": "both UTC instants",
+    "catchUpLatest": "at most the latest slot after the consumed cursor and at or before now",
+    "catchUpSkip": "only a slot in the current UTC minute",
+    "lookahead": "one Gregorian calendar cycle; no minute-by-minute replay",
+    "occurrenceIdentity": "UTC slot timestamp; timezone fold never aliases a slot"
+  }
+}

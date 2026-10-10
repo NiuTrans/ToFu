@@ -1,0 +1,11 @@
+{
+  "brand": "modelscope",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "modelscope",
+  "category": "relay",
+  "name": "ModelScope",
+  "base_url": "https://api-inference.modelscope.cn/v1",
+  "catalog_source": {"url": "https://modelscope.cn/docs/model-service/API-Inference/intro", "checked_at": "2026-09-08"},
+  "catalog_mode": "discovery",
+  "offering_recipes": []
+}

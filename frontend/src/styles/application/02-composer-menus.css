@@ -1,0 +1,70 @@
+
+
+/* ── Toolbar Sub-menus ── */
+.toolbar-submenu{position:relative;flex-shrink:0}
+.submenu-trigger{display:flex;align-items:center;gap:var(--space-1);padding:var(--space-1) 10px;min-height:32px;box-sizing:border-box;background:none;border:1px solid transparent;border-radius:10px;cursor:pointer;color:var(--text-tertiary);font-size:var(--font-size-sm);font-weight:600;font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;transition:all .15s ease;white-space:nowrap;line-height:1}
+.submenu-trigger:hover{color:var(--text-primary);background:var(--bg-hover);border-color:var(--border-light)}
+.submenu-trigger.open{color:var(--text-primary);background:var(--bg-hover);border-color:var(--border)}
+.submenu-trigger.has-active{color:var(--accent);border-color:var(--accent-subtle);background:var(--accent-subtle)}
+/* In-flight turn lock (_setAgentModeLocked): a disabled <button> swallows
+ * clicks outright, so without a distinct style the trigger reads as a dead
+ * button. Dim it and drop the hover repaint to make the lock visible. */
+.submenu-trigger:disabled,.submenu-trigger:disabled:hover{opacity:.45;cursor:not-allowed;color:var(--text-tertiary);background:none;border-color:transparent}
+.submenu-label{letter-spacing:.01em}
+.submenu-count{font-size:9px;font-weight:800;font-family:'JetBrains Mono',monospace;min-width:16px;height:16px;line-height:1;text-align:center;border-radius:8px;background:var(--accent);color:#fff;display:none}
+.submenu-count.visible{display:inline-flex;align-items:center;justify-content:center}
+.submenu-arrow{display:inline-flex;align-items:center;opacity:.45;transition:transform .2s ease}
+.submenu-trigger.open .submenu-arrow{transform:rotate(180deg)}
+
+.submenu-dropdown{position:absolute;bottom:calc(100% + 8px);left:50%;min-width:236px;background:var(--bg-secondary);border:1px solid var(--border-light);border-radius:14px;box-shadow:var(--submenu-shadow,0 12px 40px rgba(0,0,0,0.36),0 2px 10px rgba(0,0,0,0.18));padding:5px;z-index:100;opacity:0;visibility:hidden;transform:translateX(-50%) translateY(6px) scale(.97);transform-origin:bottom center;transition:opacity .16s ease,transform .18s cubic-bezier(0.16,1,0.3,1),visibility .16s ease}
+.toolbar-submenu.open .submenu-dropdown{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0) scale(1)}
+/* Pointer caret — anchors the popover to its trigger so it reads as an
+ * attached menu, not a detached floating rectangle. */
+.submenu-dropdown::after{content:'';position:absolute;bottom:-5px;left:50%;width:10px;height:10px;background:var(--bg-secondary);border-right:1px solid var(--border-light);border-bottom:1px solid var(--border-light);border-bottom-right-radius:2px;transform:translateX(-50%) rotate(45deg);pointer-events:none}
+/* Light theme: the hardcoded dark drop-shadow reads as a smudge on the pale
+ * surface — give it a soft warm-neutral shadow + solid border instead. */
+[data-theme="light"] .submenu-dropdown{--submenu-shadow:0 10px 30px rgba(50,42,26,0.14),0 2px 8px rgba(50,42,26,0.08);border-color:var(--border)}
+[data-theme="light"] .submenu-dropdown::after{border-right-color:var(--border);border-bottom-color:var(--border)}
+/* Divider inside a submenu dropdown — separates on/off toggles from the
+ * one-shot launchers (creative mode / project) folded into the Tools menu. */
+.submenu-divider{height:1px;margin:5px var(--space-2);background:var(--border-light)}
+
+/* Agent Mode is the single next-turn execution selector. Debug-only saved
+ * workflows share this menu instead of adding another toolbar control. */
+#agentModeMenu{width:min(310px,calc(100vw - 24px));max-height:min(70vh,520px);overflow-y:auto}
+.agent-workflow-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;padding-right:7px}
+.agent-workflow-heading .submenu-section-label{min-width:0}
+.agent-workflow-manage{border:0;background:transparent;color:var(--accent);font:700 10.5px/1.2 inherit;cursor:pointer;padding:6px;border-radius:7px;white-space:nowrap}
+.agent-workflow-manage:hover{background:var(--accent-subtle)}
+.agent-workflow-manage:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.agent-workflow-list{max-height:190px;overflow-y:auto}
+.agent-workflow-empty{padding:9px 10px 11px;color:var(--text-tertiary);font-size:var(--font-size-xs);line-height:1.4}
+
+.submenu-item{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:9px;cursor:pointer;transition:background .12s ease;user-select:none;position:relative}
+.submenu-item:hover{background:var(--bg-hover)}
+.submenu-item:hover .submenu-item-icon{color:var(--text-primary)}
+.submenu-item.active{background:var(--accent-subtle)}
+.submenu-item.active .submenu-item-name{color:var(--accent)}
+.submenu-item-icon{width:26px;height:26px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:transparent;color:var(--text-tertiary);flex-shrink:0;transition:all .15s ease}
+.submenu-item.active .submenu-item-icon{background:var(--accent-subtle);color:var(--accent)}
+.submenu-item-text{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0}
+.submenu-item-name{font-size:var(--font-size-md);font-weight:600;color:var(--text-primary);line-height:1.2}
+.submenu-item-desc{font-size:var(--font-size-xs);color:var(--text-tertiary);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.submenu-item-check{font-size:var(--font-size-lg);font-weight:700;color:var(--accent);opacity:0;transition:opacity .15s ease;flex-shrink:0;width:18px;text-align:center}
+.submenu-item.active .submenu-item-check{opacity:1}
+.submenu-item.tool-unavailable::after{
+  content:attr(data-exposure-label);
+  flex:0 0 auto;
+  margin-left:6px;
+  padding:2px 6px;
+  border:1px solid color-mix(in srgb,var(--text-tertiary) 42%,transparent);
+  border-radius:999px;
+  background:color-mix(in srgb,var(--text-tertiary) 8%,transparent);
+  color:var(--text-tertiary);
+  font-size:9px;
+  font-weight:700;
+  line-height:1.25;
+  white-space:nowrap;
+}
+.submenu-item.tool-unavailable .submenu-item-icon,
+.submenu-item.tool-unavailable .submenu-item-check{opacity:.42}

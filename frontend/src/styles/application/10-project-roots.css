@@ -1,0 +1,86 @@
+/* ── Selected-folder row list ── */
+.mp-folder-list {
+  display: flex; flex-direction: column; gap: 6px;
+  flex: 1 1 auto; overflow-y: auto; min-height: 0;
+  scrollbar-width: thin;
+}
+.mp-folder-list .mp-empty-hint {
+  color: var(--text-tertiary); font-size: var(--font-size-sm); font-style: italic;
+  padding: 14px var(--space-1); text-align: center;
+  border: 1px dashed var(--border); border-radius: var(--radius-sm);
+}
+.mp-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: var(--space-2) var(--space-2) var(--space-2) 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  animation: fadeIn 0.2s ease;
+}
+.mp-row-primary {
+  background: rgba(245, 158, 11, 0.07);
+  border-color: rgba(245, 158, 11, 0.28);
+}
+
+/* ── Drag-to-reorder ── the list ORDER *is* the primary-root choice:
+   index 0 carries the star + `root` badge and is sent to the backend as the
+   primary project, so dragging a folder to the top IS "promote to root". */
+.mp-row[draggable="true"] { cursor: grab; }
+.mp-row-grip {
+  flex-shrink: 0; width: 14px; height: 18px;
+  color: var(--text-tertiary); opacity: 0.45;
+  transition: opacity 0.15s, color 0.15s;
+}
+.mp-row-grip > svg { display: block; }
+.mp-row:hover .mp-row-grip { opacity: 0.9; color: var(--text-secondary); }
+.mp-row-dragging { opacity: 0.45; cursor: grabbing; border-style: dashed; }
+/* Insertion caret: a 2px accent rule on the edge the row would land against. */
+.mp-row.mp-drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+.mp-row.mp-drop-after  { box-shadow: 0 2px 0 0 var(--accent); }
+
+.mp-row-icon { flex-shrink: 0; display: flex; align-items: center; }
+.mp-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.mp-row-name {
+  font-size: 12.5px; font-weight: 600; color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mp-row-path {
+  font-size: 10.5px; color: var(--text-tertiary);
+  font-family: 'JetBrains Mono', monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mp-row-badge {
+  flex-shrink: 0; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 10px;
+  background: rgba(245, 158, 11, 0.16); color: #f59e0b;
+}
+.mp-row-remove {
+  flex-shrink: 0; background: none; border: none;
+  color: var(--text-tertiary); cursor: pointer;
+  width: 24px; height: 24px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; opacity: 0.6;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.mp-row-remove:hover { opacity: 1; color: var(--error-text); background: rgba(239, 68, 68, 0.10); }
+
+/* ── Read-only root: lock toggle + badge ── */
+.mp-row-readonly {
+  background: rgba(100, 116, 139, 0.08);
+  border-color: rgba(100, 116, 139, 0.30);
+}
+.mp-row-badge-ro {
+  background: rgba(100, 116, 139, 0.18); color: var(--text-secondary);
+}
+.mp-row-lock {
+  flex-shrink: 0; background: none; border: none;
+  color: var(--text-tertiary); cursor: pointer;
+  width: 24px; height: 24px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; opacity: 0.6;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+.mp-row-lock:hover { opacity: 1; color: var(--text-primary); background: rgba(100, 116, 139, 0.12); }
+.mp-row-lock.active { opacity: 1; color: #64748b; }
+

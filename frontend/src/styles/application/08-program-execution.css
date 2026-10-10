@@ -1,0 +1,88 @@
+/* ═══════════════════════════════════════════
+   ★ Code Execution Block (inline in chat)
+   ═══════════════════════════════════════════ */
+.code-exec-block {
+  /* Flat content inside the .ptool-turn card — see .ptool-cmd-block. */
+  margin: 0;
+  border-radius: 0;
+  border: none;
+  background: none;
+  overflow: visible;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: var(--font-size-md);
+}
+.code-exec-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* Same horizontal inset as .ptool-line — see .ptool-cmd-header. */
+  padding: 2px var(--space-3) var(--space-1) var(--space-4);
+  border-bottom: none;
+  background: none;
+}
+.code-exec-icon {
+  font-size: var(--font-size-lg);
+  line-height: 1;
+}
+.code-exec-label {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: rgba(255,255,255,0.7);
+}
+.code-exec-status {
+  margin-left: auto;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  padding: 2px var(--space-2);
+  border-radius: 4px;
+}
+.code-exec-ok .code-exec-status {
+  color: #4ade80;
+  background: rgba(74,222,128,0.1);
+}
+.code-exec-err .code-exec-status {
+  color: #f87171;
+  background: rgba(248,113,113,0.1);
+}
+.code-exec-timeout .code-exec-status {
+  color: #fbbf24;
+  background: rgba(251,191,36,0.1);
+}
+.code-exec-running .code-exec-header {
+  color: #60a5fa;
+}
+.code-exec-running .code-exec-label {
+  color: #60a5fa;
+}
+.code-exec-cmd {
+  margin: 0;
+  padding: 10px 14px;
+  background: rgba(0,0,0,0.2);
+  border: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.code-exec-cmd code {
+  color: #e2e8f0;
+  font-family: inherit;
+  font-size: 12.5px;
+}
+.code-exec-output {
+  margin: 0;
+  padding: 10px 14px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+  background: rgba(0,0,0,0.15);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.code-exec-output code {
+  color: #a5b4c8;
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+}
+/* spinner reused from project tools */
+.code-exec-running .ptool-spinner {
+  margin-left: auto;
+}

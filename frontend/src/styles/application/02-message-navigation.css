@@ -1,0 +1,10 @@
+
+
+/* In-message UI-jump deep-link button. The assistant renders `setting:<key>`
+ * and `page:<key>` links (features/settings/setting-jump.ts, features/
+ * ui-nav.ts) as chips so an app action reads differently from an ordinary
+ * outbound link. */
+.md-ui-jump{display:inline-flex;align-items:center;gap:var(--space-1);padding:1px var(--space-2);margin:0 1px;border:1px solid var(--accent);border-radius:var(--radius-xs);background:var(--accent-subtle);color:var(--accent);font-family:inherit;font-size:var(--font-size-xs);font-weight:600;line-height:1.6;cursor:pointer;vertical-align:baseline;transition:background-color var(--transition),color var(--transition)}
+.md-ui-jump::after{content:'›';margin-left:1px}
+.md-ui-jump:hover{background:var(--accent);color:var(--text-on-accent)}
+.md-ui-jump:focus-visible{outline:2px solid var(--accent);outline-offset:1px}

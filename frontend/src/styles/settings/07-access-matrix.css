@@ -1,0 +1,527 @@
+/* ── Access matrix — the provider's always-on model-supply manager ──
+   One surface per provider: a manage row (search / status buckets / 添加模型),
+   the probe toolbar, and the (credential × wire id) grant grid whose root
+   rows carry the supply metadata (state chips, capability/pricing meta) and
+   row actions (row probe, add request name, remove offering). Column headers
+   identify each credential by its masked key hint (kind string as fallback
+   for hint-less rows). */
+
+.stg-matrix { margin-top: 10px; }
+
+/* ── Manage row: substring search + exclusive status buckets + 添加模型 ── */
+.stg-mx-manage {
+  display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+/* Scoped to beat the global `.modal input` stretch (width:100%) so the
+   field flexes inside the manage row instead of overflowing it. */
+.stg-matrix .stg-mx-search {
+  flex: 1 1 200px; width: auto; min-width: 140px; max-width: 320px;
+  min-height: 32px; margin: 0; padding: 6px 10px;
+  border: var(--s-border, 1px solid rgba(26,24,20,0.15)); border-radius: 8px;
+  background: #fff; color: var(--s-ink);
+  font: 12px/1.3 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  box-sizing: border-box;
+}
+.stg-matrix .stg-mx-search:focus {
+  outline: none; border-color: var(--s-gold);
+  box-shadow: 0 0 0 3px var(--s-gold-glow, rgba(201,153,63,0.18));
+}
+.stg-mx-filters { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.stg-mx-addmodel { flex: none; margin-left: auto; white-space: nowrap; }
+
+/* Empty states: no offerings at all, or offerings but zero credentials. */
+.stg-mx-empty, .stg-mx-nokeys {
+  padding: var(--space-4);
+  text-align: center;
+  font-size: var(--font-size-sm);
+  color: var(--s-ink-soft);
+  border: 1.5px dashed var(--s-ink);
+  border-radius: var(--s-radius);
+}
+.stg-mx-nokeys {
+  padding: 10px var(--space-3);
+  font-size: var(--font-size-xs);
+  border-style: dotted; border-color: var(--s-line-strong);
+}
+.stg-matrix-table td.stg-mx-nomatch {
+  padding: var(--space-4) 6px;
+  text-align: center;
+  color: var(--s-ink-soft); font-size: var(--font-size-xs);
+}
+.stg-matrix-toolbar {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; flex-wrap: wrap;
+  margin-bottom: var(--space-2);
+}
+.stg-matrix-tools {
+  display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+}
+/* Probe status / error line: its own full-width row under the toolbar so a
+   long message (contract errors, counts) never squeezes the tool buttons. */
+.stg-mx-status {
+  margin: -2px 0 var(--space-2);
+  font-size: var(--font-size-xs); font-weight: 700; color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.stg-mx-status.running { color: #b45309; }
+.stg-mx-status.error { color: #b91c1c; }
+/* Spin the bolt glyph only — rotating the whole button flings its
+   "probing…" status text around the toolbar. */
+.stg-mx-probe.running svg { animation: stg-mx-spin 0.7s linear infinite; }
+.stg-mx-apply {
+  background: rgba(74, 222, 128, 0.14) !important;
+  border-color: #16a34a !important;
+  color: #15803d !important;
+}
+.stg-matrix-legend {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 10px; color: var(--s-ink-soft); font-weight: 700;
+}
+.stg-mx-leg { display: inline-flex; align-items: center; gap: var(--space-1); }
+.stg-mx-leg .stg-mx-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1px solid var(--s-line-strong);
+}
+.stg-mx-leg.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; }
+.stg-mx-leg.off .stg-mx-dot { background: var(--s-white); }
+.stg-matrix-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--s-line-strong);
+  border-radius: var(--s-radius);
+  /* A shadow CANNOT overflow its own element's border-radius, so both fade
+     masks live on the single scroll wrapper: the ::before block is
+     position:sticky so it paints the right-edge fade and stays pinned to
+     the visible corner while content scrolls underneath. */
+  position: relative;
+}
+/* Right-edge fade: a sticky zero-size block with the shadow drawn by its
+   ::before. The block is sticky right:0 so it tracks the visible right
+   edge while content scrolls left. */
+.stg-matrix-scroll::before {
+  content: '';
+  display: block;
+  position: sticky;
+  float: right;
+  right: 0;
+  width: 0; height: 0;
+  margin-right: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+/* The fade itself, hung off the zero-size anchor. Right/bottom inset 2px
+   so it starts inside the border, not on top of it. */
+.stg-matrix-scroll::after {
+  content: '';
+  position: absolute;
+  top: 0; right: 2px; bottom: 2px;
+  width: 56px;
+  background: linear-gradient(to right, transparent, rgba(28,25,23,0.13));
+  pointer-events: none;
+  z-index: 3;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.stg-matrix-scroll.can-scroll-right::after { opacity: 1; }
+/* Left-edge fade sits over the sticky first column when content is
+   scrolled: implemented via a ::before on the table wrapper is not
+   possible (sticky columns), so a class toggled from scroll events
+   lights a shadow on the first column's right border instead. */
+.stg-matrix-table {
+  border-collapse: collapse;
+  font-size: var(--font-size-xs);
+  width: max-content;
+  min-width: 100%;
+}
+/* Wide-screen relief: when an OPEN matrix would overflow the settings
+   panel, widen the panel itself instead of forcing horizontal scrolling.
+   Applied/removed by _fitMatrixPanelWidth() on render, poll and resize.
+   The 6vw cap keeps the panel from blowing past the viewport when a
+   provider has many credentials; the matrix's own scroller takes over
+   beyond that. */
+@media (min-width: 1100px) {
+  .modal.settings-panel.stg-matrix-wide {
+    width: min(1160px, 94vw);
+    max-width: 94vw;
+    /* The widen must not be instant: on settings pages with several
+       matrices (long page, inner overlay scroll) each matrix re-fit lands
+       in the SAME frame, and a 180ms width transition re-fires
+       ResizeObserver on every step — with all observers mutating panel
+       width that's a loop. A short transition still reads as a smooth
+       grow. */
+    transition: width 0.18s ease, max-width 0.18s ease;
+  }
+}
+.stg-matrix-table th, .stg-matrix-table td {
+  border-bottom: 1px solid var(--s-line);
+  border-right: 1px solid var(--s-line);
+  padding: var(--space-1) 6px;
+}
+.stg-matrix-table thead th {
+  background: var(--s-cream);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--s-ink-soft);
+  border-bottom: 1px solid var(--s-line-strong);
+  position: sticky; top: 0; z-index: 2;
+}
+.stg-mx-corner {
+  text-align: left;
+  position: sticky; left: 0; z-index: 4 !important;
+  background: var(--s-cream);
+  /* Shrink-to-fit: the table's min-width:100% surplus must go to the
+     credential columns, not the label column. auto layout ignores td
+     max-width, so width:1% is the working constraint; min-width keeps a
+     floor for short ids; long ids widen the column past that floor —
+     request names are never abbreviated, the matrix scroller takes over. */
+  width: 1%;
+  min-width: 170px;
+}
+/* Credential column headers: a static label (序号 + kind) with a reserved
+   right lane for the column probe trigger. */
+.stg-mx-keyhead {
+  position: relative;
+  min-width: 92px;
+  padding-right: 28px !important;
+  text-align: center;
+}
+.stg-mx-credname {
+  display: block;
+  font-size: 10.5px; font-weight: 800;
+  color: var(--s-ink);
+  text-transform: none; letter-spacing: normal;
+}
+.stg-mx-credkind {
+  display: block;
+  font-size: 8.5px; font-weight: 700;
+  color: var(--s-ink-soft);
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: none; letter-spacing: normal;
+  margin: 1px auto 0;
+  /* A masked key hint (up to 64 chars) must not stretch the credential
+     column: a max-width-capped block contributes the cap as its intrinsic
+     width, and the overflow ellipsizes. The full hint stays in the title. */
+  max-width: 150px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Model label cells: sticky first column, brand icon + id. */
+.stg-mx-model {
+  position: sticky; left: 0;
+  background: var(--s-white);
+  text-align: left;
+  /* Same shrink-to-fit contract as .stg-mx-corner (see above). */
+  width: 1%;
+  min-width: 170px;
+  z-index: 1;
+  /* Reserve a right lane for the row probe button so it never overlaps id text. */
+  padding-right: 28px !important;
+}
+/* A model whose offering is disabled keeps its column clickable but is
+   clearly dimmed. */
+.stg-mx-model.model-off .stg-mx-mid,
+.stg-mx-model.model-off .stg-mx-brand { opacity: 0.45; }
+.stg-mx-gtoggle {
+  margin-right: 5px;
+  vertical-align: -4px;
+  transform: scale(0.8);
+  transform-origin: left center;
+}
+.stg-mx-brand {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px;
+  margin-right: 5px;
+  vertical-align: -3px;
+  flex-shrink: 0;
+}
+.stg-mx-mid {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: var(--font-size-xs); font-weight: 700;
+  /* Full request names, never abbreviated: the shrink-to-fit label column
+     widens past its 170px floor and the matrix scroller absorbs the rest. */
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
+}
+/* Catalog-retired root ids strike through (the red 已下线 chip explains). */
+.stg-mx-mid.retired { text-decoration: line-through; text-decoration-thickness: 1.5px; }
+
+/* ── Root-row state chips: 待确认 / 已下线 ── */
+.stg-mx-chip {
+  display: inline-flex; align-items: center;
+  margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  font-size: 8.5px; font-weight: 800; letter-spacing: 0.05em; line-height: 1.5;
+  white-space: nowrap; vertical-align: 1px;
+}
+.stg-mx-chip.pending { color: #b45309; background: rgba(245,159,0,0.16); }
+.stg-mx-chip.retired { color: #b42318; background: rgba(239,68,68,0.12); }
+
+/* ── Root-row meta line: capability chips + context / release / pricing,
+   on its own line under the id, aligned past the toggle + brand icon ── */
+.stg-mx-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 3px var(--space-2);
+  max-width: 340px; margin: 3px 0 1px 34px;
+  font-size: 10px; color: var(--s-ink-soft);
+}
+.stg-mx-meta .stg-cap { padding: 1px 7px; font-size: 9px; }
+.stg-mx-meta-bit {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px; font-weight: 600;
+  white-space: nowrap;
+}
+.stg-mx-meta-bit.stg-mx-price { display: inline-flex; align-items: baseline; }
+.stg-mx-aliascount {
+  margin-left: 5px;
+  font-size: 8.5px; font-weight: 800; line-height: 1;
+  padding: 1.5px 5px; border-radius: 4px;
+  border: 1.5px solid var(--s-ink); color: var(--s-ink-soft);
+  background: var(--s-white);
+  vertical-align: 2px;
+  white-space: nowrap;
+}
+/* The trailing border of the sticky label column doubles as the row-group
+   separator; rows of one offering read as a unit. */
+.stg-mx-row { border-bottom: none; }
+.stg-mx-row td { border-bottom: 1px dashed rgba(0,0,0,0.08); }
+.stg-mx-row.group-end td { border-bottom: 1px solid var(--s-line-strong); }
+.stg-mx-row:not(.grouped):not(.is-alias) td { border-bottom: 1.5px solid var(--s-ink); }
+/* ── Logical root row: the canonical model id of an offering whose every
+   deployment routes to a DIFFERENT upstream id. It is not sent on the
+   wire, so it renders as a header strip (global toggle + count, no
+   per-credential cells). ── */
+.stg-mx-model.logical { background: var(--s-cream); }
+.stg-mx-cell.logical {
+  background: repeating-linear-gradient(45deg, transparent, transparent 6px, rgba(0,0,0,0.05) 6px, rgba(0,0,0,0.05) 12px);
+}
+.stg-mx-preset {
+  margin-left: 6px;
+  font-size: 8px; font-weight: 800; line-height: 1;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 5px; border-radius: 3px;
+  border: 1.5px dashed var(--s-ink-soft); color: var(--s-ink-soft);
+  background: none;
+  vertical-align: 1px;
+}
+/* ── Wire-id rows: a concrete id mapping under an offering ── */
+.stg-mx-row.is-alias .stg-mx-model.alias {
+  padding-left: 14px !important;
+  background: linear-gradient(90deg,
+    hsla(var(--alias-hue, 265), 70%, 55%, 0.10), transparent 55%);
+}
+.stg-mx-tree {
+  display: inline-block; width: 14px;
+  color: var(--s-ink-soft); font-weight: 700;
+  font-family: 'JetBrains Mono', monospace; margin-right: 2px;
+}
+.stg-mx-aliasidx {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 16px; padding: 0 var(--space-1); margin-right: 6px;
+  font-size: 9px; font-weight: 900; line-height: 1;
+  font-family: 'JetBrains Mono', monospace;
+  border-radius: 4px;
+  color: hsl(var(--alias-hue, 265), 65%, 40%);
+  background: hsla(var(--alias-hue, 265), 70%, 55%, 0.16);
+  border: 1.5px solid hsl(var(--alias-hue, 265), 60%, 55%);
+}
+.stg-mx-mid.alias-id { font-weight: 600; font-size: 10.5px; }
+.stg-mx-row.is-alias .stg-mx-brand { opacity: 0.85; }
+/* ── Attempts selector (false-429 filter) ── */
+/* Specificity must beat the global form resets `.modal label` / `.modal
+   select` (0,1,1): they otherwise flip the label to display:block with
+   uppercase text and stretch the select to width:100%, which overflows the
+   label's dashed border and covers the probe button beside it. */
+.stg-matrix-toolbar .stg-mx-attempts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-xs); font-weight: 700; color: var(--s-ink-soft);
+  line-height: 1;
+  text-transform: none;
+  letter-spacing: normal;
+  height: 30px;
+  margin: 0;
+  padding: 0 var(--space-2);
+  border: 2px dashed var(--s-ink-soft);
+  border-radius: var(--s-radius);
+  background: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+.stg-matrix-toolbar .stg-mx-attempts select {
+  width: auto;
+  flex: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: var(--font-size-xs); font-weight: 800;
+  height: 22px;
+  margin: 0;
+  padding: 0 var(--space-1);
+  border: 1.5px solid var(--s-ink);
+  border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  cursor: pointer;
+  box-sizing: border-box;
+  vertical-align: middle;
+  line-height: 1;
+  box-shadow: none;
+}
+.stg-matrix-toolbar .stg-mx-attempts select:focus {
+  box-shadow: none;
+  transform: none;
+}
+/* Once widgets/dropdown.js enhances the attempts select, the visible control
+   is a .tofu-dd-trigger BUTTON, not the <select> (which collapses to the
+   visually-hidden .tofu-dd-native). The `select` rules above stop applying,
+   so without an override the base 34px trigger blows the 30px dashed label
+   apart. Match the dashed-box geometry: 22px-tall, mono, hairline border, and
+   let the wrapper shrink-to-fit. */
+.stg-matrix-toolbar .stg-mx-attempts .tofu-dd { flex: none; height: 22px; }
+.stg-matrix-toolbar .stg-mx-attempts .tofu-dd .tofu-dd-trigger {
+  height: 22px;
+  gap: var(--space-1);
+  padding: 0 var(--space-5) 0 6px;
+  border: 1.5px solid var(--s-ink);
+  border-radius: 4px;
+  background: var(--s-white);
+  box-shadow: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: var(--font-size-xs); font-weight: 800;
+}
+.stg-matrix-toolbar .stg-mx-attempts .tofu-dd .tofu-dd-trigger:hover,
+.stg-matrix-toolbar .stg-mx-attempts .tofu-dd .tofu-dd-trigger:focus-visible {
+  border-color: var(--s-gold-dim);
+  background: var(--s-white);
+  box-shadow: none;
+}
+.stg-matrix-toolbar .stg-mx-attempts .tofu-dd .tofu-dd-arrow {
+  right: 5px;
+  margin-top: -5px;
+  background-size: 10px;
+}
+/* ── Cells ── */
+.stg-mx-cell {
+  position: relative;
+  text-align: center;
+  vertical-align: middle;
+  height: 44px;
+  min-width: 92px;
+  transition: background 0.12s;
+}
+.stg-mx-cell.on { background: rgba(74, 222, 128, 0.10); }
+.stg-mx-cell.off { background: repeating-linear-gradient(45deg, var(--s-cream), var(--s-cream) 5px, rgba(0,0,0,0.04) 5px, rgba(0,0,0,0.04) 10px); }
+.stg-mx-toggle {
+  border: none; background: none; cursor: pointer;
+  padding: var(--space-1); display: inline-flex; align-items: center; justify-content: center;
+}
+.stg-mx-cell .stg-mx-dot {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 1.5px solid var(--s-ink);
+  transition: transform 0.1s, background 0.12s;
+}
+.stg-mx-cell.on .stg-mx-dot { background: #16a34a; border-color: #16a34a; box-shadow: 0 0 0 3px rgba(74,222,128,0.25); }
+.stg-mx-cell.off .stg-mx-dot { background: var(--s-white); }
+.stg-mx-toggle:hover .stg-mx-dot { transform: scale(1.18); }
+/* Probe-status health pip (top-right of a cell) */
+.stg-mx-probe-pip {
+  position: absolute; top: 2px; right: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  font-size: 9px; font-weight: 900; line-height: 1;
+  border-radius: 4px;
+  border: 1.5px solid currentColor;
+  font-family: 'JetBrains Mono', monospace;
+  pointer-events: auto;
+}
+.stg-mx-probe-pip.ok     { color: #16a34a; background: rgba(74,222,128,0.18); }
+.stg-mx-probe-pip.rate   { color: #c2410c; background: rgba(251,146,60,0.20); }
+.stg-mx-probe-pip.unauth { color: #b91c1c; background: rgba(248,113,113,0.20); }
+.stg-mx-probe-pip.nf     { color: #6b7280; background: rgba(156,163,175,0.20); }
+.stg-mx-probe-pip.skip   { color: #6b7280; background: rgba(156,163,175,0.20); }
+.stg-mx-probe-pip.down   { color: #a16207; background: rgba(250,204,21,0.20); }
+.stg-mx-probe-pip.err    { color: #b91c1c; background: rgba(248,113,113,0.20); }
+/* When a cell is flagged (non-ok pip) but still enabled, nudge attention. */
+.stg-mx-cell:has(.stg-mx-probe-pip.rate) .stg-mx-dot,
+.stg-mx-cell:has(.stg-mx-probe-pip.unauth) .stg-mx-dot,
+.stg-mx-cell:has(.stg-mx-probe-pip.down) .stg-mx-dot { box-shadow: 0 0 0 2px rgba(194,65,12,0.25); }
+
+/* ── Scoped probe triggers (row / column / cell) — one shared mini bolt
+   button in the matrix's hover-reveal language ── */
+.stg-mx-zap {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0;
+  border: 1.5px solid var(--s-ink); border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.1s, background 0.12s;
+  box-sizing: border-box;
+}
+.stg-mx-zap svg { width: 10px; height: 10px; display: block; }
+.stg-mx-zap:hover { background: var(--s-gold); transform: scale(1.12); }
+.stg-mx-zap:disabled { opacity: 0.3; cursor: default; transform: none; background: var(--s-cream); }
+.stg-mx-zap.probing { pointer-events: none; opacity: 1; background: var(--s-gold); }
+.stg-mx-zap.probing svg { animation: stg-mx-spin 0.7s linear infinite; }
+/* Column scope: vertically centered in the header's reserved right lane. */
+.stg-mx-zap.col { position: absolute; top: 50%; right: var(--space-1); margin-top: -9px; opacity: 0.4; }
+.stg-mx-keyhead:hover .stg-mx-zap.col { opacity: 1; }
+/* Row scope: the row-action lane at the right edge of the (sticky) model
+   label cell — row probe + add request name + remove offering on root rows,
+   row probe + remove request name on alias rows. Hover-revealed, opaque so
+   the buttons never sit on top of ellipsized id text. */
+.stg-mx-rowacts {
+  position: absolute; top: 50%; right: var(--space-1); margin-top: -9px;
+  display: inline-flex; align-items: center; gap: 3px;
+  padding-left: 6px;
+  border-radius: 4px;
+  background: var(--s-white);
+  opacity: 0; transition: opacity 0.12s;
+}
+.stg-mx-model:hover .stg-mx-rowacts,
+.stg-mx-rowacts:focus-within,
+.stg-mx-rowacts:has(.probing) { opacity: 1; }
+.stg-mx-model.logical .stg-mx-rowacts { background: var(--s-cream); }
+.stg-mx-rowacts .stg-mx-zap.row { position: static; margin: 0; opacity: 1; }
+/* Mini square action button — the zap's sibling in the lane. */
+.stg-mx-act {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; padding: 0;
+  border: 1.5px solid var(--s-ink); border-radius: 4px;
+  background: var(--s-white); color: var(--s-ink);
+  font-size: var(--font-size-sm); font-weight: 800; line-height: 1;
+  cursor: pointer; box-sizing: border-box;
+  transition: background 0.12s, transform 0.1s, color 0.12s, border-color 0.12s;
+}
+.stg-mx-act svg { width: 10px; height: 10px; display: block; }
+.stg-mx-act:hover { background: var(--s-gold); transform: scale(1.12); }
+.stg-mx-act.danger { color: #b42318; border-color: rgba(180,35,24,0.5); }
+.stg-mx-act.danger:hover { background: rgba(248,113,113,0.16); border-color: #b42318; }
+/* Reserved right lanes so id text never slides under the action lane:
+   root = probe+add+del (3×18 + gaps), alias = probe+del (2×18 + gap). */
+.stg-mx-model.root { padding-right: 74px !important; }
+.stg-mx-model.alias { padding-right: 52px !important; }
+/* Pending supplies tint the root label amber to match the 待确认 chip. */
+.stg-mx-model.root.pending,
+.stg-mx-model.root.pending .stg-mx-rowacts {
+  background: color-mix(in srgb, #f59f00 7%, var(--s-white));
+}
+/* Cell scope: bottom-left corner, hover-revealed (only when no pip yet —
+   once a verdict exists the pip itself is the re-probe trigger). */
+.stg-mx-zap.cell { position: absolute; bottom: 2px; left: 3px; opacity: 0; }
+.stg-mx-cell:hover .stg-mx-zap.cell { opacity: 0.9; }
+.stg-mx-zap.cell.probing { opacity: 1; }
+/* Unmatched identity has a probe result, but no official model grant toggle. */
+.stg-mx-cell.provider-model { background: var(--s-cream); }
+.stg-mx-cell.provider-model .stg-mx-zap.cell,
+.stg-mx-cell.provider-model .stg-mx-probe-pip { position: static; opacity: 1; }
+/* The verdict pip doubles as the re-probe trigger for its own cell. */
+.stg-mx-probe-pip.clickable { cursor: pointer; transition: transform 0.1s; }
+.stg-mx-probe-pip.clickable:hover { transform: scale(1.2); }
+
+@keyframes stg-mx-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 640px) {
+  .stg-mx-keyhead, .stg-mx-cell { min-width: 76px; }
+}

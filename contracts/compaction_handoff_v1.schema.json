@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tofu automatic local compaction handoff v1",
+  "description": "Request-local continuation state, never a durable human Turn or tool execution. Private producer identity survives local replay; only content is provider-visible. Automatic handoffs do not use the manual assistant _isCompactionSummary flag. Native and manual compaction keep separate contracts.",
+  "type": "object",
+  "required": ["role", "_isMeta", "_compactionHandoff", "content"],
+  "properties": {
+    "role": {"const": "user", "description": "Transport role, not human authorship or authorization."},
+    "_isMeta": {"const": true},
+    "_compactionHandoff": {"$ref": "#/$defs/metadata"},
+    "content": {"type": "string", "minLength": 1, "description": "One visibly attributed, fallible summary. Count the whole envelope under compaction/admission budgets, never duplicate its body in metadata."}
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "required": ["version", "phase"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {"const": "tofu.compaction-handoff/v1"},
+        "phase": {
+          "enum": ["pre_turn", "mid_turn"],
+          "description": "Source chronology before folding: pre_turn has no execution after latest human input; mid_turn has execution or a surviving mid-turn boundary. Not the fold mode, trigger or API round. A later human steer starts a new pre-turn boundary."
+        }
+      }
+    },
+    "automaticContinuation": {
+      "type": "object",
+      "required": ["format", "phase", "placement"],
+      "additionalProperties": false,
+      "properties": {
+        "format": {"const": "context_handoff"},
+        "phase": {"enum": ["pre_turn", "mid_turn"]},
+        "placement": {"enum": ["before_latest_human", "after_retained_execution"]}
+      },
+      "allOf": [{
+        "if": {"properties": {"phase": {"const": "pre_turn"}}},
+        "then": {"properties": {"placement": {"const": "before_latest_human"}}},
+        "else": {"properties": {"placement": {"const": "after_retained_execution"}}}
+      }],
+      "description": "Bounded additive archive receipt metadata only; it does not imply provider delivery. A mid-turn handoff follows restored composer context only until new execution/steering/inbox events consume that boundary. UI event round remains the actual operation position."
+    }
+  }
+}

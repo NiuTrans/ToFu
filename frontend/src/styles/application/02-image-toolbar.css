@@ -1,0 +1,83 @@
+
+/* ═══════════════════════════════════════════════════
+   ★ Image Generation — Creative Mode
+   ═══════════════════════════════════════════════════ */
+
+/* ── Toolbar: single-row bar identical to .input-actions layout ── */
+.ig-toolbar{display:none;align-items:center;padding:var(--space-2) var(--space-2) 10px var(--space-3);gap:6px;position:relative;overflow:visible;min-width:0}
+.input-box.ig-active .ig-toolbar{display:flex}
+.input-box.ig-active .input-actions{display:none}
+/* Gradient hairline — matches .input-actions::before */
+.ig-toolbar::before{content:'';position:absolute;top:0;left:var(--space-4);right:var(--space-4);height:1px;background:linear-gradient(90deg,transparent,var(--border-light),transparent);opacity:.5}
+
+/* Animated gradient halo — pink/magenta creative mode */
+@property --ig-glow-angle{syntax:'<angle>';initial-value:0deg;inherits:false}
+@keyframes igGlowRotate{to{--ig-glow-angle:360deg}}
+@keyframes igPulse{0%,100%{box-shadow:0 0 12px rgba(244,114,182,0.06),0 4px 16px rgba(0,0,0,0.08)}50%{box-shadow:0 0 22px rgba(244,114,182,0.12),0 4px 16px rgba(0,0,0,0.1)}}
+.input-box.ig-active{border-color:transparent;animation:igPulse 3s ease-in-out infinite}
+.input-box.ig-active::before{opacity:1 !important;background:conic-gradient(from var(--ig-glow-angle),#f472b6,#a78bfa,#06b6d4,#f472b6) !important;animation:igGlowRotate 4s linear infinite !important}
+
+/* ── Exit button — same dimensions as .action-btn ── */
+.ig-exit{width:32px;height:32px;padding:0;background:none;border:1px solid transparent;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--text-tertiary);transition:all .15s;flex-shrink:0}
+.ig-exit:hover{color:#f472b6;background:rgba(244,114,182,0.1);border-color:rgba(244,114,182,0.2)}
+
+/* ── Model picker — reuses .preset-toggle-wrapper pattern ── */
+/* Compound selector bumps specificity above .preset-toggle-wrapper{flex:0 1 auto}
+ * which appears later and would otherwise override flex-shrink back to 1. */
+.ig-model-wrapper.preset-toggle-wrapper{flex-shrink:0}
+.ig-preset{border-radius:10px;padding:var(--space-1) 10px var(--space-1) 7px;min-height:28px}
+.ig-preset-dropdown{left:0;transform:none;min-width:260px;animation:presetDropIn .15s ease}
+.ig-model-option{display:flex;align-items:center;gap:10px;padding:9px var(--space-3);border-radius:8px;cursor:pointer;transition:background .12s;font-size:var(--font-size-md)}
+.ig-model-option:hover{background:var(--bg-hover)}
+.ig-model-option.active{background:rgba(244,114,182,0.08)}
+.ig-model-option.active .ig-model-name{color:#f472b6}
+.ig-model-icon{width:24px;height:24px;display:flex;align-items:center;justify-content:center;border-radius:7px;background:var(--bg-tertiary);flex-shrink:0}
+.ig-model-option.active .ig-model-icon{background:rgba(244,114,182,0.1)}
+.ig-model-name{font-weight:600;color:var(--text-primary);flex:1;white-space:nowrap}
+.ig-model-check{font-size:var(--font-size-lg);font-weight:700;color:#f472b6;opacity:0;width:16px;text-align:center}
+.ig-model-option.active .ig-model-check{opacity:1}
+/* Section label — groups models by transit endpoint / provider */
+.ig-model-section{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);opacity:0.6;padding:6px var(--space-3) 2px;user-select:none}
+
+/* ── Dot separator — lightweight visual divider ── */
+.ig-sep{width:3px;height:3px;border-radius:50%;background:var(--border-light);flex-shrink:0;margin:0 2px}
+
+/* ── Segmented control — the core pill bar (matches thinking-depth-bar) ── */
+.ig-seg{display:flex;align-items:center;gap:2px;padding:2px;border-radius:var(--radius-sm);background:var(--bg-primary);border:1px solid var(--border-light);flex-shrink:1;min-width:0;overflow:hidden}
+.ig-pill{padding:3px 10px;border:none;border-radius:calc(var(--radius-sm) - 2px);background:transparent;color:var(--text-secondary);font-size:var(--font-size-xs);font-weight:600;cursor:pointer;transition:color .15s,background .15s,box-shadow .15s;font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;white-space:nowrap;line-height:1.3}
+.ig-pill:hover{color:var(--text-primary);background:var(--bg-tertiary)}
+/* Aspect ratio — active = pink */
+.ig-pill.active{color:#fff;background:#f472b6;box-shadow:0 1px 4px rgba(244,114,182,0.3)}
+/* Quality — active = purple (distinguish from aspect) */
+.ig-pill-q.active{background:#a78bfa;box-shadow:0 1px 4px rgba(167,139,250,0.3)}
+
+/* ── Flexible spacer pushes Generate to right ── */
+.ig-flex{flex:1 1 0;min-width:4px}
+
+/* ── Generate button — gradient accent, matches .send-btn size ── */
+.ig-generate-btn{display:flex;align-items:center;gap:5px;padding:0 var(--space-4);height:32px;background:linear-gradient(135deg,#f472b6,#a78bfa);color:white;border:none;border-radius:10px;cursor:pointer;font-size:var(--font-size-sm);font-weight:700;font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;transition:transform .2s cubic-bezier(.34,1.56,.64,1),box-shadow .3s,opacity .2s;box-shadow:0 2px 12px rgba(244,114,182,0.25);white-space:nowrap;flex-shrink:0}
+.ig-generate-btn:hover{transform:scale(1.04);box-shadow:0 3px 18px rgba(244,114,182,0.4)}
+.ig-generate-btn:active{transform:scale(.94)}
+.ig-generate-btn:disabled{opacity:.3;cursor:not-allowed;transform:none;box-shadow:none}
+.ig-generate-btn svg{flex-shrink:0}
+
+/* ── Image gen mode button in normal toolbar ── */
+#imageGenModeBtn{transition:all .2s}
+#imageGenModeBtn:hover{color:#f472b6}
+#imageGenModeBtn.active{color:#f472b6;background:rgba(244,114,182,0.12);box-shadow:0 0 0 1px rgba(244,114,182,0.2)}
+
+/* ── Responsive: tablet — compact labels ── */
+@media(max-width:700px){
+  .ig-pill{padding:3px 7px;font-size:10px}
+  .ig-generate-btn .ig-gen-text{display:none}
+  .ig-generate-btn{padding:0 10px;width:32px;height:32px;justify-content:center}
+  .ig-model-wrapper .ps-label{max-width:80px;overflow:hidden;text-overflow:ellipsis}
+}
+/* ── Responsive: mobile — minimum viable toolbar ── */
+@media(max-width:480px){
+  .ig-toolbar{padding:6px 6px var(--space-2);gap:var(--space-1)}
+  .ig-preset{font-size:var(--font-size-xs);padding:3px var(--space-2);min-height:28px}
+  .ig-seg{padding:1px}
+  .ig-pill{padding:2px 6px;font-size:10px}
+  .ig-sep{display:none}
+}

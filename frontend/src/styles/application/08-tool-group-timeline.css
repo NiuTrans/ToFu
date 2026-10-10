@@ -1,0 +1,119 @@
+/* ── Light theme — neutral card border + muted ordinals ── */
+[data-theme="light"] .ptool-turn { border-color: var(--border); background: rgba(0,0,0,0.014); }
+[data-theme="light"] .ptool-turn:not([data-batch-size="1"]) > .ptool-turn-head { border-bottom-color: var(--border); }
+[data-theme="light"] .ptool-turn-rno,
+[data-theme="light"] .ptool-turn-head { color: var(--text-tertiary); }
+[data-theme="light"] .ptool-turn-head:hover,
+[data-theme="light"] .ptool-turn-head:hover .ptool-turn-rno { color: var(--text-secondary); }
+[data-theme="light"] .ptool-turn-chev { color: var(--text-tertiary); }
+
+/* ── Tofu theme — warm card border + clay ordinals ── */
+[data-theme="tofu"] .ptool-turn { border-color: rgba(196,149,106,0.28); background: #FFFDF9; }
+[data-theme="tofu"] .ptool-turn:not([data-batch-size="1"]) > .ptool-turn-head { border-bottom-color: rgba(196,149,106,0.22); }
+/* Solid mid-clay ordinal: legible warm digit on the cream card (AA). */
+[data-theme="tofu"] .ptool-turn-rno { color: #836636; }
+[data-theme="tofu"] .ptool-turn-head { color: rgba(138,109,59,0.72); }
+[data-theme="tofu"] .ptool-turn-head:hover,
+[data-theme="tofu"] .ptool-turn-head:hover .ptool-turn-rno { color: #A67B52; }
+[data-theme="tofu"] .ptool-turn-chev { color: rgba(138,109,59,0.5); }
+
+/* ═══════════════════════════════════════════
+   ★ Interleaved SEGMENT TIMELINE — narration/thinking styling
+   (epic pt_8b406df8fbe24ae5). The interleaved renderer (default ON) walks a
+   finished turn's segments and emits, per LLM round, the model's PRECEDING
+   thinking + narration prose ADJACENT to the tools it ran — inside the same
+   .ptool-panel-body. As of 2026-07-08 the tools are discrete quiet CARDS
+   (.ptool-turn) rather than a spine/gutter timeline, so the connective prose
+   flows as ORDINARY message body between the cards (flush left, x=0) — the
+   mainstream layout. See the alignment note below.
+   ═══════════════════════════════════════════ */
+/* ── Alignment (chrome-less card model, 2026-07-08) ──
+   The spine/ordinal-gutter grid was retired: each round is now a discrete
+   .ptool-turn CARD with 0 left offset (no 28px gutter). So the connective
+   prose no longer has a tool-content column to track — it reads as ORDINARY
+   message body flush to the message's left edge (x=0), with the round cards
+   as separated blocks between paragraphs. This is the mainstream layout the
+   owner asked for: narration is normal text, tools are quiet cards. The old
+   44px/28px values pushed prose into the (now-gone) tool column and were the
+   source of the "trapped in the panel" look. */
+.seg-timeline .seg-narration {
+  margin: 2px 0 var(--space-2) 0;
+  padding: 0;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+.seg-timeline .seg-narration:first-child { margin-top: 2px; }
+/* Tighten the markdown paragraph rhythm so narration doesn't tower over the
+   compact tool cards it introduces. */
+.seg-timeline .seg-narration > :first-child { margin-top: 0; }
+.seg-timeline .seg-narration > :last-child { margin-bottom: 0; }
+.seg-timeline .seg-narration p { margin: 6px 0; }
+/* Per-batch thinking — a QUIET inline disclosure, NOT the full bordered
+   thinking-block card. Per-round reasoning is rarely opened, so in the
+   interleaved timeline it must read as a slim muted one-liner (collapsed)
+   that doesn't tower over the compact tool cards it sits between — stacking
+   12 full cards was the "too huge" look. Strip the card chrome
+   (border/bg/shadow/radius); shrink + mute the header; expanded text gets a
+   subtle left-rule indent. Flush left (margin-left 0) — the timeline
+   alignment invariant (guarded by test_frontend_segment_timeline.py). */
+.seg-timeline .seg-thinking {
+  margin: 2px 0 var(--space-2) 0;
+  border: none;
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
+}
+.seg-timeline .seg-thinking .thinking-header {
+  padding: 3px 0;
+  gap: 5px;
+  opacity: 0.55;
+  transition: opacity var(--transition);
+}
+.seg-timeline .seg-thinking .thinking-header:hover {
+  background: none;
+  opacity: 1;
+}
+.seg-timeline .seg-thinking .thinking-label {
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+}
+.seg-timeline .seg-thinking .thinking-toggle { font-size: 9px; }
+.seg-timeline .seg-thinking .thinking-text {
+  padding: 2px 0 2px 11px;
+  margin-left: 1px;
+  border-left: 2px solid var(--thinking-border);
+  font-size: var(--font-size-sm);
+  opacity: 0.9;
+}
+/* Prose sits directly above the card it introduces — its own bottom margin
+   already provides separation, so don't double it with the card's top margin. */
+.seg-timeline .seg-narration + .ptool-turn,
+.seg-timeline .seg-thinking + .ptool-turn { margin-top: 0; }
+
+/* ★ Per-round streaming translation (interleave): the incremental translator
+   routes each closed round's Chinese into a sibling block in the panel body,
+   directly BEFORE its .ptool-turn card (NOT nested inside it). Since
+   RENDER_CONTRACT Phase 3.5 step 2 the live zh node carries the SETTLED class
+   list (`.seg-narration`, byte-identical to the cold render) — it is styled by
+   the `.seg-timeline .seg-narration` rules above (the panel carries
+   `seg-timeline`), and the former `.stream-seg-narration` block here was
+   deleted as inert. */
+
+/* ★ Per-round ENGLISH narration (segment-timeline streaming interleave, step
+   5b): rendered inside each live .ptool-turn by _renderStreamRoundProse, above
+   the tool slots — reuses the settled `.seg-narration` look verbatim (the panel
+   carries `seg-timeline`). When auto-translate is LIVE, the incremental
+   translator paints the Chinese equivalent into a settled-class `.seg-narration`
+   twin (found by exclusion from this English node), so the English copy is
+   hidden to avoid a bilingual double.
+   ★ The hide is gated PER ROUND on the `.xlate-hidden` class (toggled by JS
+   only for a round whose Chinese twin actually exists) — NOT on a global
+   `data-xlate` body flag. The old body-level rule hid EVERY round's English
+   the instant the FIRST round's Chinese arrived, so an intermediate round whose
+   translation was still pending / failed / never ran showed NOTHING (English
+   hidden, Chinese absent) — the reported "intermediate-round content lost with
+   auto-translate on" bug. The English stays visible as the fallback whenever a
+   round's Chinese hasn't landed. */
+.ptool-panel-body > .stream-seg-en-narration.xlate-hidden { display: none; }
+

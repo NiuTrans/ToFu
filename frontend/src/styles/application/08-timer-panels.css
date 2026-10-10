@@ -1,0 +1,72 @@
+@media (max-width:1080px){.net-latency-badge{padding:0 7px}}
+/* ── Timer Watcher badge & panel ── */
+.timer-trigger{position:relative;user-select:none;-webkit-user-select:none}
+.timer-panel{user-select:text;-webkit-user-select:text}
+.timer-trigger .tm-dot{width:6px;height:6px;border-radius:50%;background:#D9A12E;animation:pulse 2s ease infinite;flex-shrink:0}
+.timer-trigger .timer-count{font-size:9px;background:var(--accent);color:#fff;border-radius:9px;min-width:16px;height:16px;padding:0 var(--space-1);display:inline-flex;align-items:center;justify-content:center;font-weight:800;line-height:1}
+.timer-panel{position:absolute;top:100%;right:0;margin-top:var(--space-2);width:380px;max-width:calc(100vw - 32px);max-height:460px;overflow-y:auto;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-md,10px);box-shadow:var(--clay-lg,0 8px 32px rgba(0,0,0,0.4));z-index:1000;padding:var(--space-3);display:none;white-space:normal;text-align:left;cursor:default;font-size:var(--font-size-sm);font-family:'Plus Jakarta Sans',-apple-system,sans-serif}
+.timer-panel.visible{display:block}
+/* The panel is a DOM child of the badge, so hovering it propagates :hover to
+   the badge. The hover-lift transform (tofu theme) spawns a new stacking
+   context and re-orders the panel under the cursor → hover toggles off →
+   flicker loop that also steals clicks from the panel's buttons. While the
+   panel is open, pin a stable high stacking context and drop the lift. */
+.timer-trigger:has(.timer-panel.visible){z-index:1001}
+.timer-trigger:has(.timer-panel.visible):hover{transform:none}
+.timer-panel-title{display:flex;align-items:center;gap:6px;font-size:var(--font-size-xs);font-weight:700;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:10px;padding-bottom:var(--space-2);border-bottom:1px solid var(--border)}
+.timer-panel-empty{color:var(--text-secondary);text-align:center;padding:var(--space-6) var(--space-3);font-size:var(--font-size-sm);line-height:1.5}
+.timer-panel-item{padding:10px;border-radius:8px;margin-bottom:var(--space-2);background:var(--bg-primary);border:1px solid var(--border);border-left:3px solid var(--text-tertiary)}
+.timer-panel-item:last-child{margin-bottom:0}
+.timer-panel-item.timer-status-active{border-left-color:var(--accent)}
+.timer-panel-item.timer-status-triggered{border-left-color:#D9A12E}
+.timer-panel-item.timer-status-cancelled{border-left-color:#C2705F}
+.timer-panel-item.timer-status-exhausted{border-left-color:var(--text-tertiary)}
+.timer-panel-item .tpi-header{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+.timer-panel-item .tpi-header-jump{cursor:pointer;border-radius:6px;margin:-3px -4px var(--space-1);padding:3px var(--space-1);transition:background .15s}
+.timer-panel-item .tpi-header-jump:hover{background:var(--bg-hover)}
+/* ── Timer poll-log modal ── */
+.timer-log-overlay{position:fixed;inset:0;height:var(--vh100,100vh);z-index:4000;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;padding:var(--space-6);backdrop-filter:blur(2px)}
+.timer-log-card{background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-md,10px);box-shadow:var(--clay-lg,0 8px 32px rgba(0,0,0,0.4));width:min(560px,calc(100vw - 48px));max-height:min(70vh,640px);max-height:min(calc(var(--vh100,100vh)*0.7),640px);display:flex;flex-direction:column;overflow:hidden;font-size:var(--font-size-sm)}
+.timer-log-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);padding:var(--space-3) 14px;border-bottom:1px solid var(--border)}
+.timer-log-title{font-weight:700;color:var(--text-primary);font-size:var(--font-size-md);display:flex;align-items:center;gap:6px}
+.timer-log-title code{font-family:'JetBrains Mono',monospace;font-size:var(--font-size-xs);background:var(--bg-hover);padding:1px 6px;border-radius:4px;color:var(--text-secondary)}
+.timer-log-close{background:transparent;border:none;color:var(--text-secondary);cursor:pointer;padding:var(--space-1);border-radius:6px;display:inline-flex;line-height:1;transition:background .15s,color .15s}
+.timer-log-close:hover{background:var(--bg-hover);color:var(--text-primary)}
+.timer-log-body{overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:var(--space-2)}
+.timer-log-empty{color:var(--text-secondary);text-align:center;padding:28px var(--space-3)}
+.timer-log-row{border:1px solid var(--border);border-left:3px solid var(--text-tertiary);border-radius:8px;padding:var(--space-2) 10px;background:var(--bg-primary)}
+.timer-log-row .tl-head{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap}
+.timer-log-row .tl-icon{display:inline-flex;line-height:1}
+.timer-log-row .tl-decision{font-weight:700;font-size:10px;letter-spacing:0.4px}
+.timer-log-row .tl-time{color:var(--text-secondary);font-size:10px}
+.timer-log-row .tl-tokens{margin-left:auto;color:var(--text-tertiary);font-size:10px;font-family:'JetBrains Mono',monospace}
+.timer-log-row .tl-reason{color:var(--text-primary);margin-top:5px;line-height:1.55;word-break:break-word;overflow-wrap:anywhere}
+.timer-log-row .tl-cmd{margin-top:6px;padding:6px var(--space-2);background:var(--bg-hover);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;max-height:140px;overflow-y:auto}
+.timer-panel-item .tpi-status{font-size:var(--font-size-md);line-height:1}
+.timer-panel-item .tpi-title{flex:1;min-width:0;font-weight:600;color:var(--text-primary);font-size:var(--font-size-sm);line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.timer-panel-item .tpi-status-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;color:#fff;margin-left:auto;padding:2px 7px;border-radius:5px;background:var(--text-tertiary)}
+.timer-status-active .tpi-status-label{background:var(--accent)}
+.timer-status-triggered .tpi-status-label{background:#D9A12E}
+.timer-status-cancelled .tpi-status-label{background:#C2705F}
+.timer-panel-item .tpi-headline{color:var(--text-primary);font-size:var(--font-size-sm);line-height:1.5;margin-bottom:6px;word-break:break-word;overflow-wrap:anywhere}
+.timer-panel-item .tpi-progress-line{color:var(--text-secondary);font-size:var(--font-size-xs);line-height:1.5}
+.timer-panel-item .tpi-progress-bar{height:3px;border-radius:2px;background:var(--bg-hover);margin-top:6px;overflow:hidden}
+.timer-panel-item .tpi-progress-bar>div{height:100%;background:var(--accent);border-radius:2px;transition:width .3s ease}
+.timer-panel-item .tpi-details{margin-top:var(--space-2);font-size:var(--font-size-xs);color:var(--text-secondary)}
+.timer-panel-item .tpi-details summary{cursor:pointer;color:var(--text-tertiary);font-weight:600;user-select:none;-webkit-user-select:none}
+.timer-panel-item .tpi-details summary:hover{color:var(--text-primary)}
+.timer-panel-item .tpi-detail-rows{margin-top:5px;line-height:1.7;word-break:break-word;overflow-wrap:anywhere}
+.timer-panel-item .tpi-detail-rows code{font-size:10px;background:var(--bg-hover);color:var(--text-primary);padding:1px 5px;border-radius:4px;font-family:'JetBrains Mono',monospace;word-break:break-all;white-space:normal}
+.timer-panel-item .tpi-decision{display:inline-block;padding:1px 7px;border-radius:5px;font-size:9px;font-weight:700;letter-spacing:0.3px;margin-left:var(--space-1);color:#fff}
+.timer-panel-item .tpi-decision.ready{background:#3BA55D}
+.timer-panel-item .tpi-decision.wait{background:#D9A12E}
+.timer-panel-item .tpi-decision.error{background:#C2705F}
+.timer-panel-item .tpi-triggered{font-size:10px;color:#B5821E;font-weight:600;margin-top:7px}
+.timer-panel-item .tpi-actions{margin-top:9px;display:flex;gap:6px;flex-wrap:wrap}
+.tpi-btn{font-size:10px;padding:3px 10px;border-radius:6px;border:1px solid var(--border);cursor:pointer;font-family:inherit;font-weight:600;background:var(--bg-secondary);color:var(--text-secondary);transition:background .15s,color .15s,border-color .15s}
+.tpi-btn-log:hover{background:var(--bg-hover);color:var(--text-primary)}
+.tpi-btn-trigger{border-color:#3BA55D;color:#3BA55D}
+.tpi-btn-trigger:hover{background:#3BA55D;color:#fff}
+.tpi-btn-cancel{border-color:#C2705F;color:#C2705F}
+.tpi-btn-cancel:hover{background:#C2705F;color:#fff}
+.tool-badge{font-size:var(--font-size-xs);padding:2px 7px;border-radius:12px;white-space:nowrap;display:none;align-items:center;animation:fadeIn .3s ease;background:rgba(245,158,11,0.12);color:#f59e0b;border:1px solid rgba(245,158,11,0.25)}.tool-badge.visible{display:inline-flex}

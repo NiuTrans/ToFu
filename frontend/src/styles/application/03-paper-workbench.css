@@ -1,0 +1,35 @@
+/* Paper workbench: a reading spine and a compact Studio shelf. All visual
+ * values reuse the shared theme; controls remain owned by the UI kit. */
+.paper-workbench-tabs{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+.paper-workbench-navigation{flex-shrink:0;overflow-x:auto;scrollbar-width:thin}
+.paper-workbench-tabs>[hidden]{display:none}
+.paper-workbench{overflow-y:auto;padding:var(--space-6);gap:var(--space-6);scrollbar-width:thin}
+.paper-workbench-header{border-bottom:1px solid var(--border);padding-bottom:var(--space-5)}
+.paper-workbench-eyebrow{margin:0 0 var(--space-2);font-size:var(--font-size-xs);font-weight:var(--weight-semibold);letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+.paper-workbench-title{margin:0;font-size:var(--font-size-3xl);font-weight:var(--weight-semibold);line-height:var(--leading-title);color:var(--text-primary);overflow-wrap:anywhere}
+.paper-workbench-provenance{margin:var(--space-3) 0 0;font-size:var(--font-size-sm);color:var(--text-secondary);line-height:var(--leading-body)}
+.paper-workbench-brief{padding:var(--space-5);border-left:3px solid var(--accent);background:var(--bg-secondary);border-radius:0 var(--radius) var(--radius) 0}
+.paper-workbench-section-title{margin:0 0 var(--space-3);font-size:var(--font-size-2xl);font-weight:var(--weight-semibold);line-height:var(--leading-title);color:var(--text-primary)}
+.paper-workbench-abstract{margin:0 0 var(--space-4);font-size:var(--font-size-lg);color:var(--text-primary);line-height:var(--leading-body);white-space:pre-wrap;overflow-wrap:anywhere}
+.paper-workbench-outline{list-style:none;margin:0;padding:0;display:grid}
+.paper-workbench-outline>li,.paper-workbench-question{display:flex;align-items:baseline;gap:var(--space-3);padding:var(--space-3) 0;border-bottom:1px solid var(--border)}
+.paper-workbench-number{flex-shrink:0;color:var(--accent);font-size:var(--font-size-sm);font-variant-numeric:tabular-nums;font-weight:var(--weight-semibold)}
+.paper-workbench-outline-body{min-width:0;flex:1}
+.paper-workbench-outline-title{margin:0;font-size:var(--font-size-lg);font-weight:var(--weight-medium);line-height:var(--leading-body);color:var(--text-primary);overflow-wrap:anywhere}
+.paper-workbench-excerpt{margin:var(--space-2) 0 0;color:var(--text-secondary);font-size:var(--font-size-sm);line-height:var(--leading-body);overflow-wrap:anywhere}
+.paper-workbench-studio-heading{margin-bottom:var(--space-4)}
+.paper-workbench-studio-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-3)}
+.paper-workbench-tool{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-2);padding:var(--space-4);background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);min-width:0}
+.paper-workbench-tool-mark{font-size:var(--font-size-2xl);line-height:var(--leading-tight);color:var(--accent);font-weight:var(--weight-semibold)}
+.paper-workbench-tool-title{margin:0;font-size:var(--font-size-xl);color:var(--text-primary);font-weight:var(--weight-semibold)}
+.paper-workbench-tool .paper-workbench-excerpt{margin:0;flex:1}
+.paper-workbench-tool-status{margin:0;font-size:var(--font-size-xs);color:var(--text-secondary);line-height:var(--leading-body)}
+@media(max-width:520px){
+  .paper-workbench{padding:var(--space-4);gap:var(--space-5)}
+  .paper-workbench-title{font-size:var(--font-size-2xl)}
+  .paper-workbench-brief{padding:var(--space-4)}
+  .paper-workbench-studio-grid{grid-template-columns:1fr}
+}
+@media(max-width:768px),(max-width:1024px) and (pointer:coarse){
+  .paper-workbench{padding-bottom:calc(var(--space-6) + var(--paper-switch-h,0px))}
+}

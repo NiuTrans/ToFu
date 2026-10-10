@@ -1,0 +1,16 @@
+/* Batch per-item progress ("2/3") on an in-flight batch search/fetch row.
+ * A batch call is ONE tool round, so without this the row shows a spinner and
+ * nothing else until every item returns — one slow query is indistinguishable
+ * from all of them being slow. Monospace + tabular-nums so the digits do not
+ * reflow the row as the counter advances. */
+.ptool-batch-progress {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 7px; border-radius: 8px;
+  white-space: nowrap;
+  color: var(--text-secondary, #94a3b8);
+  background: rgba(148, 163, 184, 0.14);
+}
+.ptool-batch-failed { margin-left: var(--space-1); color: var(--error-text); }

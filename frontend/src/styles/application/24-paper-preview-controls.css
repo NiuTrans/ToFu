@@ -1,0 +1,40 @@
+.paper-preview-toolbar { display: flex; align-items: center; flex: 0 0 auto; gap: 2px; min-height: 44px; padding: 0 6px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; font-size: var(--font-size-sm); }
+.paper-preview-navigation { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; white-space: nowrap; }
+.paper-preview-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  flex-shrink: 0; min-width: 32px; min-height: 32px; padding: var(--space-1) 6px;
+  border: 1px solid transparent; border-radius: 5px;
+  color: var(--text-secondary); background: transparent; font: inherit;
+  cursor: pointer; text-decoration: none;
+}
+.paper-preview-toolbar .paper-preview-filename { display: block; flex: 1 1 80px; min-width: 44px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start; font-size: var(--font-size-md); font-weight: 500; color: var(--text-primary); }
+.paper-preview-button:hover { background: var(--bg-hover); color: var(--text-primary); }
+.paper-preview-button[aria-pressed=true] { background: var(--accent-subtle); color: var(--accent); }
+.paper-preview-button:focus-visible, .paper-preview-panel input:focus-visible,
+.paper-preview-reopen:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.paper-preview-toolbar input { min-width: 0; height: 28px; padding: 2px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); background: var(--bg-primary); font: inherit; text-align: center; }
+.paper-preview-toolbar .paper-preview-page-number { width: 44px; appearance: textfield; }
+.paper-preview-page-number::-webkit-inner-spin-button { appearance: none; }
+.paper-preview-toolbar .paper-preview-zoom { width: 48px; margin-inline-start: 2px; }
+.paper-preview-viewport { flex: 1; min-width: 0; min-height: 0; }
+.paper-preview-divider { grid-area: 1 / 2 / span 2; cursor: col-resize; touch-action: none; background: var(--bg-secondary); }
+.paper-preview-divider:hover, .paper-preview-divider:focus-visible { background: var(--accent-subtle); outline: 1px solid var(--accent); outline-offset: -2px; }
+.paper-preview-tabs { display: none; }
+.paper-preview-drawer { position: relative; flex: 0 1 auto; max-height: 240px; min-height: 64px; overflow: auto; padding: 10px var(--space-3); border-bottom: 1px solid var(--border); font-size: var(--font-size-sm); }
+.paper-preview-drawer-close { position: absolute; inset-inline-end: 4px; top: var(--space-1); }
+.paper-preview-drawer form { display: flex; gap: 6px; margin-inline-end: 30px; margin-bottom: var(--space-2); }
+.paper-preview-drawer form input { min-width: 0; width: 100%; height: 32px; padding: var(--space-1) var(--space-2); border: 1px solid var(--border); border-radius: 4px; background: var(--bg-primary); color: var(--text-primary); }
+.paper-preview-drawer form button { white-space: nowrap; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-secondary); color: var(--text-primary); }
+.paper-preview-drawer .paper-preview-overleaf-form { flex-direction: column; max-width: 440px; gap: 10px; }
+.paper-preview-drawer:has(.paper-preview-overleaf-form) { max-height: min(320px, 60vh); }
+.paper-preview-source-field { display: flex; flex-direction: column; gap: var(--space-1); }
+.paper-preview-overleaf-form select, .paper-preview-overleaf-form button { min-height: 44px; padding: var(--space-1) var(--space-2); font: inherit; }
+.paper-preview-overleaf-form select { min-width: 0; width: 100%; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 4px; }
+.paper-preview-overleaf-form input, .paper-preview-overleaf-form select { font-size: var(--font-size-xl); }
+.paper-preview-overleaf-form > button[type=submit] { position: sticky; bottom: 0; background: var(--accent-subtle); border-color: var(--accent); color: var(--accent); }
+.paper-preview-overleaf-form :disabled { opacity: 0.6; }
+.paper-preview-drawer > div:not(.paper-preview-detail-controls) > .paper-preview-button { display: flex; width: 100%; justify-content: flex-start; text-align: start; }
+.paper-preview-detail-controls { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-inline-end: 28px; margin-bottom: var(--space-2); }
+.paper-preview-menu-close { display: none; }
+.paper-preview-drawer pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--font-size-xs); line-height: 1.5; margin: 0; }
+.paper-preview-reopen { position: absolute; inset-inline-end: 12px; top: 10px; z-index: 6; min-height: 32px; padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-secondary); font: inherit; font-size: var(--font-size-sm); cursor: pointer; }

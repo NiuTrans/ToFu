@@ -1,0 +1,468 @@
+{
+  "format": "tofu.checked-conversion-shallow-receipt-evidence/v1",
+  "scope": "Actual body and checked-protocol comparison changing whole-body snapshot copying.\n\nBoth arms retain canonical build_body and raw histories. Reuse existing paired\nworker accounting; synthetic opaque fixtures are not live cryptographic proof.\n",
+  "whole_system_verdict": "incomplete",
+  "candidate_verdict": "do_not_promote_from_current_measurement",
+  "production_promoted": false,
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/context-conversion-copy-receipt-full.json",
+  "raw_artifact_sha256": "2b743562eb029141ab7c5878191b935eb3a1e008df019150ff6c525382127db6",
+  "sources": {
+    "benchmarks/context_compiler/conversion_copy_measure.py": "d98db9b9904f00595ee08840312af4ed0906aa6919fc7cee1bdf52715b386cf2",
+    "benchmarks/context_compiler/conversion_copy.py": "959ef0631d454f3a5d9d533fe47bf6bc12c1f2cbbc03f639391db4e99154de47",
+    "lib/llm/conversion.py": "e7f1af3a953003e59fef32958f4de00994bf825583266558b29341987ff00f10",
+    "benchmarks/context_compiler/native_copy_measure.py": "a1f20c4bef8db56c913cbabd91cd2e3f0a7c4c991440b8e5dbfe54144acdd45c",
+    "benchmarks/context_compiler/native_copy.py": "b5c6cbfe10dcbb895c14fcdd7f9ab7876402d787cee9e1dc2335a8468f6c219c",
+    "benchmarks/context_compiler/provider_measure.py": "cfd99610f8b561bb0b9e3cf5b088ee1448edf7fd16a59aa90a9060c175f1bb6c",
+    "benchmarks/context_compiler/compiler.py": "04e1810549db5a834049b51a6147736b500206c1632de9403fa7eb8bc46eaf0b",
+    "lib/llm/body/_build.py": "16cb25deba99fb428d8dbabb632bb956b60239b54d5e23fec58dad3e977d4f79",
+    "lib/llm_sanitize/_fields.py": "7c37db9e62667dcbdef4e2c8c1d53b3aa56dbd3d7ea51fa65944912c291e16d4",
+    "lib/llm/responses_outbound/_to_responses.py": "cd92d86401580d40c437efd6bba1256144765ba64c68d9c00a73f0012aa550c2",
+    "lib/llm/anthropic_outbound/_to_anthropic.py": "c25e116b4fe6c3c27d3a69ff9d4411ca2a1d73ca6734d3e9cedda9fa4ab5db83"
+  },
+  "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+  "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+  "affinity": [
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    144,
+    148,
+    149,
+    150,
+    151,
+    152,
+    153,
+    154,
+    155,
+    156,
+    157,
+    158,
+    159,
+    160,
+    161,
+    162,
+    163,
+    164,
+    165,
+    166,
+    167,
+    168,
+    169,
+    170,
+    171,
+    172,
+    173,
+    174,
+    175,
+    176,
+    177,
+    178
+  ],
+  "latency_observations": 5400,
+  "independent_latency_memory_workers": 108,
+  "exact_all_trace_oracles": true,
+  "memory_scope": "separate worker high-water including imports, fixtures and preflight",
+  "fixture_sha256": {
+    "openai/heavy": "d2d41e81b4146a120f3924ba17d42d4b3d01e94d4eda13ce3d7b64ee0300e4af",
+    "openai/sparse": "8225efbc6d0ddefc5de05339779c012df670b6e889e35464f379b84a919a48c0",
+    "openai/none": "3a48de6814f654d251c8b478e093465041d6d8d3402f9244f7b532925531525b",
+    "compatible/heavy": "d2d41e81b4146a120f3924ba17d42d4b3d01e94d4eda13ce3d7b64ee0300e4af",
+    "compatible/sparse": "8225efbc6d0ddefc5de05339779c012df670b6e889e35464f379b84a919a48c0",
+    "compatible/none": "3a48de6814f654d251c8b478e093465041d6d8d3402f9244f7b532925531525b",
+    "anthropic/heavy": "16237ead83ad3941a9d635b8a24ef24033bbe8b8c3f04c76492e704027a3798d",
+    "anthropic/sparse": "d9f61ba05b6a2c4051a3a5eda2313f39cee93bfa574788cc8dc0e603b76bd0b3",
+    "anthropic/none": "3a48de6814f654d251c8b478e093465041d6d8d3402f9244f7b532925531525b"
+  },
+  "cases": [
+    {
+      "profile": "openai",
+      "density": "heavy",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9329422198220837,
+            "p95_ms": 0.9381714063187936,
+            "p99_ms": 0.970411535461243,
+            "cpu_ms_per_operation": 0.9399379328295349,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "170d8a3a23e411fda2d69ceb07af972537ff3cac37ea4b98c905a4943bad3b9d"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.938195786176617,
+            "p95_ms": 0.9484249591622506,
+            "p99_ms": 0.9859547708173887,
+            "cpu_ms_per_operation": 0.9415618659136044,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "170d8a3a23e411fda2d69ceb07af972537ff3cac37ea4b98c905a4943bad3b9d"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9228108201215793,
+            "p95_ms": 0.936608354348747,
+            "p99_ms": 0.8837088284332789,
+            "cpu_ms_per_operation": 0.9317599455189779,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "170d8a3a23e411fda2d69ceb07af972537ff3cac37ea4b98c905a4943bad3b9d"
+        }
+      ]
+    },
+    {
+      "profile": "openai",
+      "density": "sparse",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9411880637639308,
+            "p95_ms": 0.9549183574102678,
+            "p99_ms": 0.9535003586018351,
+            "cpu_ms_per_operation": 0.9440875633774399,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "903a252b0c53478f475b300b3bad3f358041d2e6f1e0a82fadbd1cfbac4eede9"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.92365607097716,
+            "p95_ms": 0.9321402399573012,
+            "p99_ms": 0.9517568683819017,
+            "cpu_ms_per_operation": 0.9292396042903852,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "903a252b0c53478f475b300b3bad3f358041d2e6f1e0a82fadbd1cfbac4eede9"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9421253030562423,
+            "p95_ms": 0.9375253575376845,
+            "p99_ms": 0.8692221499313237,
+            "cpu_ms_per_operation": 0.9427497001725801,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "903a252b0c53478f475b300b3bad3f358041d2e6f1e0a82fadbd1cfbac4eede9"
+        }
+      ]
+    },
+    {
+      "profile": "openai",
+      "density": "none",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9448523367927466,
+            "p95_ms": 0.9387183656041123,
+            "p99_ms": 0.942589465995386,
+            "cpu_ms_per_operation": 0.9440560029321124,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "436fbf49b263c9511542919fcfd9ade35141421eebb2d1ce5425d0e0e1b0a715"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9191106746740632,
+            "p95_ms": 0.9301222644850504,
+            "p99_ms": 0.9225303694022103,
+            "cpu_ms_per_operation": 0.9208466099742304,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "436fbf49b263c9511542919fcfd9ade35141421eebb2d1ce5425d0e0e1b0a715"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9114916674794924,
+            "p95_ms": 0.9126582401350255,
+            "p99_ms": 1.2785406618348765,
+            "cpu_ms_per_operation": 0.9177255817400701,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [
+            "p99_ms"
+          ],
+          "trace_sha256": "436fbf49b263c9511542919fcfd9ade35141421eebb2d1ce5425d0e0e1b0a715"
+        }
+      ]
+    },
+    {
+      "profile": "compatible",
+      "density": "heavy",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9146159945411724,
+            "p95_ms": 0.9144333181538047,
+            "p99_ms": 0.9867852361776304,
+            "cpu_ms_per_operation": 0.9191777454189078,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9214278362814347,
+            "p95_ms": 0.9146307642193171,
+            "p99_ms": 0.9488294612449845,
+            "cpu_ms_per_operation": 0.9235200791665193,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9287668198705372,
+            "p95_ms": 0.9268791710536601,
+            "p99_ms": 0.953593524502389,
+            "cpu_ms_per_operation": 0.9325112193186675,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        }
+      ]
+    },
+    {
+      "profile": "compatible",
+      "density": "sparse",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9267125817126605,
+            "p95_ms": 0.9296685071125318,
+            "p99_ms": 0.9557876647221861,
+            "cpu_ms_per_operation": 0.9303265432454022,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9375871315450168,
+            "p95_ms": 0.9384076176175979,
+            "p99_ms": 0.9397838532414834,
+            "cpu_ms_per_operation": 0.9380190180643088,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9411418356081309,
+            "p95_ms": 0.9513881180908095,
+            "p99_ms": 0.9313230554872755,
+            "cpu_ms_per_operation": 0.9426429089766419,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "258311678eb35b5239efd9abda53f0e346978e92a22ebf8acb76ca3959089b6c"
+        }
+      ]
+    },
+    {
+      "profile": "compatible",
+      "density": "none",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9226832454982844,
+            "p95_ms": 0.9284762903401828,
+            "p99_ms": 0.9165356484531507,
+            "cpu_ms_per_operation": 0.9254070421609362,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "27f0b9947ea611970dc57ae135d420a360476968e02ed1e159905bfa2b329993"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9181040394644555,
+            "p95_ms": 0.9202453282883891,
+            "p99_ms": 0.9024305311649895,
+            "cpu_ms_per_operation": 0.9209362428135115,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "27f0b9947ea611970dc57ae135d420a360476968e02ed1e159905bfa2b329993"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9211472445087466,
+            "p95_ms": 0.921276440850385,
+            "p99_ms": 0.9320540875206168,
+            "cpu_ms_per_operation": 0.9237639596628713,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "27f0b9947ea611970dc57ae135d420a360476968e02ed1e159905bfa2b329993"
+        }
+      ]
+    },
+    {
+      "profile": "anthropic",
+      "density": "heavy",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9174088586701927,
+            "p95_ms": 0.92953805525736,
+            "p99_ms": 1.0374664060113414,
+            "cpu_ms_per_operation": 0.9228732363329787,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "97bb5eeaaa353b85b4964f19adcaaa6d7eac90db08a7a7ec16ef03c2edec2095"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9158272566719988,
+            "p95_ms": 0.9674760292758116,
+            "p99_ms": 0.9736432293693582,
+            "cpu_ms_per_operation": 0.9320781604358519,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "97bb5eeaaa353b85b4964f19adcaaa6d7eac90db08a7a7ec16ef03c2edec2095"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9175665152373658,
+            "p95_ms": 0.9200640081387832,
+            "p99_ms": 0.99423721388896,
+            "cpu_ms_per_operation": 0.9219840784139786,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "97bb5eeaaa353b85b4964f19adcaaa6d7eac90db08a7a7ec16ef03c2edec2095"
+        }
+      ]
+    },
+    {
+      "profile": "anthropic",
+      "density": "sparse",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9076555876352101,
+            "p95_ms": 0.907894746212577,
+            "p99_ms": 0.9249944274446477,
+            "cpu_ms_per_operation": 0.9113964169020055,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "edc3462be9ffdafd6a4320e2021396d47828e7495197a657c2f392e67f4f1e36"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9096417214935316,
+            "p95_ms": 0.9012445739459906,
+            "p99_ms": 0.9163498703763651,
+            "cpu_ms_per_operation": 0.9114819894490922,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "edc3462be9ffdafd6a4320e2021396d47828e7495197a657c2f392e67f4f1e36"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9154157718619924,
+            "p95_ms": 0.9152009928445384,
+            "p99_ms": 0.9340029470774815,
+            "cpu_ms_per_operation": 0.9164805741664495,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "edc3462be9ffdafd6a4320e2021396d47828e7495197a657c2f392e67f4f1e36"
+        }
+      ]
+    },
+    {
+      "profile": "anthropic",
+      "density": "none",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9232134529117891,
+            "p95_ms": 0.9241346765394064,
+            "p99_ms": 0.9513169176102695,
+            "cpu_ms_per_operation": 0.9246798036490834,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "73f6519cad8e66b94af1043e083768abdbe00a7dd0f478618f007e8a3501b2a6"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9232095875331494,
+            "p95_ms": 0.9635251507517949,
+            "p99_ms": 1.5861022110214769,
+            "cpu_ms_per_operation": 0.9438527623525922,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [
+            "p99_ms"
+          ],
+          "trace_sha256": "73f6519cad8e66b94af1043e083768abdbe00a7dd0f478618f007e8a3501b2a6"
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9177563644722934,
+            "p95_ms": 0.922049993815002,
+            "p99_ms": 0.9195093956400777,
+            "cpu_ms_per_operation": 0.9258163388157294,
+            "peak_process_rss_bytes": 1.0
+          },
+          "failed_measured_guards": [],
+          "trace_sha256": "73f6519cad8e66b94af1043e083768abdbe00a7dd0f478618f007e8a3501b2a6"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Shallow canonical report projection in both arms; JSONtrace serialization outside timing.",
+    "Synthetic opaque native carriers; supplied token counts, no model I/O or durable compaction authority.",
+    "No GC/host-interference provenance; two adverse tail pairs remain failures."
+  ],
+  "reason": "Most P50 improves6-9%, but openai/none pair2P99+28% and anthropic/none pair1P99+59% fail guards; original primary10% gain not consistently achieved. No production promotion.",
+  "terminal_exit_code": 0
+}

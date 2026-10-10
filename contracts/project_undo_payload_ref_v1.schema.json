@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.project-undo-payload-ref/v1",
+  "title": "Immutable project undo payload reference",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "digest",
+    "bytes",
+    "pack",
+    "offset"
+  ],
+  "properties": {
+    "kind": {
+      "const": "undo-payload-v1"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "pack": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "x-payload-encoding": "Packed ASCII JSON values; byte range and SHA-256 validate each value."
+}

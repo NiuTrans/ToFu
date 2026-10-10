@@ -1,0 +1,1129 @@
+{
+  "format": "tofu.performance-candidate-review/v1",
+  "whole_system_verdict": "incomplete",
+  "contract": "benchmarks/system_performance_contract.json",
+  "contract_sha256": "0918786a22fbad385391f9754c6520b012b78d2d1b6b088ec0ae70a13c52fac0",
+  "production_defaults_changed": false,
+  "candidates": [
+    {
+      "candidate": "tuple extraction cache with real execution/quota ownership",
+      "decision": "do_not_promote",
+      "evidence_scope": "Actual execution-owned/quota-reserved scan/rank/render comparison.\n\nOne parent launch probe supplies all workers' budgets. Cold operations include\nsession creation, acquisition, registration and terminal release in both arms.\nQuota exhaustion uses the canonical scan; no real application default changes.\n",
+      "raw_artifact": "/tmp/tofu-system-perf-snapshot/repository-scoped-full.json",
+      "raw_artifact_sha256": "a70b99a6cf6308531a1720cd9e1c8d54637de2774d7d425a67f28fe1c7127658",
+      "observations": 1800,
+      "independent_latency_memory_pids": 36,
+      "exact_output_traces": true,
+      "reported_source_identities": {
+        "scoped_measure.py": "9ec1a3eedefb14f775d7321779a592b227a27e2775584ac95426f4569e497de2",
+        "index.py": "cfb0b0d248c9df141a4f74e3a1d3d46e0eae93c34c67cde21c5457b2d192eeae",
+        "budget.py": "f0c6dd86dbbddb9e62676454bbded447fc74b9770f48344da97afa2f69ee9e15",
+        "quota.py": "4c1666ce3072beb091458396f858d497ca5a2f9589fe232101e6f3abd59953d7",
+        "owned_scope.py": "9707cae2541764c38046d57f74f85f9b9eebcc780f35cdabdcaed7917aa506ec"
+      },
+      "pairs": [
+        {
+          "case": "cold",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.0388286604269346,
+            "p95": 0.5452215331927984,
+            "p99": 0.4820475550352843,
+            "cpu": 1.0443857693840466,
+            "peak_rss": 1.0502930873018625
+          },
+          "guard_violations": [
+            {
+              "metric": "peak_rss",
+              "ratio": 1.0502930873018625,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "cold",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.03367785497148,
+            "p95": 1.0592725387153952,
+            "p99": 1.120135600351035,
+            "cpu": 1.0380092502357918,
+            "peak_rss": 1.0578976757171774
+          },
+          "guard_violations": [
+            {
+              "metric": "p95",
+              "ratio": 1.0592725387153952,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.120135600351035,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "peak_rss",
+              "ratio": 1.0578976757171774,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "cold",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.0248396814399472,
+            "p95": 0.9981045679284487,
+            "p99": 0.9877485101489152,
+            "cpu": 1.033680763507738,
+            "peak_rss": 1.0595001568545435
+          },
+          "guard_violations": [
+            {
+              "metric": "peak_rss",
+              "ratio": 1.0595001568545435,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "warm",
+          "pair": 0,
+          "ratios": {
+            "p50": 0.13063752728399022,
+            "p95": 0.8821286334996253,
+            "p99": 1.3056655467419045,
+            "cpu": 0.10646259348313436,
+            "peak_rss": 1.042240267661102
+          },
+          "guard_violations": [
+            {
+              "metric": "p99",
+              "ratio": 1.3056655467419045,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "warm",
+          "pair": 1,
+          "ratios": {
+            "p50": 0.09859219230520026,
+            "p95": 0.13305682885378686,
+            "p99": 0.12398941156597912,
+            "cpu": 0.1038925800910922,
+            "peak_rss": 1.0364380899500278
+          },
+          "guard_violations": []
+        },
+        {
+          "case": "warm",
+          "pair": 2,
+          "ratios": {
+            "p50": 0.0989689129107469,
+            "p95": 0.08923516252003649,
+            "p99": 0.07989694439226608,
+            "cpu": 0.10332148973585016,
+            "peak_rss": 1.0347901793487724
+          },
+          "guard_violations": []
+        },
+        {
+          "case": "edited",
+          "pair": 0,
+          "ratios": {
+            "p50": 0.10666521392859069,
+            "p95": 0.2596866160481687,
+            "p99": 0.4193628105281106,
+            "cpu": 0.10807245727245914,
+            "peak_rss": 1.0313259706883378
+          },
+          "guard_violations": []
+        },
+        {
+          "case": "edited",
+          "pair": 1,
+          "ratios": {
+            "p50": 0.10248895004565088,
+            "p95": 0.0677474638623141,
+            "p99": 0.06263813716104788,
+            "cpu": 0.10882749780224711,
+            "peak_rss": 1.042035782525621
+          },
+          "guard_violations": []
+        },
+        {
+          "case": "edited",
+          "pair": 2,
+          "ratios": {
+            "p50": 0.10529110906408763,
+            "p95": 0.14633587939144274,
+            "p99": 0.15203203903075108,
+            "cpu": 0.11013973892118023,
+            "peak_rss": 1.0401915868388172
+          },
+          "guard_violations": []
+        }
+      ],
+      "limitations": "domain/kernel experiment only; full six-direction integration, authority and recovery coverage incomplete"
+    },
+    {
+      "candidate": "immutable source IR capture/materialization before native request projection",
+      "decision": "do_not_promote",
+      "evidence_scope": "Actual native request projection with immutable raw-source revision costs.\n\nNo network/model calls. Token counts are supplied: token admission, durable\nhistory and interpreter startup remain outside this experiment's scope.\n",
+      "raw_artifact": "/tmp/tofu-system-perf-snapshot/context-provider-measure-full.json",
+      "raw_artifact_sha256": "41ec134890969bf7edac8f672ddeda07767bb89d4cbe415ba355d1329d81ed2e",
+      "observations": 5400,
+      "independent_latency_memory_pids": 108,
+      "exact_output_traces": true,
+      "reported_source_identities": {
+        "benchmarks/context_compiler/provider_measure.py": "7e92209a48035ab637bd31b41a252ca2ace5a4bc1c4c34bf9ae65cc9658cf016",
+        "benchmarks/context_compiler/compiler.py": "04e1810549db5a834049b51a6147736b500206c1632de9403fa7eb8bc46eaf0b",
+        "benchmarks/context_compiler/check_provider.py": "38429ad9b54a686a7f63b4005de8e5bf956975bd1148732c1248f0c389c5a9ad",
+        "lib/llm/body/_build.py": "16cb25deba99fb428d8dbabb632bb956b60239b54d5e23fec58dad3e977d4f79",
+        "lib/llm/conversion.py": "e7f1af3a953003e59fef32958f4de00994bf825583266558b29341987ff00f10",
+        "lib/llm/responses_outbound/_to_responses.py": "cd92d86401580d40c437efd6bba1256144765ba64c68d9c00a73f0012aa550c2",
+        "lib/llm/anthropic_outbound/_to_anthropic.py": "c25e116b4fe6c3c27d3a69ff9d4411ca2a1d73ca6734d3e9cedda9fa4ab5db83"
+      },
+      "pairs": [
+        {
+          "case": "openai/first",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.6323310629231127,
+            "p95": 1.6350253306276092,
+            "p99": 1.2083539614553696,
+            "cpu": 1.6034066557476085,
+            "peak_rss": 0.9971193006854078
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.6323310629231127,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.6350253306276092,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.2083539614553696,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.6034066557476085,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "openai/first",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.6450754663279568,
+            "p95": 1.6544063771455055,
+            "p99": 1.1975088512759746,
+            "cpu": 1.617970728708603,
+            "peak_rss": 1.0208458608939668
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.6450754663279568,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.6544063771455055,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.1975088512759746,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.617970728708603,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "openai/first",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.6266158784876308,
+            "p95": 1.6039391126527593,
+            "p99": 1.2150992813110912,
+            "cpu": 1.6008908582683357,
+            "peak_rss": 1.0108411965468782
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.6266158784876308,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.6039391126527593,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.2150992813110912,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.6008908582683357,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "openai/append",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.2007677078071468,
+            "p95": 1.214404817867548,
+            "p99": 1.1687085284351642,
+            "cpu": 1.2101912308938434,
+            "peak_rss": 1.0134923738756354
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.2007677078071468,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.214404817867548,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.1687085284351642,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.2101912308938434,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "openai/append",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.2171545219261473,
+            "p95": 1.2253397705327729,
+            "p99": 1.1881232668889088,
+            "cpu": 1.2230835803697928,
+            "peak_rss": 1.0170171149144254
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.2171545219261473,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.2253397705327729,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.1881232668889088,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.2230835803697928,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "openai/append",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.1986546916678282,
+            "p95": 1.2265396819652925,
+            "p99": 1.1847049654350077,
+            "cpu": 1.2194353412058732,
+            "peak_rss": 1.0167191188040912
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.1986546916678282,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.2265396819652925,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.1847049654350077,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.2194353412058732,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "openai/native_edit",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.2244554421256384,
+            "p95": 1.2286879065218528,
+            "p99": 0.4021876504995534,
+            "cpu": 1.1916285839574172,
+            "peak_rss": 1.0136573609158466
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.2244554421256384,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.2286879065218528,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.1916285839574172,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "openai/native_edit",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.2088385604739251,
+            "p95": 1.2142968097627047,
+            "p99": 0.4165677870419745,
+            "cpu": 1.1794806900326193,
+            "peak_rss": 1.0115942028985507
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.2088385604739251,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.2142968097627047,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.1794806900326193,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "openai/native_edit",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.221531458758332,
+            "p95": 1.2151989318124046,
+            "p99": 0.44691985169903065,
+            "cpu": 1.192457060789918,
+            "peak_rss": 1.0034805091487669
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.221531458758332,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.2151989318124046,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.192457060789918,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "compatible/first",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.9516965116528238,
+            "p95": 1.9535259180188684,
+            "p99": 4.676730266856255,
+            "cpu": 1.9483102962802894,
+            "peak_rss": 0.9970223325062034
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.9516965116528238,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.9535259180188684,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 4.676730266856255,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.9483102962802894,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "compatible/first",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.9482091829657373,
+            "p95": 1.9344063473783177,
+            "p99": 4.755357367897945,
+            "cpu": 1.9407891513549638,
+            "peak_rss": 1.0024873146950553
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.9482091829657373,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.9344063473783177,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 4.755357367897945,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.9407891513549638,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "compatible/first",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.952013835425821,
+            "p95": 1.9400034851634804,
+            "p99": 4.808325926256507,
+            "cpu": 1.9462941901090773,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.952013835425821,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.9400034851634804,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 4.808325926256507,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.9462941901090773,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "compatible/append",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.3329843295130341,
+            "p95": 1.3369191998852372,
+            "p99": 1.2900688497128994,
+            "cpu": 1.325465205734658,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.3329843295130341,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.3369191998852372,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.2900688497128994,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.325465205734658,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "compatible/append",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.3324689900604474,
+            "p95": 1.3341667535801534,
+            "p99": 1.3407190090374193,
+            "cpu": 1.3224484501182079,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.3324689900604474,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.3341667535801534,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.3407190090374193,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.3224484501182079,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "compatible/append",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.3583739881679517,
+            "p95": 1.3604141465242445,
+            "p99": 1.330075916012891,
+            "cpu": 1.33631403288422,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.3583739881679517,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.3604141465242445,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.330075916012891,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.33631403288422,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "compatible/native_edit",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.3452598277799792,
+            "p95": 1.3354680105631684,
+            "p99": 1.0739181436745702,
+            "cpu": 1.3346610184646368,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.3452598277799792,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.3354680105631684,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.0739181436745702,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.3346610184646368,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "compatible/native_edit",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.3413646593233495,
+            "p95": 1.3327257547909506,
+            "p99": 1.3184583597270376,
+            "cpu": 1.3311743448161841,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.3413646593233495,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.3327257547909506,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.3184583597270376,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.3311743448161841,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "compatible/native_edit",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.3267583387290482,
+            "p95": 1.3181433334534725,
+            "p99": 1.2945235796759929,
+            "cpu": 1.3129902837912324,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.3267583387290482,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.3181433334534725,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.2945235796759929,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.3129902837912324,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "anthropic/first",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.746541728444542,
+            "p95": 1.715543951040765,
+            "p99": 1.2556599349624427,
+            "cpu": 1.7054227857982538,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.746541728444542,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.715543951040765,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.2556599349624427,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.7054227857982538,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "anthropic/first",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.7341176941190413,
+            "p95": 1.7236132321330815,
+            "p99": 1.2022226970570071,
+            "cpu": 1.694650550027858,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.7341176941190413,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.7236132321330815,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.2022226970570071,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.694650550027858,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "anthropic/first",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.7544507043045479,
+            "p95": 1.7366530436545875,
+            "p99": 1.2075229900560251,
+            "cpu": 1.7129729091275214,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.7544507043045479,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.7366530436545875,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.2075229900560251,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.7129729091275214,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "anthropic/append",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.2336207953903424,
+            "p95": 1.264420688166463,
+            "p99": 1.1282059666757664,
+            "cpu": 1.2480282083170415,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.2336207953903424,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.264420688166463,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.1282059666757664,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.2480282083170415,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "anthropic/append",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.2460716605670537,
+            "p95": 1.2650180647436309,
+            "p99": 1.1430598479480338,
+            "cpu": 1.2484577361847513,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.2460716605670537,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.2650180647436309,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.1430598479480338,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.2484577361847513,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "anthropic/append",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.2477604330585785,
+            "p95": 1.2674012072395444,
+            "p99": 1.1957144427103397,
+            "cpu": 1.2456240933968479,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.2477604330585785,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.2674012072395444,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.1957144427103397,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.2456240933968479,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "anthropic/native_edit",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.2673295064851207,
+            "p95": 1.2770436427509797,
+            "p99": 0.3963986865767809,
+            "cpu": 1.2324022457362713,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.2673295064851207,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.2770436427509797,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.2324022457362713,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "anthropic/native_edit",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.275513813142965,
+            "p95": 1.2677466547831313,
+            "p99": 0.38864850396819445,
+            "cpu": 1.2340216816949987,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.275513813142965,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.2677466547831313,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.2340216816949987,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "anthropic/native_edit",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.2521156352131135,
+            "p95": 1.243630104542114,
+            "p99": 0.3382932355201762,
+            "cpu": 1.2029948313024907,
+            "peak_rss": 1.0
+          },
+          "guard_violations": [
+            {
+              "metric": "p50",
+              "ratio": 1.2521156352131135,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p95",
+              "ratio": 1.243630104542114,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "cpu",
+              "ratio": 1.2029948313024907,
+              "allowed_ratio": 1.05
+            }
+          ]
+        }
+      ],
+      "limitations": "domain/kernel experiment only; full six-direction integration, authority and recovery coverage incomplete"
+    },
+    {
+      "candidate": "static PDF chunk grouping on varied real documents",
+      "decision": "do_not_promote",
+      "evidence_scope": "Heterogeneous real PDF batches with one frozen input snapshot per comparison.\n\nVary page count, density and tables, retaining malformed per-document errors.\nThe unchanged rich parser/admission/pool are shared; no app default changes.\n",
+      "raw_artifact": "/tmp/tofu-system-perf-snapshot/pdf-heterogeneous-full.json",
+      "raw_artifact_sha256": "875e0a3d402c49a1057cf7d5048cc2cb4ecefd2d915ee6351f02562269915117",
+      "observations": 600,
+      "independent_latency_memory_pids": 12,
+      "exact_output_traces": true,
+      "reported_source_identities": {
+        "benchmarks/pdf_batch/heterogeneous.py": "2890455e1563647dca9fe5012d0c46ff9b4debf65c0ba259728c33aecf2a1cff",
+        "benchmarks/pdf_batch/measure.py": "4e246f3b5200c4d8f9dc339e97b107d41336804edaf9bf0b82a6bb356f99a441",
+        "benchmarks/pdf_batch/experiment.py": "dcdd00b937fd69e1345c5400d9544fa8531bf2e56448fb6e58847cafd808f21c",
+        "lib/pdf_parser/core.py": "82d92ec1fb6895830e336d8e6b5a7fbad2a4bb8c1e193073bb2310e3b8762f54",
+        "lib/pdf_parser/policy.py": "a0d17e3ff9f9d1804094e3abb41359002a5583caede328ea3239ae142e52c62e",
+        "lib/pdf_parser/admission.py": "6041d8ebd01d39ffcdb222fb141aed404960ed6410d73063e2487d35985bb939"
+      },
+      "pairs": [
+        {
+          "case": "heterogeneous",
+          "pair": 0,
+          "ratios": {
+            "p50": 1.020539695953859,
+            "p95": 1.0835738018366998,
+            "p99": 1.1256167367241299,
+            "cpu": 1.007392133214021,
+            "peak_rss": 0.9999085354699447
+          },
+          "guard_violations": [
+            {
+              "metric": "p95",
+              "ratio": 1.0835738018366998,
+              "allowed_ratio": 1.05
+            },
+            {
+              "metric": "p99",
+              "ratio": 1.1256167367241299,
+              "allowed_ratio": 1.05
+            }
+          ]
+        },
+        {
+          "case": "heterogeneous",
+          "pair": 1,
+          "ratios": {
+            "p50": 1.0118861342874546,
+            "p95": 1.0140298260633052,
+            "p99": 0.9927792653627053,
+            "cpu": 1.0052745888923362,
+            "peak_rss": 0.9995798933294366
+          },
+          "guard_violations": []
+        },
+        {
+          "case": "heterogeneous",
+          "pair": 2,
+          "ratios": {
+            "p50": 1.0127085228427455,
+            "p95": 1.0204395760837242,
+            "p99": 1.050932032155753,
+            "cpu": 1.0049547108461716,
+            "peak_rss": 1.001024702653248
+          },
+          "guard_violations": [
+            {
+              "metric": "p99",
+              "ratio": 1.050932032155753,
+              "allowed_ratio": 1.05
+            }
+          ]
+        }
+      ],
+      "limitations": "domain/kernel experiment only; full six-direction integration, authority and recovery coverage incomplete"
+    }
+  ],
+  "decision_reason": "Guard regressions remain disqualifying; PDF grouping also has no primary gain. Preserve these controls while testing packed cache/native-copy alternatives; never convert a microbenchmark into whole-system acceptance."
+}

@@ -1,0 +1,46 @@
+{
+  "scope": "Candidate mechanism identified by frozen current source and existing observer-enabled profiles. No timing isolates note_merged. Background holds are aggregate and cannot be added to per-event sampled means.",
+  "rows": [
+    {
+      "label": "current-profile-embedded-0",
+      "overlay_publication": {
+        "calls": 334,
+        "maximumNanos": 6889626,
+        "phase": "overlay.publish",
+        "totalNanos": 1030207704
+      },
+      "foreground_event_authority_hold": {
+        "calls": 310,
+        "exclusiveNanos": 1605347,
+        "inclusiveNanos": 120527606,
+        "stage": "authority_hold"
+      },
+      "event_samples": 150
+    },
+    {
+      "label": "current-profile-application-0",
+      "overlay_publication": {
+        "calls": 283,
+        "maximumNanos": 5867724,
+        "phase": "overlay.publish",
+        "totalNanos": 882365468
+      },
+      "foreground_event_authority_hold": {
+        "calls": 327,
+        "exclusiveNanos": 1705444,
+        "inclusiveNanos": 102026242,
+        "stage": "authority_hold"
+      },
+      "event_samples": 160
+    }
+  ],
+  "source_hashes": {
+    "entity_overlay.rs": "c013e9145960515e8f8376be40668140cbcea4e01ca016d7e80615562ade8eaa",
+    "entity_overlay_index.rs": "9a6793e8518f787fbac80e7be20c89ccd5c848c0ebb4f445b0231f34f280d094",
+    "entity.rs": "fc2a46698e9d4acc684681e7a0cc786ba602d6e840557f7907955461682de147",
+    "maintenance.rs": "9e184bbfbfb16e72971ff3ec2189d484f00b3a6e667ed997bb5f992b22214e48"
+  },
+  "finding": "finish_overlay_merge invokes note_merged while authority mutex remains held. note_merged collects covered records, then removes each from both persistent AVL indexes. Index remove uses Arc::make_mut/rebalancing. Already-private page encoding must not be reintroduced as a proposed new improvement.",
+  "candidate": "Measure bulk committed-prefix removal from sequence index against repeated deletes. Preserve exact per-key index removal, old immutable snapshot isolation, bytes/entry accounting, watermark and committed suffix. Any speed claim requires actual measurement and full harness admission.",
+  "runtime_changes": false
+}

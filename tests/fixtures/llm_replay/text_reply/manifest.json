@@ -1,0 +1,5 @@
+{
+  "description": "One plain text reply streamed in two content chunks; no tool calls. Proves the replay seam drives the real root loop end-to-end and leaves a clean durable event log.",
+  "recorded_at": "2026-09-17",
+  "mode": "replay"
+}

@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "project",
+    "command",
+    "source",
+    "resources",
+    "limits",
+    "outputs",
+    "provider_options"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "uri"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "uri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpu",
+        "memory_gib",
+        "gpu_count"
+      ],
+      "properties": {
+        "cpu": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_gib": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "gpu_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_seconds",
+        "gpu_seconds",
+        "result_bytes"
+      ],
+      "properties": {
+        "runtime_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gpu_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "result_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+      }
+    },
+    "provider_options": {
+      "type": "object"
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_attempts",
+        "restart_safe",
+        "allowed_reason"
+      ],
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "restart_safe": {
+          "const": true
+        },
+        "allowed_reason": {
+          "const": "scheduler_preemption"
+        }
+      }
+    }
+  }
+}

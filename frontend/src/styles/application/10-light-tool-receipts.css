@@ -1,0 +1,80 @@
+/* Light: approval UI */
+[data-theme="light"] .ptool-pending-wrap{border-color:rgba(180,120,0,0.3);background:rgba(180,120,0,0.03)}
+[data-theme="light"] .ptool-pending-wrap .ptool-line.ptool-pending{color:#a06e00;background:rgba(180,120,0,0.06);border-bottom-color:rgba(180,120,0,0.12)}
+[data-theme="light"] .ptool-badge-warn{color:#a06e00;background:rgba(180,120,0,0.1);border-color:rgba(180,120,0,0.25)}
+[data-theme="light"] .ptool-gate-note{border-color:rgba(180,120,0,0.3);background:rgba(180,120,0,0.05)}
+[data-theme="light"] .ptool-gate-note-icon,[data-theme="light"] .ptool-gate-note-title{color:#a06e00}
+[data-theme="light"] .ptool-gate-note-path{background:rgba(180,120,0,0.1)}
+[data-theme="light"] .ptool-diff-del{background:rgba(220,38,38,0.08);color:#b91c1c}
+[data-theme="light"] .ptool-diff-del .ptool-diff-sign{color:#dc2626}
+[data-theme="light"] .ptool-diff-add{background:rgba(22,163,74,0.08);color:#15803d}
+[data-theme="light"] .ptool-diff-add .ptool-diff-sign{color:#16a34a}
+[data-theme="light"] .ptool-diff-separator{background:rgba(0,0,0,0.08)}
+
+[data-theme="light"] .ptool-batch-done-edit{border-color:rgba(0,0,0,0.08)}
+[data-theme="light"] .ptool-batch-done-edit[open]{border-color:rgba(0,0,0,0.14)}
+[data-theme="light"] .ptool-batch-done-summary:hover{background:rgba(0,0,0,0.03)}
+[data-theme="light"] .ptool-op--replace{color:#b45309;background:rgba(180,83,9,0.08);border-color:rgba(180,83,9,0.25)}
+[data-theme="light"] .ptool-op--insert{color:#047857;background:rgba(4,120,87,0.08);border-color:rgba(4,120,87,0.25)}
+[data-theme="light"] .bdiff-block{border-top-color:rgba(0,0,0,0.08);background:#f8f9fa}
+[data-theme="light"] .bdiff-del{background:#ffebe9;color:#5c2020}
+[data-theme="light"] .bdiff-del .bdiff-sign{color:#cf222e}
+[data-theme="light"] .bdiff-add{background:#e6ffec;color:#1a4228}
+[data-theme="light"] .bdiff-add .bdiff-sign{color:#1a7f37}
+[data-theme="light"] .bdiff-ctx{background:transparent;color:#444d56}
+[data-theme="light"] .bdiff-sep{background:rgba(0,0,0,0.06)}
+[data-theme="light"] .ptool-batch-done-summary .ptool-batch-path{color:#2563eb}
+[data-theme="light"] .ptool-write-meta{color:var(--text-tertiary);border-top-color:rgba(0,0,0,0.06)}
+[data-theme="light"] .ptool-approval-btns{border-top-color:rgba(180,120,0,0.12);background:rgba(0,0,0,0.02)}
+[data-theme="light"] .ptool-approve-btn{background:rgba(22,163,74,0.1);color:#15803d;border-color:rgba(22,163,74,0.3)}
+[data-theme="light"] .ptool-approve-btn:hover{background:rgba(22,163,74,0.2);color:#166534;border-color:rgba(22,163,74,0.5)}
+[data-theme="light"] .ptool-reject-btn{background:rgba(220,38,38,0.08);color:#dc2626;border-color:rgba(220,38,38,0.2)}
+[data-theme="light"] .ptool-reject-btn:hover{background:rgba(220,38,38,0.16);color:#b91c1c;border-color:rgba(220,38,38,0.4)}
+
+/* Light: code exec */
+[data-theme="light"] .code-exec-block{background:none;border:none;border-radius:0}
+[data-theme="light"] .code-exec-header{background:none;border-bottom:none}
+[data-theme="light"] .code-exec-label{color:var(--text-secondary)}
+[data-theme="light"] .code-exec-cmd{background:var(--bg-tertiary)}
+[data-theme="light"] .code-exec-cmd code{color:#1a1a18}
+[data-theme="light"] .code-exec-output{background:var(--bg-secondary);border-top-color:var(--border)}
+[data-theme="light"] .code-exec-output code{color:#5a5850}
+
+/* Light: run_command terminal block — flat content inside .ptool-turn (no nested card) */
+[data-theme="light"] .ptool-cmd-block{background:none;border:none;border-radius:0}
+[data-theme="light"] .ptool-cmd-header{background:none;border-bottom:none}
+[data-theme="light"] .ptool-cmd-icon{color:#8a7540}
+[data-theme="light"] .ptool-cmd-label{color:#6b6255}
+[data-theme="light"] .ptool-cmd-ok .ptool-cmd-status{color:#1f7a5c;background:rgba(31,122,92,0.08)}
+[data-theme="light"] .ptool-cmd-err .ptool-cmd-status{color:#b91c1c;background:rgba(185,28,28,0.07)}
+[data-theme="light"] .ptool-cmd-timeout .ptool-cmd-status{color:#a06e00;background:rgba(160,110,0,0.08)}
+[data-theme="light"] .ptool-cmd-notrun .ptool-cmd-status{color:#a06e00;background:rgba(160,110,0,0.08)}
+[data-theme="light"] .ptool-cmd-reason{color:#7a5e1e;background:rgba(160,110,0,0.05);border-top-color:rgba(160,110,0,0.12)}
+[data-theme="light"] .ptool-cmd-running .ptool-cmd-header{color:#4068b8}
+[data-theme="light"] .ptool-cmd-running .ptool-cmd-icon{color:#4068b8}
+[data-theme="light"] .ptool-cmd-running .ptool-cmd-label{color:#4068b8}
+[data-theme="light"] .ptool-cmd-stdin .ptool-cmd-header{color:#0284c7}
+[data-theme="light"] .ptool-cmd-stdin .ptool-cmd-icon{color:#0284c7}
+[data-theme="light"] .ptool-cmd-stdin .ptool-cmd-label{color:#0284c7}
+[data-theme="light"] .stdin-pulse{background:#0284c7}
+[data-theme="light"] .stdin-prompt-output{background:rgba(0,0,0,0.03);color:#64748b;border-top-color:rgba(0,0,0,0.05)}
+[data-theme="light"] .stdin-prompt-output code{color:#64748b}
+[data-theme="light"] .stdin-input-area{background:rgba(0,0,0,0.02);border-top-color:rgba(0,0,0,0.06)}
+[data-theme="light"] .stdin-caret{color:#0284c7}
+[data-theme="light"] .stdin-input{background:rgba(255,255,255,0.8);border-color:rgba(2,132,199,0.25);color:#1e293b}
+[data-theme="light"] .stdin-input:focus{border-color:rgba(2,132,199,0.5);box-shadow:0 0 0 2px rgba(2,132,199,0.1)}
+[data-theme="light"] .stdin-submit-btn{background:rgba(2,132,199,0.1);color:#0284c7}
+[data-theme="light"] .stdin-submit-btn:hover{background:rgba(2,132,199,0.2)}
+[data-theme="light"] .stdin-eof-btn{border-color:rgba(100,116,139,0.25);color:#64748b;background:rgba(100,116,139,0.05)}
+[data-theme="light"] .stdin-eof-btn:hover{background:rgba(185,28,28,0.08);border-color:rgba(185,28,28,0.25);color:#b91c1c}
+[data-theme="light"] .ptool-cmd-desc{color:#6b6255;background:transparent;border-bottom:none}
+[data-theme="light"] .ptool-cmd-desc-inline{color:#6b6255}
+[data-theme="light"] .ptool-cmd-desc::before{background:rgba(138,117,64,0.5)}
+[data-theme="light"] .ptool-cmd-code{background:rgba(0,0,0,0.035)}
+[data-theme="light"] .ptool-cmd-code code{color:#2a2820}
+[data-theme="light"] .ptool-cmd-output-wrap{border-top-color:rgba(0,0,0,0.06)}
+[data-theme="light"] .ptool-cmd-toggle{color:#8a7540}
+[data-theme="light"] .ptool-cmd-toggle:hover{color:#6b5a2e}
+[data-theme="light"] .ptool-cmd-output{background:rgba(0,0,0,0.025);border-top-color:rgba(0,0,0,0.05)}
+[data-theme="light"] .ptool-cmd-output code{color:#4a4840}
+

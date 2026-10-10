@@ -1,0 +1,15 @@
+{
+  "contract": "tofu.automation-runtime/v1",
+  "capacityResource": "TOFU_AGENT_WORKERS",
+  "processCapability": "task_workers",
+  "controlScope": "automations:work",
+  "workerLeaseMilliseconds": 60000,
+  "heartbeatIntervalMilliseconds": 20000,
+  "idlePollMilliseconds": 250,
+  "failureBackoffMilliseconds": 1000,
+  "actionWaitMilliseconds": 1000,
+  "extensionKey": "tofu_automation_workers",
+  "threadNamePrefix": "tofu-automation",
+  "queueReceipts": "no-idle-claim-receipts",
+  "shutdown": "revoke-dispatch-await-effects-then-defer-owned-claim"
+}

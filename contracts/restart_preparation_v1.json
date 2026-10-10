@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "restart_preparation_v1.json",
+  "title": "Restart preparation projection on a lifecycle approval record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "phase",
+    "elapsedSeconds",
+    "updatedAt"
+  ],
+  "properties": {
+    "phase": {
+      "type": "string",
+      "enum": [
+        "checking",
+        "waiting",
+        "downloading",
+        "cached",
+        "compiling",
+        "validating",
+        "publishing",
+        "frontend",
+        "prepared",
+        "failed"
+      ]
+    },
+    "elapsedSeconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "remainingSeconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "updatedAt": {
+      "type": "number"
+    }
+  }
+}

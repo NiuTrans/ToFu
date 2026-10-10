@@ -1,0 +1,209 @@
+{
+  "format": "tofu.pdf-size-order-evidence/v1",
+  "scope": "Size-priority PDF scheduler vs input-order single-document scheduling.\n\nSame frozen heterogeneous inputs, parser, canonical process/admission budget and\npaired process-tree accounting. Size is a hint; no product/default admission.\n",
+  "whole_system_verdict": "incomplete",
+  "candidate_verdict": "no_primary_latency_improvement",
+  "production_promoted": false,
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/pdf-size-order-full.json",
+  "raw_artifact_sha256": "2db481e33a8070eb0b0afbb6b2123072526fd4694da13ca722d520d34e33bbb8",
+  "sources": {
+    "benchmarks/pdf_batch/size_order.py": "a10a0df83214e9d97dbf39e06019780b28bf9996bb98338f71d9252dfc1d1d40",
+    "benchmarks/pdf_batch/size_order_measure.py": "9510b3069f6eee455283469963ab64ba03cd854126fab13b3e47ac1f5f5f77ea",
+    "benchmarks/pdf_batch/heterogeneous.py": "2890455e1563647dca9fe5012d0c46ff9b4debf65c0ba259728c33aecf2a1cff",
+    "benchmarks/pdf_batch/measure.py": "4e246f3b5200c4d8f9dc339e97b107d41336804edaf9bf0b82a6bb356f99a441",
+    "benchmarks/pdf_batch/experiment.py": "dcdd00b937fd69e1345c5400d9544fa8531bf2e56448fb6e58847cafd808f21c",
+    "lib/pdf_parser/core.py": "82d92ec1fb6895830e336d8e6b5a7fbad2a4bb8c1e193073bb2310e3b8762f54",
+    "lib/pdf_parser/policy.py": "a0d17e3ff9f9d1804094e3abb41359002a5583caede328ea3239ae142e52c62e",
+    "lib/pdf_parser/admission.py": "6041d8ebd01d39ffcdb222fb141aed404960ed6410d73063e2487d35985bb939"
+  },
+  "fixtures": [
+    {
+      "kind": "text_table",
+      "pages": 8,
+      "fixture_index": 0,
+      "sha256": "1b7d8be89879e2ba0262ecf80e37f3b07173d0583181f09ff59b84220d917b60",
+      "bytes": 28869
+    },
+    {
+      "kind": "short_text",
+      "pages": 1,
+      "fixture_index": 1,
+      "sha256": "ad26ff465d1a2ec9b775b77b3de18d44b5d159dd940e6d915b1167d34baabcaf",
+      "bytes": 945
+    },
+    {
+      "kind": "malformed",
+      "pages": null,
+      "sha256": "4386774c23f60e62da4761894823799b0b50a3f599f18e5d1cd513107c7123a3",
+      "bytes": 25
+    },
+    {
+      "kind": "text_table",
+      "pages": 4,
+      "fixture_index": 2,
+      "sha256": "d7ca4f86ffcf95a383cfcea6b7a83ebdac4f31c50fafd3c46c4b0ef5d9229c91",
+      "bytes": 14567
+    },
+    {
+      "kind": "short_text",
+      "pages": 1,
+      "fixture_index": 3,
+      "sha256": "67e13d6517fd3561256727650612c8d81d352581656faca133485e661ade73af",
+      "bytes": 945
+    },
+    {
+      "kind": "text_table",
+      "pages": 2,
+      "fixture_index": 4,
+      "sha256": "12bff8f32a73d962166943678e826da7dea72da8fbd16359626561fe3c5bfba7",
+      "bytes": 7501
+    },
+    {
+      "kind": "short_text",
+      "pages": 1,
+      "fixture_index": 5,
+      "sha256": "1671205b4239379f562d2fdf6113516ef400c9ef7618ffc7a216bd7a4e1f5152",
+      "bytes": 945
+    },
+    {
+      "kind": "text_table",
+      "pages": 6,
+      "fixture_index": 6,
+      "sha256": "e1163257ee716eef2cb85970fcb58151ba5c784daba173345a1b25865857a74d",
+      "bytes": 21720
+    },
+    {
+      "kind": "short_text",
+      "pages": 1,
+      "fixture_index": 7,
+      "sha256": "94b780ed9d2f29f10c6acd03da42290fdfcb7dd96bc419bdb8872d7bc07fb671",
+      "bytes": 945
+    }
+  ],
+  "runtime": {
+    "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+    "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+    "affinity": [
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      144,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      178
+    ]
+  },
+  "latency_observations": 600,
+  "independent_latency_memory_processes": 12,
+  "every_pair_output_trace_identical": true,
+  "cases": [
+    {
+      "pair": 0,
+      "candidate_reference_ratios": {
+        "p50_ms": 1.0027884594984435,
+        "p95_ms": 1.0031004021082468,
+        "p99_ms": 1.00316602731306,
+        "tree_cpu_ms_per_batch": 1.0074447460255913,
+        "sampled_peak_tree_rss_bytes": 0.9610589333772724
+      },
+      "reference_pid": 267756,
+      "candidate_pid": 278365,
+      "reference_memory_pid": 270751,
+      "candidate_memory_pid": 283440
+    },
+    {
+      "pair": 1,
+      "candidate_reference_ratios": {
+        "p50_ms": 1.002080329639517,
+        "p95_ms": 1.0052715346792411,
+        "p99_ms": 0.964875621383965,
+        "tree_cpu_ms_per_batch": 1.00119866986312,
+        "sampled_peak_tree_rss_bytes": 0.9623080161824739
+      },
+      "reference_pid": 311337,
+      "candidate_pid": 293112,
+      "reference_memory_pid": 323897,
+      "candidate_memory_pid": 298374
+    },
+    {
+      "pair": 2,
+      "candidate_reference_ratios": {
+        "p50_ms": 1.0022969490143427,
+        "p95_ms": 0.9970172407725622,
+        "p99_ms": 0.7863518154565365,
+        "tree_cpu_ms_per_batch": 0.9982198142414864,
+        "sampled_peak_tree_rss_bytes": 0.9650185798751579
+      },
+      "reference_pid": 337505,
+      "candidate_pid": 378637,
+      "reference_memory_pid": 351281,
+      "candidate_memory_pid": 394127
+    }
+  ],
+  "limitations": [
+    "no web/PDF mixed application scheduler or persistence",
+    "no application cancellation/crash recovery admission",
+    "cold diagnostic only; memory tree sampled every 5ms",
+    "CPU measured in a separate repeated interval",
+    "Concurrent frontend/repository measurements on this host; no isolated-host admission.",
+    "Process disappearance plus complete checkpoints verified; original tool terminal exit is not observed.",
+    "No full app, persisted progress/index, scaled workers or complete cold/recovery admission."
+  ],
+  "reason": "Byte-size ordering leaves P50 approximately0.2\u20130.3% slower and CPU near neutral. RSS decreases3.5\u20133.9%, but no>=10% primary latency gain is established; third-pair P99 improvement alone is not consistent primary evidence."
+}

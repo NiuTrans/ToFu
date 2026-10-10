@@ -1,0 +1,54 @@
+{
+  "brand": "kimi",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "kimi",
+  "category": "official",
+  "name": "Moonshot (Kimi)",
+  "base_url": "https://api.moonshot.ai/v1",
+  "offering_recipes": [
+    {
+      "model_id": "kimi-k3",
+      "capabilities": [
+        "text",
+        "vision",
+        "video",
+        "thinking",
+        "cheap"
+      ]
+    },
+    {
+      "model_id": "kimi-k2.7-code",
+      "capabilities": [
+        "text",
+        "vision",
+        "video",
+        "thinking",
+        "cheap"
+      ]
+    },
+    {
+      "model_id": "kimi-k2.7-code-highspeed",
+      "capabilities": [
+        "text",
+        "vision",
+        "video",
+        "thinking",
+        "cheap"
+      ]
+    },
+    {
+      "model_id": "kimi-k2.6",
+      "capabilities": [
+        "text",
+        "vision",
+        "video",
+        "thinking",
+        "cheap"
+      ]
+    }
+  ],
+  "catalog_source": {
+    "url": "https://platform.moonshot.ai/docs/intro",
+    "checked_at": "2026-09-08"
+  }
+}

@@ -1,0 +1,382 @@
+"""Unit tests for package boundaries and explicit owner imports.
+
+``tofu_search`` intentionally keeps its public façade. Browser, PDF and
+memory capabilities instead keep aggregation-free package roots so importing a
+namespace cannot eagerly probe optional capabilities or hide its real owner.
+These tests pin both sides of that contract and keep the concrete consumer
+imports plus Flask route registration executable.
+"""
+
+_AUDIT_SYNTHETIC_REPO_PATHS = {
+    'lib/browser.py', 'lib/browser_advanced.py', 'lib/pdf_parser.py',
+    'lib/search.py', 'lib/skills.py',
+}
+
+import pytest
+
+# ═══════════════════════════════════════════════════════════
+#  1. tofu_search (extracted standalone search/fetch library)
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestSearchFacade:
+    def test_package_import(self):
+        import tofu_search
+        import tofu_search.search
+        assert tofu_search.__name__ == 'tofu_search'
+        assert callable(getattr(tofu_search, 'perform_web_search', None)), (
+            'facade must export perform_web_search')
+
+    def test_public_api(self):
+        from tofu_search import perform_web_search
+        from tofu_search.search import format_search_for_tool_response
+        assert callable(perform_web_search)
+        assert callable(format_search_for_tool_response)
+
+    def test_optional_subs(self):
+        from tofu_search.search.browser_fallback import search_via_browser
+        from tofu_search.search.dedup import dedup_by_content
+        from tofu_search.search.rerank import rerank_by_bm25
+        assert callable(dedup_by_content)
+        assert callable(rerank_by_bm25)
+        assert callable(search_via_browser)
+
+    def test_engines(self):
+        from tofu_search.search.engines.bing import search_bing
+        from tofu_search.search.engines.brave import search_brave
+        from tofu_search.search.engines.ddg import search_ddg_api, search_ddg_html
+        from tofu_search.search.engines.marginalia import search_marginalia
+        from tofu_search.search.engines.searxng import search_searxng
+        assert callable(search_ddg_html)
+        assert callable(search_marginalia)
+
+    def test_deepen(self):
+        from tofu_search.search import deepen as deepen_mod  # noqa: F401
+        from tofu_search.search.deepen import deepen_results, is_deepen_enabled
+        assert callable(deepen_results)
+        assert callable(is_deepen_enabled)
+
+    def test_common(self):
+        from tofu_search.search._common import HEADERS, clean_text
+        assert isinstance(HEADERS, dict)
+        assert callable(clean_text)
+
+    def test_all_has_public_names(self):
+        import tofu_search
+        from tofu_search.search import format_search_for_tool_response, perform_web_search
+        assert 'perform_web_search' in tofu_search.__all__
+        assert callable(perform_web_search)
+        assert callable(format_search_for_tool_response)
+
+
+# ═══════════════════════════════════════════════════════════
+#  2. lib/browser/
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestBrowserNamespace:
+    def test_package_import(self):
+        import lib.browser
+        assert lib.browser.__name__ == 'lib.browser'
+        assert lib.browser.__all__ == ()
+
+    def test_queue_api(self):
+        from lib.browser.queue import (
+            get_connected_clients,
+            get_pending_commands,
+            is_extension_connected,
+            mark_poll,
+            resolve_batch,
+            resolve_command,
+            send_browser_command,
+            wait_for_commands,
+        )
+        assert callable(send_browser_command)
+        assert callable(is_extension_connected)
+
+    def test_dispatch(self):
+        from lib.browser.dispatch import BROWSER_HANDLERS, execute_browser_tool
+        assert callable(execute_browser_tool)
+        assert isinstance(BROWSER_HANDLERS, dict)
+        assert {
+            'browser_list_tabs', 'browser_read_page',
+            'browser_menu_click', 'browser_fill_form',
+            'browser_preview_page',
+        } <= BROWSER_HANDLERS.keys()
+        assert all(callable(handler) for handler in BROWSER_HANDLERS.values())
+
+    def test_display(self):
+        from lib.browser.display import browser_tool_display
+        assert callable(browser_tool_display)
+        r = browser_tool_display('browser_list_tabs', {})
+        assert isinstance(r, str) and 'tab' in r.lower()
+
+    def test_fetch(self):
+        from lib.browser.fetch import fetch_url_via_browser
+        assert callable(fetch_url_via_browser)
+
+    def test_advanced(self):
+        from lib.browser.advanced import (
+            ADVANCED_BROWSER_TOOL_NAMES,
+            ADVANCED_BROWSER_TOOLS,
+        )
+        assert isinstance(ADVANCED_BROWSER_TOOLS, list)
+        # v2 (pt_869e5648403e4745): hover_and_click + right_click_menu merged
+        # into browser_menu_click → shipped set is menu_click + fill_form.
+        assert len(ADVANCED_BROWSER_TOOLS) == 2
+        assert isinstance(ADVANCED_BROWSER_TOOL_NAMES, set)
+
+    def test_root_does_not_reaggregate_concrete_owners(self):
+        import lib.browser
+        for name in ['send_browser_command', 'execute_browser_tool',
+                     'browser_tool_display', 'fetch_url_via_browser',
+                     'BROWSER_HANDLERS', 'ADVANCED_BROWSER_TOOLS']:
+            assert not hasattr(lib.browser, name), f'{name} leaked onto package root'
+
+
+# ═══════════════════════════════════════════════════════════
+#  3. lib/pdf_parser/
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestPdfParserNamespace:
+    def test_package_import(self):
+        import lib.pdf_parser
+        assert lib.pdf_parser.__name__ == 'lib.pdf_parser'
+        assert lib.pdf_parser.__all__ == ()
+
+    def test_core(self):
+        from lib.pdf_parser.core import parse_pdf
+        from lib.pdf_parser.text import extract_pdf_text
+        assert callable(parse_pdf)
+        assert callable(extract_pdf_text)
+
+    def test_vlm(self):
+        from lib.pdf_parser.vlm import get_vlm_task, start_vlm_task, vlm_parse_pdf
+        assert callable(start_vlm_task)
+
+    def test_images(self):
+        from lib.pdf_parser.images import detect_and_clip_figures, render_pdf_pages
+        assert callable(render_pdf_pages)
+
+    def test_math(self):
+        from lib.pdf_parser.math import postprocess_math_blocks
+        assert callable(postprocess_math_blocks)
+
+    def test_common(self):
+        from lib.pdf_parser._common import HAS_PYMUPDF4LLM, MAX_PDF_BYTES
+        assert isinstance(MAX_PDF_BYTES, int)
+        assert isinstance(HAS_PYMUPDF4LLM, bool)
+
+    def test_root_does_not_reaggregate_concrete_owners(self):
+        import lib.pdf_parser
+        for name in ['parse_pdf', 'extract_pdf_text']:
+            assert not hasattr(lib.pdf_parser, name)
+
+
+# ═══════════════════════════════════════════════════════════
+#  4. lib/memory/
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestMemoryNamespace:
+    def test_package_import(self):
+        import lib.memory
+        assert lib.memory.__name__ == 'lib.memory'
+        assert lib.memory.__all__ == ()
+
+    def test_storage_crud(self):
+        from lib.memory.storage import (
+            create_memory,
+            delete_memory,
+            get_eligible_memories,
+            get_enabled_memories,
+            get_memory,
+            list_all_memories,
+            list_memories,
+            merge_memories,
+            toggle_memory,
+            update_memory,
+        )
+        assert callable(create_memory)
+        assert callable(list_all_memories)
+
+    def test_injection(self):
+        from lib.memory.injection import (
+            MEMORY_ACCUMULATION_INSTRUCTIONS,
+            build_memory_context,
+        )
+        assert callable(build_memory_context)
+        assert isinstance(MEMORY_ACCUMULATION_INSTRUCTIONS, str)
+        assert len(MEMORY_ACCUMULATION_INSTRUCTIONS) > 100
+
+    def test_tools(self):
+        from lib.memory.tools import ALL_MEMORY_TOOLS, MEMORY_TOOL_NAMES
+        assert isinstance(ALL_MEMORY_TOOLS, list)
+        assert len(ALL_MEMORY_TOOLS) == 5
+        assert 'create_memory' in MEMORY_TOOL_NAMES
+        assert 'merge_memories' in MEMORY_TOOL_NAMES
+        assert 'search_memories' in MEMORY_TOOL_NAMES
+
+    def test_constants(self):
+        from lib.memory.storage import (
+            GLOBAL_MEMORY_SUBDIR,
+            MIN_DESCRIPTION_LENGTH,
+            PROJECT_MEMORY_SUBDIR,
+        )
+        assert isinstance(GLOBAL_MEMORY_SUBDIR, str)
+        assert isinstance(MIN_DESCRIPTION_LENGTH, int)
+
+    def test_root_does_not_reaggregate_concrete_owners(self):
+        import lib.memory
+        for name in ['create_memory', 'update_memory', 'delete_memory', 'merge_memories',
+                     'search_memories', 'SEARCH_MEMORIES_TOOL',
+                     'ALL_MEMORY_TOOLS', 'MEMORY_TOOL_NAMES', 'build_memory_context',
+                     'MEMORY_ACCUMULATION_INSTRUCTIONS']:
+            assert not hasattr(lib.memory, name)
+
+
+# ═══════════════════════════════════════════════════════════
+#  5. Consumer import sites (cross-module)
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestConsumerImports:
+    """Verify that all real import sites across the codebase resolve correctly."""
+
+    def test_executor_search(self):
+        from tofu_search import perform_web_search
+        from tofu_search.search import format_search_for_tool_response
+        assert callable(perform_web_search)
+        assert callable(format_search_for_tool_response)
+
+    def test_executor_browser(self):
+        from lib.browser.dispatch import execute_browser_tool
+        assert callable(execute_browser_tool)
+
+    def test_model_config_browser(self):
+        from lib.browser.advanced import (
+            ADVANCED_BROWSER_TOOL_NAMES,
+            ADVANCED_BROWSER_TOOLS,
+        )
+        assert isinstance(ADVANCED_BROWSER_TOOLS, list)
+
+    def test_tool_display_browser(self):
+        from lib.browser.display import browser_tool_display
+        assert callable(browser_tool_display)
+
+    def test_routes_browser(self):
+        from lib.browser.queue import (
+            get_connected_clients,
+            get_pending_commands,
+            is_extension_connected,
+            mark_poll,
+            resolve_batch,
+            wait_for_commands,
+        )
+        assert callable(mark_poll)
+
+    def test_browser_fetch(self):
+        from lib.browser.fetch import fetch_url_via_browser
+        from lib.browser.queue import is_extension_connected
+        assert callable(fetch_url_via_browser)
+
+    def test_pdf_upload(self):
+        from lib.pdf_parser.core import parse_pdf
+        from lib.pdf_parser.vlm import get_vlm_task, start_vlm_task
+        assert callable(parse_pdf)
+
+    def test_pdf_fetch(self):
+        from lib.pdf_parser.text import extract_pdf_text
+        assert callable(extract_pdf_text)
+
+    def test_skills_executor(self):
+        from lib.memory.storage import (
+            create_memory,
+            delete_memory,
+            merge_memories,
+            update_memory,
+        )
+        assert callable(create_memory)
+
+    def test_skills_model_config(self):
+        from lib.memory.tools import ALL_MEMORY_TOOLS, MEMORY_TOOL_NAMES
+        assert isinstance(ALL_MEMORY_TOOLS, list)
+
+    def test_skills_injection(self):
+        from lib.memory.injection import build_memory_context
+        assert callable(build_memory_context)
+
+
+# ═══════════════════════════════════════════════════════════
+#  6. Flask route registration
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestFlaskRouteRegistration:
+    def test_all_critical_routes_registered(self):
+        # Use the real production app (Quart, built by server.py with its
+        # blueprints already registered and the PROVIDE_AUTOMATIC_OPTIONS
+        # shim applied) rather than hand-registering ALL_BLUEPRINTS onto a
+        # bare Flask app — several blueprints use Quart-only features
+        # (@websocket) and the bare-Flask path is missing config the
+        # registration reads.
+        import server  # noqa: F401
+        from server import app
+
+        rules = [r.rule for r in app.url_map.iter_rules()]
+
+        # Post /api/v1 migration these endpoints live under /api/v1/*.
+        critical = [
+            '/api/v4/conversations',
+            '/api/v4/conversations/search',
+            '/api/v4/translate',
+            '/api/v4/translate/start',
+            '/api/health',
+            '/api/v4/pricing',
+            '/',
+        ]
+
+        missing = [ep for ep in critical if ep not in rules]
+        assert not missing, f'Missing routes: {missing}'
+
+    def test_new_blueprints_in_all(self):
+        from routes import ALL_BLUEPRINTS
+        names = [bp.name for bp in ALL_BLUEPRINTS]
+        # Core domains migrated to api_v1_<name> blueprints.
+        assert 'api_v1_conversations' in names
+        assert 'api_v1_uploads' in names
+        assert 'api_v1_translate' in names
+        assert 'common' in names
+
+
+# ═══════════════════════════════════════════════════════════
+#  7. Stale file checks
+# ═══════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestNoStaleFiles:
+    def test_no_stale_monoliths(self):
+        import os
+        # lib/search + lib/fetch are gone: search/fetch were extracted into the
+        # standalone tofu_search package (consumed via lib/search_bridge.py).
+        # Neither the monolith files nor the old packages should remain — but a
+        # leftover dir containing ONLY a __pycache__ (stale .pyc, never shipped)
+        # doesn't count: the export strips __pycache__.
+        def _has_real_content(path):
+            if os.path.isfile(path):
+                return True
+            if os.path.isdir(path):
+                return any(name != '__pycache__' for name in os.listdir(path))
+            return False
+
+        for path in ['lib/search.py', 'lib/search', 'lib/fetch',
+                     'lib/browser.py', 'lib/browser_advanced.py',
+                     'lib/pdf_parser.py', 'lib/skills.py']:
+            assert not _has_real_content(path), f'Stale path still exists: {path}'
+
+    def test_packages_have_init(self):
+        import os
+        for pkg in ['lib/browser/__init__.py',
+                     'lib/pdf_parser/__init__.py', 'lib/memory/__init__.py']:
+            assert os.path.isfile(pkg), f'{pkg} not found'

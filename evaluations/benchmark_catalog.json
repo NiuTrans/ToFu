@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "benchmarks": [
+    {
+      "key": "swebench-verified",
+      "dataset": "swe-bench/swe-bench-verified@sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341",
+      "task_count": 500,
+      "dataset_source_revision": "sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341",
+      "default_attempts": 1,
+      "official_min_attempts": 1,
+      "source_url": "https://github.com/harbor-framework/harbor/tree/main/adapters/swebench",
+      "source_commit": "ea2fee78517f2e591bad69fcf1e6731f9c23ec99",
+      "task_digest_lock": "swebench/swebench_verified_task_digests.json",
+      "environment_defaults": {}
+    },
+    {
+      "key": "terminal-bench-2.1",
+      "dataset": "terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+      "task_count": 89,
+      "dataset_source_revision": "sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a",
+      "default_attempts": 5,
+      "official_min_attempts": 5,
+      "source_url": "https://github.com/harbor-framework/terminal-bench-2-1",
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task_digest_lock": "swebench/terminal_bench_21_task_digests.json",
+      "environment_defaults": {
+        "daytona": {"snapshot_template_name": "{name}-tb-2-1"}
+      }
+    }
+  ]
+}

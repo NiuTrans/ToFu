@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tofu-overleaf-mcp"
+version = "0.1.0"
+description = "Bounded immutable paper artifact export for Overleaf MCP"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+  "overleaf-mcp-plus[compile]==0.3.1",
+  "mcp>=2,<3",
+  "httpx>=0.28,<1",
+  "jsonschema>=4.18,<5",
+  "psutil>=5.9",
+]
+
+[project.scripts]
+tofu-overleaf-mcp = "tofu_overleaf_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["tofu_overleaf_mcp*"]
+
+[tool.setuptools.package-data]
+tofu_overleaf_mcp = ["paper_build.generated.json", "file_receipts.generated.json"]

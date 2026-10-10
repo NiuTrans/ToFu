@@ -1,0 +1,6 @@
+Vendored quickjs-wasi 3.6.2 WASM reactor (MIT), wrapping QuickJS-NG (MIT).
+engine.json records verified npm integrity, SHA-256, upstream and engine commits.
+The upstream build links the WASI SDK C runtime; included notices retain
+WASI libc, musl, cloudlibc and compiler-rt license terms. These runtime notice
+versions are recorded explicitly; npm does not publish its WASI SDK source lock.
+No upstream TypeScript wrapper, extension, Node runtime or WASI loader is shipped.

@@ -1,0 +1,89 @@
+name: 🐛 Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the sections below so we can reproduce and fix it.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug.
+      placeholder: What happened? What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to reproduce the issue.
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened instead?
+
+  - type: textarea
+    id: diagnostic-bundle
+    attributes:
+      label: Diagnostic Bundle
+      description: |
+        Paste the JSON from `GET /api/support-bundle` (or visit `http://localhost:5001/api/support-bundle` in your browser).
+        This helps us diagnose the issue with your exact environment and recent errors. **API keys are automatically redacted.**
+      render: json
+      placeholder: |
+        {
+          "system": {"python_version": "...", "platform": "..."},
+          "recent_errors": [...],
+          ...
+        }
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: Paste any relevant log excerpts from `logs/error.log` or `logs/app.log`. Use the request ID (rid:XXXX) to find related entries.
+      render: shell
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Docker
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python Version
+      placeholder: "3.12.0"
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser (if frontend issue)
+      placeholder: "Chrome 120, Firefox 121, Safari 17"
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Screenshots, config details, or anything else that might help.

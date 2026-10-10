@@ -1,0 +1,26 @@
+/* ★ Per-query grouping for batch web_search results — a subheader before
+ *   each query's result block so users can attribute results to the term
+ *   that produced them. */
+.search-query-group + .search-query-group { margin-top: 2px; }
+.search-query-group-header {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px var(--space-3) 5px;
+  background: rgba(234,179,8,0.06);
+  border-top: 1px solid rgba(234,179,8,0.12);
+  font-family: 'JetBrains Mono', monospace;
+}
+.search-query-group-icon { font-size: var(--font-size-xs); flex-shrink: 0; opacity: 0.8; }
+.search-query-group-q {
+  flex: 1; min-width: 0;
+  font-size: 11.5px; font-weight: 600; color: #f59e0b;
+  word-break: break-word; line-height: 1.35;
+}
+.search-query-group-count {
+  flex-shrink: 0;
+  font-size: 10px; font-weight: 600;
+  color: rgba(234,179,8,0.8); background: rgba(234,179,8,0.12);
+  padding: 1px 7px; border-radius: 8px;
+}
+[data-theme="light"] .search-query-group-header { background: rgba(64,104,184,0.05); border-top-color: rgba(64,104,184,0.12); }
+[data-theme="light"] .search-query-group-q { color: #2563eb; }
+[data-theme="light"] .search-query-group-count { color: #2563eb; background: rgba(64,104,184,0.1); }

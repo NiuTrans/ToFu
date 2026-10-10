@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.project-undo-postimage/v1",
+  "title": "Project undo post-image evidence",
+  "$defs": {
+    "root": {"type": "array", "items": {"type": "integer", "minimum": 0}, "minItems": 2, "maxItems": 2}
+  },
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "bytes", "digest", "root"],
+      "properties": {
+        "kind": {"const": "content"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "root": {"$ref": "#/$defs/root"}
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "root"],
+      "properties": {"kind": {"const": "absent"}, "root": {"$ref": "#/$defs/root"}}
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind"], "properties": {"kind": {"const": "unavailable"}}
+    }
+  ]
+}

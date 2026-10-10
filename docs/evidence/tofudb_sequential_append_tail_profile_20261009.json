@@ -1,0 +1,1001 @@
+{
+  "exact_acknowledgements": true,
+  "exact_final_response": true,
+  "sample_every": 1,
+  "selected": 2051,
+  "append_slow_rows": [
+    {
+      "sample": 1551,
+      "dispatch_ms": 4.46267,
+      "queue_ms": 0.004372,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 4.218036
+        },
+        {
+          "stage": "parallel_prepare",
+          "ms": 0.030599
+        },
+        {
+          "stage": "apply",
+          "ms": 0.027379
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.016955
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.013472
+        }
+      ]
+    },
+    {
+      "sample": 1292,
+      "dispatch_ms": 4.460098,
+      "queue_ms": 0.0046,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 4.213457
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.031799
+        },
+        {
+          "stage": "apply",
+          "ms": 0.029843
+        },
+        {
+          "stage": "wal_barrier_wait",
+          "ms": 0.012674
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.012112
+        }
+      ]
+    },
+    {
+      "sample": 871,
+      "dispatch_ms": 4.179928,
+      "queue_ms": 0.004665,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.164774
+        },
+        {
+          "stage": "history_stage",
+          "ms": 0.747482
+        },
+        {
+          "stage": "apply",
+          "ms": 0.06334
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.028261
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.012454
+        }
+      ]
+    },
+    {
+      "sample": 1992,
+      "dispatch_ms": 3.831361,
+      "queue_ms": 0.005572,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.165288
+        },
+        {
+          "stage": "parallel_commit",
+          "ms": 0.288582
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.082932
+        },
+        {
+          "stage": "wal_barrier_wait",
+          "ms": 0.065394
+        },
+        {
+          "stage": "apply",
+          "ms": 0.039471
+        }
+      ]
+    },
+    {
+      "sample": 1632,
+      "dispatch_ms": 3.775909,
+      "queue_ms": 0.004762,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.164784
+        },
+        {
+          "stage": "parallel_commit",
+          "ms": 0.292599
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.083045
+        },
+        {
+          "stage": "apply",
+          "ms": 0.026812
+        },
+        {
+          "stage": "load_node",
+          "ms": 0.025093
+        }
+      ]
+    },
+    {
+      "sample": 1370,
+      "dispatch_ms": 3.743694,
+      "queue_ms": 0.004175,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.159065
+        },
+        {
+          "stage": "parallel_commit",
+          "ms": 0.277335
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.085066
+        },
+        {
+          "stage": "apply",
+          "ms": 0.025286
+        },
+        {
+          "stage": "load_node",
+          "ms": 0.018775
+        }
+      ]
+    },
+    {
+      "sample": 1023,
+      "dispatch_ms": 3.724223,
+      "queue_ms": 0.004463,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.161311
+        },
+        {
+          "stage": "parallel_commit",
+          "ms": 0.271119
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.067728
+        },
+        {
+          "stage": "apply",
+          "ms": 0.027518
+        },
+        {
+          "stage": "wal_barrier_wait",
+          "ms": 0.021072
+        }
+      ]
+    },
+    {
+      "sample": 937,
+      "dispatch_ms": 3.710311,
+      "queue_ms": 0.005378,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.15906
+        },
+        {
+          "stage": "parallel_commit",
+          "ms": 0.285787
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.049617
+        },
+        {
+          "stage": "apply",
+          "ms": 0.028952
+        },
+        {
+          "stage": "wal_barrier_wait",
+          "ms": 0.01456
+        }
+      ]
+    },
+    {
+      "sample": 1712,
+      "dispatch_ms": 3.504366,
+      "queue_ms": 0.005147,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.165434
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.089557
+        },
+        {
+          "stage": "apply",
+          "ms": 0.078376
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.012342
+        },
+        {
+          "stage": "parallel_prepare",
+          "ms": 0.011919
+        }
+      ]
+    },
+    {
+      "sample": 599,
+      "dispatch_ms": 3.452723,
+      "queue_ms": 0.004697,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.161431
+        },
+        {
+          "stage": "apply",
+          "ms": 0.066595
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.049093
+        },
+        {
+          "stage": "overlay_point",
+          "ms": 0.013201
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.012831
+        }
+      ]
+    },
+    {
+      "sample": 685,
+      "dispatch_ms": 3.434715,
+      "queue_ms": 0.005028,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.164523
+        },
+        {
+          "stage": "apply",
+          "ms": 0.059187
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.047653
+        },
+        {
+          "stage": "parallel_prepare",
+          "ms": 0.013063
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.01212
+        }
+      ]
+    },
+    {
+      "sample": 1915,
+      "dispatch_ms": 3.428812,
+      "queue_ms": 0.007733,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.16475
+        },
+        {
+          "stage": "parallel_prepare",
+          "ms": 0.044843
+        },
+        {
+          "stage": "apply",
+          "ms": 0.03217
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.018386
+        },
+        {
+          "stage": "wal_barrier_wait",
+          "ms": 0.011323
+        }
+      ]
+    },
+    {
+      "sample": 1207,
+      "dispatch_ms": 3.419079,
+      "queue_ms": 0.005074,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.164377
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.046068
+        },
+        {
+          "stage": "apply",
+          "ms": 0.032146
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.013549
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.011714
+        }
+      ]
+    },
+    {
+      "sample": 457,
+      "dispatch_ms": 3.411571,
+      "queue_ms": 0.004883,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 3.16658
+        },
+        {
+          "stage": "apply",
+          "ms": 0.027271
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.026116
+        },
+        {
+          "stage": "parallel_prepare",
+          "ms": 0.014213
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.013824
+        }
+      ]
+    },
+    {
+      "sample": 274,
+      "dispatch_ms": 2.376267,
+      "queue_ms": 0.004409,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 2.111812
+        },
+        {
+          "stage": "apply",
+          "ms": 0.073655
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.0163
+        },
+        {
+          "stage": "parallel_prepare",
+          "ms": 0.016086
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.013122
+        }
+      ]
+    },
+    {
+      "sample": 362,
+      "dispatch_ms": 2.351904,
+      "queue_ms": 0.004782,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 2.110657
+        },
+        {
+          "stage": "apply",
+          "ms": 0.032369
+        },
+        {
+          "stage": "wal_barrier_wait",
+          "ms": 0.021885
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.018848
+        },
+        {
+          "stage": "overlay_point",
+          "ms": 0.011549
+        }
+      ]
+    },
+    {
+      "sample": 446,
+      "dispatch_ms": 2.349897,
+      "queue_ms": 0.004329,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 2.108251
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.03705
+        },
+        {
+          "stage": "apply",
+          "ms": 0.036507
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.013134
+        },
+        {
+          "stage": "overlay_point",
+          "ms": 0.011437
+        }
+      ]
+    },
+    {
+      "sample": 877,
+      "dispatch_ms": 1.608019,
+      "queue_ms": 0.005177,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.692697
+        },
+        {
+          "stage": "put_deferred",
+          "ms": 0.682603
+        },
+        {
+          "stage": "apply",
+          "ms": 0.03326
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.015122
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.014146
+        }
+      ]
+    },
+    {
+      "sample": 467,
+      "dispatch_ms": 1.307047,
+      "queue_ms": 0.005472,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.767132
+        },
+        {
+          "stage": "apply",
+          "ms": 0.381537
+        },
+        {
+          "stage": "parallel_prepare",
+          "ms": 0.019548
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.011464
+        },
+        {
+          "stage": "wal",
+          "ms": 0.010461
+        }
+      ]
+    },
+    {
+      "sample": 358,
+      "dispatch_ms": 1.294585,
+      "queue_ms": 0.005322,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 1.055684
+        },
+        {
+          "stage": "apply",
+          "ms": 0.034681
+        },
+        {
+          "stage": "wal_barrier_wait",
+          "ms": 0.022038
+        },
+        {
+          "stage": "entity_page_decode",
+          "ms": 0.020178
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.011752
+        }
+      ]
+    },
+    {
+      "sample": 273,
+      "dispatch_ms": 1.277507,
+      "queue_ms": 0.004156,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 1.054547
+        },
+        {
+          "stage": "apply",
+          "ms": 0.03698
+        },
+        {
+          "stage": "parallel_prepare",
+          "ms": 0.018102
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.011895
+        },
+        {
+          "stage": "overlay_point",
+          "ms": 0.011887
+        }
+      ]
+    },
+    {
+      "sample": 1699,
+      "dispatch_ms": 1.251183,
+      "queue_ms": 0.004843,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "mutex_wait",
+          "ms": 1.055652
+        },
+        {
+          "stage": "apply",
+          "ms": 0.039621
+        },
+        {
+          "stage": "parallel_prepare",
+          "ms": 0.013168
+        },
+        {
+          "stage": "overlay_point",
+          "ms": 0.011455
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.011145
+        }
+      ]
+    },
+    {
+      "sample": 470,
+      "dispatch_ms": 1.156915,
+      "queue_ms": 0.004476,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.938714
+        },
+        {
+          "stage": "apply",
+          "ms": 0.037379
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.018289
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.0136
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.011405
+        }
+      ]
+    },
+    {
+      "sample": 476,
+      "dispatch_ms": 1.093844,
+      "queue_ms": 0.004353,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "put_deferred",
+          "ms": 0.803987
+        },
+        {
+          "stage": "history_stage",
+          "ms": 0.07939
+        },
+        {
+          "stage": "apply",
+          "ms": 0.028069
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.012938
+        },
+        {
+          "stage": "vfs_metadata",
+          "ms": 0.01181
+        }
+      ]
+    },
+    {
+      "sample": 468,
+      "dispatch_ms": 0.960586,
+      "queue_ms": 0.010722,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.741439
+        },
+        {
+          "stage": "apply",
+          "ms": 0.028161
+        },
+        {
+          "stage": "vfs_write",
+          "ms": 0.014795
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.014231
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.013708
+        }
+      ]
+    },
+    {
+      "sample": 876,
+      "dispatch_ms": 0.939731,
+      "queue_ms": 0.005634,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.738165
+        },
+        {
+          "stage": "apply",
+          "ms": 0.02535
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.013706
+        },
+        {
+          "stage": "ta_indexes",
+          "ms": 0.012958
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.012016
+        }
+      ]
+    },
+    {
+      "sample": 874,
+      "dispatch_ms": 0.915381,
+      "queue_ms": 0.005458,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.710942
+        },
+        {
+          "stage": "apply",
+          "ms": 0.025495
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.013875
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.013079
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.012384
+        }
+      ]
+    },
+    {
+      "sample": 469,
+      "dispatch_ms": 0.814633,
+      "queue_ms": 0.005479,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.618302
+        },
+        {
+          "stage": "apply",
+          "ms": 0.024267
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.013435
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.012071
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.011546
+        }
+      ]
+    },
+    {
+      "sample": 472,
+      "dispatch_ms": 0.755586,
+      "queue_ms": 0.00494,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.56568
+        },
+        {
+          "stage": "apply",
+          "ms": 0.024033
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.012746
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.011544
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.011094
+        }
+      ]
+    },
+    {
+      "sample": 875,
+      "dispatch_ms": 0.666484,
+      "queue_ms": 0.005015,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.468315
+        },
+        {
+          "stage": "apply",
+          "ms": 0.028158
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.013166
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.011902
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.011381
+        }
+      ]
+    },
+    {
+      "sample": 873,
+      "dispatch_ms": 0.666421,
+      "queue_ms": 0.004593,
+      "outcome": "ok",
+      "top_exclusive_stages": [
+        {
+          "stage": "history_stage",
+          "ms": 0.460617
+        },
+        {
+          "stage": "apply",
+          "ms": 0.029207
+        },
+        {
+          "stage": "semantic_transaction_compile",
+          "ms": 0.013173
+        },
+        {
+          "stage": "ta_header",
+          "ms": 0.012079
+        },
+        {
+          "stage": "ta_document",
+          "ms": 0.011167
+        }
+      ]
+    }
+  ],
+  "pressure_attempts": 0,
+  "limits": [
+    "Profiled window not default-off performance",
+    "Slowest32mixedoperations retained, not full append-tail distribution",
+    "Exclusive stage durations include scheduling, not CPU",
+    "Bounded samples omit many requests"
+  ],
+  "authority_holds": {
+    "archiveAcceptance": {
+      "acceptedMessages": 1920,
+      "acceptedPages": 48,
+      "fixedCounterBytes": 16,
+      "scope": "process-wide accepted background commits while request profiling is enabled; not durable or per-owner coverage"
+    },
+    "contract": "tofudb.authority-holds/v1",
+    "enabled": true,
+    "fixedCounterBytes": 408,
+    "phases": [
+      {
+        "calls": 250,
+        "maximumNanos": 1121,
+        "phase": "rotation.prepare",
+        "totalNanos": 48334
+      },
+      {
+        "calls": 0,
+        "maximumNanos": 0,
+        "phase": "rotation.install",
+        "totalNanos": 0
+      },
+      {
+        "calls": 72,
+        "maximumNanos": 33487,
+        "phase": "pack.prepare",
+        "totalNanos": 169812
+      },
+      {
+        "calls": 7,
+        "maximumNanos": 22086,
+        "phase": "pack.install",
+        "totalNanos": 53879
+      },
+      {
+        "calls": 21,
+        "maximumNanos": 15736,
+        "phase": "overlay.capture",
+        "totalNanos": 57769
+      },
+      {
+        "calls": 27,
+        "maximumNanos": 3279092,
+        "phase": "overlay.publish",
+        "totalNanos": 53444007
+      },
+      {
+        "calls": 7,
+        "maximumNanos": 25053877,
+        "phase": "maintenance.round",
+        "totalNanos": 25061996
+      },
+      {
+        "calls": 0,
+        "maximumNanos": 0,
+        "phase": "history.install",
+        "totalNanos": 0
+      },
+      {
+        "calls": 7,
+        "maximumNanos": 1744979,
+        "phase": "search.prepare",
+        "totalNanos": 3706277
+      },
+      {
+        "calls": 50,
+        "maximumNanos": 2366998,
+        "phase": "search.acknowledge",
+        "totalNanos": 19635015
+      },
+      {
+        "calls": 7,
+        "maximumNanos": 378927,
+        "phase": "search.activation",
+        "totalNanos": 1045981
+      },
+      {
+        "calls": 7,
+        "maximumNanos": 1210062,
+        "phase": "search.backfill",
+        "totalNanos": 1664391
+      },
+      {
+        "calls": 7,
+        "maximumNanos": 139298,
+        "phase": "search.dirty-list",
+        "totalNanos": 458941
+      },
+      {
+        "calls": 75,
+        "maximumNanos": 19476,
+        "phase": "archive.capture",
+        "totalNanos": 102867
+      },
+      {
+        "calls": 48,
+        "maximumNanos": 240615,
+        "phase": "archive.publish",
+        "totalNanos": 1368678
+      },
+      {
+        "calls": 0,
+        "maximumNanos": 0,
+        "phase": "rotation.partial",
+        "totalNanos": 0
+      },
+      {
+        "calls": 0,
+        "maximumNanos": 0,
+        "phase": "rotation.handover",
+        "totalNanos": 0
+      }
+    ],
+    "scope": "process lifetime; completed instrumented background holds; wall time, not CPU; counters may advance during snapshot; phases are not additive"
+  },
+  "source": "55180dba6fbc4a94171e3f271a38f59cd8ca605195b9138a2565cf3ba4af4be2",
+  "decision": "Slow append diagnostic samples mostly authority mutex wait; identify owner hold phases before changing durability or scheduling. Hold maxima not paired causal evidence."
+}

@@ -1,0 +1,75 @@
+/* ═══════════════════════════════════════════
+   ★ Project Modal — Two-Pane Workbench (Option A)
+   Left rail = selected folders + recent · Right = docked browser.
+   ═══════════════════════════════════════════ */
+.project-modal.pm-workbench {
+  max-width: 920px; width: 920px;
+  height: 82vh;
+  height: min(720px, calc(var(--vh100, 100vh) * 0.82));
+  max-height: 720px;
+  padding: 0; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+
+/* ── Header band ── */
+.pm-header {
+  flex-shrink: 0;
+  display: flex; align-items: flex-start; gap: var(--space-3);
+  padding: 18px var(--space-6) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
+}
+.pm-header-text { flex: 1; min-width: 0; }
+
+/* Mobile segmented tabs — hidden on desktop, shown in the mobile media query */
+.pm-mobile-tabs { display: none; }
+.pm-workbench h3 {
+  margin: 0; font-size: 17px; letter-spacing: -0.01em;
+}
+.pm-header-icon { color: var(--accent); flex-shrink: 0; }
+.pm-workbench .pm-subtitle { margin: 5px 0 0; max-width: 64ch; }
+.pm-close {
+  flex-shrink: 0;
+  width: 30px; height: 30px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid transparent;
+  border-radius: 50%; color: var(--text-tertiary);
+  cursor: pointer; transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.pm-close:hover { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border); }
+
+/* ── Two-pane body — flexes to fill, panes scroll internally ── */
+.pm-body {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 1.35fr minmax(280px, 0.85fr);
+  gap: 18px; padding: 18px var(--space-6);
+  align-items: stretch;
+}
+.pm-rail {
+  display: flex; flex-direction: column; gap: 14px;
+  min-width: 0; min-height: 0;
+}
+.pm-rail-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px var(--space-4);
+  display: flex; flex-direction: column; min-height: 0;
+}
+/* Workspace card takes ~half, Recent card takes the rest — both scroll inside */
+.pm-rail-workspace { flex: 0 0 auto; max-height: 48%; }
+.pm-rail .recent-paths { flex: 1 1 auto; }
+.pm-rail-card .pm-section-label {
+  display: flex; align-items: center; gap: var(--space-2);
+  font-size: var(--font-size-xs); font-weight: 700; letter-spacing: 0.07em;
+  text-transform: uppercase; color: var(--text-tertiary);
+  margin-bottom: var(--space-3); flex-shrink: 0;
+}
+.pm-count {
+  font-size: 10px; font-weight: 700;
+  min-width: 18px; height: 18px; line-height: 18px; text-align: center;
+  border-radius: 9px; padding: 0 5px;
+  background: var(--accent-subtle); color: var(--accent);
+}
+.pm-count:empty { display: none; }
+

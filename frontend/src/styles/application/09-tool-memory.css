@@ -1,0 +1,104 @@
+/* Memory body rendered as Markdown inside the expand block — give it
+   breathing room and a subtle surface so it reads like a content card,
+   not a raw diff row. */
+.ptool-batch-done-single.md-content {
+  padding: var(--space-2) var(--space-3);
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  font-size: var(--font-size-md);
+}
+.ptool-batch-done-single.md-content > :first-child { margin-top: 0; }
+.ptool-batch-done-single.md-content > :last-child { margin-bottom: 0; }
+
+/* ── Memory preview — create / update / merge_memories ──
+   A collapsible card with a left accent stripe. The summary row reuses the
+   standard .ptool-line layout; expanding reveals the memory name, metadata
+   chips, description lead-in, and the Markdown body. Themes via --accent. */
+.ptool-memory-block {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ptool-memory-block > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.12s ease;
+}
+.ptool-memory-block > summary::-webkit-details-marker { display: none; }
+.ptool-memory-block > summary::marker { display: none; content: ""; }
+.ptool-memory-block > summary:hover {
+  background: var(--accent-subtle);
+}
+.ptool-memory-block > summary .ptool-text::after {
+  content: " ▸";
+  font-size: 10px;
+  opacity: 0.5;
+}
+.ptool-memory-block[open] > summary .ptool-text::after {
+  content: " ▾";
+}
+.ptool-memory-body {
+  margin: var(--space-1) 0 6px 11px;
+  padding: var(--space-3) 14px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-subtle);
+  border-radius: 0 8px 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.ptool-memory-name {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--text-primary);
+  line-height: 1.35;
+  word-break: break-word;
+}
+.ptool-memory-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ptool-memory-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 var(--space-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+}
+.ptool-memory-chip-scope {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  text-transform: capitalize;
+}
+.ptool-memory-chip-id {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 500;
+}
+.ptool-memory-chip-tag {
+  color: var(--accent);
+}
+.ptool-memory-desc {
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  color: var(--text-secondary);
+  font-style: italic;
+  word-break: break-word;
+}
+.ptool-memory-content {
+  font-size: var(--font-size-md);
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.ptool-memory-content > :first-child { margin-top: 0; }
+.ptool-memory-content > :last-child { margin-bottom: 0; }
+.ptool-memory-empty {
+  font-size: var(--font-size-sm);
+  color: var(--text-tertiary);
+  font-style: italic;
+}

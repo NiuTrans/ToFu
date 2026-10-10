@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Tofu Relay — Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #1a1f2c;
+    --panel-2: #232a3a;
+    --border: #2a3142;
+    --text: #e6e8eb;
+    --text-dim: #9aa3af;
+    --accent: #5cb38a;
+    --accent-2: #7ab8e8;
+    --warn: #e0a800;
+    --danger: #e25;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                              Roboto, "Helvetica Neue", Arial, sans-serif;
+                font-size: 14px; line-height: 1.5; }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px; display: flex; align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header .nav { display: flex; gap: 18px; }
+  header .nav a { color: var(--text-dim); }
+  main { max-width: 1080px; margin: 24px auto; padding: 0 24px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px; margin-bottom: 16px;
+  }
+  .card h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+  .settings-section-title { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
+  .settings-desc, .card .desc { color: var(--text-dim); font-size: 13px; margin: 0 0 12px; }
+
+  .nav-tabs { display: flex; gap: 4px; padding-bottom: 12px;
+               border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .nav-tabs button {
+    background: transparent; color: var(--text-dim); border: 0;
+    padding: 8px 14px; border-radius: 6px 6px 0 0; cursor: pointer;
+    font-size: 13px;
+  }
+  .nav-tabs button.active { background: var(--panel); color: var(--text); }
+  .pane { display: none; }
+  .pane.active { display: block; }
+
+  /* ── relay-admin.js class vocabulary (mirrors styles.css brutalist
+       rules, retoned for the dark dashboard shell) ── */
+  .settings-row { display: flex; align-items: flex-end; }
+  .settings-input {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 10px; font-size: 13px; font-family: inherit; height: 34px;
+  }
+  .settings-input:focus { outline: none; border-color: var(--accent); }
+  .settings-table { width: 100%; border-collapse: collapse; font-size: 13px;
+                    margin-top: 4px; }
+  .settings-table th, .settings-table td {
+    padding: 8px 6px; text-align: left; border-bottom: 1px solid var(--border); }
+  .settings-table th { color: var(--text-dim); font-weight: 500; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.05em; }
+  .settings-table tbody tr:hover td { background: var(--panel-2); }
+
+  .btn {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border);
+    padding: 7px 12px; border-radius: 6px; cursor: pointer;
+    font-size: 13px; font-weight: 500;
+  }
+  .btn:hover { filter: brightness(1.15); }
+  .btn-primary { background: var(--accent); color: #061712; border: 0; }
+  .btn-secondary { background: var(--panel-2); color: var(--text); }
+  .btn-sm { padding: 4px 9px; font-size: 12px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         font-size: 12px; }
+
+  .admin-gate { max-width: 520px; margin: 64px auto; text-align: center;
+                color: var(--text-dim); }
+  .admin-gate h2 { color: var(--text); }
+</style>
+<script>
+(function () {
+  'use strict';
+  var ready = false;
+  var firstFailure = null;
+  var retryKey = 'tofu:vite-preload-reload';
+  function report(error, asset, response) {
+    var value = {
+      time: new Date().toISOString(), page: location.href, asset: asset || '',
+      error: error && (error.stack || error.message || String(error)) || 'startup timeout',
+      userAgent: navigator.userAgent
+    };
+    if (response) {
+      value.httpStatus = response.status;
+      value.contentType = response.headers.get('content-type') || '';
+    }
+    return value;
+  }
+  function showFailure(error, asset, response) {
+    if (ready || document.getElementById('tofu-boot-failure')) return;
+    var diagnostics = report(error, asset, response);
+    var root = document.createElement('main');
+    root.id = 'tofu-boot-failure';
+    root.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#17151b;color:#f8f5ed;padding:clamp(24px,6vw,72px);font:15px/1.55 system-ui,sans-serif;overflow:auto';
+    var title = document.createElement('h1');
+    title.textContent = 'Tofu 无法启动 / Tofu could not start';
+    var message = document.createElement('p');
+    message.textContent = '前端资源加载失败。请检查网络或代理后重试。 / A frontend asset failed to load. Check your network or proxy, then retry.';
+    var pre = document.createElement('pre');
+    pre.style.cssText = 'white-space:pre-wrap;background:#0d0c10;padding:16px;border-radius:10px;max-width:960px';
+    pre.textContent = JSON.stringify(diagnostics, null, 2);
+    var reload = document.createElement('button');
+    reload.textContent = '重新加载 / Reload';
+    reload.addEventListener('click', function () { location.reload(); });
+    var copy = document.createElement('button');
+    copy.textContent = '复制诊断 / Copy diagnostics';
+    copy.style.marginLeft = '10px';
+    copy.addEventListener('click', function () {
+      navigator.clipboard.writeText(pre.textContent || '').then(function () {
+        copy.textContent = '已复制 / Copied';
+      }).catch(function () {});
+    });
+    root.append(title, message, pre, reload, copy);
+    (document.body || document.documentElement).appendChild(root);
+  }
+  function diagnose(error, asset) {
+    if (!asset) { showFailure(error, asset); return; }
+    fetch(asset, { method: 'HEAD', cache: 'no-store' }).then(function (response) {
+      showFailure(error, asset, response);
+    }).catch(function () { showFailure(error, asset); });
+  }
+  window.addEventListener('vite:preloadError', function (event) {
+    event.preventDefault();
+    var error = event.payload || event.detail || new Error('dynamic import failed');
+    var asset = error && (error.url || error.src) || '';
+    if (!sessionStorage.getItem(retryKey)) {
+      sessionStorage.setItem(retryKey, '1');
+      location.reload();
+      return;
+    }
+    diagnose(error, asset);
+  });
+  window.addEventListener('error', function (event) {
+    if (!ready) firstFailure = firstFailure || event.error || new Error(event.message || 'module load failed');
+  }, true);
+  window.addEventListener('unhandledrejection', function (event) {
+    if (!ready) firstFailure = firstFailure || event.reason;
+  });
+  window.addEventListener('tofu:app-ready', function () {
+    ready = true;
+    sessionStorage.removeItem(retryKey);
+  }, { once: true });
+  window.addEventListener('tofu:app-failed', function (event) {
+    diagnose(event.detail && event.detail.error || firstFailure);
+  }, { once: true });
+  window.setTimeout(function () {
+    if (!ready) diagnose(firstFailure || new Error('startup timed out after 20 seconds'));
+  }, 20000);
+})();
+</script>
+</head>
+<body>
+<header>
+  <h1><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px" aria-hidden="true"><circle cx="7.5" cy="15.5" r="4.5"/><circle cx="16" cy="8" r="3.5"/><circle cx="18.5" cy="17" r="2"/></svg> Tofu Relay — Admin</h1>
+  <nav class="nav">
+    <a href="/dashboard" data-i18n="relayAdmin.page.navDashboard">客户 Dashboard</a>
+    <a href="/" data-i18n="relayAdmin.page.navBackToTofu">返回 Tofu</a>
+  </nav>
+</header>
+
+<!-- Shown when the caller is not a multi-user admin. The page HTML is
+     always served (no server-side gate); authorization is decided here
+     plus enforced by every /api/v1/* endpoint server-side. -->
+<main id="adminGate" class="admin-gate" style="display:none">
+  <h2 data-i18n="relayAdmin.page.gateTitle">需要管理员权限</h2>
+  <p data-i18n-html="relayAdmin.page.gateP1">本页仅在中转站模式（<code>auth_mode = multi-user</code>）下、且以管理员密钥登录时可用。</p>
+  <p data-i18n-html="relayAdmin.page.gateP2">个人 / 自用部署无需此页 —— 在 <a href="/">Tofu 设置</a> 中配置你自己的服务商即可。</p>
+</main>
+
+<main id="adminShell" style="display:none">
+  <div id="agentOnlyBanner" class="card" style="display:none;border-left:3px solid var(--accent-2);">
+    <span data-i18n-html="relayAdmin.page.bannerPrefix"><strong>受限中转模式</strong> —— </span><span id="agentOnlyBannerText"></span>
+    <span data-i18n-html="relayAdmin.page.bannerSuffix">可在 <code>data/config/relay.json</code> 中调整
+    <code>billing_enabled</code> / <code>model_relay_enabled</code>（二者互相独立）。</span>
+  </div>
+  <div class="nav-tabs">
+    <button data-pane="relayUsers"    data-tofu-action="relayAdminSwitch" data-i18n="relayAdmin.page.tabUsers">用户</button>
+    <button data-pane="relayPricing"  data-tofu-action="relayAdminSwitch" data-i18n="relayAdmin.page.tabPricing">定价</button>
+    <button data-pane="relayCodes"    data-tofu-action="relayAdminSwitch" data-i18n="relayAdmin.page.tabCodes">兑换码</button>
+    <button data-pane="relayPayments" data-tofu-action="relayAdminSwitch" data-i18n="relayAdmin.page.tabPayments">支付</button>
+  </div>
+
+  <!-- ═══ Users ═══ -->
+  <section id="pane-relayUsers" class="pane card">
+    <div class="settings-section-title" data-i18n="relayAdmin.page.usersTitle">用户管理</div>
+    <p class="settings-desc" data-i18n="relayAdmin.page.usersDesc">管理使用本中转站的用户、调整余额、暂停账号、查看历史。</p>
+    <div id="relayUsersBlock"><em style="opacity:0.5" data-i18n="relayAdmin.loadingPlaceholder">加载中…</em></div>
+  </section>
+
+  <!-- ═══ Pricing ═══ -->
+  <section id="pane-relayPricing" class="pane card">
+    <div class="settings-section-title" data-i18n="relayAdmin.page.pricingTitle">定价表</div>
+    <p class="settings-desc" data-i18n-html="relayAdmin.page.pricingDesc">每千 token 的微币(µ)单价。修改保存到 <code>data/config/pricing.json</code>，对未来请求立即生效。1 credit = 1,000,000 µ ≈ US $0.001。</p>
+    <div id="relayPricingBlock"><em style="opacity:0.5" data-i18n="relayAdmin.loadingPlaceholder">加载中…</em></div>
+  </section>
+
+  <!-- ═══ Redeem codes ═══ -->
+  <section id="pane-relayCodes" class="pane card">
+    <div class="settings-section-title" data-i18n="relayAdmin.page.codesTitle">兑换码</div>
+    <p class="settings-desc" data-i18n-html="relayAdmin.page.codesDesc">批量生成单次有效的兑换码,客户在 <code>/dashboard</code> 输入即可获得对应余额。</p>
+    <div id="relayCodesBlock"><em style="opacity:0.5" data-i18n="relayAdmin.loadingPlaceholder">加载中…</em></div>
+  </section>
+
+  <!-- ═══ Payments ═══ -->
+  <section id="pane-relayPayments" class="pane card">
+    <div class="settings-section-title" data-i18n="relayAdmin.page.paymentsTitle">支付记录</div>
+    <p class="settings-desc" data-i18n="relayAdmin.page.paymentsDesc">所有 Stripe / Alipay 完成的充值。Webhook 处理是幂等的——同一笔重复回调不会被重复入账。</p>
+    <div id="relayPaymentsBlock"><em style="opacity:0.5" data-i18n="relayAdmin.loadingPlaceholder">加载中…</em></div>
+  </section>
+</main>
+
+<!-- TOFU_ADMIN_ASSETS -->
+</body>
+</html>

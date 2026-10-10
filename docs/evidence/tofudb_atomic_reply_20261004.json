@@ -1,0 +1,3270 @@
+{
+  "format": "tofudb-atomic-reply-evidence.v1",
+  "date": "2026-10-04",
+  "decision": "rejected; prototype runtime not integrated or deployed",
+  "problem": "Fresh standard replies allocate two blocks per request; test whether owned atomic publication and direct kernel waiting produce full request improvements.",
+  "implementation": "One unique producer and non-Sync receiver; one Arc allocation, acquire/release flags, owned response slot, Linux compare-and-wait futex with portable parking fallback. Detached worker, queue bounds, normal semantic dispatch, caller-buffer isolation and watchdog remain.",
+  "alternatives_considered": [
+    "Keep the original standard unbounded reply channel (selected).",
+    "Previously rejected single-slot standard channel and Mutex/park-token mailbox.",
+    "Atomic one-shot owned cell (this rejected experiment)."
+  ],
+  "prototype_commit": "b0238adb187d7d210cd07a6bf926e54a1f126db9",
+  "baseline": {
+    "build_info": {
+      "format": "tofu-db-build.v1",
+      "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+      "version": "0.2.0"
+    },
+    "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+    "sha256": {
+      "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+      "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+    }
+  },
+  "candidate": {
+    "build_info": {
+      "format": "tofu-db-build.v1",
+      "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+      "version": "0.2.0"
+    },
+    "library_source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+    "sha256": {
+      "tofu-db": "a1c788d2a377090cb9c7f7a0e1c8c7165e6bb45d40822608152fa81331f16b60",
+      "libtofu_db.so": "256288de07b2d5d36d206dcff2ed680d013ccbaad90f5e322d2e986adedb9465"
+    }
+  },
+  "validation": {
+    "prototype_commit": "b0238adb187d7d210cd07a6bf926e54a1f126db9",
+    "candidate_source": {
+      "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+      "freeze": "/tmp/tofudb-atomic-reply-candidate-20261004"
+    },
+    "focused_reply": {
+      "passed": 11,
+      "log": "focused-reply-fixed.log"
+    },
+    "embedded_neighbors": {
+      "passed": 25,
+      "includes_focused_reply": true,
+      "log": "neighbor-embedded.log"
+    },
+    "loom": {
+      "passed": 4,
+      "log": "loom.log",
+      "source_receipt": {
+        "source_sha256": "9fa34ba51c0b52ae34a48f8ad48da468ff2a8d9a5805181568c5b5b57be0ebd9",
+        "model_sha256": "7c8f9423e39904590b19dc23c42771c4b353e733d3cba808428eca2e401ec481",
+        "transformations": [
+          "std synchronization to Loom",
+          "checked UnsafeCell access wrapper",
+          "portable parking only; infinite waits",
+          "four model tests replace ordinary test module"
+        ],
+        "scope": "Actual state transitions and endpoint/drop logic retained. Kernel syscalls, timed waits, allocator performance and full C11 behaviors are not certified by this model."
+      },
+      "limits": "Portable wait model replaces libc kernel waits and timed waits; no Miri, full C11 proof or syscall-error certification."
+    },
+    "allocation_observer": {
+      "replies_per_role": 20000,
+      "baseline_calls": 40000,
+      "candidate_calls": 20000,
+      "baseline_requested_bytes": 35200000,
+      "candidate_requested_bytes": 1440000,
+      "off_outcome_size": 32,
+      "scope": "Single-thread ready-before-wait System allocator diagnostic; not RSS or performance credit."
+    },
+    "known_limits": [
+      "Unexpected Linux futex-wait errors switch to portable parking but injected ENOSYS not tested.",
+      "FUTEX_WAKE return is ignored; asymmetric syscall filtering is not proven equivalent to standard channel behavior.",
+      "Timing shared host comparisons is finite and does not certify universal SQLite superiority."
+    ],
+    "files": {
+      "packages/tofu-db/src/embed_reply_cell.rs": "9fa34ba51c0b52ae34a48f8ad48da468ff2a8d9a5805181568c5b5b57be0ebd9",
+      "packages/tofu-db/src/embed_reply_cell_tests.rs": "43c5e531be2d9b3975f01cdbca37757f7cb9e27b4cae4da199725d7a4d79194b"
+    },
+    "live_readiness_receipt": "live-ready.json",
+    "docs_baseline_findings": 10
+  },
+  "exact_timed_readbacks": 5905600,
+  "comparison": {
+    "sdk": [
+      {
+        "case": "small",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 17.795259625,
+          "candidate": 17.564133484375,
+          "reduction_percent": 1.298807353730874,
+          "all_legs": {
+            "baseline": [
+              17.7089933125,
+              17.737174687499998,
+              17.833304000000002,
+              17.9015665
+            ],
+            "candidate": [
+              17.8395115625,
+              17.7209749375,
+              17.2125430625,
+              17.483504375
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 22.505,
+          "candidate": 22.25425,
+          "reduction_percent": 1.1141968451455233,
+          "all_legs": {
+            "baseline": [
+              22.298,
+              22.639,
+              22.288,
+              22.795
+            ],
+            "candidate": [
+              22.405,
+              22.747,
+              21.97,
+              21.895
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.329454148,
+          "candidate": 0.3223130585,
+          "reduction_percent": 2.1675518561083575,
+          "all_legs": {
+            "baseline": [
+              0.32724268,
+              0.327684341,
+              0.33097770000000004,
+              0.33191187099999997
+            ],
+            "candidate": [
+              0.328223323,
+              0.32446863800000003,
+              0.316099745,
+              0.32046052799999997
+            ]
+          }
+        }
+      },
+      {
+        "case": "small-8",
+        "callers": 8,
+        "mean_us": {
+          "baseline": 91.93588664583334,
+          "candidate": 91.41717335416666,
+          "reduction_percent": 0.5642119857558148,
+          "all_legs": {
+            "baseline": [
+              89.92975341666667,
+              92.77689174999999,
+              91.57159004166667,
+              93.465311375
+            ],
+            "candidate": [
+              89.903325,
+              92.4035665,
+              94.24941870833334,
+              89.11238320833334
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 553.55975,
+          "candidate": 592.95525,
+          "reduction_percent": -7.116756592219714,
+          "all_legs": {
+            "baseline": [
+              597.562,
+              531.253,
+              465.174,
+              620.25
+            ],
+            "candidate": [
+              665.661,
+              579.73,
+              582.726,
+              543.704
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.740698786,
+          "candidate": 0.7243671365000001,
+          "reduction_percent": 2.2048975654727196,
+          "all_legs": {
+            "baseline": [
+              0.7414535529999999,
+              0.744687308,
+              0.7384488090000001,
+              0.7382054739999999
+            ],
+            "candidate": [
+              0.7198551100000001,
+              0.7222763339999999,
+              0.743148022,
+              0.7121890800000001
+            ]
+          }
+        }
+      },
+      {
+        "case": "small-32",
+        "callers": 32,
+        "mean_us": {
+          "baseline": 417.528946203125,
+          "candidate": 398.8555740546875,
+          "reduction_percent": 4.472353909410869,
+          "all_legs": {
+            "baseline": [
+              426.7042535,
+              424.42642471875,
+              403.3927710625,
+              415.59233553125
+            ],
+            "candidate": [
+              387.96666165625004,
+              399.74869003125,
+              409.4991115,
+              398.20783303125
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 2711.4815,
+          "candidate": 2976.78375,
+          "reduction_percent": -9.78440199573555,
+          "all_legs": {
+            "baseline": [
+              2792.263,
+              2488.941,
+              2750.098,
+              2814.624
+            ],
+            "candidate": [
+              3078.714,
+              2772.58,
+              2902.635,
+              3153.206
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 1.08552530175,
+          "candidate": 1.04262107675,
+          "reduction_percent": 3.95239290423108,
+          "all_legs": {
+            "baseline": [
+              1.090647076,
+              1.0974473079999998,
+              1.061553468,
+              1.092453355
+            ],
+            "candidate": [
+              1.0310336059999998,
+              1.0340911220000002,
+              1.057534386,
+              1.047825193
+            ]
+          }
+        }
+      },
+      {
+        "case": "inline-7k",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 24.453842,
+          "candidate": 23.297456375,
+          "reduction_percent": 4.728850480836517,
+          "all_legs": {
+            "baseline": [
+              24.503888500000002,
+              24.2166295,
+              24.5605635,
+              24.534286499999997
+            ],
+            "candidate": [
+              23.266180499999997,
+              23.2375555,
+              23.396656500000002,
+              23.289433000000002
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 30.0095,
+          "candidate": 29.29475,
+          "reduction_percent": 2.3817457805028366,
+          "all_legs": {
+            "baseline": [
+              31.116,
+              29.758,
+              29.456,
+              29.708
+            ],
+            "candidate": [
+              28.556,
+              31.222,
+              29.012,
+              28.389
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.054634825000000165,
+          "candidate": 0.05195879450000007,
+          "reduction_percent": 4.898030697453657,
+          "all_legs": {
+            "baseline": [
+              0.05486597400000015,
+              0.053993285000000224,
+              0.054967589000000316,
+              0.05471245199999997
+            ],
+            "candidate": [
+              0.05187659,
+              0.0518758720000001,
+              0.05216736099999997,
+              0.05191535500000022
+            ]
+          }
+        }
+      },
+      {
+        "case": "inline-escaped",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 52.161734375,
+          "candidate": 52.8498185,
+          "reduction_percent": -1.3191358248428564,
+          "all_legs": {
+            "baseline": [
+              52.833168,
+              52.107831,
+              51.398749,
+              52.3071895
+            ],
+            "candidate": [
+              52.6967585,
+              52.52362,
+              53.685359,
+              52.493536500000005
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 60.4775,
+          "candidate": 60.204,
+          "reduction_percent": 0.45223430201314296,
+          "all_legs": {
+            "baseline": [
+              69.101,
+              57.726,
+              57.209,
+              57.874
+            ],
+            "candidate": [
+              58.501,
+              61.201,
+              62.798,
+              58.316
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.10990555499999999,
+          "candidate": 0.11095108749999982,
+          "reduction_percent": -0.9513008691870353,
+          "all_legs": {
+            "baseline": [
+              0.11139221499999996,
+              0.10969550999999989,
+              0.10846041400000006,
+              0.11007408100000005
+            ],
+            "candidate": [
+              0.11058271099999972,
+              0.11030616399999982,
+              0.11268245499999985,
+              0.1102330199999999
+            ]
+          }
+        }
+      },
+      {
+        "case": "inline-array",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 64.65734325,
+          "candidate": 70.04378675000001,
+          "reduction_percent": -8.330752903306173,
+          "all_legs": {
+            "baseline": [
+              64.155032,
+              66.31371,
+              64.093557,
+              64.067074
+            ],
+            "candidate": [
+              67.97944100000001,
+              67.220943,
+              78.00393,
+              66.970833
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 77.97625,
+          "candidate": 81.028,
+          "reduction_percent": -3.9136916689376737,
+          "all_legs": {
+            "baseline": [
+              75.939,
+              90.558,
+              75.027,
+              70.381
+            ],
+            "candidate": [
+              83.716,
+              76.81,
+              91.034,
+              72.552
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.06741508600000001,
+          "candidate": 0.07268720549999996,
+          "reduction_percent": -7.82038533630284,
+          "all_legs": {
+            "baseline": [
+              0.06706234800000033,
+              0.06894353899999972,
+              0.0668415010000003,
+              0.0668129559999997
+            ],
+            "candidate": [
+              0.07039229600000008,
+              0.06981397599999983,
+              0.08102141499999993,
+              0.06952113500000001
+            ]
+          }
+        }
+      },
+      {
+        "case": "numeric",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 18.929968875,
+          "candidate": 17.584807625,
+          "reduction_percent": 7.105987647853438,
+          "all_legs": {
+            "baseline": [
+              20.065635750000002,
+              18.473996,
+              18.90570675,
+              18.274537
+            ],
+            "candidate": [
+              17.91201525,
+              17.52634,
+              17.550466,
+              17.350409250000002
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 24.9985,
+          "candidate": 22.68425,
+          "reduction_percent": 9.257555453327205,
+          "all_legs": {
+            "baseline": [
+              26.499,
+              26.906,
+              24.076,
+              22.513
+            ],
+            "candidate": [
+              23.032,
+              23.321,
+              23.026,
+              21.358
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.08664920949999999,
+          "candidate": 0.08018502250000015,
+          "reduction_percent": 7.460180003142261,
+          "all_legs": {
+            "baseline": [
+              0.09195505400000004,
+              0.08465041000000006,
+              0.08644677499999975,
+              0.08354459900000011
+            ],
+            "candidate": [
+              0.08122606700000023,
+              0.08009994900000006,
+              0.08046390500000022,
+              0.07895016900000007
+            ]
+          }
+        }
+      },
+      {
+        "case": "blob-256k",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 187.6236375,
+          "candidate": 189.60633,
+          "reduction_percent": -1.0567391861806394,
+          "all_legs": {
+            "baseline": [
+              188.27329999999998,
+              187.011445,
+              188.362725,
+              186.84707999999998
+            ],
+            "candidate": [
+              189.56076000000002,
+              192.756135,
+              188.96281,
+              187.145615
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 195.9055,
+          "candidate": 205.589,
+          "reduction_percent": -4.942944429839902,
+          "all_legs": {
+            "baseline": [
+              195.248,
+              199.47,
+              195.585,
+              193.319
+            ],
+            "candidate": [
+              203.887,
+              218.283,
+              206.328,
+              193.858
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.03820260775000006,
+          "candidate": 0.03852345974999993,
+          "reduction_percent": -0.8398693672943598,
+          "all_legs": {
+            "baseline": [
+              0.0383373920000003,
+              0.0380444820000001,
+              0.03838619599999982,
+              0.038042361000000025
+            ],
+            "candidate": [
+              0.03859952799999977,
+              0.03914068000000004,
+              0.038272738999999945,
+              0.03808089199999998
+            ]
+          }
+        }
+      },
+      {
+        "case": "cold-unique-1000",
+        "callers": 1,
+        "mean_us": {
+          "baseline": 17.15472975,
+          "candidate": 16.87021625,
+          "reduction_percent": 1.6585134487472921,
+          "all_legs": {
+            "baseline": [
+              17.462628000000002,
+              16.982846000000002,
+              17.107101999999998,
+              17.066343
+            ],
+            "candidate": [
+              16.500477999999998,
+              18.193776000000003,
+              16.567353,
+              16.219258
+            ]
+          }
+        },
+        "p99_us": {
+          "baseline": 22.0435,
+          "candidate": 22.04325,
+          "reduction_percent": 0.0011341211695111652,
+          "all_legs": {
+            "baseline": [
+              22.717,
+              21.206,
+              21.867,
+              22.384
+            ],
+            "candidate": [
+              21.423,
+              24.533,
+              21.499,
+              20.718
+            ]
+          }
+        },
+        "process_cpu_seconds": {
+          "baseline": 0.020024531499999942,
+          "candidate": 0.019594802249999987,
+          "reduction_percent": 2.146014002874206,
+          "all_legs": {
+            "baseline": [
+              0.02040093200000026,
+              0.019823679999999566,
+              0.01990485299999989,
+              0.019968661000000054
+            ],
+            "candidate": [
+              0.019087964999999762,
+              0.021154604999999993,
+              0.019289305000000034,
+              0.01884733400000016
+            ]
+          }
+        }
+      }
+    ],
+    "native": [
+      {
+        "storage": "overlay",
+        "callers": 1,
+        "mean_ns": {
+          "baseline": 13355.2,
+          "candidate": 12965.65,
+          "reduction_percent": 2.9168413801365842,
+          "all_legs": {
+            "baseline": [
+              13186.0,
+              13097.7,
+              13577.6,
+              13559.5
+            ],
+            "candidate": [
+              13035.4,
+              13151.2,
+              13137.9,
+              12538.1
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 17258.75,
+          "candidate": 16837.0,
+          "reduction_percent": 2.4436879843557615,
+          "all_legs": {
+            "baseline": [
+              17104.0,
+              16628.0,
+              17593.0,
+              17710.0
+            ],
+            "candidate": [
+              16843.0,
+              17472.0,
+              17044.0,
+              15989.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 1.5943025,
+          "candidate": 1.525505,
+          "reduction_percent": 4.3152099429060575,
+          "all_legs": {
+            "baseline": [
+              1.56745,
+              1.57073,
+              1.62139,
+              1.61764
+            ],
+            "candidate": [
+              1.53118,
+              1.54201,
+              1.5479,
+              1.48093
+            ]
+          }
+        }
+      },
+      {
+        "storage": "overlay",
+        "callers": 8,
+        "mean_ns": {
+          "baseline": 19764.025,
+          "candidate": 19941.6,
+          "reduction_percent": -0.898475892435863,
+          "all_legs": {
+            "baseline": [
+              19091.0,
+              19966.2,
+              19991.2,
+              20007.7
+            ],
+            "candidate": [
+              19989.0,
+              19261.1,
+              19615.6,
+              20900.7
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 52766.25,
+          "candidate": 55669.75,
+          "reduction_percent": -5.5025702982493545,
+          "all_legs": {
+            "baseline": [
+              51396.0,
+              53510.0,
+              53063.0,
+              53096.0
+            ],
+            "candidate": [
+              53655.0,
+              52490.0,
+              53161.0,
+              63373.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 2.149175,
+          "candidate": 2.1338675,
+          "reduction_percent": 0.7122500494375762,
+          "all_legs": {
+            "baseline": [
+              2.07983,
+              2.16204,
+              2.17723,
+              2.1776
+            ],
+            "candidate": [
+              2.14272,
+              2.08534,
+              2.12485,
+              2.18256
+            ]
+          }
+        }
+      },
+      {
+        "storage": "overlay",
+        "callers": 32,
+        "mean_ns": {
+          "baseline": 79526.875,
+          "candidate": 80084.3,
+          "reduction_percent": -0.7009265735639718,
+          "all_legs": {
+            "baseline": [
+              79309.1,
+              80146.8,
+              77664.0,
+              80987.6
+            ],
+            "candidate": [
+              81229.1,
+              78484.6,
+              80303.3,
+              80320.2
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 426267.75,
+          "candidate": 427941.0,
+          "reduction_percent": -0.3925349736169344,
+          "all_legs": {
+            "baseline": [
+              428870.0,
+              425209.0,
+              417934.0,
+              433058.0
+            ],
+            "candidate": [
+              432975.0,
+              418117.0,
+              433597.0,
+              427075.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 2.84643,
+          "candidate": 2.824375,
+          "reduction_percent": 0.7748302259321304,
+          "all_legs": {
+            "baseline": [
+              2.83825,
+              2.84251,
+              2.80942,
+              2.89554
+            ],
+            "candidate": [
+              2.80972,
+              2.79527,
+              2.84193,
+              2.85058
+            ]
+          }
+        }
+      },
+      {
+        "storage": "materialized",
+        "callers": 1,
+        "mean_ns": {
+          "baseline": 13150.225,
+          "candidate": 13093.05,
+          "reduction_percent": 0.4347834352644239,
+          "all_legs": {
+            "baseline": [
+              13308.2,
+              12981.4,
+              13134.2,
+              13177.1
+            ],
+            "candidate": [
+              13258.6,
+              13005.8,
+              12983.1,
+              13124.7
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 16948.75,
+          "candidate": 16951.0,
+          "reduction_percent": -0.013275315288738107,
+          "all_legs": {
+            "baseline": [
+              17065.0,
+              16515.0,
+              16754.0,
+              17461.0
+            ],
+            "candidate": [
+              17226.0,
+              16966.0,
+              16815.0,
+              16797.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 1.567565,
+          "candidate": 1.542545,
+          "reduction_percent": 1.596106062587519,
+          "all_legs": {
+            "baseline": [
+              1.58396,
+              1.55375,
+              1.56571,
+              1.56684
+            ],
+            "candidate": [
+              1.56132,
+              1.52915,
+              1.53561,
+              1.5441
+            ]
+          }
+        }
+      },
+      {
+        "storage": "materialized",
+        "callers": 8,
+        "mean_ns": {
+          "baseline": 19817.6,
+          "candidate": 19127.3,
+          "reduction_percent": 3.483267398675921,
+          "all_legs": {
+            "baseline": [
+              19959.2,
+              19215.3,
+              19630.4,
+              20465.5
+            ],
+            "candidate": [
+              19647.2,
+              19142.4,
+              19482.1,
+              18237.5
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 52987.25,
+          "candidate": 50865.75,
+          "reduction_percent": 4.003793365385069,
+          "all_legs": {
+            "baseline": [
+              52710.0,
+              51803.0,
+              52152.0,
+              55284.0
+            ],
+            "candidate": [
+              53313.0,
+              50313.0,
+              53106.0,
+              46731.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 2.142475,
+          "candidate": 2.0865675,
+          "reduction_percent": 2.609482024294332,
+          "all_legs": {
+            "baseline": [
+              2.16837,
+              2.07927,
+              2.12856,
+              2.1937
+            ],
+            "candidate": [
+              2.10868,
+              2.10522,
+              2.06716,
+              2.06521
+            ]
+          }
+        }
+      },
+      {
+        "storage": "materialized",
+        "callers": 32,
+        "mean_ns": {
+          "baseline": 81215.1,
+          "candidate": 79421.875,
+          "reduction_percent": 2.207994572437891,
+          "all_legs": {
+            "baseline": [
+              78542.0,
+              80266.5,
+              83302.6,
+              82749.3
+            ],
+            "candidate": [
+              81069.5,
+              79709.3,
+              82432.5,
+              74476.2
+            ]
+          }
+        },
+        "p99_ns": {
+          "baseline": 435512.75,
+          "candidate": 425608.25,
+          "reduction_percent": 2.274215852463562,
+          "all_legs": {
+            "baseline": [
+              412554.0,
+              435875.0,
+              448056.0,
+              445566.0
+            ],
+            "candidate": [
+              433026.0,
+              425622.0,
+              445203.0,
+              398582.0
+            ]
+          }
+        },
+        "cpu_seconds": {
+          "baseline": 2.8639925,
+          "candidate": 2.815765,
+          "reduction_percent": 1.6839254991065902,
+          "all_legs": {
+            "baseline": [
+              2.78242,
+              2.86176,
+              2.92122,
+              2.89057
+            ],
+            "candidate": [
+              2.81864,
+              2.83251,
+              2.81998,
+              2.79193
+            ]
+          }
+        }
+      }
+    ],
+    "exploratory_sdk_leg_excluded": null,
+    "scope": "Four matched baseline and four candidate legs each. Positive percentages mean reductions. Finite pinned TofuDB comparisons; no universal SQLite claim.",
+    "input_sha256": {
+      "sdk-manifest.json": "ee12532cdf1bc6bde46442df08213117d0b1944bacdf7c3b7b1879ac16217971",
+      "native-abba.json": "e691906063f7f0685390feb7f6c2e289c17cd751af956e8714e0cbd4212632c1"
+    }
+  },
+  "sdk_raw": [
+    {
+      "role": "baseline",
+      "index": 1,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+        "sha256": {
+          "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+          "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+        }
+      },
+      "identity": {
+        "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756"
+      },
+      "cases": [
+        {
+          "case": "small",
+          "callers": 1,
+          "exact_readbacks": 16000,
+          "latency": {
+            "mean_us": 17.7089933125,
+            "p99_us": 22.298
+          },
+          "process_cpu_seconds": 0.32724268,
+          "wall_seconds": 0.28587424755096436,
+          "ops_per_second": 55968.66502341241,
+          "memory_after_case": {
+            "VmHWM": "49080 kB",
+            "VmRSS": "49080 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-8",
+          "callers": 8,
+          "exact_readbacks": 24000,
+          "latency": {
+            "mean_us": 89.92975341666667,
+            "p99_us": 597.562
+          },
+          "process_cpu_seconds": 0.7414535529999999,
+          "wall_seconds": 0.3011966273188591,
+          "ops_per_second": 79682.16713991493,
+          "memory_after_case": {
+            "VmHWM": "52124 kB",
+            "VmRSS": "52116 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-32",
+          "callers": 32,
+          "exact_readbacks": 32000,
+          "latency": {
+            "mean_us": 426.7042535,
+            "p99_us": 2792.263
+          },
+          "process_cpu_seconds": 1.090647076,
+          "wall_seconds": 0.44205156713724136,
+          "ops_per_second": 72389.74449798779,
+          "memory_after_case": {
+            "VmHWM": "63392 kB",
+            "VmRSS": "63376 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-7k",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 24.503888500000002,
+            "p99_us": 31.116
+          },
+          "process_cpu_seconds": 0.05486597400000015,
+          "wall_seconds": 0.04950682818889618,
+          "ops_per_second": 40398.46770972448,
+          "memory_after_case": {
+            "VmHWM": "64352 kB",
+            "VmRSS": "64352 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-escaped",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 52.833168,
+            "p99_us": 69.101
+          },
+          "process_cpu_seconds": 0.11139221499999996,
+          "wall_seconds": 0.10600461065769196,
+          "ops_per_second": 18867.10387021147,
+          "memory_after_case": {
+            "VmHWM": "64356 kB",
+            "VmRSS": "64356 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-array",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 64.155032,
+            "p99_us": 75.939
+          },
+          "process_cpu_seconds": 0.06706234800000033,
+          "wall_seconds": 0.064353808760643,
+          "ops_per_second": 15539.095808911501,
+          "memory_after_case": {
+            "VmHWM": "64372 kB",
+            "VmRSS": "64372 kB",
+            "Threads": "131"
+          }
+        },
+        {
+          "case": "numeric",
+          "callers": 1,
+          "exact_readbacks": 4000,
+          "latency": {
+            "mean_us": 20.065635750000002,
+            "p99_us": 26.499
+          },
+          "process_cpu_seconds": 0.09195505400000004,
+          "wall_seconds": 0.08077138662338257,
+          "ops_per_second": 49522.48769296276,
+          "memory_after_case": {
+            "VmHWM": "64372 kB",
+            "VmRSS": "64372 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "blob-256k",
+          "callers": 1,
+          "exact_readbacks": 200,
+          "latency": {
+            "mean_us": 188.27329999999998,
+            "p99_us": 195.248
+          },
+          "process_cpu_seconds": 0.0383373920000003,
+          "wall_seconds": 0.0377194806933403,
+          "ops_per_second": 5302.299934243573,
+          "memory_after_case": {
+            "VmHWM": "68488 kB",
+            "VmRSS": "68488 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "cold-unique-1000",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 17.462628000000002,
+            "p99_us": 22.717
+          },
+          "process_cpu_seconds": 0.02040093200000026,
+          "wall_seconds": 0.017773739993572235,
+          "ops_per_second": 56262.778703955606,
+          "memory_after_case": {
+            "VmHWM": "70104 kB",
+            "VmRSS": "70104 kB",
+            "Threads": "130"
+          }
+        }
+      ],
+      "profile_enabled": false,
+      "scope": "Warm SDK reads on strict disposable FUSE authority; exact values and numeric types. Timed loop includes readback assertions."
+    },
+    {
+      "role": "candidate",
+      "index": 2,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+        "sha256": {
+          "tofu-db": "a1c788d2a377090cb9c7f7a0e1c8c7165e6bb45d40822608152fa81331f16b60",
+          "libtofu_db.so": "256288de07b2d5d36d206dcff2ed680d013ccbaad90f5e322d2e986adedb9465"
+        }
+      },
+      "identity": {
+        "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4"
+      },
+      "cases": [
+        {
+          "case": "small",
+          "callers": 1,
+          "exact_readbacks": 16000,
+          "latency": {
+            "mean_us": 17.8395115625,
+            "p99_us": 22.405
+          },
+          "process_cpu_seconds": 0.328223323,
+          "wall_seconds": 0.28809545189142227,
+          "ops_per_second": 55537.14886838997,
+          "memory_after_case": {
+            "VmHWM": "49184 kB",
+            "VmRSS": "49184 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-8",
+          "callers": 8,
+          "exact_readbacks": 24000,
+          "latency": {
+            "mean_us": 89.903325,
+            "p99_us": 665.661
+          },
+          "process_cpu_seconds": 0.7198551100000001,
+          "wall_seconds": 0.2903846427798271,
+          "ops_per_second": 82648.9988253169,
+          "memory_after_case": {
+            "VmHWM": "52068 kB",
+            "VmRSS": "52060 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-32",
+          "callers": 32,
+          "exact_readbacks": 32000,
+          "latency": {
+            "mean_us": 387.96666165625004,
+            "p99_us": 3078.714
+          },
+          "process_cpu_seconds": 1.0310336059999998,
+          "wall_seconds": 0.4128120243549347,
+          "ops_per_second": 77517.12186679544,
+          "memory_after_case": {
+            "VmHWM": "62764 kB",
+            "VmRSS": "62756 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-7k",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 23.266180499999997,
+            "p99_us": 28.556
+          },
+          "process_cpu_seconds": 0.05187659,
+          "wall_seconds": 0.04707898199558258,
+          "ops_per_second": 42481.80218059218,
+          "memory_after_case": {
+            "VmHWM": "62824 kB",
+            "VmRSS": "62824 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-escaped",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 52.6967585,
+            "p99_us": 58.501
+          },
+          "process_cpu_seconds": 0.11058271099999972,
+          "wall_seconds": 0.10571812093257904,
+          "ops_per_second": 18918.23258261926,
+          "memory_after_case": {
+            "VmHWM": "62844 kB",
+            "VmRSS": "62844 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-array",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 67.97944100000001,
+            "p99_us": 83.716
+          },
+          "process_cpu_seconds": 0.07039229600000008,
+          "wall_seconds": 0.06818545609712601,
+          "ops_per_second": 14665.884152414574,
+          "memory_after_case": {
+            "VmHWM": "62860 kB",
+            "VmRSS": "62860 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "numeric",
+          "callers": 1,
+          "exact_readbacks": 4000,
+          "latency": {
+            "mean_us": 17.91201525,
+            "p99_us": 23.032
+          },
+          "process_cpu_seconds": 0.08122606700000023,
+          "wall_seconds": 0.07215214520692825,
+          "ops_per_second": 55438.407112196415,
+          "memory_after_case": {
+            "VmHWM": "62860 kB",
+            "VmRSS": "62860 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "blob-256k",
+          "callers": 1,
+          "exact_readbacks": 200,
+          "latency": {
+            "mean_us": 189.56076000000002,
+            "p99_us": 203.887
+          },
+          "process_cpu_seconds": 0.03859952799999977,
+          "wall_seconds": 0.03796687722206116,
+          "ops_per_second": 5267.749539427155,
+          "memory_after_case": {
+            "VmHWM": "66256 kB",
+            "VmRSS": "66256 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "cold-unique-1000",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 16.500477999999998,
+            "p99_us": 21.423
+          },
+          "process_cpu_seconds": 0.019087964999999762,
+          "wall_seconds": 0.01682049036026001,
+          "ops_per_second": 59451.29889688555,
+          "memory_after_case": {
+            "VmHWM": "67048 kB",
+            "VmRSS": "67048 kB",
+            "Threads": "130"
+          }
+        }
+      ],
+      "profile_enabled": false,
+      "scope": "Warm SDK reads on strict disposable FUSE authority; exact values and numeric types. Timed loop includes readback assertions."
+    },
+    {
+      "role": "candidate",
+      "index": 3,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+        "sha256": {
+          "tofu-db": "a1c788d2a377090cb9c7f7a0e1c8c7165e6bb45d40822608152fa81331f16b60",
+          "libtofu_db.so": "256288de07b2d5d36d206dcff2ed680d013ccbaad90f5e322d2e986adedb9465"
+        }
+      },
+      "identity": {
+        "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4"
+      },
+      "cases": [
+        {
+          "case": "small",
+          "callers": 1,
+          "exact_readbacks": 16000,
+          "latency": {
+            "mean_us": 17.7209749375,
+            "p99_us": 22.747
+          },
+          "process_cpu_seconds": 0.32446863800000003,
+          "wall_seconds": 0.2861873283982277,
+          "ops_per_second": 55907.43688601094,
+          "memory_after_case": {
+            "VmHWM": "48980 kB",
+            "VmRSS": "48980 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-8",
+          "callers": 8,
+          "exact_readbacks": 24000,
+          "latency": {
+            "mean_us": 92.4035665,
+            "p99_us": 579.73
+          },
+          "process_cpu_seconds": 0.7222763339999999,
+          "wall_seconds": 0.29120345413684845,
+          "ops_per_second": 82416.60481376507,
+          "memory_after_case": {
+            "VmHWM": "51888 kB",
+            "VmRSS": "51880 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-32",
+          "callers": 32,
+          "exact_readbacks": 32000,
+          "latency": {
+            "mean_us": 399.74869003125,
+            "p99_us": 2772.58
+          },
+          "process_cpu_seconds": 1.0340911220000002,
+          "wall_seconds": 0.41783401370048523,
+          "ops_per_second": 76585.43572505437,
+          "memory_after_case": {
+            "VmHWM": "61704 kB",
+            "VmRSS": "61696 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-7k",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 23.2375555,
+            "p99_us": 31.222
+          },
+          "process_cpu_seconds": 0.0518758720000001,
+          "wall_seconds": 0.04696687310934067,
+          "ops_per_second": 42583.205301828886,
+          "memory_after_case": {
+            "VmHWM": "62668 kB",
+            "VmRSS": "62668 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-escaped",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 52.52362,
+            "p99_us": 61.201
+          },
+          "process_cpu_seconds": 0.11030616399999982,
+          "wall_seconds": 0.1053754910826683,
+          "ops_per_second": 18979.74547450485,
+          "memory_after_case": {
+            "VmHWM": "62688 kB",
+            "VmRSS": "62688 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-array",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 67.220943,
+            "p99_us": 76.81
+          },
+          "process_cpu_seconds": 0.06981397599999983,
+          "wall_seconds": 0.06740643084049225,
+          "ops_per_second": 14835.37976319141,
+          "memory_after_case": {
+            "VmHWM": "62704 kB",
+            "VmRSS": "62704 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "numeric",
+          "callers": 1,
+          "exact_readbacks": 4000,
+          "latency": {
+            "mean_us": 17.52634,
+            "p99_us": 23.321
+          },
+          "process_cpu_seconds": 0.08009994900000006,
+          "wall_seconds": 0.07059217244386673,
+          "ops_per_second": 56663.506186620165,
+          "memory_after_case": {
+            "VmHWM": "62704 kB",
+            "VmRSS": "62704 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "blob-256k",
+          "callers": 1,
+          "exact_readbacks": 200,
+          "latency": {
+            "mean_us": 192.756135,
+            "p99_us": 218.283
+          },
+          "process_cpu_seconds": 0.03914068000000004,
+          "wall_seconds": 0.03862970322370529,
+          "ops_per_second": 5177.363099110456,
+          "memory_after_case": {
+            "VmHWM": "67060 kB",
+            "VmRSS": "67060 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "cold-unique-1000",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 18.193776000000003,
+            "p99_us": 24.533
+          },
+          "process_cpu_seconds": 0.021154604999999993,
+          "wall_seconds": 0.01849997043609619,
+          "ops_per_second": 54054.14043521126,
+          "memory_after_case": {
+            "VmHWM": "68616 kB",
+            "VmRSS": "68616 kB",
+            "Threads": "130"
+          }
+        }
+      ],
+      "profile_enabled": false,
+      "scope": "Warm SDK reads on strict disposable FUSE authority; exact values and numeric types. Timed loop includes readback assertions."
+    },
+    {
+      "role": "baseline",
+      "index": 4,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+        "sha256": {
+          "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+          "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+        }
+      },
+      "identity": {
+        "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756"
+      },
+      "cases": [
+        {
+          "case": "small",
+          "callers": 1,
+          "exact_readbacks": 16000,
+          "latency": {
+            "mean_us": 17.737174687499998,
+            "p99_us": 22.639
+          },
+          "process_cpu_seconds": 0.327684341,
+          "wall_seconds": 0.2860608473420143,
+          "ops_per_second": 55932.1562131514,
+          "memory_after_case": {
+            "VmHWM": "49556 kB",
+            "VmRSS": "49556 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-8",
+          "callers": 8,
+          "exact_readbacks": 24000,
+          "latency": {
+            "mean_us": 92.77689174999999,
+            "p99_us": 531.253
+          },
+          "process_cpu_seconds": 0.744687308,
+          "wall_seconds": 0.2983376532793045,
+          "ops_per_second": 80445.76249827619,
+          "memory_after_case": {
+            "VmHWM": "52632 kB",
+            "VmRSS": "52624 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-32",
+          "callers": 32,
+          "exact_readbacks": 32000,
+          "latency": {
+            "mean_us": 424.42642471875,
+            "p99_us": 2488.941
+          },
+          "process_cpu_seconds": 1.0974473079999998,
+          "wall_seconds": 0.4406234472990036,
+          "ops_per_second": 72624.36939331795,
+          "memory_after_case": {
+            "VmHWM": "63884 kB",
+            "VmRSS": "63876 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-7k",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 24.2166295,
+            "p99_us": 29.758
+          },
+          "process_cpu_seconds": 0.053993285000000224,
+          "wall_seconds": 0.04891347885131836,
+          "ops_per_second": 40888.52494175221,
+          "memory_after_case": {
+            "VmHWM": "64868 kB",
+            "VmRSS": "64868 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-escaped",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 52.107831,
+            "p99_us": 57.726
+          },
+          "process_cpu_seconds": 0.10969550999999989,
+          "wall_seconds": 0.1045517548918724,
+          "ops_per_second": 19129.281972056837,
+          "memory_after_case": {
+            "VmHWM": "64884 kB",
+            "VmRSS": "64884 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-array",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 66.31371,
+            "p99_us": 90.558
+          },
+          "process_cpu_seconds": 0.06894353899999972,
+          "wall_seconds": 0.06651183217763901,
+          "ops_per_second": 15034.918859688181,
+          "memory_after_case": {
+            "VmHWM": "64884 kB",
+            "VmRSS": "64884 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "numeric",
+          "callers": 1,
+          "exact_readbacks": 4000,
+          "latency": {
+            "mean_us": 18.473996,
+            "p99_us": 26.906
+          },
+          "process_cpu_seconds": 0.08465041000000006,
+          "wall_seconds": 0.07440754771232605,
+          "ops_per_second": 53757.987233563625,
+          "memory_after_case": {
+            "VmHWM": "64884 kB",
+            "VmRSS": "64884 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "blob-256k",
+          "callers": 1,
+          "exact_readbacks": 200,
+          "latency": {
+            "mean_us": 187.011445,
+            "p99_us": 199.47
+          },
+          "process_cpu_seconds": 0.0380444820000001,
+          "wall_seconds": 0.03748147189617157,
+          "ops_per_second": 5335.969744038477,
+          "memory_after_case": {
+            "VmHWM": "68296 kB",
+            "VmRSS": "68296 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "cold-unique-1000",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 16.982846000000002,
+            "p99_us": 21.206
+          },
+          "process_cpu_seconds": 0.019823679999999566,
+          "wall_seconds": 0.017296507954597473,
+          "ops_per_second": 57815.13832878598,
+          "memory_after_case": {
+            "VmHWM": "69588 kB",
+            "VmRSS": "69588 kB",
+            "Threads": "130"
+          }
+        }
+      ],
+      "profile_enabled": false,
+      "scope": "Warm SDK reads on strict disposable FUSE authority; exact values and numeric types. Timed loop includes readback assertions."
+    },
+    {
+      "role": "candidate",
+      "index": 5,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+        "sha256": {
+          "tofu-db": "a1c788d2a377090cb9c7f7a0e1c8c7165e6bb45d40822608152fa81331f16b60",
+          "libtofu_db.so": "256288de07b2d5d36d206dcff2ed680d013ccbaad90f5e322d2e986adedb9465"
+        }
+      },
+      "identity": {
+        "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4"
+      },
+      "cases": [
+        {
+          "case": "small",
+          "callers": 1,
+          "exact_readbacks": 16000,
+          "latency": {
+            "mean_us": 17.2125430625,
+            "p99_us": 21.97
+          },
+          "process_cpu_seconds": 0.316099745,
+          "wall_seconds": 0.27763739973306656,
+          "ops_per_second": 57629.123509235935,
+          "memory_after_case": {
+            "VmHWM": "49628 kB",
+            "VmRSS": "49628 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-8",
+          "callers": 8,
+          "exact_readbacks": 24000,
+          "latency": {
+            "mean_us": 94.24941870833334,
+            "p99_us": 582.726
+          },
+          "process_cpu_seconds": 0.743148022,
+          "wall_seconds": 0.2964480221271515,
+          "ops_per_second": 80958.54317997777,
+          "memory_after_case": {
+            "VmHWM": "52508 kB",
+            "VmRSS": "52500 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-32",
+          "callers": 32,
+          "exact_readbacks": 32000,
+          "latency": {
+            "mean_us": 409.4991115,
+            "p99_us": 2902.635
+          },
+          "process_cpu_seconds": 1.057534386,
+          "wall_seconds": 0.42681581526994705,
+          "ops_per_second": 74973.79163366064,
+          "memory_after_case": {
+            "VmHWM": "61436 kB",
+            "VmRSS": "61428 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-7k",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 23.396656500000002,
+            "p99_us": 29.012
+          },
+          "process_cpu_seconds": 0.05216736099999997,
+          "wall_seconds": 0.047255806624889374,
+          "ops_per_second": 42322.8412092454,
+          "memory_after_case": {
+            "VmHWM": "62392 kB",
+            "VmRSS": "62392 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-escaped",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 53.685359,
+            "p99_us": 62.798
+          },
+          "process_cpu_seconds": 0.11268245499999985,
+          "wall_seconds": 0.1077316626906395,
+          "ops_per_second": 18564.64432135581,
+          "memory_after_case": {
+            "VmHWM": "62416 kB",
+            "VmRSS": "62416 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-array",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 78.00393,
+            "p99_us": 91.034
+          },
+          "process_cpu_seconds": 0.08102141499999993,
+          "wall_seconds": 0.07823102921247482,
+          "ops_per_second": 12782.651718463378,
+          "memory_after_case": {
+            "VmHWM": "62436 kB",
+            "VmRSS": "62436 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "numeric",
+          "callers": 1,
+          "exact_readbacks": 4000,
+          "latency": {
+            "mean_us": 17.550466,
+            "p99_us": 23.026
+          },
+          "process_cpu_seconds": 0.08046390500000022,
+          "wall_seconds": 0.07074611634016037,
+          "ops_per_second": 56540.20611912126,
+          "memory_after_case": {
+            "VmHWM": "62436 kB",
+            "VmRSS": "62436 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "blob-256k",
+          "callers": 1,
+          "exact_readbacks": 200,
+          "latency": {
+            "mean_us": 188.96281,
+            "p99_us": 206.328
+          },
+          "process_cpu_seconds": 0.038272738999999945,
+          "wall_seconds": 0.03784088045358658,
+          "ops_per_second": 5285.28928509759,
+          "memory_after_case": {
+            "VmHWM": "66732 kB",
+            "VmRSS": "66732 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "cold-unique-1000",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 16.567353,
+            "p99_us": 21.499
+          },
+          "process_cpu_seconds": 0.019289305000000034,
+          "wall_seconds": 0.016899310052394867,
+          "ops_per_second": 59174.0134301096,
+          "memory_after_case": {
+            "VmHWM": "67788 kB",
+            "VmRSS": "67788 kB",
+            "Threads": "130"
+          }
+        }
+      ],
+      "profile_enabled": false,
+      "scope": "Warm SDK reads on strict disposable FUSE authority; exact values and numeric types. Timed loop includes readback assertions."
+    },
+    {
+      "role": "baseline",
+      "index": 6,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+        "sha256": {
+          "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+          "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+        }
+      },
+      "identity": {
+        "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756"
+      },
+      "cases": [
+        {
+          "case": "small",
+          "callers": 1,
+          "exact_readbacks": 16000,
+          "latency": {
+            "mean_us": 17.833304000000002,
+            "p99_us": 22.288
+          },
+          "process_cpu_seconds": 0.33097770000000004,
+          "wall_seconds": 0.2877970039844513,
+          "ops_per_second": 55594.74135757308,
+          "memory_after_case": {
+            "VmHWM": "49172 kB",
+            "VmRSS": "49172 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-8",
+          "callers": 8,
+          "exact_readbacks": 24000,
+          "latency": {
+            "mean_us": 91.57159004166667,
+            "p99_us": 465.174
+          },
+          "process_cpu_seconds": 0.7384488090000001,
+          "wall_seconds": 0.29367896914482117,
+          "ops_per_second": 81721.88859790277,
+          "memory_after_case": {
+            "VmHWM": "52220 kB",
+            "VmRSS": "52212 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-32",
+          "callers": 32,
+          "exact_readbacks": 32000,
+          "latency": {
+            "mean_us": 403.3927710625,
+            "p99_us": 2750.098
+          },
+          "process_cpu_seconds": 1.061553468,
+          "wall_seconds": 0.42147018015384674,
+          "ops_per_second": 75924.70714848493,
+          "memory_after_case": {
+            "VmHWM": "63476 kB",
+            "VmRSS": "63468 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-7k",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 24.5605635,
+            "p99_us": 29.456
+          },
+          "process_cpu_seconds": 0.054967589000000316,
+          "wall_seconds": 0.049676522612571716,
+          "ops_per_second": 40260.46701372485,
+          "memory_after_case": {
+            "VmHWM": "64448 kB",
+            "VmRSS": "64448 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-escaped",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 51.398749,
+            "p99_us": 57.209
+          },
+          "process_cpu_seconds": 0.10846041400000006,
+          "wall_seconds": 0.10312291979789734,
+          "ops_per_second": 19394.330609719407,
+          "memory_after_case": {
+            "VmHWM": "64456 kB",
+            "VmRSS": "64456 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-array",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 64.093557,
+            "p99_us": 75.027
+          },
+          "process_cpu_seconds": 0.0668415010000003,
+          "wall_seconds": 0.06427302211523056,
+          "ops_per_second": 15558.627353902399,
+          "memory_after_case": {
+            "VmHWM": "64472 kB",
+            "VmRSS": "64472 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "numeric",
+          "callers": 1,
+          "exact_readbacks": 4000,
+          "latency": {
+            "mean_us": 18.90570675,
+            "p99_us": 24.076
+          },
+          "process_cpu_seconds": 0.08644677499999975,
+          "wall_seconds": 0.07610377669334412,
+          "ops_per_second": 52559.80943124249,
+          "memory_after_case": {
+            "VmHWM": "64472 kB",
+            "VmRSS": "64472 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "blob-256k",
+          "callers": 1,
+          "exact_readbacks": 200,
+          "latency": {
+            "mean_us": 188.362725,
+            "p99_us": 195.585
+          },
+          "process_cpu_seconds": 0.03838619599999982,
+          "wall_seconds": 0.037738583981990814,
+          "ops_per_second": 5299.61590756669,
+          "memory_after_case": {
+            "VmHWM": "67812 kB",
+            "VmRSS": "67812 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "cold-unique-1000",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 17.107101999999998,
+            "p99_us": 21.867
+          },
+          "process_cpu_seconds": 0.01990485299999989,
+          "wall_seconds": 0.017414003610610962,
+          "ops_per_second": 57425.04838982949,
+          "memory_after_case": {
+            "VmHWM": "69044 kB",
+            "VmRSS": "69044 kB",
+            "Threads": "130"
+          }
+        }
+      ],
+      "profile_enabled": false,
+      "scope": "Warm SDK reads on strict disposable FUSE authority; exact values and numeric types. Timed loop includes readback assertions."
+    },
+    {
+      "role": "baseline",
+      "index": 7,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+        "sha256": {
+          "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+          "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+        }
+      },
+      "identity": {
+        "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756"
+      },
+      "cases": [
+        {
+          "case": "small",
+          "callers": 1,
+          "exact_readbacks": 16000,
+          "latency": {
+            "mean_us": 17.9015665,
+            "p99_us": 22.795
+          },
+          "process_cpu_seconds": 0.33191187099999997,
+          "wall_seconds": 0.28865985572338104,
+          "ops_per_second": 55428.55954079251,
+          "memory_after_case": {
+            "VmHWM": "49136 kB",
+            "VmRSS": "49136 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-8",
+          "callers": 8,
+          "exact_readbacks": 24000,
+          "latency": {
+            "mean_us": 93.465311375,
+            "p99_us": 620.25
+          },
+          "process_cpu_seconds": 0.7382054739999999,
+          "wall_seconds": 0.2942051663994789,
+          "ops_per_second": 81575.72585728225,
+          "memory_after_case": {
+            "VmHWM": "52204 kB",
+            "VmRSS": "52196 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-32",
+          "callers": 32,
+          "exact_readbacks": 32000,
+          "latency": {
+            "mean_us": 415.59233553125,
+            "p99_us": 2814.624
+          },
+          "process_cpu_seconds": 1.092453355,
+          "wall_seconds": 0.43431030958890915,
+          "ops_per_second": 73680.03773681815,
+          "memory_after_case": {
+            "VmHWM": "63476 kB",
+            "VmRSS": "63460 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-7k",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 24.534286499999997,
+            "p99_us": 29.708
+          },
+          "process_cpu_seconds": 0.05471245199999997,
+          "wall_seconds": 0.04957594722509384,
+          "ops_per_second": 40342.143961853755,
+          "memory_after_case": {
+            "VmHWM": "64436 kB",
+            "VmRSS": "64436 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-escaped",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 52.3071895,
+            "p99_us": 57.874
+          },
+          "process_cpu_seconds": 0.11007408100000005,
+          "wall_seconds": 0.10495364665985107,
+          "ops_per_second": 19056.03153058501,
+          "memory_after_case": {
+            "VmHWM": "64456 kB",
+            "VmRSS": "64456 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-array",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 64.067074,
+            "p99_us": 70.381
+          },
+          "process_cpu_seconds": 0.0668129559999997,
+          "wall_seconds": 0.06425361335277557,
+          "ops_per_second": 15563.327069399791,
+          "memory_after_case": {
+            "VmHWM": "64460 kB",
+            "VmRSS": "64460 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "numeric",
+          "callers": 1,
+          "exact_readbacks": 4000,
+          "latency": {
+            "mean_us": 18.274537,
+            "p99_us": 22.513
+          },
+          "process_cpu_seconds": 0.08354459900000011,
+          "wall_seconds": 0.07360333949327469,
+          "ops_per_second": 54345.360245040094,
+          "memory_after_case": {
+            "VmHWM": "64460 kB",
+            "VmRSS": "64460 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "blob-256k",
+          "callers": 1,
+          "exact_readbacks": 200,
+          "latency": {
+            "mean_us": 186.84707999999998,
+            "p99_us": 193.319
+          },
+          "process_cpu_seconds": 0.038042361000000025,
+          "wall_seconds": 0.0374283492565155,
+          "ops_per_second": 5343.54316909085,
+          "memory_after_case": {
+            "VmHWM": "67868 kB",
+            "VmRSS": "67868 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "cold-unique-1000",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 17.066343,
+            "p99_us": 22.384
+          },
+          "process_cpu_seconds": 0.019968661000000054,
+          "wall_seconds": 0.017377115786075592,
+          "ops_per_second": 57546.94923545985,
+          "memory_after_case": {
+            "VmHWM": "68660 kB",
+            "VmRSS": "68660 kB",
+            "Threads": "130"
+          }
+        }
+      ],
+      "profile_enabled": false,
+      "scope": "Warm SDK reads on strict disposable FUSE authority; exact values and numeric types. Timed loop includes readback assertions."
+    },
+    {
+      "role": "candidate",
+      "index": 8,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+        "sha256": {
+          "tofu-db": "a1c788d2a377090cb9c7f7a0e1c8c7165e6bb45d40822608152fa81331f16b60",
+          "libtofu_db.so": "256288de07b2d5d36d206dcff2ed680d013ccbaad90f5e322d2e986adedb9465"
+        }
+      },
+      "identity": {
+        "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4"
+      },
+      "cases": [
+        {
+          "case": "small",
+          "callers": 1,
+          "exact_readbacks": 16000,
+          "latency": {
+            "mean_us": 17.483504375,
+            "p99_us": 21.895
+          },
+          "process_cpu_seconds": 0.32046052799999997,
+          "wall_seconds": 0.2820044830441475,
+          "ops_per_second": 56736.68669123681,
+          "memory_after_case": {
+            "VmHWM": "49172 kB",
+            "VmRSS": "49172 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-8",
+          "callers": 8,
+          "exact_readbacks": 24000,
+          "latency": {
+            "mean_us": 89.11238320833334,
+            "p99_us": 543.704
+          },
+          "process_cpu_seconds": 0.7121890800000001,
+          "wall_seconds": 0.28521446138620377,
+          "ops_per_second": 84147.2058722227,
+          "memory_after_case": {
+            "VmHWM": "52036 kB",
+            "VmRSS": "52028 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "small-32",
+          "callers": 32,
+          "exact_readbacks": 32000,
+          "latency": {
+            "mean_us": 398.20783303125,
+            "p99_us": 3153.206
+          },
+          "process_cpu_seconds": 1.047825193,
+          "wall_seconds": 0.4193563014268875,
+          "ops_per_second": 76307.42614601924,
+          "memory_after_case": {
+            "VmHWM": "62756 kB",
+            "VmRSS": "62748 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-7k",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 23.289433000000002,
+            "p99_us": 28.389
+          },
+          "process_cpu_seconds": 0.05191535500000022,
+          "wall_seconds": 0.047046683728694916,
+          "ops_per_second": 42510.96658658113,
+          "memory_after_case": {
+            "VmHWM": "63712 kB",
+            "VmRSS": "63712 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-escaped",
+          "callers": 1,
+          "exact_readbacks": 2000,
+          "latency": {
+            "mean_us": 52.493536500000005,
+            "p99_us": 58.316
+          },
+          "process_cpu_seconds": 0.1102330199999999,
+          "wall_seconds": 0.10532397776842117,
+          "ops_per_second": 18989.028352095254,
+          "memory_after_case": {
+            "VmHWM": "63728 kB",
+            "VmRSS": "63728 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "inline-array",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 66.970833,
+            "p99_us": 72.552
+          },
+          "process_cpu_seconds": 0.06952113500000001,
+          "wall_seconds": 0.0671415627002716,
+          "ops_per_second": 14893.904159843969,
+          "memory_after_case": {
+            "VmHWM": "63748 kB",
+            "VmRSS": "63748 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "numeric",
+          "callers": 1,
+          "exact_readbacks": 4000,
+          "latency": {
+            "mean_us": 17.350409250000002,
+            "p99_us": 21.358
+          },
+          "process_cpu_seconds": 0.07895016900000007,
+          "wall_seconds": 0.06993977725505829,
+          "ops_per_second": 57192.06089851689,
+          "memory_after_case": {
+            "VmHWM": "63748 kB",
+            "VmRSS": "63748 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "blob-256k",
+          "callers": 1,
+          "exact_readbacks": 200,
+          "latency": {
+            "mean_us": 187.145615,
+            "p99_us": 193.858
+          },
+          "process_cpu_seconds": 0.03808089199999998,
+          "wall_seconds": 0.03756459057331085,
+          "ops_per_second": 5324.162913733376,
+          "memory_after_case": {
+            "VmHWM": "66944 kB",
+            "VmRSS": "66208 kB",
+            "Threads": "130"
+          }
+        },
+        {
+          "case": "cold-unique-1000",
+          "callers": 1,
+          "exact_readbacks": 1000,
+          "latency": {
+            "mean_us": 16.219258,
+            "p99_us": 20.718
+          },
+          "process_cpu_seconds": 0.01884733400000016,
+          "wall_seconds": 0.016526401042938232,
+          "ops_per_second": 60509.2419941789,
+          "memory_after_case": {
+            "VmHWM": "67264 kB",
+            "VmRSS": "67264 kB",
+            "Threads": "130"
+          }
+        }
+      ],
+      "profile_enabled": false,
+      "scope": "Warm SDK reads on strict disposable FUSE authority; exact values and numeric types. Timed loop includes readback assertions."
+    }
+  ],
+  "native_raw": [
+    {
+      "index": 1,
+      "role": "baseline",
+      "exit_code": 0,
+      "seconds": 6.0875703021883965,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+        "sha256": {
+          "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+          "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+        }
+      },
+      "reference": {
+        "error_code": null,
+        "error_message": null,
+        "payload": {
+          "updated_at_ms": 1791108127236,
+          "value": 1,
+          "version": 1
+        },
+        "retryable": false,
+        "status": 0
+      },
+      "results": [
+        {
+          "storage": "overlay",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13186",
+          "p50_ns": "12994",
+          "p99_ns": "17104",
+          "ops_per_second": "75611",
+          "cpu_seconds": "1.56745",
+          "wall_seconds": "1.32256"
+        },
+        {
+          "storage": "overlay",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19091",
+          "p50_ns": "14556",
+          "p99_ns": "51396",
+          "ops_per_second": "411943",
+          "cpu_seconds": "2.07983",
+          "wall_seconds": "0.242752"
+        },
+        {
+          "storage": "overlay",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "79309.1",
+          "p50_ns": "15251",
+          "p99_ns": "428870",
+          "ops_per_second": "396044",
+          "cpu_seconds": "2.83825",
+          "wall_seconds": "0.323196"
+        },
+        {
+          "storage": "materialized",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13308.2",
+          "p50_ns": "13002",
+          "p99_ns": "17065",
+          "ops_per_second": "74930.2",
+          "cpu_seconds": "1.58396",
+          "wall_seconds": "1.33458"
+        },
+        {
+          "storage": "materialized",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19959.2",
+          "p50_ns": "15599",
+          "p99_ns": "52710",
+          "ops_per_second": "396021",
+          "cpu_seconds": "2.16837",
+          "wall_seconds": "0.252512"
+        },
+        {
+          "storage": "materialized",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "78542",
+          "p50_ns": "15021",
+          "p99_ns": "412554",
+          "ops_per_second": "400545",
+          "cpu_seconds": "2.78242",
+          "wall_seconds": "0.319564"
+        }
+      ],
+      "harness_sha256": "939148120a2ffa41c861228e4fb535db2cf1f3bdcd97f2996945077bd4a05c0d",
+      "harness_source_sha256": "a636f171d07c58eecb63569af5d7045abf8e7b749636d40540093475e3a3005d",
+      "scope": "Strict disposable FUSE authority, native C ABI, no Python/GIL in measured loop; fresh overlay and graceful reopened materialized, 1/8/32 callers; all timed bytes exact."
+    },
+    {
+      "index": 2,
+      "role": "candidate",
+      "exit_code": 0,
+      "seconds": 6.090189591050148,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+        "sha256": {
+          "tofu-db": "a1c788d2a377090cb9c7f7a0e1c8c7165e6bb45d40822608152fa81331f16b60",
+          "libtofu_db.so": "256288de07b2d5d36d206dcff2ed680d013ccbaad90f5e322d2e986adedb9465"
+        }
+      },
+      "reference": {
+        "error_code": null,
+        "error_message": null,
+        "payload": {
+          "updated_at_ms": 1791108134070,
+          "value": 1,
+          "version": 1
+        },
+        "retryable": false,
+        "status": 0
+      },
+      "results": [
+        {
+          "storage": "overlay",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13035.4",
+          "p50_ns": "12825",
+          "p99_ns": "16843",
+          "ops_per_second": "76446.4",
+          "cpu_seconds": "1.53118",
+          "wall_seconds": "1.30811"
+        },
+        {
+          "storage": "overlay",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19989",
+          "p50_ns": "15499",
+          "p99_ns": "53655",
+          "ops_per_second": "392252",
+          "cpu_seconds": "2.14272",
+          "wall_seconds": "0.254938"
+        },
+        {
+          "storage": "overlay",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "81229.1",
+          "p50_ns": "15625",
+          "p99_ns": "432975",
+          "ops_per_second": "388257",
+          "cpu_seconds": "2.80972",
+          "wall_seconds": "0.329679"
+        },
+        {
+          "storage": "materialized",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13258.6",
+          "p50_ns": "13055",
+          "p99_ns": "17226",
+          "ops_per_second": "75004.4",
+          "cpu_seconds": "1.56132",
+          "wall_seconds": "1.33326"
+        },
+        {
+          "storage": "materialized",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19647.2",
+          "p50_ns": "15120",
+          "p99_ns": "53313",
+          "ops_per_second": "400514",
+          "cpu_seconds": "2.10868",
+          "wall_seconds": "0.249679"
+        },
+        {
+          "storage": "materialized",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "81069.5",
+          "p50_ns": "15641",
+          "p99_ns": "433026",
+          "ops_per_second": "388671",
+          "cpu_seconds": "2.81864",
+          "wall_seconds": "0.329327"
+        }
+      ],
+      "harness_sha256": "939148120a2ffa41c861228e4fb535db2cf1f3bdcd97f2996945077bd4a05c0d",
+      "harness_source_sha256": "a636f171d07c58eecb63569af5d7045abf8e7b749636d40540093475e3a3005d",
+      "scope": "Strict disposable FUSE authority, native C ABI, no Python/GIL in measured loop; fresh overlay and graceful reopened materialized, 1/8/32 callers; all timed bytes exact."
+    },
+    {
+      "index": 3,
+      "role": "candidate",
+      "exit_code": 0,
+      "seconds": 6.074732646346092,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+        "sha256": {
+          "tofu-db": "a1c788d2a377090cb9c7f7a0e1c8c7165e6bb45d40822608152fa81331f16b60",
+          "libtofu_db.so": "256288de07b2d5d36d206dcff2ed680d013ccbaad90f5e322d2e986adedb9465"
+        }
+      },
+      "reference": {
+        "error_code": null,
+        "error_message": null,
+        "payload": {
+          "updated_at_ms": 1791108140263,
+          "value": 1,
+          "version": 1
+        },
+        "retryable": false,
+        "status": 0
+      },
+      "results": [
+        {
+          "storage": "overlay",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13151.2",
+          "p50_ns": "12928",
+          "p99_ns": "17472",
+          "ops_per_second": "75802.8",
+          "cpu_seconds": "1.54201",
+          "wall_seconds": "1.31921"
+        },
+        {
+          "storage": "overlay",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19261.1",
+          "p50_ns": "14870",
+          "p99_ns": "52490",
+          "ops_per_second": "409594",
+          "cpu_seconds": "2.08534",
+          "wall_seconds": "0.244144"
+        },
+        {
+          "storage": "overlay",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "78484.6",
+          "p50_ns": "15452",
+          "p99_ns": "418117",
+          "ops_per_second": "401153",
+          "cpu_seconds": "2.79527",
+          "wall_seconds": "0.31908"
+        },
+        {
+          "storage": "materialized",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13005.8",
+          "p50_ns": "12846",
+          "p99_ns": "16966",
+          "ops_per_second": "76662.8",
+          "cpu_seconds": "1.52915",
+          "wall_seconds": "1.30441"
+        },
+        {
+          "storage": "materialized",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19142.4",
+          "p50_ns": "15442",
+          "p99_ns": "50313",
+          "ops_per_second": "408483",
+          "cpu_seconds": "2.10522",
+          "wall_seconds": "0.244808"
+        },
+        {
+          "storage": "materialized",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "79709.3",
+          "p50_ns": "15874",
+          "p99_ns": "425622",
+          "ops_per_second": "395552",
+          "cpu_seconds": "2.83251",
+          "wall_seconds": "0.323598"
+        }
+      ],
+      "harness_sha256": "939148120a2ffa41c861228e4fb535db2cf1f3bdcd97f2996945077bd4a05c0d",
+      "harness_source_sha256": "a636f171d07c58eecb63569af5d7045abf8e7b749636d40540093475e3a3005d",
+      "scope": "Strict disposable FUSE authority, native C ABI, no Python/GIL in measured loop; fresh overlay and graceful reopened materialized, 1/8/32 callers; all timed bytes exact."
+    },
+    {
+      "index": 4,
+      "role": "baseline",
+      "exit_code": 0,
+      "seconds": 6.097934506833553,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+        "sha256": {
+          "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+          "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+        }
+      },
+      "reference": {
+        "error_code": null,
+        "error_message": null,
+        "payload": {
+          "updated_at_ms": 1791108146351,
+          "value": 1,
+          "version": 1
+        },
+        "retryable": false,
+        "status": 0
+      },
+      "results": [
+        {
+          "storage": "overlay",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13097.7",
+          "p50_ns": "12942",
+          "p99_ns": "16628",
+          "ops_per_second": "76109.3",
+          "cpu_seconds": "1.57073",
+          "wall_seconds": "1.3139"
+        },
+        {
+          "storage": "overlay",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19966.2",
+          "p50_ns": "15397",
+          "p99_ns": "53510",
+          "ops_per_second": "395568",
+          "cpu_seconds": "2.16204",
+          "wall_seconds": "0.252801"
+        },
+        {
+          "storage": "overlay",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "80146.8",
+          "p50_ns": "15482",
+          "p99_ns": "425209",
+          "ops_per_second": "392925",
+          "cpu_seconds": "2.84251",
+          "wall_seconds": "0.325762"
+        },
+        {
+          "storage": "materialized",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "12981.4",
+          "p50_ns": "12858",
+          "p99_ns": "16515",
+          "ops_per_second": "76835.6",
+          "cpu_seconds": "1.55375",
+          "wall_seconds": "1.30148"
+        },
+        {
+          "storage": "materialized",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19215.3",
+          "p50_ns": "14634",
+          "p99_ns": "51803",
+          "ops_per_second": "412196",
+          "cpu_seconds": "2.07927",
+          "wall_seconds": "0.242603"
+        },
+        {
+          "storage": "materialized",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "80266.5",
+          "p50_ns": "15542",
+          "p99_ns": "435875",
+          "ops_per_second": "394066",
+          "cpu_seconds": "2.86176",
+          "wall_seconds": "0.324819"
+        }
+      ],
+      "harness_sha256": "939148120a2ffa41c861228e4fb535db2cf1f3bdcd97f2996945077bd4a05c0d",
+      "harness_source_sha256": "a636f171d07c58eecb63569af5d7045abf8e7b749636d40540093475e3a3005d",
+      "scope": "Strict disposable FUSE authority, native C ABI, no Python/GIL in measured loop; fresh overlay and graceful reopened materialized, 1/8/32 callers; all timed bytes exact."
+    },
+    {
+      "index": 5,
+      "role": "candidate",
+      "exit_code": 0,
+      "seconds": 6.088147595524788,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+        "sha256": {
+          "tofu-db": "a1c788d2a377090cb9c7f7a0e1c8c7165e6bb45d40822608152fa81331f16b60",
+          "libtofu_db.so": "256288de07b2d5d36d206dcff2ed680d013ccbaad90f5e322d2e986adedb9465"
+        }
+      },
+      "reference": {
+        "error_code": null,
+        "error_message": null,
+        "payload": {
+          "updated_at_ms": 1791108152746,
+          "value": 1,
+          "version": 1
+        },
+        "retryable": false,
+        "status": 0
+      },
+      "results": [
+        {
+          "storage": "overlay",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13137.9",
+          "p50_ns": "12952",
+          "p99_ns": "17044",
+          "ops_per_second": "75892.5",
+          "cpu_seconds": "1.5479",
+          "wall_seconds": "1.31765"
+        },
+        {
+          "storage": "overlay",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19615.6",
+          "p50_ns": "15389",
+          "p99_ns": "53161",
+          "ops_per_second": "401503",
+          "cpu_seconds": "2.12485",
+          "wall_seconds": "0.249064"
+        },
+        {
+          "storage": "overlay",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "80303.3",
+          "p50_ns": "15695",
+          "p99_ns": "433597",
+          "ops_per_second": "393201",
+          "cpu_seconds": "2.84193",
+          "wall_seconds": "0.325533"
+        },
+        {
+          "storage": "materialized",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "12983.1",
+          "p50_ns": "12797",
+          "p99_ns": "16815",
+          "ops_per_second": "76687.5",
+          "cpu_seconds": "1.53561",
+          "wall_seconds": "1.30399"
+        },
+        {
+          "storage": "materialized",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19482.1",
+          "p50_ns": "14597",
+          "p99_ns": "53106",
+          "ops_per_second": "404007",
+          "cpu_seconds": "2.06716",
+          "wall_seconds": "0.247521"
+        },
+        {
+          "storage": "materialized",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "82432.5",
+          "p50_ns": "15609",
+          "p99_ns": "445203",
+          "ops_per_second": "382656",
+          "cpu_seconds": "2.81998",
+          "wall_seconds": "0.334504"
+        }
+      ],
+      "harness_sha256": "939148120a2ffa41c861228e4fb535db2cf1f3bdcd97f2996945077bd4a05c0d",
+      "harness_source_sha256": "a636f171d07c58eecb63569af5d7045abf8e7b749636d40540093475e3a3005d",
+      "scope": "Strict disposable FUSE authority, native C ABI, no Python/GIL in measured loop; fresh overlay and graceful reopened materialized, 1/8/32 callers; all timed bytes exact."
+    },
+    {
+      "index": 6,
+      "role": "baseline",
+      "exit_code": 0,
+      "seconds": 6.088178172707558,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+        "sha256": {
+          "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+          "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+        }
+      },
+      "reference": {
+        "error_code": null,
+        "error_message": null,
+        "payload": {
+          "updated_at_ms": 1791108159217,
+          "value": 1,
+          "version": 1
+        },
+        "retryable": false,
+        "status": 0
+      },
+      "results": [
+        {
+          "storage": "overlay",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13577.6",
+          "p50_ns": "13314",
+          "p99_ns": "17593",
+          "ops_per_second": "73423.9",
+          "cpu_seconds": "1.62139",
+          "wall_seconds": "1.36195"
+        },
+        {
+          "storage": "overlay",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19991.2",
+          "p50_ns": "15734",
+          "p99_ns": "53063",
+          "ops_per_second": "394528",
+          "cpu_seconds": "2.17723",
+          "wall_seconds": "0.253467"
+        },
+        {
+          "storage": "overlay",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "77664",
+          "p50_ns": "15221",
+          "p99_ns": "417934",
+          "ops_per_second": "407365",
+          "cpu_seconds": "2.80942",
+          "wall_seconds": "0.314214"
+        },
+        {
+          "storage": "materialized",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13134.2",
+          "p50_ns": "12999",
+          "p99_ns": "16754",
+          "ops_per_second": "75684.1",
+          "cpu_seconds": "1.56571",
+          "wall_seconds": "1.32128"
+        },
+        {
+          "storage": "materialized",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "19630.4",
+          "p50_ns": "15358",
+          "p99_ns": "52152",
+          "ops_per_second": "402160",
+          "cpu_seconds": "2.12856",
+          "wall_seconds": "0.248657"
+        },
+        {
+          "storage": "materialized",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "83302.6",
+          "p50_ns": "15990",
+          "p99_ns": "448056",
+          "ops_per_second": "379724",
+          "cpu_seconds": "2.92122",
+          "wall_seconds": "0.337087"
+        }
+      ],
+      "harness_sha256": "939148120a2ffa41c861228e4fb535db2cf1f3bdcd97f2996945077bd4a05c0d",
+      "harness_source_sha256": "a636f171d07c58eecb63569af5d7045abf8e7b749636d40540093475e3a3005d",
+      "scope": "Strict disposable FUSE authority, native C ABI, no Python/GIL in measured loop; fresh overlay and graceful reopened materialized, 1/8/32 callers; all timed bytes exact."
+    },
+    {
+      "index": 7,
+      "role": "baseline",
+      "exit_code": 0,
+      "seconds": 6.286246456205845,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "5412f2670543c6722c7fa425c578850f367ffd2fa09bb82892f3eb6164b41756",
+        "sha256": {
+          "tofu-db": "e870d2f87e774efb2dee005f55fbff6a9e7b88c018fc05e9968613b9e6cfed57",
+          "libtofu_db.so": "32ea716bf0ffdf444ab7413aa7581a1721822c73613b7398f41c1612ea273529"
+        }
+      },
+      "reference": {
+        "error_code": null,
+        "error_message": null,
+        "payload": {
+          "updated_at_ms": 1791108165361,
+          "value": 1,
+          "version": 1
+        },
+        "retryable": false,
+        "status": 0
+      },
+      "results": [
+        {
+          "storage": "overlay",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13559.5",
+          "p50_ns": "13106",
+          "p99_ns": "17710",
+          "ops_per_second": "73501",
+          "cpu_seconds": "1.61764",
+          "wall_seconds": "1.36052"
+        },
+        {
+          "storage": "overlay",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "20007.7",
+          "p50_ns": "15661",
+          "p99_ns": "53096",
+          "ops_per_second": "394227",
+          "cpu_seconds": "2.1776",
+          "wall_seconds": "0.253661"
+        },
+        {
+          "storage": "overlay",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "80987.6",
+          "p50_ns": "15781",
+          "p99_ns": "433058",
+          "ops_per_second": "388542",
+          "cpu_seconds": "2.89554",
+          "wall_seconds": "0.329436"
+        },
+        {
+          "storage": "materialized",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13177.1",
+          "p50_ns": "12827",
+          "p99_ns": "17461",
+          "ops_per_second": "75683.9",
+          "cpu_seconds": "1.56684",
+          "wall_seconds": "1.32128"
+        },
+        {
+          "storage": "materialized",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "20465.5",
+          "p50_ns": "15798",
+          "p99_ns": "55284",
+          "ops_per_second": "384620",
+          "cpu_seconds": "2.1937",
+          "wall_seconds": "0.259997"
+        },
+        {
+          "storage": "materialized",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "82749.3",
+          "p50_ns": "15575",
+          "p99_ns": "445566",
+          "ops_per_second": "381957",
+          "cpu_seconds": "2.89057",
+          "wall_seconds": "0.335116"
+        }
+      ],
+      "harness_sha256": "939148120a2ffa41c861228e4fb535db2cf1f3bdcd97f2996945077bd4a05c0d",
+      "harness_source_sha256": "a636f171d07c58eecb63569af5d7045abf8e7b749636d40540093475e3a3005d",
+      "scope": "Strict disposable FUSE authority, native C ABI, no Python/GIL in measured loop; fresh overlay and graceful reopened materialized, 1/8/32 callers; all timed bytes exact."
+    },
+    {
+      "index": 8,
+      "role": "candidate",
+      "exit_code": 0,
+      "seconds": 6.081053212285042,
+      "receipt": {
+        "build_info": {
+          "format": "tofu-db-build.v1",
+          "source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+          "version": "0.2.0"
+        },
+        "library_source_sha256": "24deaee845d154b93a257c2ff070721028be65f53939f221ea8481e7f79a91f4",
+        "sha256": {
+          "tofu-db": "a1c788d2a377090cb9c7f7a0e1c8c7165e6bb45d40822608152fa81331f16b60",
+          "libtofu_db.so": "256288de07b2d5d36d206dcff2ed680d013ccbaad90f5e322d2e986adedb9465"
+        }
+      },
+      "reference": {
+        "error_code": null,
+        "error_message": null,
+        "payload": {
+          "updated_at_ms": 1791108172152,
+          "value": 1,
+          "version": 1
+        },
+        "retryable": false,
+        "status": 0
+      },
+      "results": [
+        {
+          "storage": "overlay",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "12538.1",
+          "p50_ns": "12400",
+          "p99_ns": "15989",
+          "ops_per_second": "79510.7",
+          "cpu_seconds": "1.48093",
+          "wall_seconds": "1.25769"
+        },
+        {
+          "storage": "overlay",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "20900.7",
+          "p50_ns": "15756",
+          "p99_ns": "63373",
+          "ops_per_second": "376322",
+          "cpu_seconds": "2.18256",
+          "wall_seconds": "0.26573"
+        },
+        {
+          "storage": "overlay",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "80320.2",
+          "p50_ns": "15901",
+          "p99_ns": "427075",
+          "ops_per_second": "391856",
+          "cpu_seconds": "2.85058",
+          "wall_seconds": "0.326651"
+        },
+        {
+          "storage": "materialized",
+          "callers": "1",
+          "exact_readbacks": "100000",
+          "mean_ns": "13124.7",
+          "p50_ns": "12987",
+          "p99_ns": "16797",
+          "ops_per_second": "75846.6",
+          "cpu_seconds": "1.5441",
+          "wall_seconds": "1.31845"
+        },
+        {
+          "storage": "materialized",
+          "callers": "8",
+          "exact_readbacks": "100000",
+          "mean_ns": "18237.5",
+          "p50_ns": "14617",
+          "p99_ns": "46731",
+          "ops_per_second": "431806",
+          "cpu_seconds": "2.06521",
+          "wall_seconds": "0.231586"
+        },
+        {
+          "storage": "materialized",
+          "callers": "32",
+          "exact_readbacks": "128000",
+          "mean_ns": "74476.2",
+          "p50_ns": "15521",
+          "p99_ns": "398582",
+          "ops_per_second": "423630",
+          "cpu_seconds": "2.79193",
+          "wall_seconds": "0.30215"
+        }
+      ],
+      "harness_sha256": "939148120a2ffa41c861228e4fb535db2cf1f3bdcd97f2996945077bd4a05c0d",
+      "harness_source_sha256": "a636f171d07c58eecb63569af5d7045abf8e7b749636d40540093475e3a3005d",
+      "scope": "Strict disposable FUSE authority, native C ABI, no Python/GIL in measured loop; fresh overlay and graceful reopened materialized, 1/8/32 callers; all timed bytes exact."
+    }
+  ],
+  "decision_basis": "SDK arrays regress mean latency 8.33% and process CPU 7.82%; all four candidate array legs are slower than neighboring baseline. Positive small/numeric and materialized native cases do not offset adverse shapes. Overlay eight/32 callers also regress mean latency 0.90%/0.70%.",
+  "interpretation": "Allocation request count and bytes are sharply reduced, but dominant end-to-end costs remain. The measured mixed outcomes do not establish that allocator cost, scheduler behavior, code layout, or Python alone caused the regressions. No observer stage is subtracted as an exact latency budget.",
+  "gate_scope": "25 embedded tests (including 11 reply tests) and four portable Loom models passed. Initial two visibility compile failures retained. No full native/app release gate claimed for this rejected candidate. No Miri or syscall-error certification.",
+  "resource_scope": "No persistent cache, retained reply pool, new worker or storage backend. Allocation diagnostic measured 20000 ready-before-wait 32-byte outcomes per role with System allocator, 2/1760 bytes -> 1/72 bytes per reply. RSS and timings in SDK logs are whole-process diagnostics, not isolated resource credit.",
+  "raw_directory": "/path/to/your/project",
+  "raw_sha256": {
+    "validation.json": "00d6093557656e07cbf63099af55be0fc1d339faf2602789e996ad25c5137e46",
+    "comparison.json": "cd42324f5ea222d1363e3f47db44c5ae2b41aaa828f28c2c0bf758fba3678eef",
+    "sdk-manifest.json": "ee12532cdf1bc6bde46442df08213117d0b1944bacdf7c3b7b1879ac16217971",
+    "native-abba.json": "e691906063f7f0685390feb7f6c2e289c17cd751af956e8714e0cbd4212632c1",
+    "candidate-source.json": "d42feb3544dbbd0834b201e78b500964e67c4fa448350d76d1b8ecc4cd821752",
+    "live-ready.json": "7590d6cfec6ba7f0e87adec1afaca64d5fa513c910d1f9a7fb85fdb164567dd7",
+    "loom.log": "cee3aa14c8431a7225e25869f4c7c41d5a3efef2413c41242b908bf9bb778b4c",
+    "model-source-receipt.json": "89e106202af1870b9065a634e274cb63230bce6b6240bf939ae6d38a47a66796",
+    "neighbor-embedded.log": "62cd0388a71e108505f79331e8eaa4c4081379acfba09530b7c58fe9be64dec9",
+    "focused-reply.log": "91832e1f3ecbf5ef539c80b69a041d4907db84996e34cc2bdfa5fd55ad68dd15",
+    "focused-reply-final.log": "91832e1f3ecbf5ef539c80b69a041d4907db84996e34cc2bdfa5fd55ad68dd15",
+    "focused-reply-fixed.log": "435b28ce4f4dba909e5d17a43edc0a8c1f2e8a3e4293c4e044f2608716a79760",
+    "allocation.log": "b80b3e085c342520481a39fe19009f6aff595e869755da190bf78601b52ca8e0",
+    "build.log": "271260141ba8344b977bdb2fb5feb9e9cf44c6af070a74bc5e37a08c20bdc386",
+    "sdk_compare.py": "d1a2c206e12a6b955b67dbd045c87311ee00e3bcd25bbaefbcd1f90a20f56ce8",
+    "native_compare.py": "22986d43ba3e460957980f8c0f996af7a78735460d10f1b7532f714096f3ae67",
+    "report.py": "dc7c8de309516b06926231b521d8b8b0e4e3bbae34f0d82153ea4d4cafe7c77d",
+    "pin_artifact.py": "beb49fa8cc0c8a2bdace6b0335dffdd298cbae1c583f126cab54cdb71ca0e848",
+    "native-scalar.cpp": "a636f171d07c58eecb63569af5d7045abf8e7b749636d40540093475e3a3005d",
+    "prepare_model.py": "63d52647eea943f29be2d4555b879d653e859efb378d59c5a5023629b267bcc8",
+    "sdk-1-baseline.json": "dcd5d071fbb89419984f27d247a3c18c9abee3b6e6d12a3f021b365988b65fc0",
+    "sdk-2-candidate.json": "b98b6a24d4b4fc2083412f72bd310afa999de38750231fe83ebbbc630331c7dd",
+    "sdk-3-candidate.json": "6bf609db2becb92155fdaeccb4beba434331cd6f9ab79514d0b7d4249e047422",
+    "sdk-4-baseline.json": "5ded578283a36f581b3d61707a8ba8d27ea1dc8dd11db30b8972d847bf219e7b",
+    "sdk-5-candidate.json": "c3b07a60287af8fd93055e5da94e7b8372a3bcd2fdf215e22b0156c6957de4e0",
+    "sdk-6-baseline.json": "40de96e684763ca4902631ce517f588d5171bed577e579f4f26b0896787aa8c9",
+    "sdk-7-baseline.json": "cb204b2d3e0ee2010c7ac32067a521820f2b33691086afd29d3b3972bd6f025e",
+    "sdk-8-candidate.json": "c24793edc265d588c7f1850154509876d61fc26dc21e78d1a52f044de7c371cc"
+  },
+  "primary_protocol_sources": [
+    "https://man7.org/linux/man-pages/man2/FUTEX_WAIT.2const.html",
+    "https://man7.org/linux/man-pages/man2/FUTEX_WAKE.2const.html",
+    "https://github.com/tokio-rs/loom"
+  ],
+  "shared_native_mutated": false
+}

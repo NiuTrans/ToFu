@@ -1,0 +1,23 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "model": "s",
+  "requestId": "s",
+  "roundNum": 1,
+  "seq": 1,
+  "tag": "s",
+  "taskId": "s",
+  "tokensIn": 1,
+  "tokensOut": 1,
+  "turn": "s",
+  "turnRole": "s",
+  "type": "round_usage",
+  "usage": {},
+  "vuMsgId": "s"
+}

@@ -1,0 +1,60 @@
+/* Timer check history, complete parse/tool/command evidence and the non-authoritative countdown hint. */
+.timer-poll-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  min-inline-size: 0;
+  color: var(--text-primary);
+}
+.timer-poll-has-detail { cursor: pointer; }
+.timer-poll-has-detail:hover { background: var(--bg-hover); }
+.timer-poll-icon, .timer-poll-caret, .timer-poll-caret-spacer { display: inline-flex; flex: 0 0 auto; color: var(--text-secondary); }
+.timer-poll-caret, .timer-poll-caret-spacer { inline-size: var(--space-3); }
+.timer-poll-caret svg { transform: rotate(-90deg); transition: transform var(--motion-fast) var(--ease-standard); }
+.timer-poll-line.expanded .timer-poll-caret svg { transform: rotate(0deg); }
+.timer-poll-num { flex: 0 0 auto; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.timer-poll-reason { flex: 1 1 16ch; min-inline-size: 0; overflow-wrap: anywhere; }
+.timer-poll-meta { margin-inline-start: auto; color: var(--text-secondary); font-size: var(--font-size-sm); font-variant-numeric: tabular-nums; }
+.timer-poll-ready .timer-poll-icon { color: var(--success-text); }
+.timer-poll-error .timer-poll-icon { color: var(--error-text); }
+.timer-poll-started .timer-poll-icon, .timer-poll-parse-err .timer-poll-icon { color: var(--warning-text); }
+.timer-poll-ready .timer-poll-reason { color: var(--text-primary); font-weight: var(--weight-semibold); }
+.timer-poll-error .timer-poll-reason { color: var(--text-primary); }
+.timer-poll-skipped { border-top: var(--control-edge-inset) dashed var(--border); }
+.timer-poll-skipped .timer-poll-reason, .timer-poll-started .timer-poll-reason { color: var(--text-secondary); }
+.timer-poll-hidden { margin: var(--space-2) 0; color: var(--text-secondary); font-size: var(--font-size-sm); }
+.timer-poll-id { font-family: var(--font-mono); }
+.timer-poll-model { color: var(--info-text); border-color: var(--info-border); }
+.timer-poll-detail {
+  display: none;
+  margin: 0 0 var(--space-2) var(--space-5);
+  padding: var(--space-3);
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.timer-poll-detail.expanded { display: block; }
+.timer-poll-detail-reason { margin-bottom: var(--space-2); white-space: pre-wrap; }
+.timer-poll-detail-label { margin: var(--space-2) 0 var(--space-1); color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--weight-semibold); }
+.timer-poll-detail-output {
+  margin: 0;
+  padding: var(--space-2);
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: var(--font-size-sm)/var(--leading-body) var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-block-size: 40vh;
+  overflow: auto;
+}
+.timer-poll-detail-output code { color: inherit; font: inherit; white-space: inherit; }
+.timer-poll-trace { margin: var(--space-2) 0; }
+.timer-poll-trace :is(.sw-tl-name, .sw-tl-args, .sw-tl-elapsed) { font-size: var(--font-size-sm); color: var(--text-primary); }
+.timer-poll-trace .sw-tl-args { color: var(--text-secondary); }
+.timer-next-poll { display: flex; align-items: center; gap: var(--space-1); margin-top: var(--space-2); color: var(--text-secondary); font-variant-numeric: tabular-nums; }

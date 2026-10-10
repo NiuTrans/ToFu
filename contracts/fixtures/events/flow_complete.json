@@ -1,0 +1,20 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "orchestrationOutcome": {},
+  "reason": "s",
+  "replanCount": 1,
+  "requestId": "s",
+  "seq": 1,
+  "taskId": "s",
+  "totalIterations": 1,
+  "turnRole": "s",
+  "type": "flow_complete",
+  "vuMsgId": "s"
+}

@@ -1,0 +1,171 @@
+{
+  "decision": "Do not reduce the default pool to128 on this evidence. First pair stream improves4.8% but settlement regresses5.8%; reverse pair stream regresses77.2% and settlement26.6%. Both capacities miss original1s stream gate. No production code change.",
+  "scope": "Four sequential256-128-128-256 windows via existing public resize_resource_capacity API, within advertisedceiling256; frozenNative014bb and admittedclientFIFO; original1000x4x8192 carry-stream-events, /tmp, gracefulclose/reopen. Source/import guards and exact replay pass.",
+  "rows": [
+    {
+      "label": "capacity-B0",
+      "report": ".tmp/tofudb-direct-sqlite-semantics-20261008/capacity-B0.json",
+      "sha256": "34811316b711f048d3a021c5423c4bd02bdc73662515156a8b0a31c715f287ec",
+      "pool": {
+        "capacity": 256,
+        "used": 0,
+        "waiting": 0,
+        "completed": 0,
+        "ceiling": 256
+      },
+      "p99_ms": {
+        "submit_to_running": 727.8910875320435,
+        "stream_scheduled": 1260.9285861253738,
+        "settle": 2288.859434425831
+      },
+      "rss_bytes": {
+        "client_peak_rss_bytes": 2195263488,
+        "engine_peak_rss_bytes": 2195263488,
+        "client_rss_bytes_at_barrier": 457043968,
+        "engine_rss_bytes_at_barrier": 457043968
+      },
+      "correctness": true,
+      "errors": 0,
+      "source": {
+        "manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1",
+        "shared_project_imports": [],
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "runner_sha256": "2d8d8750a58fea3c80b6b924e2d7d4ba0e0468e241ec4d303b62988427bf7330",
+        "direct_port_sha256": "c8d2427140ade98870c6e39020fa80c8e1a9e0bb0d8adfbc939b1aa3803175e4"
+      }
+    },
+    {
+      "label": "capacity-C1",
+      "report": ".tmp/tofudb-direct-sqlite-semantics-20261008/capacity-C1.json",
+      "sha256": "f54f3b1ef83d55079bdf08e46ca3ad879d07c5ed83e7fdec9b1041fe728e59f0",
+      "pool": {
+        "capacity": 128,
+        "used": 0,
+        "waiting": 0,
+        "completed": 0,
+        "ceiling": 256
+      },
+      "p99_ms": {
+        "submit_to_running": 708.6616903543472,
+        "stream_scheduled": 1200.55041462183,
+        "settle": 2421.2260469794273
+      },
+      "rss_bytes": {
+        "client_peak_rss_bytes": 2221387776,
+        "engine_peak_rss_bytes": 2221387776,
+        "client_rss_bytes_at_barrier": 476815360,
+        "engine_rss_bytes_at_barrier": 476815360
+      },
+      "correctness": true,
+      "errors": 0,
+      "source": {
+        "manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1",
+        "shared_project_imports": [],
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "runner_sha256": "2d8d8750a58fea3c80b6b924e2d7d4ba0e0468e241ec4d303b62988427bf7330",
+        "direct_port_sha256": "c8d2427140ade98870c6e39020fa80c8e1a9e0bb0d8adfbc939b1aa3803175e4"
+      }
+    },
+    {
+      "label": "capacity-C2",
+      "report": ".tmp/tofudb-direct-sqlite-semantics-20261008/capacity-C2.json",
+      "sha256": "f4aab24cdd54fd83a16c7639b0fc3f3ede8dc9766fe684769a0d9e7e39899f77",
+      "pool": {
+        "capacity": 128,
+        "used": 0,
+        "waiting": 0,
+        "completed": 0,
+        "ceiling": 256
+      },
+      "p99_ms": {
+        "submit_to_running": 717.138409614563,
+        "stream_scheduled": 2178.040124475956,
+        "settle": 3350.654251873493
+      },
+      "rss_bytes": {
+        "client_peak_rss_bytes": 2289319936,
+        "engine_peak_rss_bytes": 2306076672,
+        "client_rss_bytes_at_barrier": 467783680,
+        "engine_rss_bytes_at_barrier": 467783680
+      },
+      "correctness": true,
+      "errors": 0,
+      "source": {
+        "manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1",
+        "shared_project_imports": [],
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "runner_sha256": "2d8d8750a58fea3c80b6b924e2d7d4ba0e0468e241ec4d303b62988427bf7330",
+        "direct_port_sha256": "c8d2427140ade98870c6e39020fa80c8e1a9e0bb0d8adfbc939b1aa3803175e4"
+      }
+    },
+    {
+      "label": "capacity-B3",
+      "report": ".tmp/tofudb-direct-sqlite-semantics-20261008/capacity-B3.json",
+      "sha256": "0fc74a270f650c2c32d74aa11a1f1d22b93c6fd7145949ea2f953f8d93228d04",
+      "pool": {
+        "capacity": 256,
+        "used": 0,
+        "waiting": 0,
+        "completed": 0,
+        "ceiling": 256
+      },
+      "p99_ms": {
+        "submit_to_running": 722.4652990698814,
+        "stream_scheduled": 1228.886917233467,
+        "settle": 2646.898537874222
+      },
+      "rss_bytes": {
+        "client_peak_rss_bytes": 2266722304,
+        "engine_peak_rss_bytes": 2266816512,
+        "client_rss_bytes_at_barrier": 471080960,
+        "engine_rss_bytes_at_barrier": 471080960
+      },
+      "correctness": true,
+      "errors": 0,
+      "source": {
+        "manifest_sha256": "6752a93b374573e58d5eca0ee8efd99f5d3a1d58326a91dda794a76f228999f1",
+        "shared_project_imports": [],
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "runner_sha256": "2d8d8750a58fea3c80b6b924e2d7d4ba0e0468e241ec4d303b62988427bf7330",
+        "direct_port_sha256": "c8d2427140ade98870c6e39020fa80c8e1a9e0bb0d8adfbc939b1aa3803175e4"
+      }
+    }
+  ],
+  "client_stage_observation": {
+    "correctness": true,
+    "errors": 0,
+    "report_sha256": "097307c423e697bdd67af775dfa88928aa6762334256426d99ada8b3c66f08ec",
+    "stages": {
+      "turn.event.record": {
+        "count": 5000,
+        "pool_total_ms": 1148934.0455010533,
+        "attempt_total_ms": 2241713.6534526944,
+        "pool_fraction_of_attempt_total": 0.5125248908269179,
+        "pool_p99_bucket_ms": 1629.8305317759514,
+        "attempt_p99_bucket_ms": 2048.4002145854793
+      },
+      "queue.depth": {
+        "count": 1000,
+        "pool_total_ms": 560726.2713760138,
+        "attempt_total_ms": 653296.5307980776,
+        "pool_fraction_of_attempt_total": 0.8583028455562461,
+        "pool_p99_bucket_ms": 1633.1766247749329,
+        "attempt_p99_bucket_ms": 1862.1820132595262
+      }
+    },
+    "scope": "Opt-in client profiler with admitted FIFO handoff, stock frozenNative014bb; exact replay/noerrors pass. Pool timers include acquisition and caller scheduling, attempt includes pool. Stage percentile values are histogram upper edges; stage totals sum concurrent calls, not wall time. No embedded-wire timer exists in this profiler; attempt-minus-pool is not exclusive Native CPU. Cannot quantify natural production starvation or uninstrumented gate contribution from this observation.",
+    "next_action": "Inspect resource-budget/pool capacity admission before a bounded saturation control; do not bypass authority ceilings."
+  },
+  "limitations": [
+    "RSS client and engine fields represent the same in-process PID; never sum them.",
+    "Two matched pairs do not isolate host scheduling and overlay timing. The observed reverse regression rejects simple128default admission, not every adaptive policy.",
+    "Opt-in profiler pool time includes scheduling and acquire; summed concurrent durations are not wall time.",
+    "Graceful reopen and inherited raw offline-after-abandon integrity label do not establish process crash parity."
+  ],
+  "next_action": "Return to actual per-request serialization/materialization cost; pool waiting alone does not establish insufficient capacity. Inspect native overlay encoding retry ownership before any further candidate.",
+  "scripts": {
+    "capacity.py": "2d8d8750a58fea3c80b6b924e2d7d4ba0e0468e241ec4d303b62988427bf7330",
+    "run_capacity.py": "c12db84feb6b67b90a1519bcfa5ebf3028d6b565953c765d4148493dd1f7e803",
+    "profile.py": "68e53de3fbf596aa5ae958a0f8768dfa67ab26935028b2330d24fd2f010cec54"
+  }
+}

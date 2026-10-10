@@ -1,0 +1,17 @@
+/* ── Async-only tool rounds: await_agents / get_agent_result mini-cards ───── */
+/*    These are NOT swarm panels — they're regular tool rounds, but rendered   */
+/*    with the swarm vocabulary (amber, monospace) so the user instantly       */
+/*    recognizes "this is part of the swarm flow".                             */
+@keyframes swarmIconBounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
+@keyframes agentPulse{0%,100%{opacity:0.6;transform:scale(0.9)}50%{opacity:1;transform:scale(1.1)}}
+/* ── Live preview stream ── */
+.sw-a-preview-live{border-color:rgba(251,191,36,0.15);background:rgba(251,191,36,0.03);position:relative}
+.sw-typing-cursor{color:#fbbf24;font-weight:700;animation:blink 1s step-end infinite}
+@keyframes blink{50%{opacity:0}}
+/* ── Dependency tags ── */
+.sw-a-deps{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1);margin-bottom:6px;font-size:10px}
+.sw-a-deps-label{color:var(--text-tertiary);font-weight:600;margin-right:2px}
+.sw-dep-tag{display:inline-flex;align-items:center;gap:2px;padding:1px 6px;border-radius:4px;background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.15);color:#fbbf24;font-family:'JetBrains Mono',monospace}
+.sw-dep-tag.sw-dep-done{background:rgba(74,222,128,0.08);border-color:rgba(74,222,128,0.15);color:#4ade80}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+

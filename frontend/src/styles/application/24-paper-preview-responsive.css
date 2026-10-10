@@ -1,0 +1,35 @@
+@media (max-width: 800px) {
+  .chat-wrapper.paper-preview-open { grid-template-columns: minmax(0, 1fr); grid-template-rows: 44px minmax(0, 1fr) auto; }
+  .paper-preview-tabs { grid-area: 1 / 1; display: flex; border-bottom: 1px solid var(--border); padding-inline: 8px; }
+  .paper-preview-tabs > button { flex: 1; min-height: 44px; border-radius: 0; border-bottom: 2px solid transparent; }
+  .paper-preview-tabs > button[aria-selected=true] { border-bottom-color: var(--accent); color: var(--accent); }
+  .paper-preview-open > .chat-container { grid-area: 2 / 1; }
+  .paper-preview-open > .input-area { grid-area: 3 / 1; }
+  .paper-preview-panel { grid-area: 2 / 1 / span 2; border-inline-start: 0; }
+  .paper-preview-divider { display: none; }
+  .paper-preview-open[data-paper-preview-view=paper] > :is(.chat-container, .input-area, .scroll-to-bottom-btn),
+  .paper-preview-open[data-paper-preview-view=chat] > .paper-preview-panel { display: none; }
+  .paper-preview-open > .scroll-to-bottom-btn { right: var(--space-4); }
+  .paper-preview-button, .paper-preview-reopen { min-height: 44px; min-width: 44px; }
+  .paper-preview-panel input, .paper-preview-drawer form button { min-height: 44px; }
+}
+@container (max-width: 600px) {
+  .paper-preview-toolbar .paper-preview-button { min-width: 44px; min-height: 44px; }
+  .paper-preview-toolbar .paper-preview-fit,
+  .paper-preview-toolbar .paper-preview-close,
+  .paper-preview-has-document .paper-preview-toolbar .paper-preview-compile { display: none; }
+  .paper-preview-menu-close { display: inline-flex; }
+  .paper-preview-toolbar input { min-height: 44px; font-size: var(--font-size-xl); }
+  .paper-preview-toolbar .paper-preview-zoom { width: 3.5em; }
+  .paper-preview-status { max-width: 56px; }
+}
+@container (max-width: 360px) {
+  .paper-preview-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .paper-preview-toolbar { flex-wrap: wrap; }
+  .paper-preview-toolbar .paper-preview-filename { flex-basis: 100%; }
+  .paper-preview-navigation { margin-inline-end: auto; }
+}
+.chat-wrapper.paper-preview-open[data-paper-preview-reading=true] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.paper-preview-open[data-paper-preview-reading=true] > :is(.chat-container, .input-area, .scroll-to-bottom-btn, .paper-preview-divider, .paper-preview-tabs) { display: none; }
+.paper-preview-open[data-paper-preview-reading=true] > .paper-preview-panel { grid-area: 1 / 1; border-inline-start: 0; }
+

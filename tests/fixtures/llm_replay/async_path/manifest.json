@@ -1,0 +1,5 @@
+{
+  "description": "The async replayer drives lib.llm_dispatch.async_dispatch_stream against the real dispatcher/slot (dispatch-level depth by design): aggregated content and result settle identically to the sync path.",
+  "recorded_at": "2026-09-17",
+  "mode": "replay"
+}

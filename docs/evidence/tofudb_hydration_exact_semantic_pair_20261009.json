@@ -1,0 +1,95 @@
+{
+  "report": {
+    "conversations": 50,
+    "turns": 2000,
+    "exact_response_equal": true,
+    "difference_paths": [],
+    "timings": [
+      {
+        "round": 0,
+        "backend": "native",
+        "calls": 30,
+        "mean_ms": 15.914097428321838,
+        "p50_ms": 15.116751194000244,
+        "max_ms": 30.091427266597748
+      },
+      {
+        "round": 0,
+        "backend": "sqlite",
+        "calls": 30,
+        "mean_ms": 50.883954018354416,
+        "p50_ms": 49.861714243888855,
+        "max_ms": 61.84831261634827
+      },
+      {
+        "round": 1,
+        "backend": "sqlite",
+        "calls": 30,
+        "mean_ms": 51.68629437685013,
+        "p50_ms": 50.04190653562546,
+        "max_ms": 66.54055416584015
+      },
+      {
+        "round": 1,
+        "backend": "native",
+        "calls": 30,
+        "mean_ms": 15.270365526278814,
+        "p50_ms": 15.08372277021408,
+        "max_ms": 17.111361026763916
+      },
+      {
+        "round": 2,
+        "backend": "sqlite",
+        "calls": 30,
+        "mean_ms": 43.58263512452444,
+        "p50_ms": 41.96346551179886,
+        "max_ms": 55.14167249202728
+      },
+      {
+        "round": 2,
+        "backend": "native",
+        "calls": 30,
+        "mean_ms": 15.256928652524948,
+        "p50_ms": 15.071667730808258,
+        "max_ms": 18.740274012088776
+      },
+      {
+        "round": 3,
+        "backend": "native",
+        "calls": 30,
+        "mean_ms": 15.159507592519125,
+        "p50_ms": 15.095822513103485,
+        "max_ms": 16.06971025466919
+      },
+      {
+        "round": 3,
+        "backend": "sqlite",
+        "calls": 30,
+        "mean_ms": 44.455207139253616,
+        "p50_ms": 42.98759996891022,
+        "max_ms": 61.34047359228134
+      }
+    ],
+    "bytes": {
+      "native": 845681,
+      "sqlite": 845681
+    },
+    "scope": "Same production semantic create/append/list operations; direct SQLite vs embeddedNative55180; synthetic fixed IDs/timestamps; Full exact shape parity;30sequential warm reads/window,comparison outside timers;both authorities coexist, not cold/concurrent/recovery performance"
+  },
+  "median_window_mean_ms": {
+    "native": 15.263647089401882,
+    "sqlite": 47.669580578804016
+  },
+  "sqlite_over_native_ratio": 3.1230793204006124,
+  "report_sha256": "2e7ad10ad6b23acdc95c1ff9d229939bb6e735f84a64f5017a696ec17c8ae92d",
+  "probe_sha256": "581d2904a9a139e0a1b55b15797528115bbbfb2fa9dd60692539a2ba56e0d607",
+  "prepared_manifest_unchanged_after": 2919,
+  "native_source": "55180dba6fbc4a94171e3f271a38f59cd8ca605195b9138a2565cf3ba4af4be2",
+  "correction": "Earlier rawSQLite compact-response hydration ratio is not full semantic backend parity. This same production catalog fixture has exact complete response equality and favors Native in four sequential warm windows.",
+  "limits": [
+    "Single fixture pair, both authorities coexist",
+    "Only50conversations40human settled turns each; no attachments/branch/tool/failure workload",
+    "SQLite direct existing semantic backend with receipt setup; read shape equality, not all-operation parity",
+    "Cold/concurrent/soak and all-scenes superiority unproven"
+  ]
+}

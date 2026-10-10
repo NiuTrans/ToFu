@@ -1,0 +1,23 @@
+{
+  "format": "tofu.conversation-concurrency-policy/v2",
+  "minimum_conversations": 1000,
+  "minimum_rounds": 4,
+  "minimum_chunk_bytes": 8192,
+  "minimum_repeats": 2,
+  "maximum_stream_interval_ms": 1000,
+  "rpc_deadline_seconds": 30,
+  "p99_budget_ms": {
+    "submit_to_running": 5000,
+    "stream_scheduled": 1000,
+    "settle": 5000
+  },
+  "required_backends": [
+    "tofudb",
+    "sqlite"
+  ],
+  "uncovered": [
+    "real-provider-capacity",
+    "browser-send-to-visible-feedback",
+    "sustained-soak"
+  ]
+}

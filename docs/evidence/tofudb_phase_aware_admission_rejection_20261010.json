@@ -1,0 +1,203 @@
+{
+  "schema": "tofudb.optimization-rejection/v1",
+  "decision": "Rejected: phase-aware prepared-commit priority under capacity pressure did not establish a stable cross-transport full-workload improvement. No runtime integration.",
+  "problem": "Prepared transactions retain scarce snapshots/private data while captures and commits share FIFO authority admission.",
+  "candidate": "Separate ordinary/prepared classes only for actual prepared transactions under observed capacity pressure. Alternate grants when both classes wait; never preempt active holder; preserve quotas and deadline/poison/OCC boundaries.",
+  "alternatives_considered": [
+    "Blind pin/pool limit increases were previously rejected.",
+    "Unbounded commit priority risks capture starvation.",
+    "Tuning a fairness ratio without stable full-workload evidence does not satisfy the user priority for comprehensive optimization."
+  ],
+  "baseline_source_sha256": "7d38c76a7bb9c298b639113b40117b9270e8424508652137b09d3544a11e7e58",
+  "candidate_pair": {
+    "source_sha256": "23bd51158a5053159c6a5e306eb6d69b500edb81c5d88091c9fb640d5a7c1a5c",
+    "binary_sha256": "aa20f42b6515eb3e5551ad798c8e6cc7d09bd82bbe072c6fc1f251e6890c4550",
+    "library_sha256": "477577396f393c7210ab9dc59263fe9b6d00e03ce2e71182785bd11ecd7da10b",
+    "scope": "Phase-aware admission candidate, actual exported source and allocator verified, no runtime deployment"
+  },
+  "verification": {
+    "admission_tests_passed": 6,
+    "server_tests_passed": 37,
+    "pin_lifecycle_tests_passed_in_full_suite": 13,
+    "full_native_passed": 1687,
+    "full_native_ignored": 6,
+    "full_native_failed": 0,
+    "full_native_elapsed_seconds": 122.99,
+    "macro_windows": 8,
+    "macro_correctness_all": true,
+    "macro_errors_all": 0,
+    "macro_profile_every": "0"
+  },
+  "comparisons": [
+    {
+      "transport": "application",
+      "rows": [
+        {
+          "transport": "application",
+          "index": 0,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 7873.343147337437,
+          "settleP99ms": 10689.477324485779,
+          "engineRss": 3495927808,
+          "clientRss": 142733312,
+          "latencyPassed": false
+        },
+        {
+          "transport": "application",
+          "index": 1,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 4945.470876991749,
+          "settleP99ms": 8637.640595436096,
+          "engineRss": 3344343040,
+          "clientRss": 289099776,
+          "latencyPassed": false
+        },
+        {
+          "transport": "application",
+          "index": 2,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 9377.885773777962,
+          "settleP99ms": 14334.599666297436,
+          "engineRss": 3678404608,
+          "clientRss": 156987392,
+          "latencyPassed": false
+        },
+        {
+          "transport": "application",
+          "index": 3,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 7691.89228862524,
+          "settleP99ms": 13009.486861526966,
+          "engineRss": 3719782400,
+          "clientRss": 292614144,
+          "latencyPassed": false
+        }
+      ],
+      "comparisons": {
+        "candidateVsBaseline": {
+          "pairs": [
+            {
+              "streamP99ms": 0.6281284562916809,
+              "settleP99ms": 0.8080507898782239,
+              "engineRss": 0.9566396171988687,
+              "clientRss": 2.025454128045456
+            },
+            {
+              "streamP99ms": 1.2191909899266227,
+              "settleP99ms": 1.1018574228849283,
+              "engineRss": 0.9888762869570005,
+              "clientRss": 0.536499671048027
+            }
+          ],
+          "medianPairRatios": {
+            "streamP99ms": 0.9236597231091518,
+            "settleP99ms": 0.9549541063815761,
+            "engineRss": 0.9727579520779346,
+            "clientRss": 1.2809768995467414
+          }
+        }
+      }
+    },
+    {
+      "transport": "embedded",
+      "rows": [
+        {
+          "transport": "embedded",
+          "index": 0,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1797.4963560700417,
+          "settleP99ms": 4032.9333916306496,
+          "engineRss": 3405578240,
+          "clientRss": 3405578240,
+          "latencyPassed": false
+        },
+        {
+          "transport": "embedded",
+          "index": 1,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1712.8580659627914,
+          "settleP99ms": 4459.702029824257,
+          "engineRss": 3387363328,
+          "clientRss": 3387363328,
+          "latencyPassed": false
+        },
+        {
+          "transport": "embedded",
+          "index": 2,
+          "variant": "candidate",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1716.9038280844688,
+          "settleP99ms": 4239.931710064411,
+          "engineRss": 3146530816,
+          "clientRss": 3142131712,
+          "latencyPassed": false
+        },
+        {
+          "transport": "embedded",
+          "index": 3,
+          "variant": "baseline",
+          "returncode": 1,
+          "report": "/path/to/your/project",
+          "streamP99ms": 1829.1511163115501,
+          "settleP99ms": 4387.034237384796,
+          "engineRss": 3634835456,
+          "clientRss": 3657801728,
+          "latencyPassed": false
+        }
+      ],
+      "comparisons": {
+        "candidateVsBaseline": {
+          "pairs": [
+            {
+              "streamP99ms": 0.952913234109526,
+              "settleP99ms": 1.1058208992688199,
+              "engineRss": 0.9946514480900606,
+              "clientRss": 0.9946514480900606
+            },
+            {
+              "streamP99ms": 0.938634218230462,
+              "settleP99ms": 0.9664687988831206,
+              "engineRss": 0.8656597675710578,
+              "clientRss": 0.8590218786183481
+            }
+          ],
+          "medianPairRatios": {
+            "streamP99ms": 0.945773726169994,
+            "settleP99ms": 1.0361448490759702,
+            "engineRss": 0.9301556078305592,
+            "clientRss": 0.9268366633542043
+          }
+        }
+      }
+    }
+  ],
+  "admission_failure": "Application stream and settlement pairs disagree; embedded stream improves about5% but settlement ratios1.1058 and0.9665. All eight latency-acceptance gates remain false. Application client RSS ratios disagree strongly. No broad16 rerun justified after this failed cross-transport gate.",
+  "limits": [
+    "Two opposing-order pairs per transport; not provider/browser/soak proof.",
+    "Embedded abandonment is not process SIGKILL.",
+    "Scheduled settlement comparison is distinct from unscheduled acceptance.",
+    "Root full-suite is a moving target with concurrent writers; tests refer to frozen candidate only."
+  ],
+  "next_action": "Prioritize physical write/history amplification and total primary-plus-projection lifecycle on matched full workloads; retain end-to-end scheduling attribution, but stop refining this queue-priority prototype.",
+  "raw_evidence_directory": "/path/to/your/project",
+  "receipt_sha256": {
+    "candidate-freeze-manifest.json": "d1bc158fc863f79faeb87d4f187490a0c1efd9f5af90bfe958a40da215f91b59",
+    "phase-aware-macro-windows.json": "f2edbfad12b7002fb12e8bdfe0206da72b2695693312209722a3fca02fb5d42b",
+    "phase-aware-macro-review.json": "2b524a1a33cacb70a734e1a2988494db1ac3769aba8abccbff5fadc57d47f69a",
+    "native-full-tests.log": "73ddf9e62a6a0a50ce71d93b7215e9550a7b171c98b309a77eaa3b302c3b5729",
+    "pair-attestation.log": "75e954cf91dd2dfa66f980e801a5016d30bdd62b4a4178a74c11deb4db22fd70"
+  }
+}

@@ -1,0 +1,52 @@
+/* ═══════════════════════════════════════════
+   ★ Theme System
+   ═══════════════════════════════════════════ */
+
+/* ── Theme Picker UI ── */
+.theme-picker{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--space-2)}
+/* Degraded-section contract (settings/section_requires.js): a block whose JS
+   dependency is missing hides its CONTROLS and shows a notice instead — never
+   an empty box masquerading as a usable control. */
+.settings-section-js-missing{display:none;font-size:var(--font-size-sm);line-height:1.6;color:var(--text-secondary);
+  background:var(--bg-tertiary);border:1px dashed var(--border-light);border-radius:var(--radius-sm);padding:var(--space-2) var(--space-3)}
+.settings-section-needs-js.degraded>.theme-picker,
+.settings-section-needs-js.degraded>.settings-toggle-desc{display:none}
+.settings-section-needs-js.degraded>.settings-section-js-missing{display:block}
+.theme-option{display:flex;flex-direction:column;align-items:center;gap:5px;padding:var(--space-2) var(--space-1) 6px;border:2px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;transition:border-color .2s,background-color .2s,transform .2s,box-shadow .2s;background:var(--bg-tertiary)}
+.theme-option:hover{border-color:var(--border-light);background:var(--bg-hover);transform:translateY(-1px)}
+.theme-option.active{border-color:var(--accent);background:var(--accent-subtle);box-shadow:0 0 0 1px var(--accent)}
+.theme-preview{width:100%;height:32px;border-radius:6px;border:1px solid rgba(128,128,128,0.15)}
+.dark-preview{background:linear-gradient(135deg,#0a0a0c 0%,#1a1a21 40%,#6e56cf 100%)}
+.light-preview{background:linear-gradient(135deg,#ffffff 0%,#f0f2f5 40%,#6366f1 100%)}
+.tofu-preview{background:linear-gradient(135deg,#F5F3ED 0%,#E9E5DC 40%,#BB9572 100%)}
+.theme-option span{font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary)}
+.theme-option.active span{color:var(--accent)}
+
+.theme-option-label{display:inline-flex;align-items:center;gap:5px}
+.theme-option-label svg{flex-shrink:0}
+/* ── Theme picker: tofu overrides inside settings panel ── */
+.settings-panel .theme-picker{gap:var(--space-2)}
+.settings-panel .theme-option{border:1px solid var(--s-line);border-radius:10px;background:var(--s-white);box-shadow:var(--s-shadow-xs);transition:transform .12s,box-shadow .12s,border-color .12s,background .12s}
+.settings-panel .theme-option:hover{border-color:var(--s-line-strong);background:var(--s-cream);transform:translateY(-1px);box-shadow:var(--s-shadow-sm)}
+.settings-panel .theme-option:active{transform:translateY(1px);box-shadow:none}
+.settings-panel .theme-option.active{border-color:rgba(201,153,63,.5);background:rgba(201,153,63,.14);box-shadow:0 0 0 1px rgba(201,153,63,.25);transform:none}
+.settings-panel .theme-preview{border-radius:6px;border:1px solid rgba(26,24,20,.14)}
+.settings-panel .theme-option span{color:#3a342a;font-weight:700;font-size:var(--font-size-xs);text-transform:uppercase;letter-spacing:.03em}
+.settings-panel .theme-option.active span{color:#1a1814;font-weight:900}
+
+/* ── Language Picker UI ── */
+.lang-picker{display:flex;gap:var(--space-2);flex-wrap:wrap}
+.lang-option{display:flex;align-items:center;gap:6px;padding:6px 14px;border:2px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;transition:border-color .2s,background-color .2s;background:var(--bg-tertiary)}
+.lang-option:hover{border-color:var(--border-light);background:var(--bg-hover)}
+.lang-option.active{border-color:var(--accent);background:var(--accent-subtle);box-shadow:0 0 0 1px var(--accent)}
+.lang-flag{font-size:var(--font-size-xl);line-height:1}
+.lang-label{font-size:var(--font-size-sm);font-weight:600;color:var(--text-secondary)}
+.lang-option.active .lang-label{color:var(--accent)}
+/* ── Language picker: tofu overrides ── */
+.settings-panel .lang-option{border:1px solid var(--s-line);border-radius:10px;background:var(--s-white);box-shadow:var(--s-shadow-xs);transition:transform .12s,box-shadow .12s,border-color .12s,background .12s}
+.settings-panel .lang-option:hover{border-color:var(--s-line-strong);background:var(--s-cream);transform:translateY(-1px);box-shadow:var(--s-shadow-sm)}
+.settings-panel .lang-option:active{transform:translateY(1px);box-shadow:none}
+.settings-panel .lang-option.active{border-color:rgba(201,153,63,.5);background:rgba(201,153,63,.14);box-shadow:0 0 0 1px rgba(201,153,63,.25);transform:none}
+.settings-panel .lang-label{color:#3a342a;font-weight:700}
+.settings-panel .lang-option.active .lang-label{color:#1a1814;font-weight:900}
+

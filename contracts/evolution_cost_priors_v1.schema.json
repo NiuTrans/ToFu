@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_cost_priors_v1.schema.json",
+  "title": "Self-evolution measured cost priors, one record per domain plus a reserved _global aggregate",
+  "type": "object",
+  "required": ["schema_version", "domain", "samples", "tokens_median", "wall_clock_median", "tool_calls_median", "failure_rate", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "domain": {"type": "string", "minLength": 1, "maxLength": 80, "description": "Goal domain, or the reserved aggregate '_global' computed from all settled episodes of one owner."},
+    "samples": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "tokens_median": {"type": "integer", "minimum": 0},
+    "wall_clock_median": {"type": "integer", "minimum": 0},
+    "tool_calls_median": {"type": "integer", "minimum": 0},
+    "failure_rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

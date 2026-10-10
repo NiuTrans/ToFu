@@ -1,0 +1,42 @@
+/* Timer instruction, predicate, verifier and cadence. Complete instruction survives its explicit disclosure. */
+.timer-watcher-meta {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: var(--control-edge-inset) solid var(--border);
+}
+.timer-meta-row {
+  display: grid;
+  grid-template-columns: var(--tool-receipt-label-width) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-2);
+  min-inline-size: 0;
+}
+.timer-meta-label { color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--weight-semibold); }
+.timer-meta-val { min-inline-size: 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.timer-watcher-block .timer-meta-md.md-content {
+  font: var(--font-size-lg)/var(--leading-body) var(--font-ui);
+  min-inline-size: 0;
+}
+.timer-meta-md :is(p, ul, ol, blockquote, pre) { margin: 0 0 var(--space-2); }
+.timer-meta-md > :last-child { margin-bottom: 0; }
+.timer-meta-md :is(ul, ol) { padding-inline-start: var(--space-5); }
+.timer-meta-md a { color: var(--info-text); }
+.timer-meta-md code { font-family: var(--font-mono); font-size: var(--font-size-sm); overflow-wrap: anywhere; }
+.timer-meta-clamp { max-block-size: calc(3em * var(--leading-body)); overflow: hidden; }
+.timer-meta-clamp.expanded { max-block-size: none; }
+.timer-meta-row-instr[role="button"] { cursor: pointer; }
+.timer-meta-more { grid-column: 2; justify-self: start; color: var(--text-secondary); font-size: var(--font-size-sm); font-weight: var(--weight-semibold); }
+.timer-meta-row-instr:hover .timer-meta-more { color: var(--text-primary); }
+.timer-meta-cmd {
+  min-inline-size: 0;
+  padding: var(--space-2);
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: var(--font-size-sm)/var(--leading-body) var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

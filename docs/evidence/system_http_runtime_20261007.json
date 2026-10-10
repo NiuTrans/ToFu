@@ -1,0 +1,1560 @@
+{
+  "format": "tofu.http-runtime-experiment/v1",
+  "whole_system_verdict": "incomplete",
+  "scope": "production Headless API transport with synthetic compute; excludes full app/agent/storage",
+  "connection_cohort": "fresh client pool each 256 requests; server default keepalive limit retained",
+  "runtime": {
+    "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+    "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.17",
+    "affinity": [
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      144,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      178
+    ]
+  },
+  "runner_sha256": "c579b5fe817427140e14b51dd4bdd0935098ce11861ba9ea7240ebae178c3f22",
+  "workloads": [
+    {
+      "protocol": "h1",
+      "case": "short_requests",
+      "pairs": [
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h1",
+            "case": "short_requests",
+            "server_pid": 1008826,
+            "p50_ms": 18.114524000000003,
+            "p95_ms": 26.737742,
+            "p99_ms": 27.075457,
+            "server_cpu_ms_per_request": 0.5277777777777779,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 52830208,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1008894
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h1",
+            "case": "short_requests",
+            "server_pid": 1008841,
+            "p50_ms": 16.0613585,
+            "p95_ms": 25.552229,
+            "p99_ms": 27.36296,
+            "server_cpu_ms_per_request": 0.49074074074074076,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 55947264,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1008897
+          }
+        },
+        {
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h1",
+            "case": "short_requests",
+            "server_pid": 1008900,
+            "p50_ms": 16.126835999999997,
+            "p95_ms": 25.704653,
+            "p99_ms": 27.461872,
+            "server_cpu_ms_per_request": 0.49074074074074076,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 55885824,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1008930
+          },
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h1",
+            "case": "short_requests",
+            "server_pid": 1008913,
+            "p50_ms": 16.941705499999998,
+            "p95_ms": 26.881034,
+            "p99_ms": 27.289831,
+            "server_cpu_ms_per_request": 0.5277777777777779,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 52854784,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1008982
+          }
+        },
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h1",
+            "case": "short_requests",
+            "server_pid": 1008989,
+            "p50_ms": 16.326687,
+            "p95_ms": 26.741139,
+            "p99_ms": 26.998307,
+            "server_cpu_ms_per_request": 0.5277777777777779,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 52936704,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009002
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h1",
+            "case": "short_requests",
+            "server_pid": 1008995,
+            "p50_ms": 16.377914,
+            "p95_ms": 25.636295,
+            "p99_ms": 27.265093,
+            "server_cpu_ms_per_request": 0.49074074074074076,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 55889920,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009004
+          }
+        }
+      ]
+    },
+    {
+      "protocol": "h1",
+      "case": "authentication",
+      "pairs": [
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h1",
+            "case": "authentication",
+            "server_pid": 1009006,
+            "p50_ms": 15.860126999999999,
+            "p95_ms": 25.121004,
+            "p99_ms": 26.491309,
+            "server_cpu_ms_per_request": 0.49074074074074076,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 52695040,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009062
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h1",
+            "case": "authentication",
+            "server_pid": 1009058,
+            "p50_ms": 15.887584499999999,
+            "p95_ms": 25.15623,
+            "p99_ms": 25.566704,
+            "server_cpu_ms_per_request": 0.44444444444444453,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 56168448,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009063
+          }
+        },
+        {
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h1",
+            "case": "authentication",
+            "server_pid": 1009066,
+            "p50_ms": 16.2269835,
+            "p95_ms": 25.368937,
+            "p99_ms": 27.073773,
+            "server_cpu_ms_per_request": 0.46296296296296297,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 56356864,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009126
+          },
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h1",
+            "case": "authentication",
+            "server_pid": 1009122,
+            "p50_ms": 16.1501315,
+            "p95_ms": 25.481149,
+            "p99_ms": 27.058783,
+            "server_cpu_ms_per_request": 0.5,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 52994048,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009129
+          }
+        },
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h1",
+            "case": "authentication",
+            "server_pid": 1009131,
+            "p50_ms": 15.817833499999999,
+            "p95_ms": 25.071916,
+            "p99_ms": 26.640321,
+            "server_cpu_ms_per_request": 0.5,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 52887552,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009289
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h1",
+            "case": "authentication",
+            "server_pid": 1009235,
+            "p50_ms": 16.187552500000002,
+            "p95_ms": 25.402157,
+            "p99_ms": 26.605122,
+            "server_cpu_ms_per_request": 0.4444444444444444,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 56037376,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009291
+          }
+        }
+      ]
+    },
+    {
+      "protocol": "h1",
+      "case": "sse_fanout",
+      "pairs": [
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h1",
+            "case": "sse_fanout",
+            "server_pid": 1009293,
+            "p50_ms": 34.262906,
+            "p95_ms": 47.950225,
+            "p99_ms": 51.526126,
+            "server_cpu_ms_per_request": 1.287037037037037,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 53321728,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009411
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h1",
+            "case": "sse_fanout",
+            "server_pid": 1009324,
+            "p50_ms": 32.966312,
+            "p95_ms": 46.703832,
+            "p99_ms": 49.089794,
+            "server_cpu_ms_per_request": 1.1296296296296295,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 56434688,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009420
+          }
+        },
+        {
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h1",
+            "case": "sse_fanout",
+            "server_pid": 1009431,
+            "p50_ms": 33.075834,
+            "p95_ms": 46.271401,
+            "p99_ms": 48.585396,
+            "server_cpu_ms_per_request": 1.1296296296296295,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 56061952,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009584
+          },
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h1",
+            "case": "sse_fanout",
+            "server_pid": 1009544,
+            "p50_ms": 34.7578505,
+            "p95_ms": 48.060305,
+            "p99_ms": 52.051864,
+            "server_cpu_ms_per_request": 1.2499999999999998,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 53317632,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009714
+          }
+        },
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h1",
+            "case": "sse_fanout",
+            "server_pid": 1009727,
+            "p50_ms": 34.144465,
+            "p95_ms": 47.980184,
+            "p99_ms": 51.618285,
+            "server_cpu_ms_per_request": 1.259259259259259,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 53747712,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009946
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h1",
+            "case": "sse_fanout",
+            "server_pid": 1009903,
+            "p50_ms": 33.068243499999994,
+            "p95_ms": 46.381614,
+            "p99_ms": 48.75731,
+            "server_cpu_ms_per_request": 1.101851851851852,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 56360960,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1009957
+          }
+        }
+      ]
+    },
+    {
+      "protocol": "h2",
+      "case": "short_requests",
+      "pairs": [
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h2",
+            "case": "short_requests",
+            "server_pid": 1010022,
+            "p50_ms": 12.3133915,
+            "p95_ms": 18.028934,
+            "p99_ms": 21.484068,
+            "server_cpu_ms_per_request": 0.5740740740740742,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 55500800,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010043
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h2",
+            "case": "short_requests",
+            "server_pid": 1010032,
+            "p50_ms": 11.277688000000001,
+            "p95_ms": 13.083308,
+            "p99_ms": 13.369659,
+            "server_cpu_ms_per_request": 0.5740740740740742,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 58052608,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010050
+          }
+        },
+        {
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h2",
+            "case": "short_requests",
+            "server_pid": 1010052,
+            "p50_ms": 11.303476,
+            "p95_ms": 13.053572,
+            "p99_ms": 18.264351,
+            "server_cpu_ms_per_request": 0.5555555555555557,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 58122240,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010108
+          },
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h2",
+            "case": "short_requests",
+            "server_pid": 1010055,
+            "p50_ms": 12.175193,
+            "p95_ms": 13.441722,
+            "p99_ms": 20.527823,
+            "server_cpu_ms_per_request": 0.5833333333333334,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 55169024,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010109
+          }
+        },
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h2",
+            "case": "short_requests",
+            "server_pid": 1010111,
+            "p50_ms": 11.872696999999999,
+            "p95_ms": 13.224495,
+            "p99_ms": 13.570213,
+            "server_cpu_ms_per_request": 0.5833333333333333,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 55361536,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010118
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h2",
+            "case": "short_requests",
+            "server_pid": 1010114,
+            "p50_ms": 11.185088,
+            "p95_ms": 13.043224,
+            "p99_ms": 19.063889,
+            "server_cpu_ms_per_request": 0.5648148148148149,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 58290176,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010121
+          }
+        }
+      ]
+    },
+    {
+      "protocol": "h2",
+      "case": "authentication",
+      "pairs": [
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h2",
+            "case": "authentication",
+            "server_pid": 1010125,
+            "p50_ms": 10.954063999999999,
+            "p95_ms": 12.30034,
+            "p99_ms": 12.459746,
+            "server_cpu_ms_per_request": 0.5462962962962964,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 55349248,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010204
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h2",
+            "case": "authentication",
+            "server_pid": 1010201,
+            "p50_ms": 11.089687000000001,
+            "p95_ms": 12.267437,
+            "p99_ms": 19.5541,
+            "server_cpu_ms_per_request": 0.5277777777777779,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 58155008,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010206
+          }
+        },
+        {
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h2",
+            "case": "authentication",
+            "server_pid": 1010208,
+            "p50_ms": 11.049234,
+            "p95_ms": 12.304199,
+            "p99_ms": 19.776719,
+            "server_cpu_ms_per_request": 0.5277777777777779,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 58126336,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010215
+          },
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h2",
+            "case": "authentication",
+            "server_pid": 1010212,
+            "p50_ms": 10.990262000000001,
+            "p95_ms": 12.293297,
+            "p99_ms": 12.505382,
+            "server_cpu_ms_per_request": 0.5370370370370371,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 55595008,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010313
+          }
+        },
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h2",
+            "case": "authentication",
+            "server_pid": 1010364,
+            "p50_ms": 10.850736000000001,
+            "p95_ms": 12.149184,
+            "p99_ms": 12.344321,
+            "server_cpu_ms_per_request": 0.5370370370370371,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 55525376,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010374
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h2",
+            "case": "authentication",
+            "server_pid": 1010369,
+            "p50_ms": 11.206472,
+            "p95_ms": 12.335278,
+            "p99_ms": 12.430284,
+            "server_cpu_ms_per_request": 0.5092592592592593,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 58322944,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010376
+          }
+        }
+      ]
+    },
+    {
+      "protocol": "h2",
+      "case": "sse_fanout",
+      "pairs": [
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h2",
+            "case": "sse_fanout",
+            "server_pid": 1010378,
+            "p50_ms": 26.5298085,
+            "p95_ms": 32.371166,
+            "p99_ms": 39.710422,
+            "server_cpu_ms_per_request": 1.3333333333333335,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 56725504,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010521
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h2",
+            "case": "sse_fanout",
+            "server_pid": 1010415,
+            "p50_ms": 27.951368,
+            "p95_ms": 31.308422,
+            "p99_ms": 38.603424,
+            "server_cpu_ms_per_request": 0.9814814814814815,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 59236352,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010556
+          }
+        },
+        {
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h2",
+            "case": "sse_fanout",
+            "server_pid": 1010591,
+            "p50_ms": 28.006757999999998,
+            "p95_ms": 32.010821,
+            "p99_ms": 39.383799,
+            "server_cpu_ms_per_request": 1.0092592592592593,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 59015168,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010725
+          },
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h2",
+            "case": "sse_fanout",
+            "server_pid": 1010640,
+            "p50_ms": 26.181425,
+            "p95_ms": 30.42916,
+            "p99_ms": 39.397228,
+            "server_cpu_ms_per_request": 1.314814814814815,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 56778752,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010762
+          }
+        },
+        {
+          "asyncio": {
+            "loop": "asyncio",
+            "protocol": "h2",
+            "case": "sse_fanout",
+            "server_pid": 1010797,
+            "p50_ms": 26.7371665,
+            "p95_ms": 32.2586,
+            "p99_ms": 39.106579,
+            "server_cpu_ms_per_request": 1.314814814814815,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 56418304,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010947
+          },
+          "uvloop": {
+            "loop": "uvloop",
+            "protocol": "h2",
+            "case": "sse_fanout",
+            "server_pid": 1010836,
+            "p50_ms": 28.105161000000003,
+            "p95_ms": 30.448102,
+            "p99_ms": 38.731184,
+            "server_cpu_ms_per_request": 0.9907407407407407,
+            "warmup_requests": 80,
+            "rss_after_requests_bytes": 58904576,
+            "compute_port": "synthetic",
+            "correctness_passed": true,
+            "memory_server_pid": 1010991
+          }
+        }
+      ]
+    }
+  ],
+  "raw_artifact_sha256": "2d3a19a1e01c2dae7d2452c59a901907cc41ecd7faee86c8179919ac7e9e8bfd",
+  "disposition": "uvloop_not_promoted",
+  "reference_git_commit": "947a9f21a",
+  "reason": "Client-visible latency improvement is inconsistent; H2 P99 regresses in some pairs and server RSS rises around 4-7%. CPU benefits alone do not meet admission. Slow-consumer/cancellation/full-application/native-framework coverage remains missing.",
+  "rejected_measurement": "Original >1000 request run hit default keepalive GOAWAY, so it is not completion evidence. Controlled cohorts preserve the server default and recycle client pools explicitly.",
+  "stream_lifecycle": {
+    "source": "benchmarks/http_stream_lifecycle.py",
+    "source_sha256": "5712ccbafddeafc17d085a23f0eed96d10bf6ae43de4c4f96b8b037d5b293506",
+    "runtime": {
+      "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+      "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+      "affinity": [
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        144,
+        148,
+        149,
+        150,
+        151,
+        152,
+        153,
+        154,
+        155,
+        156,
+        157,
+        158,
+        159,
+        160,
+        161,
+        162,
+        163,
+        164,
+        165,
+        166,
+        167,
+        168,
+        169,
+        170,
+        171,
+        172,
+        173,
+        174,
+        175,
+        176,
+        177,
+        178
+      ]
+    },
+    "scope": "production Headless transport with synthetic compute; lifecycle comparison, not performance admission",
+    "raw_artifact_sha256": "3a6608b24d089ce9eac60c282c7fed8899944cbc3dc35848572f92bc351f1c72",
+    "pairs": [
+      {
+        "protocol": "h1",
+        "pair": 0,
+        "measurements": {
+          "asyncio": {
+            "server_pid": 1599862,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.2918045,
+            "observed_cleanup_p99_ms": 1.342037,
+            "server_cpu_ms_per_cycle_including_warmup": 23.583333333333332,
+            "sampled_peak_server_rss_bytes": 58834944,
+            "synthetic_compute": true,
+            "memory_server_pid": 1599991
+          },
+          "uvloop": {
+            "server_pid": 1600167,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.279819,
+            "observed_cleanup_p99_ms": 1.467397,
+            "server_cpu_ms_per_cycle_including_warmup": 22.916666666666668,
+            "sampled_peak_server_rss_bytes": 57995264,
+            "synthetic_compute": true,
+            "memory_server_pid": 1600359
+          }
+        }
+      },
+      {
+        "protocol": "h1",
+        "pair": 1,
+        "measurements": {
+          "uvloop": {
+            "server_pid": 1600565,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.28138,
+            "observed_cleanup_p99_ms": 1.398097,
+            "server_cpu_ms_per_cycle_including_warmup": 23.083333333333332,
+            "sampled_peak_server_rss_bytes": 57802752,
+            "synthetic_compute": true,
+            "memory_server_pid": 1600753
+          },
+          "asyncio": {
+            "server_pid": 1601059,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.304596,
+            "observed_cleanup_p99_ms": 1.553787,
+            "server_cpu_ms_per_cycle_including_warmup": 23.916666666666668,
+            "sampled_peak_server_rss_bytes": 58318848,
+            "synthetic_compute": true,
+            "memory_server_pid": 1601283
+          }
+        }
+      },
+      {
+        "protocol": "h1",
+        "pair": 2,
+        "measurements": {
+          "asyncio": {
+            "server_pid": 1601557,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.2971215,
+            "observed_cleanup_p99_ms": 1.336831,
+            "server_cpu_ms_per_cycle_including_warmup": 23.583333333333336,
+            "sampled_peak_server_rss_bytes": 58220544,
+            "synthetic_compute": true,
+            "memory_server_pid": 1601838
+          },
+          "uvloop": {
+            "server_pid": 1602077,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.2799735,
+            "observed_cleanup_p99_ms": 1.329892,
+            "server_cpu_ms_per_cycle_including_warmup": 23.083333333333336,
+            "sampled_peak_server_rss_bytes": 57790464,
+            "synthetic_compute": true,
+            "memory_server_pid": 1602205
+          }
+        }
+      },
+      {
+        "protocol": "h2",
+        "pair": 0,
+        "measurements": {
+          "asyncio": {
+            "server_pid": 1602513,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.7709405,
+            "observed_cleanup_p99_ms": 14.03683,
+            "server_cpu_ms_per_cycle_including_warmup": 95.74999999999999,
+            "sampled_peak_server_rss_bytes": 1725042688,
+            "synthetic_compute": true,
+            "memory_server_pid": 1602830
+          },
+          "uvloop": {
+            "server_pid": 1603188,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.7789565,
+            "observed_cleanup_p99_ms": 13.978286,
+            "server_cpu_ms_per_cycle_including_warmup": 95.91666666666669,
+            "sampled_peak_server_rss_bytes": 1835241472,
+            "synthetic_compute": true,
+            "memory_server_pid": 1603393
+          }
+        }
+      },
+      {
+        "protocol": "h2",
+        "pair": 1,
+        "measurements": {
+          "uvloop": {
+            "server_pid": 1603577,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.747428,
+            "observed_cleanup_p99_ms": 13.77852,
+            "server_cpu_ms_per_cycle_including_warmup": 96.08333333333333,
+            "sampled_peak_server_rss_bytes": 1860927488,
+            "synthetic_compute": true,
+            "memory_server_pid": 1603771
+          },
+          "asyncio": {
+            "server_pid": 1603995,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.7796275000000001,
+            "observed_cleanup_p99_ms": 1.88678,
+            "server_cpu_ms_per_cycle_including_warmup": 97.33333333333333,
+            "sampled_peak_server_rss_bytes": 1723232256,
+            "synthetic_compute": true,
+            "memory_server_pid": 1604147
+          }
+        }
+      },
+      {
+        "protocol": "h2",
+        "pair": 2,
+        "measurements": {
+          "asyncio": {
+            "server_pid": 1604353,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 2.2139610000000003,
+            "observed_cleanup_p99_ms": 5.601693,
+            "server_cpu_ms_per_cycle_including_warmup": 98.25,
+            "sampled_peak_server_rss_bytes": 1743675392,
+            "synthetic_compute": true,
+            "memory_server_pid": 1604505
+          },
+          "uvloop": {
+            "server_pid": 1604657,
+            "samples": 100,
+            "warmups": 20,
+            "observed_cleanup_p50_ms": 1.7412239999999999,
+            "observed_cleanup_p99_ms": 14.880893,
+            "server_cpu_ms_per_cycle_including_warmup": 95.49999999999999,
+            "sampled_peak_server_rss_bytes": 1843625984,
+            "synthetic_compute": true,
+            "memory_server_pid": 1604804
+          }
+        }
+      }
+    ],
+    "metrics_limitations": [
+      "cleanup latency ends at observer HTTP acknowledgement; not actual producer release time",
+      "CPU includes synthetic producer, TLS, diagnostic requests and 20 warmups; not serving cost alone",
+      "separate 5ms sampled server RSS; spikes shorter than sampling interval may be missed",
+      "connection close and actual RST_STREAM are distinct; HTTPX response close alone sends no reset in installed httpcore"
+    ],
+    "correctness": "all 1200 measured cycles pass pause/backpressure, producer release, cursor reconnect/abort; independent 1200 memory cycles also pass, plus warmups; H2 includes explicit RST_STREAM and successful same-connection new request",
+    "new_risk": "H2 sampled server peak ~1.6-1.8 GiB under repeated cancellation vs H1 ~55-56 MiB; producer counters do not prove transport quiescence or memory reclamation",
+    "decision": "no production loop/server promotion; diagnose H2 transport tasks/buffer retention before admission",
+    "initial_diagnostic_failures": [
+      "missing isolated uvloop module resolved using existing experiment dependency",
+      "installed httpcore response close alone sends no RST; actual transport close and explicit reset are distinct gates"
+    ],
+    "required_remaining": [
+      "transport quiescence and retained-memory evidence",
+      "full application/agent/storage integration",
+      "native server alternative",
+      "throughput and full cold-start/resource-admission gate"
+    ],
+    "transport_diagnosis": {
+      "runs": {
+        "upstream": {
+          "raw_sha256": "c7e8fcd90b7eabdcf8ba1ac745830671a38702ccbc4b208b91d7c942c63ae2e1",
+          "samples": 20,
+          "warmups": 20,
+          "before_gc": {
+            "active_producers": 0,
+            "gc_collected": null,
+            "gc_counts": [
+              665,
+              4,
+              2
+            ],
+            "rss_bytes": 647462912,
+            "tasks": {
+              "ASGIHTTPConnection.handle_messages": 1,
+              "ASGIHTTPConnection.handle_request": 1,
+              "H2Protocol.send_task": 1,
+              "Lifespan.handle_lifespan": 1,
+              "TCPServer._idle_timeout": 107,
+              "_handle": 1,
+              "raise_shutdown": 2,
+              "serve_child": 1,
+              "worker_serve.<locals>._server_callback": 108
+            }
+          },
+          "after_idle": {
+            "active_producers": 0,
+            "gc_collected": null,
+            "gc_counts": [
+              116,
+              4,
+              2
+            ],
+            "rss_bytes": 647462912,
+            "tasks": {
+              "ASGIHTTPConnection.handle_messages": 1,
+              "ASGIHTTPConnection.handle_request": 1,
+              "H2Protocol.send_task": 1,
+              "Lifespan.handle_lifespan": 1,
+              "TCPServer._idle_timeout": 86,
+              "_handle": 1,
+              "raise_shutdown": 2,
+              "serve_child": 1,
+              "worker_serve.<locals>._server_callback": 87
+            }
+          },
+          "after_gc": {
+            "active_producers": 0,
+            "gc_collected": 3797,
+            "gc_counts": [
+              16,
+              0,
+              0
+            ],
+            "rss_bytes": 497082368,
+            "tasks": {
+              "ASGIHTTPConnection.handle_messages": 1,
+              "ASGIHTTPConnection.handle_request": 1,
+              "H2Protocol.send_task": 1,
+              "Lifespan.handle_lifespan": 1,
+              "TCPServer._idle_timeout": 86,
+              "_handle": 1,
+              "raise_shutdown": 2,
+              "serve_child": 1,
+              "worker_serve.<locals>._server_callback": 87
+            }
+          }
+        },
+        "owned_fixed": {
+          "raw_sha256": "c9dd9197cdc605da8b9b849b833a702de0dc46149d4f46b561f1204be1616e00",
+          "samples": 20,
+          "warmups": 20,
+          "before_gc": {
+            "active_producers": 0,
+            "gc_collected": null,
+            "gc_counts": [
+              578,
+              2,
+              2
+            ],
+            "rss_bytes": 91869184,
+            "tasks": {
+              "ASGIHTTPConnection.handle_messages": 1,
+              "ASGIHTTPConnection.handle_request": 1,
+              "H2Protocol.send_task": 1,
+              "Lifespan.handle_lifespan": 1,
+              "_handle": 1,
+              "raise_shutdown": 2,
+              "serve_child": 1,
+              "worker_serve.<locals>._server_callback": 1
+            }
+          },
+          "after_idle": {
+            "active_producers": 0,
+            "gc_collected": null,
+            "gc_counts": [
+              597,
+              2,
+              2
+            ],
+            "rss_bytes": 91906048,
+            "tasks": {
+              "ASGIHTTPConnection.handle_messages": 1,
+              "ASGIHTTPConnection.handle_request": 1,
+              "H2Protocol.send_task": 1,
+              "Lifespan.handle_lifespan": 1,
+              "_handle": 1,
+              "raise_shutdown": 2,
+              "serve_child": 1,
+              "worker_serve.<locals>._server_callback": 1
+            }
+          },
+          "after_gc": {
+            "active_producers": 0,
+            "gc_collected": 639,
+            "gc_counts": [
+              16,
+              0,
+              0
+            ],
+            "rss_bytes": 91906048,
+            "tasks": {
+              "ASGIHTTPConnection.handle_messages": 1,
+              "ASGIHTTPConnection.handle_request": 1,
+              "H2Protocol.send_task": 1,
+              "Lifespan.handle_lifespan": 1,
+              "_handle": 1,
+              "raise_shutdown": 2,
+              "serve_child": 1,
+              "worker_serve.<locals>._server_callback": 1
+            }
+          }
+        }
+      },
+      "owned_original": "same lifecycle fixture with exact prior read method fails producer release deadline; native TLS/H2 regression also fails when the prior method is restored",
+      "fixed_read_owner_sha256": "36f79b78564ff4edd253a07f02ffe2a38b473cc95e18633f952e7ceeb498f7f4",
+      "interpretation": "stop and join owned idle timer after EOF, before connection task group joins; GC alone does not establish transport quiescence",
+      "attribution_limit": "upstream vs fixed-owned RSS comparison includes existing Tofu transport behavior, not solely the timer fix; no complete paired promotion gate",
+      "validation": "40 neighboring shutdown/body/progress/expiry tests pass; new native TLS/H2 layered producer regression passes and restored prior method fails",
+      "remaining": [
+        "100-sample/three-pair original-owned vs fixed-owned residency/recovery comparison",
+        "full application workload",
+        "Headless CLI transport ownership and native server alternatives"
+      ]
+    },
+    "late_idle_followup": {
+      "first_fix_repeated_run": "three H1 pairs pass, then H2 producer release fails; first timer fix was incomplete",
+      "failed_raw_sha256": "6ec89233dbc0451ab5966c2b49f5d420e8fd845e2fea8d1e88c2ec3bd79d68c4",
+      "failed_log_sha256": "e597823f0e0877158fa17ec3d9ee845adbdcced382b3a7703836d441bb916440",
+      "decision": "latch closed authority before notifying protocol disconnect; ignore late idle Updated notifications; always stop/join timer in finally",
+      "validation": "43 existing/late-hint gates pass; exact first-fix class fails both late idle true/false gates; protocol-close injected failure also preserves error and retires timer",
+      "diagnostic": {
+        "samples": 100,
+        "warmups": 20,
+        "raw_sha256": "8347b62ae0de2dd10064c5b4c4da64ef42bdef6cd4c82886baf490a29d6264af",
+        "before_gc": {
+          "active_producers": 0,
+          "gc_collected": null,
+          "gc_counts": [
+            607,
+            10,
+            8
+          ],
+          "rss_bytes": 100319232,
+          "tasks": {
+            "ASGIHTTPConnection.handle_messages": 1,
+            "ASGIHTTPConnection.handle_request": 1,
+            "H2Protocol.send_task": 1,
+            "Lifespan.handle_lifespan": 1,
+            "_handle": 1,
+            "raise_shutdown": 2,
+            "serve_child": 1,
+            "worker_serve.<locals>._server_callback": 1
+          }
+        },
+        "after_idle": {
+          "active_producers": 0,
+          "gc_collected": null,
+          "gc_counts": [
+            626,
+            10,
+            8
+          ],
+          "rss_bytes": 100319232,
+          "tasks": {
+            "ASGIHTTPConnection.handle_messages": 1,
+            "ASGIHTTPConnection.handle_request": 1,
+            "H2Protocol.send_task": 1,
+            "Lifespan.handle_lifespan": 1,
+            "_handle": 1,
+            "raise_shutdown": 2,
+            "serve_child": 1,
+            "worker_serve.<locals>._server_callback": 1
+          }
+        },
+        "after_gc": {
+          "active_producers": 0,
+          "gc_collected": 4035,
+          "gc_counts": [
+            16,
+            0,
+            0
+          ],
+          "rss_bytes": 100323328,
+          "tasks": {
+            "ASGIHTTPConnection.handle_messages": 1,
+            "ASGIHTTPConnection.handle_request": 1,
+            "H2Protocol.send_task": 1,
+            "Lifespan.handle_lifespan": 1,
+            "_handle": 1,
+            "raise_shutdown": 2,
+            "serve_child": 1,
+            "worker_serve.<locals>._server_callback": 1
+          }
+        },
+        "observed_cleanup_p50_ms": 2.0420965,
+        "observed_cleanup_p99_ms": 3.231099
+      },
+      "scope_limit": "one asyncio H2 diagnostic process, no sampled peak memory or full paired promotion claim",
+      "remaining": "repeat full matrix and independent peak RSS, original-owner recovery comparison, full app/CLI/native server gates"
+    },
+    "request_child_ownership": {
+      "problem": "after connection EOF, response sender can remain blocked in H2 StreamBuffer.push; request parent cancellation did not join child tasks; SSE wrapper close deferred nested iterator finalization",
+      "decision": "both Quart shells select a shared lazy HTTP connection class owning only their receiver/handler tasks; every exit joins unfinished children, including creation rollback; both SSE views explicitly close nested event iterators",
+      "failure_evidence_sha256": "b43bcc7f2636e3548a851071fea8f121ccaf74a2c5a47e80aa4c0360d05419f7",
+      "validation": [
+        "original request-parent cancellation test fails; owned request test passes",
+        "four original SSE close tests fail; explicit iterator close passes",
+        "64 HTTP/auth/SSE/transport/lifecycle neighboring gates pass; separate second-child creation rollback passes",
+        "73 public runtime/distribution gates plus 10 SDK SSE gates pass after supplying SDK source path",
+        "TypeScript SDK build passes; built wheel and sdist artifact boundary checks pass"
+      ],
+      "diagnostic": {
+        "samples": 100,
+        "warmups": 20,
+        "before_gc": {
+          "active_producers": 0,
+          "async_generators": {},
+          "await_chains": {
+            "ASGIHTTPConnection.handle_messages -> Queue.get -> FutureIter": 1,
+            "ASGIHTTPConnection.handle_request": 1,
+            "H2Protocol.send_task -> EventWrapper.wait -> Event.wait -> FutureIter": 1,
+            "Lifespan.handle_lifespan -> ASGIWrapper.__call__ -> Quart.__call__ -> Quart.asgi_app -> ASGILifespan.__call__ -> Lifespan.asgi_receive -> Queue.get -> FutureIter": 1,
+            "_handle -> ASGIWrapper.__call__ -> Quart.__call__ -> Quart.asgi_app -> owned_asgi_http_connection_class.<locals>.OwnedHTTPConnection.__call__ -> wait -> _wait -> FutureIter": 1,
+            "raise_shutdown -> Event.wait -> FutureIter": 1,
+            "raise_shutdown -> EventWrapper.wait -> Event.wait -> FutureIter": 1,
+            "serve_child -> serve -> worker_serve -> TaskGroup.__aexit__ -> TaskGroup._aexit -> FutureIter": 1,
+            "worker_serve.<locals>._server_callback -> coroutine_wrapper": 1
+          },
+          "gc_collected": null,
+          "gc_counts": [
+            614,
+            10,
+            8
+          ],
+          "rss_bytes": 105627648,
+          "tasks": {
+            "ASGIHTTPConnection.handle_messages": 1,
+            "ASGIHTTPConnection.handle_request": 1,
+            "H2Protocol.send_task": 1,
+            "Lifespan.handle_lifespan": 1,
+            "_handle": 1,
+            "raise_shutdown": 2,
+            "serve_child": 1,
+            "worker_serve.<locals>._server_callback": 1
+          }
+        },
+        "after_idle": {
+          "active_producers": 0,
+          "async_generators": {},
+          "await_chains": {
+            "ASGIHTTPConnection.handle_messages -> Queue.get -> FutureIter": 1,
+            "ASGIHTTPConnection.handle_request": 1,
+            "H2Protocol.send_task -> EventWrapper.wait -> Event.wait -> FutureIter": 1,
+            "Lifespan.handle_lifespan -> ASGIWrapper.__call__ -> Quart.__call__ -> Quart.asgi_app -> ASGILifespan.__call__ -> Lifespan.asgi_receive -> Queue.get -> FutureIter": 1,
+            "_handle -> ASGIWrapper.__call__ -> Quart.__call__ -> Quart.asgi_app -> owned_asgi_http_connection_class.<locals>.OwnedHTTPConnection.__call__ -> wait -> _wait -> FutureIter": 1,
+            "raise_shutdown -> Event.wait -> FutureIter": 1,
+            "raise_shutdown -> EventWrapper.wait -> Event.wait -> FutureIter": 1,
+            "serve_child -> serve -> worker_serve -> TaskGroup.__aexit__ -> TaskGroup._aexit -> FutureIter": 1,
+            "worker_serve.<locals>._server_callback -> coroutine_wrapper": 1
+          },
+          "gc_collected": null,
+          "gc_counts": [
+            637,
+            10,
+            8
+          ],
+          "rss_bytes": 105627648,
+          "tasks": {
+            "ASGIHTTPConnection.handle_messages": 1,
+            "ASGIHTTPConnection.handle_request": 1,
+            "H2Protocol.send_task": 1,
+            "Lifespan.handle_lifespan": 1,
+            "_handle": 1,
+            "raise_shutdown": 2,
+            "serve_child": 1,
+            "worker_serve.<locals>._server_callback": 1
+          }
+        },
+        "after_gc": {
+          "active_producers": 0,
+          "async_generators": {},
+          "await_chains": {
+            "ASGIHTTPConnection.handle_messages -> Queue.get -> FutureIter": 1,
+            "ASGIHTTPConnection.handle_request": 1,
+            "H2Protocol.send_task -> EventWrapper.wait -> Event.wait -> FutureIter": 1,
+            "Lifespan.handle_lifespan -> ASGIWrapper.__call__ -> Quart.__call__ -> Quart.asgi_app -> ASGILifespan.__call__ -> Lifespan.asgi_receive -> Queue.get -> FutureIter": 1,
+            "_handle -> ASGIWrapper.__call__ -> Quart.__call__ -> Quart.asgi_app -> owned_asgi_http_connection_class.<locals>.OwnedHTTPConnection.__call__ -> wait -> _wait -> FutureIter": 1,
+            "raise_shutdown -> Event.wait -> FutureIter": 1,
+            "raise_shutdown -> EventWrapper.wait -> Event.wait -> FutureIter": 1,
+            "serve_child -> serve -> worker_serve -> TaskGroup.__aexit__ -> TaskGroup._aexit -> FutureIter": 1,
+            "worker_serve.<locals>._server_callback -> coroutine_wrapper": 1
+          },
+          "gc_collected": 4011,
+          "gc_counts": [
+            25,
+            0,
+            0
+          ],
+          "rss_bytes": 105631744,
+          "tasks": {
+            "ASGIHTTPConnection.handle_messages": 1,
+            "ASGIHTTPConnection.handle_request": 1,
+            "H2Protocol.send_task": 1,
+            "Lifespan.handle_lifespan": 1,
+            "_handle": 1,
+            "raise_shutdown": 2,
+            "serve_child": 1,
+            "worker_serve.<locals>._server_callback": 1
+          }
+        },
+        "raw_sha256": "e0cf886229e22ed15cdfc6a5ec809ee1fb3ecec6a2223f08ebfbeaad3c8d684f"
+      },
+      "scope_limit": "diagnostic single asyncio H2 process; full paired application/native server admission remains incomplete",
+      "quart_extension_source": "https://github.com/pallets/quart/blob/main/src/quart/app.py"
+    },
+    "owned_request_full_repeat": {
+      "raw_sha256": "ee25c334e3ff09bdf7f88d7aed8ff063270112a6b040f612570928312cc312d4",
+      "report": {
+        "transport": "owned",
+        "owner_source_sha256": "54721dee72fcf8fb2f2baf6c016f8a5213f91fc2053aadedb47214c7df334a68",
+        "original_owner_source_sha256": null,
+        "scope": "production Headless transport with synthetic compute; lifecycle comparison, not performance admission",
+        "whole_system_verdict": "incomplete",
+        "source_sha256": "41aaebcacb2ce0bb0070a2b37e2027bd59fff3cc06b28b8eb885c9a8db788cce",
+        "runtime": {
+          "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+          "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+          "affinity": [
+            52,
+            53,
+            54,
+            55,
+            56,
+            57,
+            58,
+            59,
+            60,
+            61,
+            62,
+            63,
+            64,
+            65,
+            66,
+            67,
+            68,
+            69,
+            70,
+            71,
+            72,
+            73,
+            74,
+            75,
+            76,
+            77,
+            78,
+            79,
+            80,
+            81,
+            82,
+            144,
+            148,
+            149,
+            150,
+            151,
+            152,
+            153,
+            154,
+            155,
+            156,
+            157,
+            158,
+            159,
+            160,
+            161,
+            162,
+            163,
+            164,
+            165,
+            166,
+            167,
+            168,
+            169,
+            170,
+            171,
+            172,
+            173,
+            174,
+            175,
+            176,
+            177,
+            178
+          ]
+        },
+        "metrics_limitations": [
+          "cleanup latency ends at observer HTTP acknowledgement; not actual producer release time",
+          "CPU includes synthetic producer, TLS, diagnostic requests and 20 warmups; not serving cost alone",
+          "separate 5ms sampled server RSS; spikes shorter than sampling interval may be missed",
+          "connection close and actual RST_STREAM are distinct; HTTPX response close alone sends no reset in installed httpcore"
+        ],
+        "trials": [
+          {
+            "protocol": "h1",
+            "pair": 0,
+            "measurements": {
+              "asyncio": {
+                "server_pid": 1868634,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 1.326592,
+                "observed_cleanup_p99_ms": 1.65209,
+                "server_cpu_ms_per_cycle_including_warmup": 23.333333333333332,
+                "sampled_peak_server_rss_bytes": 59408384,
+                "synthetic_compute": true,
+                "memory_server_pid": 1869120
+              },
+              "uvloop": {
+                "server_pid": 1870904,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 1.388684,
+                "observed_cleanup_p99_ms": 1.802672,
+                "server_cpu_ms_per_cycle_including_warmup": 23.749999999999996,
+                "sampled_peak_server_rss_bytes": 60682240,
+                "synthetic_compute": true,
+                "memory_server_pid": 1872442
+              }
+            }
+          },
+          {
+            "protocol": "h1",
+            "pair": 1,
+            "measurements": {
+              "uvloop": {
+                "server_pid": 1876799,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 1.379626,
+                "observed_cleanup_p99_ms": 1.858464,
+                "server_cpu_ms_per_cycle_including_warmup": 23.833333333333336,
+                "sampled_peak_server_rss_bytes": 60588032,
+                "synthetic_compute": true,
+                "memory_server_pid": 1878931
+              },
+              "asyncio": {
+                "server_pid": 1879237,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 1.3349585,
+                "observed_cleanup_p99_ms": 1.666824,
+                "server_cpu_ms_per_cycle_including_warmup": 23.16666666666667,
+                "sampled_peak_server_rss_bytes": 59658240,
+                "synthetic_compute": true,
+                "memory_server_pid": 1880732
+              }
+            }
+          },
+          {
+            "protocol": "h1",
+            "pair": 2,
+            "measurements": {
+              "asyncio": {
+                "server_pid": 1881012,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 1.3520475,
+                "observed_cleanup_p99_ms": 1.871008,
+                "server_cpu_ms_per_cycle_including_warmup": 24.25,
+                "sampled_peak_server_rss_bytes": 59133952,
+                "synthetic_compute": true,
+                "memory_server_pid": 1882647
+              },
+              "uvloop": {
+                "server_pid": 1884300,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 1.5378370000000001,
+                "observed_cleanup_p99_ms": 1.935437,
+                "server_cpu_ms_per_cycle_including_warmup": 24.583333333333332,
+                "sampled_peak_server_rss_bytes": 60301312,
+                "synthetic_compute": true,
+                "memory_server_pid": 1884454
+              }
+            }
+          },
+          {
+            "protocol": "h2",
+            "pair": 0,
+            "measurements": {
+              "asyncio": {
+                "server_pid": 1885906,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 2.0529884999999997,
+                "observed_cleanup_p99_ms": 4.05051,
+                "server_cpu_ms_per_cycle_including_warmup": 94.91666666666666,
+                "sampled_peak_server_rss_bytes": 103436288,
+                "synthetic_compute": true,
+                "memory_server_pid": 1886200
+              },
+              "uvloop": {
+                "server_pid": 1886425,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 1.954764,
+                "observed_cleanup_p99_ms": 7.823652,
+                "server_cpu_ms_per_cycle_including_warmup": 95.83333333333333,
+                "sampled_peak_server_rss_bytes": 117743616,
+                "synthetic_compute": true,
+                "memory_server_pid": 1887271
+              }
+            }
+          },
+          {
+            "protocol": "h2",
+            "pair": 1,
+            "measurements": {
+              "uvloop": {
+                "server_pid": 1891471,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 1.9967485,
+                "observed_cleanup_p99_ms": 3.919951,
+                "server_cpu_ms_per_cycle_including_warmup": 95.25,
+                "sampled_peak_server_rss_bytes": 114388992,
+                "synthetic_compute": true,
+                "memory_server_pid": 1893590
+              },
+              "asyncio": {
+                "server_pid": 1894013,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 2.0340534999999997,
+                "observed_cleanup_p99_ms": 2.853166,
+                "server_cpu_ms_per_cycle_including_warmup": 95.66666666666666,
+                "sampled_peak_server_rss_bytes": 103960576,
+                "synthetic_compute": true,
+                "memory_server_pid": 1894173
+              }
+            }
+          },
+          {
+            "protocol": "h2",
+            "pair": 2,
+            "measurements": {
+              "asyncio": {
+                "server_pid": 1894328,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 2.054748,
+                "observed_cleanup_p99_ms": 4.154359,
+                "server_cpu_ms_per_cycle_including_warmup": 95.16666666666666,
+                "sampled_peak_server_rss_bytes": 91865088,
+                "synthetic_compute": true,
+                "memory_server_pid": 1894596
+              },
+              "uvloop": {
+                "server_pid": 1894865,
+                "samples": 100,
+                "warmups": 20,
+                "observed_cleanup_p50_ms": 1.9541005,
+                "observed_cleanup_p99_ms": 2.886344,
+                "server_cpu_ms_per_cycle_including_warmup": 95.91666666666667,
+                "sampled_peak_server_rss_bytes": 112095232,
+                "synthetic_compute": true,
+                "memory_server_pid": 1895155
+              }
+            }
+          }
+        ]
+      },
+      "validation": "1200 measured cycles and1200 independent memory cycles plus warmups pass; pause/backpressure, socket disconnect, cursor reconnect/abort and H2 RST with same-connection reuse remain correct",
+      "interpretation": "H2 sampled server RSS87.6-112.3 MiB, versus prior upstream1643-1775 MiB; includes owned transport, request-child lifecycle and explicit SSE source closure, not a single-code-line attribution",
+      "remaining": [
+        "full application/agent/storage recovery",
+        "native server alternative",
+        "clean end-to-end throughput/admission/cold resource gate"
+      ]
+    }
+  }
+}

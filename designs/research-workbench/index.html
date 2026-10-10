@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Tofu Research design study — isolated, synthetic data, no real execution.">
+  <title>Tofu Research · 研究工作台设计原型</title>
+  <link rel="stylesheet" href="prototype.css">
+  <script src="prototype.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳转到研究内容</a>
+  <div class="prototype-bar"><span><strong>DESIGN STUDY / 01</strong> 交互原型 · 全部为示例数据 · 不执行真实任务</span><label for="scenario">查看状态 <select id="scenario"><option value="synthesis">证据整理中</option><option value="initial">刚开始研究</option><option value="approval">等待实验确认</option><option value="disconnected">连接中断</option><option value="interrupted">任务已中断</option><option value="stale">结论待复核</option><option value="complete">本轮已完成</option></select></label></div>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="研究导航">
+      <a href="#brief" class="brand" aria-label="Tofu Research 首页"><span class="brand-mark" aria-hidden="true">t<span>.</span></span><span>tofu<span class="brand-product">Research</span></span></a>
+      <button class="search-button" data-action="commands"><span>⌕ &nbsp; 查找或跳转</span><kbd>⌘ K</kbd></button>
+      <nav class="global-nav" aria-label="工作空间"><button data-page="home"><span aria-hidden="true">▦</span>研究首页</button><button data-action="decisions"><span aria-hidden="true">◈</span>需要我判断 <span class="count decision-count">1</span></button></nav>
+      <div class="sidebar-heading"><span>当前研究</span><button class="icon-button" data-action="new" aria-label="新建研究">＋</button></div>
+      <button class="project-item selected" data-page="brief"><span class="project-dot" aria-hidden="true"></span><span><strong>工具调用中的错误恢复</strong><small>小模型 · 等预算评测</small></span></button>
+      <div class="sidebar-outline"><button data-action="scope">问题与研究范围 <span>↗</span></button><button data-action="activity">版本与活动记录 <span>↗</span></button></div>
+      <div class="sidebar-note"><span class="eyebrow">研究原则</span><p>保留证据。<br>允许反证。<br>让下一步有理由。</p></div>
+      <div class="sidebar-bottom"><span class="avatar">R</span><span>个人研究空间<small>私有 · 按项目保存</small></span><button class="icon-button" data-action="about" aria-label="关于此设计">?</button></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><div class="breadcrumb"><button data-page="home">研究</button><span>/</span><span id="project-name">工具调用中的错误恢复</span></div><div class="topbar-actions"><span class="saved"><span aria-hidden="true">✓</span> 示例快照</span>
+<button class="text-button context-toggle" data-action="toggle-context" aria-expanded="true" aria-controls="context">收起上下文</button>
+<button class="text-button" data-action="activity">活动记录 <span aria-hidden="true">↗</span></button><button class="icon-button" data-action="commands" aria-label="查找或跳转">⌕</button></div></header>
+      <nav class="tabs" aria-label="研究视图"><a href="#brief" data-page="brief">研究简报</a><a href="#evidence" data-page="evidence">证据与文献 <span>4</span></a><a href="#hypotheses" data-page="hypotheses">候选解释</a><a href="#experiments" data-page="experiments">实验与判断</a><a href="#outputs" data-page="outputs">研究产物</a></nav>
+      <div id="state-banner" aria-live="polite"></div>
+      <div class="content-grid"><main id="main" tabindex="-1"></main><aside id="context" class="context-panel" aria-label="研究上下文"></aside></div>
+      <footer class="workspace-footer"><span id="run-status"></span><button class="text-button" data-action="activity">查看执行详情 <span aria-hidden="true">↗</span></button></footer>
+    </div>
+  </div>
+  <dialog id="modal" aria-labelledby="modal-title"><div id="modal-content"></div></dialog>
+  <div id="a11y-status" class="sr-only" role="status" aria-live="polite"></div>
+  
+<div id="toast" role="status" aria-live="polite"></div>
+  <script type="application/json" id="prototype-info">{"isolated":true,"scientific_data":"synthetic","network":false,"persistence":false}</script>
+</body>
+</html>

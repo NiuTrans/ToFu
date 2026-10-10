@@ -1,0 +1,358 @@
+{
+  "format": "tofu.system-performance-verdict/v1",
+  "verdict": "regression",
+  "coverage": {
+    "measured": 5,
+    "required": 30
+  },
+  "issues": [
+    {
+      "kind": "incomplete",
+      "case": [
+        "context",
+        "append_only_history"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "context",
+        "compaction"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "context",
+        "edited_history"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "context",
+        "multimodal"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "context",
+        "provider_projection"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "events",
+        "append"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "events",
+        "bounded_replay"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "events",
+        "concurrent_producers"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "events",
+        "durability_failure"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "events",
+        "reconnect"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "http",
+        "authentication"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "http",
+        "cancellation"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "http",
+        "short_requests"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "http",
+        "slow_consumer"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "http",
+        "sse_fanout"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "regression",
+      "case": [
+        "ingest",
+        "bounded_memory"
+      ],
+      "metric": "retained_bytes",
+      "ratios": [
+        1.0732540893751479,
+        1.0733455037691095,
+        1.2778653192514553
+      ]
+    },
+    {
+      "kind": "regression",
+      "case": [
+        "ingest",
+        "cancellation"
+      ],
+      "metric": "retained_bytes",
+      "ratios": [
+        0.9293873312564901,
+        1.0550755939524838,
+        0.8850102669404517
+      ]
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "markdown",
+        "selection_and_scroll"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "markdown",
+        "streaming_code"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "markdown",
+        "streaming_prose"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "markdown",
+        "tables_and_references"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "markdown",
+        "terminal_render"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "repository",
+        "cold_scan"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "repository",
+        "incremental_edit"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "repository",
+        "multilingual_extraction"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "repository",
+        "python_extraction"
+      ],
+      "reason": "missing comparison"
+    },
+    {
+      "kind": "incomplete",
+      "case": [
+        "repository",
+        "ranking"
+      ],
+      "reason": "missing comparison"
+    }
+  ],
+  "improvements": [
+    {
+      "case": [
+        "ingest",
+        "bounded_memory"
+      ],
+      "metric": "p50_ms",
+      "ratios": [
+        0.5572130883343183,
+        0.5538539255721667,
+        0.5764095730241368
+      ]
+    },
+    {
+      "case": [
+        "ingest",
+        "bounded_memory"
+      ],
+      "metric": "p95_ms",
+      "ratios": [
+        0.5343045696960763,
+        0.5201119528112882,
+        0.5483931121108823
+      ]
+    },
+    {
+      "case": [
+        "ingest",
+        "bounded_memory"
+      ],
+      "metric": "p99_ms",
+      "ratios": [
+        0.5566272226333439,
+        0.5175456733220167,
+        0.5788313051208731
+      ]
+    },
+    {
+      "case": [
+        "ingest",
+        "bounded_memory"
+      ],
+      "metric": "throughput_per_second",
+      "ratios": [
+        1.8224419228786526,
+        1.8570942424194552,
+        1.7891037055850854
+      ]
+    },
+    {
+      "case": [
+        "ingest",
+        "bounded_memory"
+      ],
+      "metric": "cpu_ms_per_operation",
+      "ratios": [
+        0.6118877679251831,
+        0.6043013915675031,
+        0.6253612915605773
+      ]
+    },
+    {
+      "case": [
+        "ingest",
+        "cancellation"
+      ],
+      "metric": "p99_ms",
+      "ratios": [
+        0.8902219096325292,
+        0.6942233236692973,
+        0.2822989104428105
+      ]
+    },
+    {
+      "case": [
+        "ingest",
+        "html"
+      ],
+      "metric": "p50_ms",
+      "ratios": [
+        0.5943936024612099,
+        0.5705410409504719,
+        0.5937535772174748
+      ]
+    },
+    {
+      "case": [
+        "ingest",
+        "html"
+      ],
+      "metric": "p95_ms",
+      "ratios": [
+        0.6555184729267408,
+        0.6548396501005227,
+        0.7975335070123546
+      ]
+    },
+    {
+      "case": [
+        "ingest",
+        "html"
+      ],
+      "metric": "throughput_per_second",
+      "ratios": [
+        1.6554609598431547,
+        1.7064766184201894,
+        1.601946040657912
+      ]
+    },
+    {
+      "case": [
+        "ingest",
+        "html"
+      ],
+      "metric": "cpu_ms_per_operation",
+      "ratios": [
+        0.6102162350682858,
+        0.597346027180567,
+        0.654406214496709
+      ]
+    }
+  ]
+}

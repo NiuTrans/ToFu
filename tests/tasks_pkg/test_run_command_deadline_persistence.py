@@ -1,0 +1,434 @@
+"""Acceptance gate for the live run_command countdown (epic pt_1a82ffb3).
+
+THE REQUIREMENT
+---------------
+A `run_command` that declared a `timeout` must render a real-time countdown,
+and — the part that is easy to fake — that countdown must SURVIVE switching
+conversations. It must resume from where it was, never restart from zero.
+
+WHY A DB ROUND-TRIP AND NOT A REDUCER UNIT TEST
+-----------------------------------------------
+"Persisted" is a claim about the DATABASE, so a reducer-only test cannot
+falsify it. Three independent holes each break persistence while leaving a
+reducer test perfectly green, and each is pinned below:
+
+  1. `tool_progress` had NO branch in the pure reducer, so everything it
+     carried lived only on the live path and was absent from
+     `projectColdSnapshot` (test_reducer_folds_deadline_from_tool_progress +
+     test_cold_projection_preserves_deadline).
+  2. Neither periodic checkpoint fires during a long command — the
+     orchestrator's runs after a round COMPLETES, the stream's on a content
+     delta — so whether a running round reached the DB at all was a race. Once
+     a command outlives the short-command grace window, the spawn lifecycle
+     forces one write (see `_make_run_command_spawn_cb`), proven end-to-end by
+     test_running_round_with_deadline_survives_a_real_db_roundtrip.
+  3. Both checkpoint writers early-returned when content+thinking were empty,
+     which is exactly a tool-only turn
+     (test_tool_only_turn_is_checkpointed_despite_empty_prose).
+
+Plus the reason the deadline cannot be computed on the client at all:
+the effective budget is the requested timeout AFTER the cross-DC multiplier
+and the MAX_COMMAND_TIMEOUT clamp
+(test_deadline_reflects_effective_budget_not_the_requested_one).
+
+NOTE on scope: `run_command` resolves timeout=None BY DESIGN (no ceiling,
+pinned by tests/project_mod/test_no_backend_timeouts.py), so most commands have NO
+deadline. For those the truthful display is the ELAPSED count-up, which is why
+the renderer covers both and why no cap was introduced to manufacture a
+countdown.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+import pytest
+
+from tests._runtime_sections import runtime_section_path
+
+pytestmark = pytest.mark.unit
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+TOOL_ROUNDS_JS = runtime_section_path('ui/tool_rounds.js')
+
+
+# ══════════════════════════════════════════════════════════════════
+#  1. Backend: the spawn clock publishes the EFFECTIVE budget
+# ══════════════════════════════════════════════════════════════════
+
+def test_spawn_publishes_absolute_deadline_for_an_explicit_timeout():
+    """on_spawn fires once with (exec_start_ms, deadline_ms) in epoch ms."""
+    import lib.project_mod.run_command as rc
+    seen = []
+    rc.tool_run_command('/tmp', 'echo hi', timeout=7,
+                        on_spawn=lambda s, d: seen.append((s, d)))
+    assert len(seen) == 1, f'on_spawn must fire exactly once, got {len(seen)}'
+    start, deadline = seen[0]
+    now = time.time() * 1000.0
+    assert abs(start - now) < 60_000, 'exec_start must be epoch MILLISECONDS'
+    assert abs((deadline - start) / 1000.0 - 7.0) < 0.5
+
+
+def test_unbounded_command_publishes_no_deadline():
+    """No timeout is the DEFAULT. It must yield None — never 0, never a past
+    instant, either of which would render as an instantly-expired countdown."""
+    import lib.project_mod.run_command as rc
+    seen = []
+    rc.tool_run_command('/tmp', 'echo hi', on_spawn=lambda s, d: seen.append(d))
+    assert seen == [None]
+    seen.clear()
+    # timeout=0 is the documented "unlimited" spelling.
+    rc.tool_run_command('/tmp', 'echo hi', timeout=0,
+                        on_spawn=lambda s, d: seen.append(d))
+    assert seen == [None]
+
+
+def test_deadline_reflects_effective_budget_not_the_requested_one():
+    """THE reason the client cannot compute this itself.
+
+    A DolphinFS path multiplies the timeout (run_command.py cross-DC block). A
+    frontend that read `toolArgs.timeout` would count to zero while the command
+    was still legitimately running.
+    """
+    import lib.project_mod.run_command as rc
+    seen = []
+    rc.tool_run_command('/tmp', 'echo hi', timeout=10,
+                        on_spawn=lambda s, d: seen.append((s, d)))
+    base_budget = (seen[0][1] - seen[0][0]) / 1000.0
+
+    seen.clear()
+    import lib.cross_dc as _cross_dc
+    _orig_mult = _cross_dc.get_timeout_multiplier
+    _cross_dc.get_timeout_multiplier = lambda p: 3.0
+    try:
+        rc.tool_run_command('/tmp', 'echo hi', timeout=10,
+                            on_spawn=lambda s, d: seen.append((s, d)))
+    finally:
+        _cross_dc.get_timeout_multiplier = _orig_mult
+    scaled_budget = (seen[0][1] - seen[0][0]) / 1000.0
+
+    assert abs(base_budget - 10.0) < 0.5
+    assert abs(scaled_budget - 30.0) < 0.5, (
+        f'cross-DC multiplier must be baked into the published deadline '
+        f'(got {scaled_budget:.1f}s, expected ~30s). A client deriving the '
+        f'countdown from the REQUESTED timeout would hit zero 20s early.')
+
+
+def test_a_raising_spawn_callback_never_breaks_the_command():
+    """Telemetry must never abort a running command."""
+    import lib.project_mod.run_command as rc
+
+    def _boom(_s, _d):
+        raise RuntimeError('spawn callback exploded')
+
+    out = rc.tool_run_command('/tmp', 'echo survived', on_spawn=_boom)
+    assert 'survived' in out and 'exit code: 0' in out
+
+
+def test_spawn_callback_sees_registered_pid_on_both_runners():
+    """Stop can target the process even while on_spawn is doing slow work."""
+    import lib.project_mod.run_command as rc
+
+    for stdin_callback in (None, lambda _prompt: None):
+        task = {}
+        seen = []
+
+        def _on_spawn(_start, _deadline):
+            seen.append((task.get('_subprocess_pid'),
+                         task.get('_subprocess_pgid')))
+
+        out = rc.tool_run_command(
+            '/tmp', 'printf registered', task=task,
+            stdin_callback=stdin_callback, on_spawn=_on_spawn)
+
+        assert 'registered' in out
+        assert len(seen) == 1
+        assert isinstance(seen[0][0], int) and seen[0][0] > 0
+        assert isinstance(seen[0][1], int) and seen[0][1] > 0
+        assert '_subprocess_pid' not in task
+        assert '_subprocess_pgid' not in task
+
+
+# ══════════════════════════════════════════════════════════════════
+#  1b. The PROJECT-mode dispatch wires the spawn callback
+# ══════════════════════════════════════════════════════════════════
+#
+# Owner review (2026-07-31) caught that the first landing only wired the
+# STANDALONE path (_handle_code_exec), while project mode — the common case —
+# passed no on_spawn, so neither the deadline frame nor the forced checkpoint
+# ever happened exactly where they mattered. The same shape as the pet-drag
+# lesson recorded in JOURNAL: N entrances, N-1 implementations.
+
+def test_project_mode_short_command_collapses_intermediate_writes(monkeypatch):
+    """A short command keeps its clocks but emits only its terminal result."""
+    import lib.tasks_pkg.handlers.code_exec as ce
+    from lib.tasks_pkg.handlers.project import _handle_project_tool
+    from lib.tasks_pkg.manager import create_task
+
+    events = []
+    checkpoints = []
+    import lib.tasks_pkg.manager as mgr
+    monkeypatch.setattr(ce, 'RUN_COMMAND_LIVE_GRACE_MS', 5_000)
+    monkeypatch.setattr(
+        ce, 'append_event', lambda _task, ev: events.append(dict(ev)))
+    monkeypatch.setattr(
+        mgr, 'checkpoint_task_partial',
+        lambda _task, force=False: checkpoints.append(force))
+    round_entry = {'query': 'run_command', 'toolCallId': 'tc-proj-1',
+                   'status': 'searching'}
+    task = create_task('conv-proj-spawn',
+                       [{'role': 'user', 'content': 'run it'}], {}, user_id=1)
+    _handle_project_tool(
+        task, {}, 'run_command', 'tc-proj-1',
+        {'command': 'echo proj-ok', 'timeout': 9}, 1, round_entry,
+        None, '/tmp', True)
+
+    assert 'proj-ok' in (round_entry.get('results') or [{}])[0].get('output', ''), (
+        'sanity: the project-mode command did not actually run')
+    assert round_entry.get('deadlineTs'), (
+        'THE BUG THE OWNER CAUGHT: project mode published no deadlineTs — '
+        'the spawn callback was never wired into _handle_project_tool, so the '
+        'common case (a conversation WITH a project) rendered no countdown.')
+    assert round_entry.get('execStartTs'), (
+        'execStartTs missing on the project-mode round — the elapsed chip '
+        'would anchor on tStart (round ANNOUNCE) and over-report execution.')
+    assert not events, 'short command paid for an unnecessary progress write'
+    assert not checkpoints, 'short command paid for a running checkpoint'
+
+
+def test_project_mode_long_command_publishes_and_checkpoints(monkeypatch):
+    """After the grace period, countdown and reconnect durability still work."""
+    import lib.tasks_pkg.handlers.code_exec as ce
+    from lib.tasks_pkg.handlers.project import _handle_project_tool
+    from lib.tasks_pkg.manager import create_task
+    import lib.tasks_pkg.manager as mgr
+
+    events = []
+    checkpoints = []
+    monkeypatch.setattr(ce, 'RUN_COMMAND_LIVE_GRACE_MS', 10)
+    monkeypatch.setattr(
+        ce, 'append_event', lambda _task, ev: events.append(dict(ev)))
+    monkeypatch.setattr(
+        mgr, 'checkpoint_task_partial',
+        lambda _task, force=False: checkpoints.append(force))
+    round_entry = {'query': 'run_command', 'toolCallId': 'tc-proj-long',
+                   'status': 'searching'}
+    task = create_task('conv-proj-long',
+                       [{'role': 'user', 'content': 'run it'}], {}, user_id=1)
+
+    _handle_project_tool(
+        task, {}, 'run_command', 'tc-proj-long',
+        {'command': 'sleep 0.08; echo proj-live', 'timeout': 9},
+        1, round_entry, None, '/tmp', True)
+
+    assert 'proj-live' in (round_entry.get('results') or [{}])[0].get(
+        'output', '')
+    spawn_events = [
+        event for event in events
+        if event.get('type') == 'tool_progress' and event.get('deadlineTs')]
+    assert spawn_events, 'long command published no countdown frame'
+    assert any(checkpoints), 'long command has no recoverable running snapshot'
+
+
+def test_every_run_command_dispatch_point_wires_the_spawn_callback():
+    """Structural ratchet for the NEXT entrance.
+
+    The suite above proves the two known dispatch points work today. This
+    guard answers "what if someone adds a third dispatch point and forgets":
+    every callsite that passes on_chunk into a run_command execution must
+    also pass on_spawn — the two callbacks are one contract, never half.
+
+    Implemented as a FILE-LEVEL co-occurrence rule over lib/tasks_pkg: any
+    module that drives run_command's live output through
+    ``_make_run_command_progress_cb`` must ALSO wire the spawn clock through
+    ``_make_run_command_spawn_cb``. File level (not callsite level) because
+    the two call shapes differ — project mode builds a kwargs DICT
+    (``'on_chunk': _progress_cb``) while the standalone handler passes plain
+    keywords (``on_chunk=progress_cb``); a callsite regex would silently
+    cover only one. A new dispatch point in ANY file that wires the first
+    factory but not the second turns this red.
+    """
+    import glob
+
+    from tests._source_scan import strip_comments
+
+    offenders = []
+    pattern = os.path.join(ROOT, 'lib', 'tasks_pkg', '**', '*.py')
+    for path in glob.glob(pattern, recursive=True):
+        with open(path, encoding='utf-8') as fh:
+            live = strip_comments(fh.read(), lang='python', inline=True)
+        if '_make_run_command_progress_cb(' in live and \
+                '_make_run_command_spawn_cb(' not in live:
+            offenders.append(os.path.relpath(path, ROOT))
+    assert not offenders, (
+        'these modules stream run_command output but publish no spawn clock '
+        '— a countdown would silently never appear on their path (the exact '
+        'project-mode gap the owner caught):\n  ' + '\n  '.join(offenders))
+
+
+def test_remote_path_deliberately_publishes_no_deadline():
+    """Pins the DECISION (owner instruction 2), not an accident: the remote
+    bridge timeout bounds the server's WAIT for a result — it does not kill
+    the process on the user's machine. A deadlineTs there would render a
+    countdown to an event that never happens."""
+    path = os.path.join(ROOT, 'lib/tasks_pkg/handlers/project.py')
+    with open(path, encoding='utf-8') as fh:
+        src = fh.read()
+    # Strip comments BEFORE slicing: the function's own docstring-style
+    # comment explains WHY there is no deadlineTs — a naive substring check
+    # would match that prose and report the exact opposite of the truth
+    # (the same trap this suite's pipeline guard documents).
+    from tests._source_scan import strip_comments
+    live = strip_comments(src, lang='python', inline=True)
+    start = live.index('def _execute_remote_run_command')
+    body = live[start:live.index('\ndef ', start + 10)]
+    assert 'deadlineTs' not in body, (
+        'the remote bridge path must NOT publish deadlineTs — the server '
+        'cannot kill a process on the user machine, so the countdown would '
+        'be a lie')
+    assert 'bridge_timeout' in body  # sanity: we are reading the right fn
+
+
+# ══════════════════════════════════════════════════════════════════
+#  2. Checkpoint: a tool-only running round reaches the DB
+# ══════════════════════════════════════════════════════════════════
+
+def test_tool_only_turn_is_checkpointed_despite_empty_prose():
+    """Both checkpoint writers used to early-return on empty content+thinking.
+
+    A turn whose first act is a long `run_command` has empty content AND empty
+    thinking for its entire duration, so that guard dropped precisely the write
+    that makes the running round recoverable.
+    """
+    from lib.tasks_pkg.manager._sync import _has_inflight_round
+
+    running = {'toolRounds': [{'roundNum': 1, 'status': 'searching',
+                               'deadlineTs': time.time() * 1000 + 60_000}]}
+    assert _has_inflight_round(running) is True
+
+    # A settled round is NOT in flight — it must not keep re-arming writes.
+    assert _has_inflight_round(
+        {'toolRounds': [{'roundNum': 1, 'status': 'done'}]}) is False
+    assert _has_inflight_round({'toolRounds': []}) is False
+
+    # A command blocked on a human gate is emphatically still running — this is
+    # the longest-lived case and the one most likely to span a conv switch.
+    for st in ('executing', 'pending_approval', 'awaiting_human', 'awaiting_stdin'):
+        assert _has_inflight_round({'toolRounds': [{'status': st}]}) is True, st
+
+
+# ══════════════════════════════════════════════════════════════════
+#  3. THE ACCEPTANCE TEST — real DB round-trip
+# ══════════════════════════════════════════════════════════════════
+
+def test_running_round_deadline_is_in_the_authoritative_turn_projection():
+    """The cumulative turn projection owns live tool timing across reloads."""
+    from lib.turn_lifecycle import _task_projection
+
+    now_ms = int(time.time() * 1000)
+    deadline_ms = now_ms + 300_000
+    exec_start_ms = now_ms - 42_000
+    task = {
+        'content': '', 'thinking': '',
+        'toolRounds': [{
+            'roundNum': 1, 'toolName': 'run_command',
+            'toolCallId': 'tc_build_1', 'query': 'make -j8',
+            'status': 'searching', 'results': None,
+            'tStart': exec_start_ms - 5_000,
+            'execStartTs': exec_start_ms, 'deadlineTs': deadline_ms,
+        }],
+    }
+
+    projection = json.loads(json.dumps(_task_projection(task, {})))
+    round_record = projection['toolRounds'][0]
+    assert round_record['status'] == 'searching'
+    assert round_record['deadlineTs'] == deadline_ms
+    assert round_record['execStartTs'] == exec_start_ms
+    assert round_record['deadlineTs'] > time.time() * 1000
+
+
+# ══════════════════════════════════════════════════════════════════
+#  4. Renderer: countdown / count-up / no negative numbers
+# ══════════════════════════════════════════════════════════════════
+
+def _node(script: str) -> dict:
+    if shutil.which('node') is None:
+        pytest.skip('node is required for the reducer projection gate')
+    with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False) as fh:
+        fh.write(script)
+        path = fh.name
+    try:
+        proc = subprocess.run(['node', path], capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            raise AssertionError(f'node harness failed:\n{proc.stderr[:2000]}')
+        return json.loads(proc.stdout)
+    finally:
+        os.unlink(path)
+
+
+def test_timer_chip_formats_backend_samples_without_a_client_clock(tmp_path):
+    bundle = tmp_path / 'command-timing.cjs'
+    proc = subprocess.run(['node', os.path.join(ROOT, 'scripts/vite_test_bundle.mjs'),
+        os.path.join(ROOT, 'frontend/src/conversation/presentation/tool-command-execution-presentation.ts'),
+        '--bundle', '--format=cjs', f'--outfile={bundle}'],
+        cwd=ROOT, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = _node(f'''
+const fs = require('fs');
+global.commandExecutionTiming = require({json.dumps(str(bundle))}).commandExecutionTiming;
+global.Date = class {{ static now() {{ throw new Error('browser clock used'); }} }};
+global.escapeHtml = (s) => String(s == null ? '' : s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+global.t = (k, d) => (d || k);
+global.Icon = (n, s) => '';
+global.renderMarkdown = (s) => s;
+global._shortUrl = (u) => u;
+global.formatNumber = (n) => String(n);
+global.window = {{ addEventListener(){{}}, removeEventListener(){{}} }};
+global.document = {{ addEventListener(){{}}, removeEventListener(){{}},
+  querySelectorAll: () => [],
+  createElement: () => ({{ style:{{}}, setAttribute(){{}}, appendChild(){{}} }}) }};
+eval(fs.readFileSync({json.dumps(TOOL_ROUNDS_JS)}, 'utf8'));
+// A REALISTIC epoch. An artificially small NOW makes `NOW - 3900000` NEGATIVE,
+// which _cmdTimerAnchor correctly rejects as "not a real clock" — so a toy
+// value would test the rejection path instead of the hour formatting.
+const NOW = 1785000000000;
+const mk = (o) => _cmdTimerState({{execTimingAtMs:NOW, execElapsedMs:5000, ...o}});
+console.log(JSON.stringify({{
+  countdown:  mk({{ deadlineRemainingMs: 90000 }}).txt,
+  soonCls:    mk({{ deadlineRemainingMs: 5000 }}).cls,
+  expired:    mk({{ deadlineRemainingMs: 0 }}).txt,
+  expiredCls: mk({{ deadlineRemainingMs: 0 }}).cls,
+  countUp:    mk({{ execElapsedMs: 195000 }}).txt,
+  hours:      mk({{ execElapsedMs: 3900000 }}).txt,
+  prefersExec: mk({{ tStart: NOW - 600000, execStartTs: NOW - 30000, execElapsedMs: 30000 }}).txt,
+  noClock:    _cmdTimerState({{execStartTs:NOW - 600000}}),
+  tickerArmed: typeof _tickCmdTimers === 'function',
+}}));
+// No live chip was rendered, so the demand-scoped owner owns no timer.
+process.exit(0);
+''')
+    assert out['countdown'] == '1m30s left'
+    assert 'soon' in out['soonCls'], 'under 10s must escalate visually'
+    assert 'terminating' in out['expired'], (
+        f'past the deadline must say what is happening, not show a negative '
+        f'number; got {out["expired"]!r}')
+    assert 'over' in out['expiredCls']
+    assert out['countUp'] == '3m15s', (
+        'a command with NO timeout — the DEFAULT — must still show elapsed time')
+    assert out['hours'] == '1h05m'
+    assert out['prefersExec'] == '30s', (
+        'must use the backend elapsed sample, never the round announce: a '
+        'write-approval gate between them would over-report execution by 9.5m')
+    assert out['noClock'] is None, 'no clocks at all → render nothing, not "NaN"'
+    assert out['tickerArmed'] is False

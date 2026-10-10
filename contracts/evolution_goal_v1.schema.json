@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_goal_v1.schema.json",
+  "title": "Self-evolution goal: statement, verifiable completion criteria, budget envelope",
+  "type": "object",
+  "required": ["schema_version", "goal_id", "statement", "domain", "exploratory", "criteria", "budget_envelope", "status", "created_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "goal_id": {"type": "string", "maxLength": 160},
+    "statement": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "domain": {"type": "string", "maxLength": 80, "description": "Free-form task family label (e.g. research, code, web); not a closed enum so new domains do not break the wire."},
+    "lang": {"enum": ["en", "zh"]},
+    "exploratory": {"type": "boolean", "description": "True only when no machine-checkable criterion exists. Exploratory episodes may update resource weights and cost priors but never mint strategy templates or capability changes. The research adapter may retain one falsification_protocol as unverified intent, not an executable checker or a grant of learning rights."},
+    "criteria": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["criterion_id", "kind", "params"],
+        "properties": {
+          "criterion_id": {"type": "string", "maxLength": 96},
+          "kind": {"enum": ["test_command", "artifact_check", "metric_threshold", "judge_panel", "falsification_protocol", "explicit_human"]},
+          "params": {"type": "object", "maxProperties": 16, "description": "Checker-specific payload owned by the checker registry, e.g. command for test_command, metric+threshold for metric_threshold."},
+          "weight": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "budget_envelope": {
+      "type": "object",
+      "required": ["max_tokens", "max_wall_clock_seconds", "max_tool_calls"],
+      "properties": {
+        "max_tokens": {"type": "integer", "minimum": 0},
+        "max_wall_clock_seconds": {"type": "integer", "minimum": 0},
+        "max_tool_calls": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "constraints": {"type": "array", "maxItems": 16, "items": {"type": "string", "maxLength": 500}},
+    "status": {"enum": ["draft", "admitted", "active", "settled", "aborted"]},
+    "created_at": {"type": "integer", "minimum": 0}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"exploratory": {"const": true}}},
+      "then": {"anyOf": [
+        {"properties": {"criteria": {"maxItems": 0}}},
+        {"properties": {"domain": {"const": "research"}, "criteria": {
+          "maxItems": 1, "items": {"properties": {"kind": {"const": "falsification_protocol"}}}
+        }}}
+      ]}
+    },
+    {
+      "if": {"properties": {"exploratory": {"const": false}}},
+      "then": {"properties": {"criteria": {"minItems": 1}}}
+    }
+  ],
+  "additionalProperties": false
+}

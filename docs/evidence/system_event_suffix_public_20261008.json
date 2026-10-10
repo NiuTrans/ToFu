@@ -1,0 +1,505 @@
+{
+  "format": "tofu.native-suffix-public-evidence/v1",
+  "scope": "Actual public event-page comparison with experimental native suffix reading.\n\nReuse the public benchmark's fixtures, timing, exact oracle and process driver\nin private function namespaces. No production or benchmark globals are patched.\n",
+  "whole_system_verdict": "incomplete",
+  "candidate_verdict": "do_not_promote_current_suffix_adapter",
+  "production_promoted": false,
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/native-event-public-tail-full.json",
+  "raw_artifact_sha256": "46c1ee6d8b506c30d44ecdd2197a82439021fc568a9e0e1121b188e7facb280a",
+  "sources": {
+    "benchmarks/native_event/public_measure.py": "f39672667096fcdef941261a8ad227668a244d8bfaba15da4dab24f4136fe7a2",
+    "benchmarks/native_event/check.py": "11a0418ee4bd40929729792e51c0e7470bece3051da8af8beb4fc353ac615a48",
+    "tofu_agent/runtime.py": "f997bbd63eaff0bb2df0bbc8c373e88e5f74e367da9f31bf0e7be9dbb71975f3",
+    "lib/task_replay.py": "0c849771c7c4462e90ec58ffd16bf6f9c720118b316387fe867bf9536a017964",
+    "lib/agent_core/run_contract.py": "17351b486e09ac02acd16f9768ff1d79641921a531080094ad35dace6faa2336",
+    "benchmarks/native_event/public_tail.py": "34fc3001626cf1e29424dd8df0ad85c4553b25049f686102cbfcdfd60b6dfe75",
+    "benchmarks/native_event/public_tail_measure.py": "54dae910c042655f1f84bd7f6c62da3871987ad982252a45bb07dd409b62e037",
+    "benchmarks/native_event/runtime.py": "90404efab0acac72e1ce00831bd1ca77fd8a5fae589bec5a8951eb7bb28798f7"
+  },
+  "library_sha256": "137ffc55cb670d7067db088b232d44004f715789a4da4a70f9d9d0a9bef029eb",
+  "latency_observations": 5400,
+  "independent_latency_memory_workers": 108,
+  "every_page_exact_oracle": true,
+  "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+  "affinity": [
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    144,
+    148,
+    149,
+    150,
+    151,
+    152,
+    153,
+    154,
+    155,
+    156,
+    157,
+    158,
+    159,
+    160,
+    161,
+    162,
+    163,
+    164,
+    165,
+    166,
+    167,
+    168,
+    169,
+    170,
+    171,
+    172,
+    173,
+    174,
+    175,
+    176,
+    177,
+    178
+  ],
+  "memory_scope": "Independent worker high-water includes imports, both fixture/oracle and read allocations.",
+  "limitations": [
+    "No producer/append timing, HTTP auth/SSE/backpressure or durable recovery.",
+    "Stale public event_page is unbounded; no HTTP page-size claim.",
+    "Exact page equality outside timing still affects process residency and inter-sample GC."
+  ],
+  "cases": [
+    {
+      "count": 64,
+      "case": "stale",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9638644178956324,
+            "p95_ms": 0.9266730209897199,
+            "p99_ms": 0.9336698551229168,
+            "cpu_ms_per_operation": 0.9609722593769362,
+            "peak_process_rss_bytes": 1.1170089520800421
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9714499851454397,
+            "p95_ms": 0.985860934415442,
+            "p99_ms": 0.9893247096460116,
+            "cpu_ms_per_operation": 0.97822582656293,
+            "peak_process_rss_bytes": 1.104959630911188
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.992402192229338,
+            "p95_ms": 0.991592699361238,
+            "p99_ms": 0.9744219357479026,
+            "cpu_ms_per_operation": 0.9909547454604517,
+            "peak_process_rss_bytes": 1.1035063704327683
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "count": 64,
+      "case": "tail",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 1.0679465908193095,
+            "p95_ms": 1.0386457235896944,
+            "p99_ms": 1.0582577515292133,
+            "cpu_ms_per_operation": 1.062890601168579,
+            "peak_process_rss_bytes": 1.1125065963060685
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p99_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.0472972972972971,
+            "p95_ms": 0.9786382463815332,
+            "p99_ms": 0.9370406377600623,
+            "cpu_ms_per_operation": 1.0419685202900344,
+            "peak_process_rss_bytes": 1.1071089046160347
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.0213455752671439,
+            "p95_ms": 0.7489997142040583,
+            "p99_ms": 0.7648494711147273,
+            "cpu_ms_per_operation": 0.9789104490287827,
+            "peak_process_rss_bytes": 1.1067397953802343
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "count": 64,
+      "case": "future",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 1.170606156108835,
+            "p95_ms": 1.0087300280019766,
+            "p99_ms": 0.8796487603305786,
+            "cpu_ms_per_operation": 1.146603649347952,
+            "peak_process_rss_bytes": 1.1029781879194631
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.1744826869085991,
+            "p95_ms": 1.1193333333333333,
+            "p99_ms": 1.0230731467844871,
+            "cpu_ms_per_operation": 1.174364621938513,
+            "peak_process_rss_bytes": 1.1044367161977027
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p95_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.1483510803266823,
+            "p95_ms": 1.0965085638998682,
+            "p99_ms": 0.9253039953676897,
+            "cpu_ms_per_operation": 1.135585282516062,
+            "peak_process_rss_bytes": 1.1072030328559392
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p95_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "count": 4096,
+      "case": "stale",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 1.0142335893701933,
+            "p95_ms": 1.0328038836927624,
+            "p99_ms": 1.0370155597119433,
+            "cpu_ms_per_operation": 1.0238459863048015,
+            "peak_process_rss_bytes": 1.061137646547981
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9972632865814587,
+            "p95_ms": 1.0062919453635517,
+            "p99_ms": 1.016714265214349,
+            "cpu_ms_per_operation": 0.9948261568499867,
+            "peak_process_rss_bytes": 1.0628656247271457
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.000364608444078,
+            "p95_ms": 1.0038985308574662,
+            "p99_ms": 1.004692360150544,
+            "cpu_ms_per_operation": 0.9983046833800029,
+            "peak_process_rss_bytes": 1.0683588621444202
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "count": 4096,
+      "case": "tail",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 1.050420597785789,
+            "p95_ms": 1.0243428359866718,
+            "p99_ms": 0.9552227008655101,
+            "cpu_ms_per_operation": 1.0154338263078238,
+            "peak_process_rss_bytes": 1.104314038059181
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.0327872977529504,
+            "p95_ms": 0.9641439534268325,
+            "p99_ms": 0.7959934587080949,
+            "cpu_ms_per_operation": 0.999407545744544,
+            "peak_process_rss_bytes": 1.1011715647339158
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.0251186509138646,
+            "p95_ms": 0.9731455484104701,
+            "p99_ms": 0.9458649620455454,
+            "cpu_ms_per_operation": 0.9927489787874534,
+            "peak_process_rss_bytes": 1.0928332348887577
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "count": 4096,
+      "case": "future",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 1.1757625216770378,
+            "p95_ms": 1.0006297229219143,
+            "p99_ms": 0.7357979184735473,
+            "cpu_ms_per_operation": 1.1830258108259335,
+            "peak_process_rss_bytes": 1.1116191233475798
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.1779122231337162,
+            "p95_ms": 1.318543046357616,
+            "p99_ms": 1.4666082127721758,
+            "cpu_ms_per_operation": 1.2238901295320128,
+            "peak_process_rss_bytes": 1.1118309578391308
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p95_ms",
+            "p99_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.143741265721701,
+            "p95_ms": 0.9968374446552815,
+            "p99_ms": 1.1416097615582672,
+            "cpu_ms_per_operation": 1.1541118650994224,
+            "peak_process_rss_bytes": 1.1168173239296713
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p99_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "count": 65536,
+      "case": "stale",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 0.9956760511795234,
+            "p95_ms": 0.9939488165278376,
+            "p99_ms": 1.0076320372184664,
+            "cpu_ms_per_operation": 1.0021240705829424,
+            "peak_process_rss_bytes": 1.0328016428953217
+          },
+          "failed_measured_guards": []
+        },
+        {
+          "ratios": {
+            "p50_ms": 0.9902863144025317,
+            "p95_ms": 0.9984518631961575,
+            "p99_ms": 1.0123107554874924,
+            "cpu_ms_per_operation": 0.9995187633465585,
+            "peak_process_rss_bytes": 1.0353790206636033
+          },
+          "failed_measured_guards": []
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.0044536291596229,
+            "p95_ms": 1.0269007830075259,
+            "p99_ms": 1.0181412628389426,
+            "cpu_ms_per_operation": 1.0016242418638104,
+            "peak_process_rss_bytes": 1.0356104856231836
+          },
+          "failed_measured_guards": []
+        }
+      ]
+    },
+    {
+      "count": 65536,
+      "case": "tail",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 1.0331153007567013,
+            "p95_ms": 0.9917136073739583,
+            "p99_ms": 0.8318106158683188,
+            "cpu_ms_per_operation": 1.030266705059509,
+            "peak_process_rss_bytes": 1.0630529848469439
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.0460265071424888,
+            "p95_ms": 1.047645924462631,
+            "p99_ms": 0.9880411384836163,
+            "cpu_ms_per_operation": 1.0389774641160352,
+            "peak_process_rss_bytes": 1.0701485679277072
+          },
+          "failed_measured_guards": [
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.049003602062764,
+            "p95_ms": 1.033666014039444,
+            "p99_ms": 1.0254351299083493,
+            "cpu_ms_per_operation": 1.0500855650651346,
+            "peak_process_rss_bytes": 1.0656555374592833
+          },
+          "failed_measured_guards": [
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        }
+      ]
+    },
+    {
+      "count": 65536,
+      "case": "future",
+      "pairs": [
+        {
+          "ratios": {
+            "p50_ms": 1.2104114713216956,
+            "p95_ms": 1.1722471522264413,
+            "p99_ms": 1.376512968299712,
+            "cpu_ms_per_operation": 1.210034464770584,
+            "peak_process_rss_bytes": 1.059939301972686
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p95_ms",
+            "p99_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.2017333194110893,
+            "p95_ms": 1.1432296193290457,
+            "p99_ms": 1.1945463243501835,
+            "cpu_ms_per_operation": 1.2161451118454099,
+            "peak_process_rss_bytes": 1.0600374285569774
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p95_ms",
+            "p99_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        },
+        {
+          "ratios": {
+            "p50_ms": 1.1675753523300072,
+            "p95_ms": 1.1466206395348837,
+            "p99_ms": 1.4144429368309965,
+            "cpu_ms_per_operation": 1.1734867518397747,
+            "peak_process_rss_bytes": 1.0638525383166149
+          },
+          "failed_measured_guards": [
+            "p50_ms",
+            "p95_ms",
+            "p99_ms",
+            "cpu_ms_per_operation",
+            "peak_process_rss_bytes"
+          ]
+        }
+      ]
+    }
+  ],
+  "reason": "Native suffix adapter removes full-window replay catastrophe, but future/empty reads regressP50 about14-21%; several latency/CPU guards fail and no primary10% consumer gain. Native append gain and full consumer admission remain separate.",
+  "process_observation": "Original supervisorPID45762 absent; full27pair checkpoint/source hashes validated; supervisor terminal exit unobserved."
+}

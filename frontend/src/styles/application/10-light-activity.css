@@ -1,0 +1,57 @@
+/* Light: search blocks */
+[data-theme="light"] .search-result-title{color:#355aa0}
+[data-theme="light"] .search-result-title a{color:#355aa0}
+[data-theme="light"] .search-result-title a:hover{color:#2c4b8a}
+[data-theme="light"] .search-result-item{border-top-color:rgba(64,104,184,0.1)}
+[data-theme="light"] .search-result-item:hover{background:rgba(64,104,184,0.03)}
+[data-theme="light"] .search-result-fetched{color:#1f7a5c;background:rgba(31,122,92,0.08)}
+
+/* Light: fetch blocks */
+
+/* Light: search mode toggle */
+[data-theme="light"] .search-mode-toggle[data-mode="single"]{color:#4068b8;background:rgba(64,104,184,0.07);animation:none;box-shadow:0 0 8px rgba(64,104,184,0.1),0 0 3px rgba(64,104,184,0.06)}
+[data-theme="light"] .search-mode-toggle[data-mode="single"]:hover{background:rgba(64,104,184,0.12)}
+[data-theme="light"] .search-mode-toggle[data-mode="single"] .sm-icon{color:#4068b8}
+[data-theme="light"] .search-mode-toggle[data-mode="single"] .sm-mode-pill{background:rgba(64,104,184,0.12);color:#4068b8}
+[data-theme="light"] .search-mode-toggle[data-mode="multi"]{color:#6b48c0;background:rgba(107,72,192,0.07);animation:none;box-shadow:0 0 8px rgba(107,72,192,0.1),0 0 3px rgba(107,72,192,0.06)}
+[data-theme="light"] .search-mode-toggle[data-mode="multi"]:hover{background:rgba(107,72,192,0.12)}
+[data-theme="light"] .search-mode-toggle[data-mode="multi"] .sm-icon{color:#6b48c0}
+[data-theme="light"] .search-mode-toggle[data-mode="multi"] .sm-mode-pill{background:rgba(107,72,192,0.12);color:#6b48c0}
+/* Light: image gen toggle */
+
+[data-theme="light"] .imagegen-card{border-color:var(--border)}
+[data-theme="light"] .imagegen-error{background:rgba(239,68,68,0.04);border-color:rgba(239,68,68,0.15)}
+
+/* Light: badges in topbar */
+[data-theme="light"] .search-orbit-center{background:#4068b8}
+[data-theme="light"] .ptool-panel .search-orbit-center{background:#4068b8}
+[data-theme="light"] .ptool-panel .search-orbit-dot:nth-child(2){background:#60a5fa}
+[data-theme="light"] .ptool-panel .search-orbit-dot:nth-child(3){background:#a78bfa}
+[data-theme="light"] .ptool-panel .search-orbit-dot:nth-child(4){background:#34d399}
+
+/* Light: project */
+[data-theme="light"] .project-bar{background:rgba(180,120,0,0.06);border-color:rgba(180,120,0,0.25);color:#a06e00}
+[data-theme="light"] .project-badge{background:rgba(180,120,0,0.07);color:#a06e00;border-color:rgba(180,120,0,0.2)}
+[data-theme="light"] .ptool-panel{border:none;background:none}
+[data-theme="light"] .ptool-panel-active{border:none;background:none}
+[data-theme="light"] .ptool-panel-header{color:var(--text-tertiary);border-bottom:none}
+[data-theme="light"] .ptool-icon{color:rgba(100,116,139,0.6)}
+[data-theme="light"] .ptool-line.ptool-active .ptool-icon{color:currentColor}
+[data-theme="light"] .ptool-line:hover{background:rgba(100,116,139,0.05)}
+[data-theme="light"] .ptool-spinner{border-color:rgba(64,104,184,0.2);border-top-color:#4068b8}
+[data-theme="light"] .ptool-results-block{border-color:transparent;background:none}
+[data-theme="light"] .ptool-results-block.expanded{border-color:rgba(100,116,139,0.18);background:rgba(100,116,139,0.03)}
+[data-theme="light"] .ptool-results-block.expanded .ptool-results-content{border-top-color:rgba(100,116,139,0.1)}
+[data-theme="light"] .ptool-results-header:hover{background:rgba(100,116,139,0.05)}
+[data-theme="light"] .ptool-results-content .search-result-item{border-top-color:rgba(100,116,139,0.08)}
+[data-theme="light"] .ptool-results-content .search-result-item:hover{background:rgba(100,116,139,0.03)}
+[data-theme="light"] .project-bar-btn{border-color:rgba(180,120,0,0.2);color:#a06e00}
+[data-theme="light"] .folder-badge{background:rgba(180,120,0,0.10);color:#a06e00;border-color:rgba(180,120,0,0.20)}
+[data-theme="light"] .folder-badge:hover{background:rgba(180,120,0,0.16);color:#a06e00;border-color:rgba(180,120,0,0.35)}
+[data-theme="light"] .project-autoapply-toggle{border-color:rgba(180,120,0,0.2);background:rgba(180,120,0,0.05);color:#a06e00}
+[data-theme="light"] .project-autoapply-toggle .autoapply-dot{background:#a06e00}
+[data-theme="light"] .project-autoapply-toggle.auto-mode{border-color:rgba(31,122,92,0.25);background:rgba(31,122,92,0.06);color:#1f7a5c}
+[data-theme="light"] .project-autoapply-toggle.auto-mode .autoapply-dot{background:#1f7a5c}
+[data-theme="light"] .apply-btn{background:rgba(180,120,0,0.1);color:#a06e00;border-color:rgba(180,120,0,0.25)}
+[data-theme="light"] .apply-btn:hover{background:rgba(180,120,0,0.18);color:#b47800;border-color:rgba(180,120,0,0.4)}
+

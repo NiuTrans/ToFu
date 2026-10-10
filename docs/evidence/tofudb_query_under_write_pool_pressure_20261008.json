@@ -1,0 +1,299 @@
+{
+  "scope": "Controlled augmentation of frozen original1000 harness: same existing sampling thread adds up to64 explicit owner11 conversation.list limit10 metadata-only reads with .5s query parameter. Added read work changes sampling cadence/load, not original acceptance results or performance comparison. Observer-enabled Native3e9809, frozen callers; source/import guards pass. Query shape checked but no snapshot-content oracle while concurrent writes progress.",
+  "rows": [
+    {
+      "label": "worker-query-embedded-0",
+      "productive_probe_count": 12,
+      "productive_probe_errors": 2,
+      "productive_probe_max_ms": 1504.9924477934837,
+      "probes": [
+        {
+          "active_conversations": 105,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 0.4669651389122009,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 400,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 199.8010203242302,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 0.2680346369743347,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 1.2870505452156067,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 0.23859739303588867,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 215.22371470928192,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 272.45618402957916,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 560.8144104480743,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 0.25454163551330566,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": false,
+          "error_type": "StorageError",
+          "error_code": "database_busy",
+          "elapsed_ms": 1500.181421637535,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 722,
+          "ok": false,
+          "error_type": "StorageError",
+          "error_code": "database_busy",
+          "elapsed_ms": 1504.9924477934837,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 74,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 286.6505905985832,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 0,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 9.27211344242096,
+          "restart_affected": false
+        }
+      ],
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 18,
+          "total_ms": 4085.087537765503,
+          "max": 505.44461607933044,
+          "p50": 171.87194770116267,
+          "p99": 505.44461607933044
+        },
+        "embedded_wire:conversation.list": {
+          "count": 12,
+          "total_ms": 286.6045907139778,
+          "max": 111.47260665893555,
+          "p50": 1.0,
+          "p99": 111.47260665893555
+        },
+        "attempt:conversation.list": {
+          "count": 18,
+          "total_ms": 4372.185789048672,
+          "max": 505.4626166820526,
+          "p50": 228.76156239024755,
+          "p99": 505.4626166820526
+        },
+        "rpc:conversation.list": {
+          "count": 13,
+          "total_ms": 4551.675617694855,
+          "max": 1504.9787759780884,
+          "p50": 207.96505671840686,
+          "p99": 1504.9787759780884
+        }
+      },
+      "original_write_replay_correctness": true,
+      "original_harness_errors": 0,
+      "raw_report": {
+        "path": ".tmp/tofudb-current-refresh-20261008/worker-query-embedded-0.json",
+        "sha256": "1f304d8cd57712e18507fa8125c98bcc5109df2cb3f4076de5b01ac5e15a0818"
+      },
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      }
+    },
+    {
+      "label": "worker-query-application-0",
+      "productive_probe_count": 11,
+      "productive_probe_errors": 3,
+      "productive_probe_max_ms": 1504.980318248272,
+      "probes": [
+        {
+          "active_conversations": 64,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 0.8625313639640808,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 546,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 0.5470365285873413,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 9.028099477291107,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 0.9548813104629517,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 2.0243003964424133,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 162.53143548965454,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 618.7893450260162,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 1000,
+          "ok": false,
+          "error_type": "StorageError",
+          "error_code": "database_busy",
+          "elapsed_ms": 1501.0277852416039,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 979,
+          "ok": false,
+          "error_type": "StorageError",
+          "error_code": "database_busy",
+          "elapsed_ms": 1500.1762956380844,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 361,
+          "ok": false,
+          "error_type": "StorageError",
+          "error_code": "database_busy",
+          "elapsed_ms": 1504.980318248272,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 16,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 105.5489256978035,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 0,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 39.97892141342163,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 0,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 8.68193805217743,
+          "restart_affected": false
+        },
+        {
+          "active_conversations": 0,
+          "ok": true,
+          "returned_count": 10,
+          "elapsed_ms": 34.52504426240921,
+          "restart_affected": false
+        }
+      ],
+      "query_stages": {
+        "pool:conversation.list": {
+          "count": 21,
+          "total_ms": 5169.13928091526,
+          "max": 506.26713037490845,
+          "p50": 171.87194770116267,
+          "p99": 506.26713037490845
+        },
+        "wire:conversation.list": {
+          "count": 11,
+          "total_ms": 108.81195962429047,
+          "max": 34.39293056726456,
+          "p50": 3.452271214393104,
+          "p99": 34.39293056726456
+        },
+        "attempt:conversation.list": {
+          "count": 21,
+          "total_ms": 5282.32541680336,
+          "max": 506.2868297100067,
+          "p50": 171.87194770116267,
+          "p99": 506.2868297100067
+        },
+        "rpc:conversation.list": {
+          "count": 14,
+          "total_ms": 5489.388033747673,
+          "max": 1504.966750741005,
+          "p50": 37.40434344477363,
+          "p99": 1504.966750741005
+        }
+      },
+      "original_write_replay_correctness": true,
+      "original_harness_errors": 0,
+      "raw_report": {
+        "path": ".tmp/tofudb-current-refresh-20261008/worker-query-application-0.json",
+        "sha256": "d6b3a261ad54ef5a3cd309db6eb52a835d48b49cb7493d1f2337df9b07b56ddd"
+      },
+      "source_scope": {
+        "native_source": "3e9809e9c1deff4daf30a9889c6edf5654bb765914cae7c3bebf628d07b1fce3",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      }
+    }
+  ],
+  "decision": "Read probes fail under write load on both paths; client session-pool acquisition dominates observed attempt aggregate duration. Prior health success does not imply query success. Prioritize shared StorageV2Client pool read/write admission rather than assume Native pin starvation is primary query cause. Preserve existing deadlines,retries,error classification,capacity/memory bounds and FIFO guarantees while considering class fairness. No runtime change admitted.",
+  "limitations": "Few probes, no percentile confidence. .5s per-attempt parameter plus retries can yield1.5s caller time; do not label deadline contract breach without inspecting owning contract. Independent stage percentiles cannot be summed."
+}

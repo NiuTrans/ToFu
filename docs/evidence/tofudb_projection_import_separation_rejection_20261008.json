@@ -1,0 +1,153 @@
+{
+  "scope": "One original1000x4x8192 application diagnostic; nested spans not additive; no source optimization or causal macro admission",
+  "native_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+  "correctness": {
+    "correctness_passed": true,
+    "error_count": 0,
+    "observed_stream_events": 4000,
+    "recovered_exact_replay": 1000,
+    "recovered_exact_content": 1000,
+    "integrity_returncode": 0,
+    "readiness_observation": {
+      "probes": 25,
+      "unhealthy_probes": 0,
+      "max_consecutive_unhealthy": 0,
+      "max_contended_milliseconds": 0,
+      "failure_examples": []
+    }
+  },
+  "stages": {
+    "scope": "nested import and normalize spans, not additive; diagnostic only",
+    "stats": {
+      "import:lib.background_command_projection": {
+        "calls": 18000,
+        "wall_ms": 35.483102000000066,
+        "cpu_ms": 29.980336999999928,
+        "max_wall_ms": 1.647505
+      },
+      "normalize": {
+        "calls": 10000,
+        "wall_ms": 839498.9210030016,
+        "cpu_ms": 469.1478129999998,
+        "max_wall_ms": 1184.265907
+      },
+      "import:lib.model_routing": {
+        "calls": 1000,
+        "wall_ms": 839121.899444,
+        "cpu_ms": 102.76315200000003,
+        "max_wall_ms": 1184.221019
+      }
+    }
+  },
+  "interpretation": [
+    "1000 first model-routing imports account for839121.899ms aggregate wall within839498.921ms normalize aggregate wall. Parallel thread wall totals are not elapsed workload time.",
+    "Standalone64-thread cold normalization mean75.739ms versus warm6.226ms; equal projection outputs.",
+    "Earlier prewarm ABBA did not improve macro tails consistently; no prewarming fix admitted.",
+    "Fresh importtime includes startup/root-lib dependencies already loaded by application; cannot attribute their cumulative time to projection cold import."
+  ],
+  "next": "Stop optimizing projection imports for this gate; return to terminal client pool wait and native reader admission/commit scheduling.",
+  "sha256": {
+    ".tmp/tofudb-projection-import-isolation-20261008/full-import-stages.json": "4c254c40c5a1b683e9be1396fe440e6589fa9f887ca1f581498a7559613ec6ef",
+    ".tmp/tofudb-projection-import-isolation-20261008/cold.json": "b7a1817083236dde81c4cf06255ed8235d68c80ebcd7f175b3fa04178727f738",
+    ".tmp/tofudb-projection-import-isolation-20261008/warm.json": "7abc16c77e8c2760238c18ff0e6d7f24f7f02f913348931ac3c6530b420d00bb",
+    ".tmp/tofudb-whole-event-timeline-20261008/native-import-detail-0.json": "f745f059b1d66aa2753a9e4e812d5618f8e57f931c6711720dabd9ce6bb15a67",
+    ".tmp/tofudb-whole-event-timeline-20261008/native-import-detail-0-caller.json": "29edd1f5eddb22405eb3b832467380421b27cbc3fde6bc1ba2ad9e550a3c2277"
+  },
+  "decision": "Reject source integration: pure import dependency separation does not improve original macro tails",
+  "private_source_commit": "b2a9e9540",
+  "verification": "127 focused existing tests +1 subprocess import boundary test;729 differential output cases,0mismatches",
+  "abba": [
+    {
+      "label": "baseline-0",
+      "correctness": true,
+      "errors": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity": 0,
+      "readiness": {
+        "probes": 21,
+        "unhealthy_probes": 0,
+        "max_consecutive_unhealthy": 0,
+        "max_contended_milliseconds": 0,
+        "failure_examples": []
+      },
+      "p99_ms": {
+        "submit_to_running": 58.927640318870544,
+        "stream_scheduled": 1820.3613609075546,
+        "settle": 4020.324759185314
+      },
+      "sha256": "b1309143997d47000cd791f1593fd11b439a0fc74fd59cd2eb773b7b98d8f89a"
+    },
+    {
+      "label": "candidate-0",
+      "correctness": true,
+      "errors": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity": 0,
+      "readiness": {
+        "probes": 21,
+        "unhealthy_probes": 0,
+        "max_consecutive_unhealthy": 0,
+        "max_contended_milliseconds": 0,
+        "failure_examples": []
+      },
+      "p99_ms": {
+        "submit_to_running": 101.36556625366211,
+        "stream_scheduled": 1882.2937831282616,
+        "settle": 4190.306097269058
+      },
+      "sha256": "fb0bc551f461aba6c89f34054e6d839bcd0176861aebd866d37c965ea1a23728"
+    },
+    {
+      "label": "candidate-1",
+      "correctness": true,
+      "errors": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity": 0,
+      "readiness": {
+        "probes": 21,
+        "unhealthy_probes": 0,
+        "max_consecutive_unhealthy": 0,
+        "max_contended_milliseconds": 0,
+        "failure_examples": []
+      },
+      "p99_ms": {
+        "submit_to_running": 93.2493582367897,
+        "stream_scheduled": 1878.9212927222252,
+        "settle": 4092.7593782544136
+      },
+      "sha256": "76dfac06870770089b66ea308483b2041cfa32772beaf39817d0c7e85d59d025"
+    },
+    {
+      "label": "baseline-1",
+      "correctness": true,
+      "errors": 0,
+      "events": 4000,
+      "exact_replay": 1000,
+      "exact_content": 1000,
+      "integrity": 0,
+      "readiness": {
+        "probes": 21,
+        "unhealthy_probes": 0,
+        "max_consecutive_unhealthy": 0,
+        "max_contended_milliseconds": 0,
+        "failure_examples": []
+      },
+      "p99_ms": {
+        "submit_to_running": 46.90638184547424,
+        "stream_scheduled": 1807.1964606642723,
+        "settle": 4063.815526664257
+      },
+      "sha256": "7f2c65bd3b4362bfa331ffecc22c4338a24e03c6e12752d9f9ac12033e32ad2a"
+    }
+  ],
+  "limits": [
+    "Four observations, no statistical confidence interval. Candidate loaded isolated function/helper into current root harness; native source identical.",
+    "Earlier prewarming rejection remains applicable. Local import delay removed without macro improvement; not evidence of all-scene supremacy."
+  ]
+}

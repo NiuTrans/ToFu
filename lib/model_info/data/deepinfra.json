@@ -1,0 +1,16 @@
+{
+  "brand": "deepinfra",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "deepinfra",
+  "category": "relay",
+  "name": "DeepInfra",
+  "base_url": "https://api.deepinfra.com/v1/openai",
+  "catalog_source": {"url": "https://deepinfra.com/docs/openai_api", "checked_at": "2026-09-08"},
+  "catalog_mode": "curated",
+  "offering_recipes": [
+    {"model_id": "deepseek-ai/DeepSeek-V4-Pro-0813", "capabilities": ["text"]},
+    {"model_id": "Qwen/Qwen3.5-397B-A17B", "capabilities": ["text"]},
+    {"model_id": "zai-org/GLM-5.3", "capabilities": ["text", "thinking"]},
+    {"model_id": "openai/gpt-oss-20b", "capabilities": ["text"]}
+  ]
+}

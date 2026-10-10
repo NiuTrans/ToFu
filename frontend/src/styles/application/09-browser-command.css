@@ -1,0 +1,64 @@
+
+/* Browser JS keeps the same command chrome; the observed page title is the
+ * execution-location chip. Never uppercase the operation or expand raw JS
+ * merely because the result has settled. */
+.ptool-cmd-js .ptool-cmd-identity,
+.ptool-cmd-js .ptool-cmd-right {
+  display: contents;
+}
+.ptool-cmd-js .ptool-cmd-label {
+  text-transform: none;
+  letter-spacing: normal;
+  flex-shrink: 0;
+}
+.ptool-cmd-tab {
+  min-width: 0;
+  max-width: 30%;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+}
+.ptool-cmd-js-code {
+  display: none;
+}
+.ptool-cmd-js.cmd-open .ptool-cmd-js-code {
+  display: block;
+}
+.ptool-cmd-js .ptool-cmd-code {
+  max-height: 260px;
+  overflow: auto;
+}
+@media (max-width: 600px) {
+  .ptool-cmd-js .ptool-cmd-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: var(--space-1);
+  }
+  .ptool-cmd-js .ptool-cmd-identity {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    grid-column: 1 / -1;
+  }
+  .ptool-cmd-js .ptool-cmd-tab {
+    max-width: 100%;
+  }
+  .ptool-cmd-js .ptool-cmd-desc-inline {
+    grid-column: 1;
+  }
+  .ptool-cmd-js .ptool-cmd-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    grid-column: 2;
+  }
+}

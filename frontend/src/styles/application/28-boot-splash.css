@@ -1,0 +1,141 @@
+/* Cold-start boot splash (frontend/src/boot-splash.ts).
+   Full-screen launch screen shown only while the server's background boot
+   runner reports a non-ready boot over /api/boot. Solid app background (not
+   a modal backdrop): this IS the app launch surface, not a dialog dim. */
+
+.boot-splash{
+  position:fixed;
+  inset:0;
+  z-index:var(--z-toast);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:var(--bg-primary);
+  color:var(--text-primary);
+  opacity:0;
+  transition:opacity var(--motion-base) var(--ease-standard);
+  pointer-events:none;
+}
+.boot-splash--visible{
+  opacity:1;
+  pointer-events:auto;
+}
+.boot-splash--leaving{
+  opacity:0;
+  pointer-events:none;
+}
+
+.boot-splash__card{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:var(--space-3);
+  width:min(420px,calc(100vw - var(--space-8) * 2));
+  padding:var(--space-8);
+  background:var(--bg-secondary);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  text-align:center;
+  -webkit-user-select:text;
+  user-select:text;
+}
+
+.boot-splash__spinner{
+  margin-bottom:var(--space-2);
+}
+
+.boot-splash__title{
+  font-size:var(--font-size-2xl);
+  font-weight:var(--weight-semibold);
+  line-height:var(--leading-title);
+  color:var(--text-primary);
+}
+
+.boot-splash__subtitle{
+  font-size:var(--font-size-md);
+  line-height:var(--leading-body);
+  color:var(--text-secondary);
+}
+
+.boot-splash__progress{
+  width:100%;
+  height:6px;
+  border-radius:var(--radius-xs);
+  background:var(--bg-tertiary);
+  overflow:hidden;
+  margin-top:var(--space-2);
+}
+.boot-splash__progress-fill{
+  height:100%;
+  background:var(--accent);
+  border-radius:inherit;
+  transition:width var(--motion-slow) var(--ease-standard);
+}
+
+.boot-splash__status-line{
+  font-size:var(--font-size-sm);
+  color:var(--text-tertiary);
+}
+
+.boot-splash__phases{
+  list-style:none;
+  margin:var(--space-2) 0 0;
+  padding:0;
+  width:100%;
+  display:flex;
+  flex-direction:column;
+  gap:var(--space-1);
+  text-align:left;
+}
+.boot-splash__phase{
+  display:flex;
+  align-items:center;
+  gap:var(--space-2);
+  font-size:var(--font-size-sm);
+  line-height:var(--leading-tight);
+  color:var(--text-tertiary);
+}
+.boot-splash__phase--running{
+  color:var(--text-primary);
+}
+.boot-splash__phase--done{
+  color:var(--text-secondary);
+}
+.boot-splash__phase--done .boot-splash__phase-marker{
+  color:var(--success-text);
+}
+.boot-splash__phase--failed{
+  color:var(--error-text);
+}
+.boot-splash__phase-marker{
+  width:var(--space-4);
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  flex:none;
+  font-weight:var(--weight-bold);
+}
+
+.boot-splash__error{
+  width:100%;
+  max-height:120px;
+  overflow:auto;
+  padding:var(--space-2) var(--space-3);
+  background:var(--error-bg);
+  border:1px solid var(--error-border);
+  border-radius:var(--radius-xs);
+  color:var(--error-text);
+  font-size:var(--font-size-xs);
+  line-height:var(--leading-body);
+  text-align:left;
+  word-break:break-word;
+}
+
+.boot-splash--failed .boot-splash__title{
+  color:var(--error-text);
+}
+
+.boot-splash__retry{
+  margin-top:var(--space-2);
+}

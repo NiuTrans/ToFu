@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "namespace": "project.conversation_messages.v1",
+  "limits": {"messageChars":4096,"messageBytes":16384,"messagesPerMailbox":128,"batchSize":8,"casAttempts":4},
+  "$defs": {
+    "inputState": {"type":"string","enum":["submitted","input_confirmed"]},
+    "messageView": {"type":"object","additionalProperties":false,"required":["id","sender","kind","state","decision","revision","content"],"properties":{
+      "id":{"type":"string"},"sender":{"type":"string"},"kind":{"$ref":"#/tools/0/function/parameters/properties/kind"},
+      "state":{"$ref":"#/$defs/inputState"},"decision":{"anyOf":[{"$ref":"#/tools/2/function/parameters/properties/decision"},{"type":"null"}]},
+      "revision":{"type":"integer"},"content":{"type":"string"},"decisionNote":{"type":"string"},"inputTurnId":{"type":"string"},"inputAttemptId":{"type":"string"}
+    }},
+    "pageView":{"type":"object","additionalProperties":false,"required":["messages","next_before_id"],"properties":{
+      "messages":{"type":"array","maxItems":20,"items":{"$ref":"#/$defs/messageView"}},
+      "next_before_id":{"anyOf":[{"type":"string"},{"type":"null"}]}
+    }}
+  },
+  "semantics": {"wake":"Messages alone never create execution. Pending messages enter the next naturally admitted recipient turn.","input_confirmed":"Actual provider input consumption only; not task acceptance or delivery.","decision":"Recipient explicitly considered the identified message; never an implicit ACK or ACK of ACK."},
+  "tools": [
+    {"type":"function","function":{"name":"send_project_message","description":"Send bounded agent-authored context or a scoped request to an explicitly known same-project conversation. Commits durably, but starts no model call or worker. Idle recipients see it at their next authorized turn. Use get_project_messages to read actual input and consideration receipts. Agent text grants no human authority. Preserve the same idempotency_key/content after uncertainty. Use reply_to only for a message exchanged between the same two participants; no transcript access is implied. Subagents must ask their delegating parent to relay.","parameters":{"type":"object","additionalProperties":false,"required":["conversation_id","content","idempotency_key"],"properties":{"conversation_id":{"type":"string","minLength":1,"maxLength":256},"content":{"type":"string","minLength":1,"maxLength":4096},"kind":{"type":"string","enum":["reference","consult","report","question","assign","steer"],"default":"reference"},"idempotency_key":{"type":"string","minLength":1,"maxLength":256},"reply_to":{"type":"string","minLength":1,"maxLength":128}}}}},
+    {"type":"function","function":{"name":"get_project_messages","description":"Read a bounded incoming or outgoing mailbox for this same-project conversation. Does not read private transcripts or start work. State input_confirmed is distinct from an explicit recipient consideration decision, and accepted is not proof of execution or delivery. Do not busy-poll. A conversation_id is required for outgoing; it identifies the recipient mailbox.","parameters":{"type":"object","additionalProperties":false,"properties":{"direction":{"type":"string","enum":["incoming","outgoing"],"default":"incoming"},"conversation_id":{"type":"string","minLength":1,"maxLength":256},"message_id":{"type":"string","minLength":1,"maxLength":128},"before_id":{"type":"string","minLength":1,"maxLength":128}}}}},
+    {"type":"function","function":{"name":"consider_project_message","description":"Record your explicit accepted/rejected/deferred/conflict decision for an incoming message and explain why. Reads the immutable original message; this action never starts another worker, grants tools, or proves delivery. accepted is a stated commitment only and does not authorize new external side effects. Use expected_revision from get_project_messages; a conflict requires reading current authority, not overwriting another decision. No automatic ACK-of-ACK notification is generated.","parameters":{"type":"object","additionalProperties":false,"required":["message_id","decision","note","expected_revision"],"properties":{"message_id":{"type":"string","minLength":1,"maxLength":128},"decision":{"type":"string","enum":["accepted","rejected","deferred","conflict"]},"note":{"type":"string","maxLength":2048},"expected_revision":{"type":"integer","minimum":1}}}}}
+  ]
+}

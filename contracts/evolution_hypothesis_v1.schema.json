@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_hypothesis_v1.schema.json",
+  "title": "Self-evolution self-model hypothesis: a falsifiable success factor over episode features",
+  "type": "object",
+  "required": ["schema_version", "hypothesis_id", "domain", "feature", "operator", "threshold", "direction", "statement", "status", "evidence", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "hypothesis_id": {"type": "string", "maxLength": 160},
+    "domain": {"type": "string", "minLength": 1, "maxLength": 80, "description": "Domain the factor applies to, or '*' for all domains."},
+    "feature": {"type": "string", "maxLength": 80, "description": "One of the deterministic feature-registry names; hypotheses over uncomputable features cannot be tested and never leave proposed."},
+    "operator": {"enum": ["gt", "lte", "eq", "neq"]},
+    "threshold": {"type": ["number", "string", "boolean"], "description": "Numeric threshold for gt/lte, categorical value for eq/neq."},
+    "direction": {"enum": ["helps", "hurts"], "description": "Predicted effect on success when the predicate holds."},
+    "statement": {"type": "string", "minLength": 1, "maxLength": 500},
+    "status": {"enum": ["proposed", "admitted", "discarded"]},
+    "evidence": {
+      "type": "object",
+      "required": ["samples_match", "samples_rest", "rate_match", "rate_rest", "lift"],
+      "properties": {
+        "samples_match": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "samples_rest": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "rate_match": {"type": "number", "minimum": 0, "maximum": 1},
+        "rate_rest": {"type": "number", "minimum": 0, "maximum": 1},
+        "lift": {"type": "number", "minimum": -1, "maximum": 1, "description": "rate_match - rate_rest, sign-normalized so positive means the measured direction agrees with the claimed direction."}
+      },
+      "additionalProperties": false
+    },
+    "lineage": {"type": "array", "maxItems": 8, "items": {"type": "string", "maxLength": 160}},
+    "created_at": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

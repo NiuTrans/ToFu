@@ -1,0 +1,185 @@
+
+/* ── Per-command interrupt button (pt_232244fb) ──
+ * Sits in the running header next to the timer chip. Amber outline (a
+ * deliberate, reversible stop), never the red of an error frame. */
+.ptool-cmd-interrupt {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px var(--space-2);
+  border-radius: 4px;
+  border: 1px solid rgba(251,191,36,0.45);
+  background: rgba(251,191,36,0.08);
+  color: #fbbf24;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.ptool-cmd-interrupt:hover:not(:disabled) {
+  background: rgba(251,191,36,0.18);
+  border-color: rgba(251,191,36,0.7);
+}
+.ptool-cmd-interrupt:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Per-command continuation action, distinct from the amber stop action. */
+.ptool-cmd-handoff {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px var(--space-2);
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.ptool-cmd-handoff:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+.ptool-cmd-handoff:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/* Terminal frame of an interrupted command: amber neutral stop (like
+ * not-run), never the red of an error — the task CONTINUED. */
+.ptool-cmd-interrupted .ptool-cmd-status {
+  color: #fbbf24;
+  background: rgba(251,191,36,0.1);
+}
+
+/* ── Interactive stdin: waiting for user input ── */
+.ptool-cmd-stdin .ptool-cmd-header {
+  color: #38bdf8;
+}
+.ptool-cmd-stdin .ptool-cmd-icon { color: #38bdf8; }
+.ptool-cmd-stdin .ptool-cmd-label { color: #38bdf8; }
+.stdin-pulse {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: #38bdf8;
+  margin-left: 6px;
+  animation: stdinPulse 1.2s ease-in-out infinite;
+}
+@keyframes stdinPulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(56,189,248,0.5); }
+  50% { opacity: 0.5; box-shadow: 0 0 6px 3px rgba(56,189,248,0.3); }
+}
+.stdin-prompt-output {
+  margin: 0;
+  padding: 6px var(--space-3);
+  background: rgba(0,0,0,0.15);
+  border: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #94a3b8;
+  font-size: var(--font-size-sm);
+  max-height: 100px;
+  overflow-y: auto;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
+.stdin-prompt-output code {
+  color: #94a3b8;
+  font-family: var(--font-mono, 'Fira Code', monospace);
+  font-size: var(--font-size-sm);
+}
+.stdin-input-area {
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid rgba(255,255,255,0.06);
+  background: rgba(0,0,0,0.1);
+  border-radius: 0 0 8px 8px;
+}
+.stdin-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.stdin-caret {
+  color: #38bdf8;
+  font-weight: 700;
+  font-size: var(--font-size-xl);
+  font-family: var(--font-mono, 'Fira Code', monospace);
+  user-select: none;
+  flex-shrink: 0;
+}
+.stdin-input {
+  flex: 1;
+  background: rgba(0,0,0,0.25);
+  border: 1px solid rgba(56,189,248,0.25);
+  border-radius: 5px;
+  padding: 6px 10px;
+  color: #e2e8f0;
+  font-family: var(--font-mono, 'Fira Code', monospace);
+  font-size: var(--font-size-md);
+  outline: none;
+  transition: border-color 0.2s;
+}
+.stdin-input:focus {
+  border-color: rgba(56,189,248,0.6);
+  box-shadow: 0 0 0 2px rgba(56,189,248,0.15);
+}
+.stdin-input::placeholder {
+  color: rgba(148,163,184,0.5);
+}
+.stdin-submit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px; height: 32px;
+  border: none;
+  border-radius: 5px;
+  background: rgba(56,189,248,0.15);
+  color: #38bdf8;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.stdin-submit-btn:hover {
+  background: rgba(56,189,248,0.3);
+}
+.stdin-eof-btn {
+  padding: var(--space-1) 10px;
+  border: 1px solid rgba(148,163,184,0.25);
+  border-radius: 5px;
+  background: rgba(148,163,184,0.08);
+  color: #94a3b8;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  font-family: var(--font-mono, 'Fira Code', monospace);
+}
+.stdin-eof-btn:hover {
+  background: rgba(248,113,113,0.15);
+  border-color: rgba(248,113,113,0.35);
+  color: #f87171;
+}
+.ptool-cmd-desc {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 7px var(--space-3) 5px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+.ptool-cmd-desc::before {
+  content: "";
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: 0.55;
+}

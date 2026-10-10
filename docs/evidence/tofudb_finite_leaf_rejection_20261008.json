@@ -1,0 +1,281 @@
+{
+  "format": "tofu.finite-leaf-rejection/v1",
+  "decision": "reject pre-scan: scalar win adds CPU work to nested writes and stream events",
+  "private_source_commit": "cd69698e08fb717cf4dc725c275b056a9b24f74b",
+  "tests": {
+    "existing_protocol_json_passed": 12
+  },
+  "micro_probe": {
+    "rows": [
+      {
+        "index": 0,
+        "variant": "baseline",
+        "case": "flat-read",
+        "iterations": 300000,
+        "mean_ns": 499.6479766666667,
+        "cpu_ns_per_call": 497.66376
+      },
+      {
+        "index": 0,
+        "variant": "baseline",
+        "case": "nested-put",
+        "iterations": 100000,
+        "mean_ns": 808.05964,
+        "cpu_ns_per_call": 805.23056
+      },
+      {
+        "index": 0,
+        "variant": "baseline",
+        "case": "stream-event",
+        "iterations": 50000,
+        "mean_ns": 1009.28244,
+        "cpu_ns_per_call": 1005.3367
+      },
+      {
+        "index": 0,
+        "variant": "baseline",
+        "case": "array-512",
+        "iterations": 1000,
+        "mean_ns": 170709.304,
+        "cpu_ns_per_call": 170080.626
+      },
+      {
+        "index": 1,
+        "variant": "candidate",
+        "case": "flat-read",
+        "iterations": 300000,
+        "mean_ns": 168.92379333333332,
+        "cpu_ns_per_call": 168.25887666666668
+      },
+      {
+        "index": 1,
+        "variant": "candidate",
+        "case": "nested-put",
+        "iterations": 100000,
+        "mean_ns": 945.30578,
+        "cpu_ns_per_call": 941.95729
+      },
+      {
+        "index": 1,
+        "variant": "candidate",
+        "case": "stream-event",
+        "iterations": 50000,
+        "mean_ns": 1171.46508,
+        "cpu_ns_per_call": 1166.37882
+      },
+      {
+        "index": 1,
+        "variant": "candidate",
+        "case": "array-512",
+        "iterations": 1000,
+        "mean_ns": 170674.804,
+        "cpu_ns_per_call": 170054.986
+      },
+      {
+        "index": 2,
+        "variant": "candidate",
+        "case": "flat-read",
+        "iterations": 300000,
+        "mean_ns": 169.29877,
+        "cpu_ns_per_call": 168.68674333333334
+      },
+      {
+        "index": 2,
+        "variant": "candidate",
+        "case": "nested-put",
+        "iterations": 100000,
+        "mean_ns": 943.82717,
+        "cpu_ns_per_call": 940.50852
+      },
+      {
+        "index": 2,
+        "variant": "candidate",
+        "case": "stream-event",
+        "iterations": 50000,
+        "mean_ns": 1172.67952,
+        "cpu_ns_per_call": 1168.6054
+      },
+      {
+        "index": 2,
+        "variant": "candidate",
+        "case": "array-512",
+        "iterations": 1000,
+        "mean_ns": 171013.171,
+        "cpu_ns_per_call": 170360.66
+      },
+      {
+        "index": 3,
+        "variant": "baseline",
+        "case": "flat-read",
+        "iterations": 300000,
+        "mean_ns": 499.79045666666667,
+        "cpu_ns_per_call": 497.81437666666665
+      },
+      {
+        "index": 3,
+        "variant": "baseline",
+        "case": "nested-put",
+        "iterations": 100000,
+        "mean_ns": 809.43131,
+        "cpu_ns_per_call": 806.35254
+      },
+      {
+        "index": 3,
+        "variant": "baseline",
+        "case": "stream-event",
+        "iterations": 50000,
+        "mean_ns": 1058.9377,
+        "cpu_ns_per_call": 1054.64124
+      },
+      {
+        "index": 3,
+        "variant": "baseline",
+        "case": "array-512",
+        "iterations": 1000,
+        "mean_ns": 172001.199,
+        "cpu_ns_per_call": 171324.641
+      },
+      {
+        "index": 4,
+        "variant": "candidate",
+        "case": "flat-read",
+        "iterations": 300000,
+        "mean_ns": 169.10077333333334,
+        "cpu_ns_per_call": 168.36948
+      },
+      {
+        "index": 4,
+        "variant": "candidate",
+        "case": "nested-put",
+        "iterations": 100000,
+        "mean_ns": 947.37,
+        "cpu_ns_per_call": 943.62097
+      },
+      {
+        "index": 4,
+        "variant": "candidate",
+        "case": "stream-event",
+        "iterations": 50000,
+        "mean_ns": 1174.67312,
+        "cpu_ns_per_call": 1170.61442
+      },
+      {
+        "index": 4,
+        "variant": "candidate",
+        "case": "array-512",
+        "iterations": 1000,
+        "mean_ns": 171343.834,
+        "cpu_ns_per_call": 170572.426
+      },
+      {
+        "index": 5,
+        "variant": "baseline",
+        "case": "flat-read",
+        "iterations": 300000,
+        "mean_ns": 500.06312333333335,
+        "cpu_ns_per_call": 497.7504466666667
+      },
+      {
+        "index": 5,
+        "variant": "baseline",
+        "case": "nested-put",
+        "iterations": 100000,
+        "mean_ns": 811.21137,
+        "cpu_ns_per_call": 807.78657
+      },
+      {
+        "index": 5,
+        "variant": "baseline",
+        "case": "stream-event",
+        "iterations": 50000,
+        "mean_ns": 1031.259,
+        "cpu_ns_per_call": 1027.15306
+      },
+      {
+        "index": 5,
+        "variant": "baseline",
+        "case": "array-512",
+        "iterations": 1000,
+        "mean_ns": 170443.501,
+        "cpu_ns_per_call": 169785.198
+      },
+      {
+        "index": 6,
+        "variant": "baseline",
+        "case": "flat-read",
+        "iterations": 300000,
+        "mean_ns": 498.82526333333334,
+        "cpu_ns_per_call": 497.0164433333333
+      },
+      {
+        "index": 6,
+        "variant": "baseline",
+        "case": "nested-put",
+        "iterations": 100000,
+        "mean_ns": 809.73422,
+        "cpu_ns_per_call": 806.33801
+      },
+      {
+        "index": 6,
+        "variant": "baseline",
+        "case": "stream-event",
+        "iterations": 50000,
+        "mean_ns": 1021.9961,
+        "cpu_ns_per_call": 1018.01664
+      },
+      {
+        "index": 6,
+        "variant": "baseline",
+        "case": "array-512",
+        "iterations": 1000,
+        "mean_ns": 171080.573,
+        "cpu_ns_per_call": 170388.596
+      },
+      {
+        "index": 7,
+        "variant": "candidate",
+        "case": "flat-read",
+        "iterations": 300000,
+        "mean_ns": 168.01135,
+        "cpu_ns_per_call": 167.44755666666666
+      },
+      {
+        "index": 7,
+        "variant": "candidate",
+        "case": "nested-put",
+        "iterations": 100000,
+        "mean_ns": 945.84419,
+        "cpu_ns_per_call": 942.49112
+      },
+      {
+        "index": 7,
+        "variant": "candidate",
+        "case": "stream-event",
+        "iterations": 50000,
+        "mean_ns": 1184.84072,
+        "cpu_ns_per_call": 1180.44194
+      },
+      {
+        "index": 7,
+        "variant": "candidate",
+        "case": "array-512",
+        "iterations": 1000,
+        "mean_ns": 170897.701,
+        "cpu_ns_per_call": 170325.425
+      }
+    ],
+    "source_sha256": {
+      "baseline": "8be529b59683975de2ebcb7e1e9e9bf266e14ae812791be932026b8a99218894",
+      "candidate": "47fed11b3702592488d31af1d7b35887dfec4d70f9e9f659b09af925257816cf"
+    },
+    "scope": "Exact retained validation functions; finite inputs, no encoding or database. Fixed closed corpus, eight ordered legs. Stage means cannot imply whole-client speed."
+  },
+  "reproducer": "from pathlib import Path\nimport sys,ast,time,json,hashlib\nroot=Path.cwd();sys.path.insert(0,str(root));p=root/'.tmp/tofudb-finite-leaf-20261008';w=Path('/tmp/tofudb-finite-leaf-20261008')\nfrom lib.storage import protocol\nsources={'baseline':p/'lib__storage__protocol.py.before','candidate':w/'lib/storage/protocol.py'};functions={}\nfor label,path in sources.items():\n tree=ast.parse(path.read_text());node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='validate_finite_json_numbers');namespace=dict(protocol.__dict__);exec(compile(ast.Module(body=[node],type_ignores=[]),label+'-finite-admission','exec'),namespace);functions[label]=namespace['validate_finite_json_numbers']\ncases=[('flat-read',300000,{'namespace':'worker','key':'one','user_id':11}),('nested-put',100000,{'namespace':'worker','key':'one','value':{'n':1,'text':'small'},'user_id':11}),('stream-event',50000,{'task_id':'one','sequence':1,'event':{'type':'assistant.delta','text':'x'*8192,'tool_calls':[]},'user_id':11}),('array-512',1000,{'items':[{'n':n,'label':str(n)} for n in range(512)]})]\nrows=[]\nfor index,label in enumerate(['baseline','candidate','candidate','baseline','candidate','baseline','baseline','candidate']):\n for name,iterations,value in cases:\n  function=functions[label]\n  for _ in range(100):function(value)\n  cpu=time.process_time_ns();wall=time.perf_counter_ns()\n  for _ in range(iterations):function(value)\n  elapsed=time.perf_counter_ns()-wall;cpu=time.process_time_ns()-cpu\n  row={'index':index,'variant':label,'case':name,'iterations':iterations,'mean_ns':elapsed/iterations,'cpu_ns_per_call':cpu/iterations};rows.append(row);print(label,name,round(elapsed/iterations),flush=True)\n(p/'micro-results.json').write_text(json.dumps({'rows':rows,'source_sha256':{k:hashlib.sha256(v.read_bytes()).hexdigest() for k,v in sources.items()},'scope':'Exact retained validation functions; finite inputs, no encoding or database. Fixed closed corpus, eight ordered legs. Stage means cannot imply whole-client speed.'},indent=2)+'\\n')\n",
+  "archive_sha256": "211f9d31bf8314bbf3f8af52b7c0ad26cd241a6ba5ad94328b20edb295b9c3e6",
+  "limits": [
+    "Validation-stage means only; no whole RPC or database performance claim",
+    "No complete client or harness gate after early stage rejection",
+    "Existing Root protocol exact-builtin optimization is concurrent/pre-task work and preserved",
+    "All-scene SQLite superiority, stream gate and provider/browser/soak remain incomplete"
+  ]
+}

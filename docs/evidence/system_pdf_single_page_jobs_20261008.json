@@ -1,0 +1,242 @@
+{
+  "format": "tofu.pdf-single-page-jobs-evidence/v1",
+  "scope": "Page-job single-document hypothesis on one frozen 32-page rich PDF.\n\nSame full-core defaults and budget as the mixed batch. Parent generates bytes\nonce, shared by independent latency/RSS workers. New workload never waives mixed\nbatch regressions or proves scaled/cold/durable application admission.\n",
+  "whole_system_verdict": "incomplete",
+  "candidate_verdict": "do_not_promote_under_current_memory_guard",
+  "production_promoted": false,
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/pdf-single-page-jobs-full.json",
+  "raw_artifact_sha256": "8d407c047d1b2d0dea8c24cdf1186a0d9bedfc33de47aaab1b69fdf9263e3bee",
+  "sources": {
+    "benchmarks/pdf_batch/single_document_measure.py": "aa448061e3f13d1be15b5fd8768ab47830274b9644f46abc764947ba18a851be",
+    "benchmarks/pdf_batch/page_jobs_measure.py": "6c0f153559f35570d048940035dfdabacc67e7855f4fde65ba49e0deffaeb743",
+    "benchmarks/pdf_batch/page_jobs.py": "f9796e6dbe531761e6f86a2f3921ce399bc8f89a1edb5820e83b5338b796eb1e",
+    "lib/pdf_parser/text.py": "4d86fb85c117bcbb1cd80aac7457f474ddc6743249e8abd86ff9d816572cea42",
+    "lib/pdf_parser/_common.py": "b81d42bed15fee1ee272f07c185742e63dc9cc1ecce3473e260d5d34b629cc6a",
+    "lib/pdf_parser/postprocess.py": "3b450ccac1aba65b60560bd4d2743b6a5f2a685a12d31f45b2e66adc39dea873",
+    "lib/pdf_parser/math.py": "b13d5b1b0b20960abac20bdf7edcc7c493d18c491778fe854ecf943331da3e92",
+    "benchmarks/pdf_batch/heterogeneous.py": "2890455e1563647dca9fe5012d0c46ff9b4debf65c0ba259728c33aecf2a1cff",
+    "benchmarks/pdf_batch/measure.py": "4e246f3b5200c4d8f9dc339e97b107d41336804edaf9bf0b82a6bb356f99a441",
+    "benchmarks/pdf_batch/experiment.py": "5db65cd433233c2ca42dc74acb5fd0f1af0aef4656057d549e19049223a1b999",
+    "lib/pdf_parser/core.py": "82d92ec1fb6895830e336d8e6b5a7fbad2a4bb8c1e193073bb2310e3b8762f54",
+    "lib/pdf_parser/policy.py": "a0d17e3ff9f9d1804094e3abb41359002a5583caede328ea3239ae142e52c62e",
+    "lib/pdf_parser/admission.py": "6041d8ebd01d39ffcdb222fb141aed404960ed6410d73063e2487d35985bb939"
+  },
+  "fixtures": [
+    {
+      "kind": "single_text_table",
+      "pages": 32,
+      "fixture_index": 0,
+      "sha256": "11d38217d7947df3f9d19fc4b9b1b1fdbe2dc32e2cb5342780f360d0e1318bfb",
+      "bytes": 114762
+    }
+  ],
+  "runtime": {
+    "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+    "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+    "affinity": [
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      144,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      178
+    ]
+  },
+  "observations": 600,
+  "independent_latency_memory_leader_pids": 12,
+  "correctness": "full rich PDF core outputs match; frozen source identities verified",
+  "pairs": [
+    {
+      "pair": 0,
+      "reference": {
+        "p50_ms": 4324.682027,
+        "p95_ms": 4364.641427,
+        "p99_ms": 4435.125954,
+        "tree_cpu_ms_per_batch": 4363.600000000001,
+        "sampled_peak_tree_rss_bytes": 138452992
+      },
+      "candidate": {
+        "p50_ms": 3174.1113649999998,
+        "p95_ms": 3234.119452,
+        "p99_ms": 3279.596649,
+        "tree_cpu_ms_per_batch": 4296.8,
+        "sampled_peak_tree_rss_bytes": 246374400
+      },
+      "ratios": {
+        "p50_ms": 0.733952541524043,
+        "p95_ms": 0.7409817063077608,
+        "p99_ms": 0.7394596417362536,
+        "tree_cpu_ms_per_batch": 0.9846915390961589,
+        "sampled_peak_tree_rss_bytes": 1.7794805041121826
+      },
+      "guard_violations": [
+        {
+          "metric": "sampled_peak_tree_rss_bytes",
+          "ratio": 1.7794805041121826,
+          "allowed_ratio": 1.05
+        }
+      ],
+      "exact_output_sha256": "1bb1b727c3d12612dc8095769e093b4a52d7acc0963d9e7601ae39f863109678",
+      "latency_memory_pids": {
+        "reference": [
+          2203677,
+          2308782
+        ],
+        "candidate": [
+          2404328,
+          2435083
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "reference": {
+        "p50_ms": 4324.1877365,
+        "p95_ms": 4392.401846,
+        "p99_ms": 4473.601188,
+        "tree_cpu_ms_per_batch": 4330.0,
+        "sampled_peak_tree_rss_bytes": 137621504
+      },
+      "candidate": {
+        "p50_ms": 3150.5150265,
+        "p95_ms": 3192.706091,
+        "p99_ms": 3223.584431,
+        "tree_cpu_ms_per_batch": 4280.500000000001,
+        "sampled_peak_tree_rss_bytes": 246501376
+      },
+      "ratios": {
+        "p50_ms": 0.7285796127459602,
+        "p95_ms": 0.7268702188319771,
+        "p99_ms": 0.7205793041290655,
+        "tree_cpu_ms_per_batch": 0.9885681293302543,
+        "sampled_peak_tree_rss_bytes": 1.791154498645793
+      },
+      "guard_violations": [
+        {
+          "metric": "sampled_peak_tree_rss_bytes",
+          "ratio": 1.791154498645793,
+          "allowed_ratio": 1.05
+        }
+      ],
+      "exact_output_sha256": "1bb1b727c3d12612dc8095769e093b4a52d7acc0963d9e7601ae39f863109678",
+      "latency_memory_pids": {
+        "candidate": [
+          2491154,
+          2517864
+        ],
+        "reference": [
+          2567204,
+          2778191
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "reference": {
+        "p50_ms": 4303.05087,
+        "p95_ms": 4398.677307,
+        "p99_ms": 4439.667805,
+        "tree_cpu_ms_per_batch": 4325.0999999999985,
+        "sampled_peak_tree_rss_bytes": 137662464
+      },
+      "candidate": {
+        "p50_ms": 3159.0532405,
+        "p95_ms": 3174.25197,
+        "p99_ms": 3183.157964,
+        "tree_cpu_ms_per_batch": 4275.9000000000015,
+        "sampled_peak_tree_rss_bytes": 247324672
+      },
+      "ratios": {
+        "p50_ms": 0.7341426666657092,
+        "p95_ms": 0.7216378352984737,
+        "p99_ms": 0.7169811129596441,
+        "tree_cpu_ms_per_batch": 0.9886245404730534,
+        "sampled_peak_tree_rss_bytes": 1.7966021006278081
+      },
+      "guard_violations": [
+        {
+          "metric": "sampled_peak_tree_rss_bytes",
+          "ratio": 1.7966021006278081,
+          "allowed_ratio": 1.05
+        }
+      ],
+      "exact_output_sha256": "1bb1b727c3d12612dc8095769e093b4a52d7acc0963d9e7601ae39f863109678",
+      "latency_memory_pids": {
+        "reference": [
+          2942022,
+          3009562
+        ],
+        "candidate": [
+          3035433,
+          3047663
+        ]
+      }
+    }
+  ],
+  "process_observation": "PID 2203673 is absent; all three paired checkpoints exist; terminal exit code was not observed",
+  "limitations": [
+    "no web/PDF mixed application scheduler or persistence",
+    "no application cancellation/crash recovery admission",
+    "cold diagnostic only; memory tree sampled every 5ms",
+    "CPU measured in a separate repeated interval"
+  ],
+  "decision": "single-document wall latency improves approximately 27%, process-tree CPU stays approximately equal, sampled peak RSS increases approximately 78–80%; retain measured tradeoff and current memory guard, no production default change",
+  "cpu_scope": "separate repeated intervals; no raw per-operation CPU vector admission"
+}

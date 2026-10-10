@@ -1,0 +1,3353 @@
+{
+  "$comment": "Environment configuration knob registry. Canonical source of the knob inventory; metadata is curated, membership is machine-verified by scripts/check_config_knobs.py.",
+  "contract": "tofu.config-knobs/v1",
+  "taskConfig": {
+    "compaction.summaryBudgetSeconds": {
+      "scope": "task.config",
+      "status": "retired",
+      "owner": "lib/tasks_pkg/compaction/_summary_budget.py",
+      "description": "Legacy values are ignored, including zero and positive values. Summary completion has no wall-clock deadline; cancellation and provider transport failures still apply. Elapsed duration is telemetry, never permission to adopt incomplete output or discard its source."
+    },
+    "compaction.summaryPolicy": {
+      "scope": "task.config",
+      "type": "enum",
+      "default": "aa-cheapest",
+      "values": [
+        "main",
+        "aa-cheapest",
+        "qualified-cheapest"
+      ],
+      "aliases": {
+        "qualified-cheapest": "aa-cheapest"
+      },
+      "owner": "lib/tasks_pkg/compaction/_summary_routing.py",
+      "rationale": {
+        "problem": "Auxiliary summaries may be cheaper without changing the main task model or granting new route permissions.",
+        "decision": "Compression first uses the lowest projected-cost eligible route, with the highest exact fresh AA Intelligence Index breaking minimum-cost ties. AA is an accepted quality proxy, not measured summary fidelity or speed. Explicit main and disableModelFallback retain the main route.",
+        "alternativesRejected": [
+          "A hidden near-cheapest price band",
+          "AA-first ranking that pays more",
+          "Requiring the main model's ordinal quality tier despite exact AA evidence",
+          "Silent subscription-to-paid-API fallback"
+        ]
+      },
+      "qualification": {
+        "executionScope": "Same owner, tenant, execution pin, actual provider, provider access and billing class; only already initialized authorized slots.",
+        "qualityProxy": "Every reachable candidate has confirmed identity and a fresh exact-model Artificial Analysis Intelligence Index, finite and nonnegative. Use the lowest score across reachable offerings; do not infer summary fidelity, latency, an AA-to-tier threshold or a main-quality-tier requirement. Routing scores use the existing AA cache freshness authority, with no inline fetch.",
+        "capacity": "Every picker-reachable slot must have declared context/output capacity including full input plus requested output, intersected with learned context limits.",
+        "pricing": "Strictly lower token-weighted declared offering cost. USD/CNY per-million-token input, output and cache rates, selected prompt tier, zero speculative cache reads and conservative cold-cache write reserve. Unknown, invalid or time-dependent pricing never means free.",
+        "ranking": "Minimize worst-reachable token-weighted projected USD cost; among exact minimum-cost ties maximize the weakest-reachable AA Intelligence Index, then deterministic execution-pin/model ordering. No price-band tolerance. Require strict savings against the best reachable main offering; equal main costs retain main.",
+        "safety": "Missing/invalid AA or unknown price never qualifies an alternate. The main model needs confirmed identity and known price, not an AA score. disableModelFallback overrides selection. Subscription routes remain selected and marginal cost stays unknown. Existing qualified-cheapest requests use the AA-cheapest alias; invalid policies retain main.",
+        "caller": "Use returned providerId as an execution pin with strict_model=True; verify complete output before adopting a summary. Main task model/config is never mutated."
+      }
+    }
+  },
+  "knobs": {
+    "TOFU_TOOL_CALL_FLOOD_HARD_CAP": {
+      "status": "documented",
+      "owner": "lib/llm/tool_call_flood.py",
+      "description": "Existing safety limit for identical normalized tool occurrences in one provider response; default 32, clamped to 2..4096. Independent of distinct-tool parallel fan-out and checkout admission. Registry catch-up only, no behavioral change."
+    },
+    "CDPATH": {
+      "status": "documented",
+      "owner": "lib/project_mod/run_command.py",
+      "description": "Inherited shell cd search paths; when set, relative cd destinations are ambiguous and command-writer admission retains fallback cwd claims. Absolute and explicit ./ or ../ paths remain resolvable. Tofu does not change this host setting."
+    },
+    "TOFU_WORKSPACE_TOOL_WAIT_SECONDS": {
+      "status": "documented",
+      "owner": "lib/project_mod/tool_admission.py",
+      "description": "Cancellable checkout-writer admission wait for task file/shell mutations and input snapshot creation; default 5 seconds, finite inclusive 0..600. Does not cap command runtime, lower parallelism or alter low-level fail-fast lease defaults. Read fingerprints are rechecked after acquisition."
+    },
+    "TOFU_AGENT_WORKERS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_BROWSER_CLIENT_REGISTRY_CAPACITY": {
+      "status": "documented",
+      "owner": "lib/browser/queue/_limits.py",
+      "description": "Reconstructible work-tab and device-affinity cache retention only. Never rejects live devices, long polls or leases."
+    },
+    "TOFU_BROWSER_POLL_BODY_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_BROWSER_STAGING_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_CHAT_TASK_TERMINAL_TTL_SECONDS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_COMMAND_SNAPSHOT_MAX_ENTRIES": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_COMMAND_SNAPSHOT_MAX_SECONDS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_EVOLUTION_TERMINAL_QUEUE_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_INCREMENTAL_TRANSLATE_PREVIEW_DEADLINE_SECONDS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MAX_429_ATTEMPTS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_INCREMENTAL_TRANSLATE_PREVIEW_MIN_CHARS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_KNOWLEDGE_ENRICH_WORKERS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Launch-probed idle enrichment carrier reuse target. Independent corpus owners start on demand; actual owner and job counts do not refuse admission. Changes require process restart."
+    },
+    "TOFU_MCP_DISPLAY_CACHE_ENTRIES": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_MEMORY_METADATA_CACHE_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_MEMORY_METADATA_CACHE_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_MODEL_REPLAY_CACHE_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_OPTIONAL_LLM_MAX_429_ATTEMPTS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PAPER_BUILD_COMPILE_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PAPER_BUILD_VALIDATION_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PAPER_QA_SOURCE_CACHE_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PDF_MAX_PAGES": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PDF_MAX_TEXT_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PDF_PARSE_TIMEOUT": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PDF_PROCESSES": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Launch-probed idle parser-process reuse target. Independent documents acquire their own process on demand, without active or queued admission counts. Explicit positive overrides and idle retirement remain; changes require process restart."
+    },
+    "TOFU_PDF_VLM_CALL_WORKERS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Launch-probed idle worker reuse hint. Independent page batches start on demand; PDF_VLM_MAX_WORKERS also sizes idle reuse only. No active call count admission ceiling."
+    },
+    "TOFU_PDF_VLM_MAX_429_ATTEMPTS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PDF_VLM_TASK_TIMEOUT_SECONDS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PDF_VLM_TASK_WORKERS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Launch-probed idle thread reuse target; independent jobs start on demand. Actual active and pending job counts have no admission quota. Explicit reuse overrides and idle retirement resolve through runtime_guards; changes require process restart."
+    },
+    "TOFU_PDF_WORKER_IDLE_SECONDS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PRODUCTION_IMAGE_FANOUT": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PRODUCTION_IMAGE_MAX_429_ATTEMPTS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PRODUCTION_LLM_FANOUT": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PRODUCTION_TTS_FANOUT": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_PROJECT_WRITE_RECOVERY_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Process per-file exact write recovery budget in MiB; launch-probed from memory capacity, headroom and free volume via contracts/resource_policy_v1.json. Shared by direct edits, intent recovery and undo, independently of display limits. Overrides require restart."
+    },
+    "TOFU_PROJECT_UNDO_CACHE_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_RATE_LIMIT_MEMORY_BUCKET_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_STORAGE_RECOVERY_COPY_BUDGET_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_STORAGE_RPC_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Launch-derived SQL Sidecar listen-backlog hint; kernel capabilities clamp listen queues. Active requests have no count quota or admission wait. Explicit overrides require restart."
+    },
+    "TOFU_STORAGE_RPC_INFLIGHT_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Process RAM threshold (MiB) for Python storage receive buffers; excess frames use private anonymous files without admission queueing or rejection. Launch defaults remain in contracts/resource_policy_v1.json; changes require restart."
+    },
+    "TOFU_STORAGE_SQLITE_BACKUP_TIMEOUT_SECONDS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (seconds); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_STORAGE_SQLITE_WRITER_QUEUE_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_SWARM_MAX_AGENTS_PER_SESSION": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_SWARM_MAX_AGENTS_PER_WAVE": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_SWARM_MAX_PARALLEL": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_SWARM_SESSION_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TIMER_LIVE_CAP": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TOKEN_COUNT_CACHE_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TOOL_RESULT_CACHE_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TOOL_SEARCH_TERM_CACHE_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TRANSLATE_CACHE_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (MiB); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TRANSLATE_MAX_429_ATTEMPTS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TRANSLATE_WORKERS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Launch-probed idle thread reuse target; independent jobs start on demand. Actual active and pending job counts have no admission quota. Explicit reuse overrides and idle retirement resolve through runtime_guards; changes require process restart."
+    },
+    "TOFU_TREE_INDEX_MAX_ENTRIES": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TREE_INDEX_MEM_ROOTS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TREE_INDEX_WALK_JOBS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_USAGE_CACHE_CAPACITY": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOOL_MAX_PARALLEL_WORKERS": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Cataloged process resource budget (count); personal and distributed launch defaults are owned by contracts/resource_policy_v1.json. Explicit overrides, probe fallback and finite consumer bounds resolve through runtime_guards.resolve_resource_budget. Changes require process restart."
+    },
+    "TOFU_TASK_INSPECTOR_CACHE_MAX_MIB": {
+      "status": "documented",
+      "owner": "lib/tasks_pkg/request_inspector.py",
+      "description": "Finite retained event and snapshot-index cache estimate in MiB. Personal default uses launch capacity/256 and available memory/64 (4 MiB floor,16 MiB probe-failure fallback); distributed default256. Override hard ceiling65536 MiB. Eviction affects reconstructible diagnostics only; oversized original payloads remain readable."
+    },
+    "TOFU_CODEX_SHARED_LOGIN": {
+      "status": "documented",
+      "owner": "lib/oauth/codex_shared_login.py",
+      "description": "Personal deployments borrow an owner-bound local/desktop Codex login without importing refresh tokens; 0 disables sharing."
+    },
+    "BAR_SCREENSHOTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "BIND_HOST": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "BING_DEFAULT_MARKET": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CACHE_ACCEPT_MIN_SAMPLES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CACHE_ACCEPT_TOLERANCE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CACHE_EXTENDED_TTL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CACHE_FIX_GEN_BASELINE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CARGO_HOME": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CHECKPOINT_CONV_BLOB_MAX_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CHECKPOINT_MIN_DELTA_CHARS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CHROMIUM_EXTRA_LIB_DIRS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CLAUDE_SONNET_MODEL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CODEX_HOME": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONDA_DEFAULT_ENV": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONDA_PREFIX": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_ALLOW_HOSTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_CODEX_PACKAGE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_DATASET_CACHE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_MODEL_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_PROVIDER_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_TOFU_CONFIG_SOURCE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_TOFU_DATA_ROOT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_TOFU_RUNTIME": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_TOFU_SOURCE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CONTEXT_BENCH_UDOCKER_ROOT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CRANE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "CROSSREF_MAILTO": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "DAYTONA_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "DAYTONA_JWT_TOKEN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "DAYTONA_ORGANIZATION_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "E2B_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FEISHU_ALLOWED_USERS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FEISHU_APP_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FEISHU_APP_SECRET": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FEISHU_DEFAULT_OWNER_USER_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FEISHU_DEFAULT_PROJECT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FEISHU_USER_OWNER_MAP": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FEISHU_WORKSPACE_ROOT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FETCH_FILTER_GATE_MAX_CHARS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FETCH_FILTER_MIN_CHARS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FETCH_FILTER_MODE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FETCH_FILTER_MODEL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FETCH_FILTER_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FETCH_LLM_FILTER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FIX_COMMIT_TS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FLASK_SECRET_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FLYAI_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FLYAI_SIGN_SECRET": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FONTCONFIG_FILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "FONTCONFIG_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "GEMINI_PRO_MODEL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "GEMINI_PRO_PREVIEW_MODEL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "GIT_CONFIG_COUNT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "HOME": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "HTTPS_PROXY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "HTTP_PROXY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "HYPERFRAMES_BROWSER_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "IMAGE_GEN_BASE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "KIMI_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "KIMI_CHAT_BASE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "LD_LIBRARY_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "LD_PRELOAD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "LLM_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "LLM_API_KEYS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "LLM_BASE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "LLM_DEBUG_RAW_SSE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "LLM_MODEL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "LOCALAPPDATA": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "LocalAppData": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "MAKENSIS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "MEITUAN_SSO_COOKIE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "MODAL_TOKEN_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "MODAL_TOKEN_SECRET": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "NEUTER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "NOVITA_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "NO_COLOR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "NO_PROXY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "OLLAMA_HOST": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "OMP_NUM_THREADS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "OPENAI_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "OPENAI_BASE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "OPENBLAS_NUM_THREADS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PDF_TEXT_MODE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PEXELS_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PLAYWRIGHT_BROWSERS_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PORT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PPTX_TRANSLATE_ENABLED": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PREFETCH_GATE_MIN_FETCH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PREFETCH_GATE_MIN_QUERY_TERMS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PROXY_BYPASS_DOMAINS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PYTEST_CURRENT_TEST": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PYTEST_XDIST_AUTO_NUM_WORKERS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "PYTEST_XDIST_WORKER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "ProgramFiles": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "ProgramFiles(x86)": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "ROLLINGGO_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "ROOTLESS_VM_EGRESS_BRIDGE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "ROOTLESS_VM_QEMU": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "ROOTLESS_VM_TMPDIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "ROOTLESS_VM_UNSHARE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "RUNLOOP_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "SEARCH_DEEPEN_HOPS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "SEMANTIC_SCHOLAR_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "SHELL_PREFIX": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "SOYOUNG_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "SQLITE_TMPDIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TLS_CERTFILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TLS_KEYFILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TMPDIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFUDB_BIN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFUDB_DIFFERENTIAL_BIN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFUDB_OWNER_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFUDB_PERF_BIN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFUDB_TENANT_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFUDB_V2_SECRET": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_429_SATURATION_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ADMISSION_CGROUP_PCT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ADMISSION_PROCESS_RSS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ADMIT_SLOT_TTL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_AUTH_MODE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_ENV_FILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_HOST": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_IDEMPOTENCY_MAX": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_IDEMPOTENCY_TTL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_LOG_LEVEL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_MAX_BODY_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_MAX_INFLIGHT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_MODEL_ROUTING_FILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_PORT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_RUN_CWD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_RUN_NATIVE_EXPOSURE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_RUN_OUTPUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_RUN_TASK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_RUN_TASK_FILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_RUN_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_RUN_TOOLS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_RUN_TRAJECTORY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_SETUP_ENABLED": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_SMOKE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AGENT_TOKEN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ALLOW_GLOBAL_PIP": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ANDROID_APK_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_API_BUCKET_BACKEND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_API_MAJOR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_APPLY_DIFF_READ_GATE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_APP_LOG": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ASR_CORRECTION": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ASR_ZH_VARIANT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUDIO_MAX_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUDIO_MAX_CPS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUDIO_MAX_DURATION_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUDIO_SILENCE_PEAK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUDIO_SILENCE_RMS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUDIT_LOG_QUEUE_MAX": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUTH_MODE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUTOPILOT_MAX_TURNS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUTOPILOT_PROGRESS_WINDOW": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUTOPILOT_SUMMARY_RETENTION": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUTO_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUTO_RESTART": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_AUTO_RESTART_INTERVAL_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BASE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BILLING_JANITOR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BILLING_JANITOR_TTL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BILLING_RESERVE_TTL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BOOT_HEARTBEAT_GRACE_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BROWSER_POLL_WAIT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BROWSER_STAGING_TTL_HOURS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BYO_ALLOW_HOSTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BYO_BLOCK_LOOPBACK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_BYO_BLOCK_PRIVATE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_BYTE_PROBE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_FLOOR_RETRY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_FLOOR_RETRY_MAX": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_MARKERS_NONCLAUDE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_MID_MODE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE": {
+      "status": "documented",
+      "owner": "docs/modules/llm_io.md",
+      "description": "Opt-in cache visibility and Codex prompt-cache-key spacing waits; default off for immediate dispatch."
+    },
+    "TOFU_CACHE_SETTLE_CODEX_MAX_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_CODEX_SEND_INTERVAL_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_CODEX_THRESHOLD_TOKENS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_CODEX_VISIBILITY_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_CODEX_WARM_WRITE_TOKENS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_COLD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_COLD_MAX_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_COLD_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_MAX_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_THRESHOLD_TOKENS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CACHE_SETTLE_WARM_WRITE_TOKENS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CGROUP_DROP_LOGS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CGROUP_JOURNAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CGROUP_LOGDROP_MIN_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CGROUP_MATERIAL_PCT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CGROUP_RELIEF_COOLDOWN_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CGROUP_REQUEST_GUARD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CGROUP_REQUEST_MIN_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CLIENT_LOG_RELAY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CLIPROXYAPI_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CMD_INTERRUPT_GRACE_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CODEX_01491_SHA256": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_COMMAND_PROXY_CONNECT_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_COMMAND_PROXY_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_COMPACTION_ARCHIVE_RETENTION": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_COMPACT_ANCHOR_SLACK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_COMPACT_FLOOR_MAX_RATIO": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONTROL_RPC_WORKERS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONV_STICKY_HOLD": {
+      "status": "documented",
+      "owner": "docs/modules/llm_io.md",
+      "description": "Opt-in waiting for a cooled warm key instead of selecting a healthy eligible alternative; default off."
+    },
+    "TOFU_CONV_STICKY_HOLD_MAX_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONV_STICKY_HOLD_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONV_STICKY_ROUTING": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONV_STICKY_TTL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CREDENTIAL_TOUCH_INTERVAL_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CTX_SHRINK_TTL_DAYS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CUSTOM_TOOLS_ALLOW_SANDBOX": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DATA_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DATA_LAYOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DEBUG_RAW_SSE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DEFAULT_TOOL_PLUGINS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DEPLOYMENT_MODE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DESKTOP_BUILD_TIMEOUT_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DESKTOP_CONFIG": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DESKTOP_DIST_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DESKTOP_DIST_MAX_AGE_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DESKTOP_POLL_WAIT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DESKTOP_WINBUILD_TIMEOUT_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DISABLE_CONFIGURED_SLOTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DISABLE_ENV_REEXEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DISABLE_SCHEDULER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DISCOVER_PLUGINS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DOCLING_THREADS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_E2E_BROWSER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_E2E_EXECUTABLE_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EDIT_ECHO_REPAIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EDIT_SYNTAX_GUARD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EPHEMERAL_PREFLIGHT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EPHEMERAL_PREFLIGHT_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EVAL_BACKEND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EVAL_ROOT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EVENT_SCHEMA": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EXPORT_SOURCE_REF": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EXTERNAL_CONSOLE_LOG": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EXTERNAL_CONSOLE_STREAM": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_FFMPEG": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_FFPROBE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_FILE_HISTORY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_FILE_HISTORY_PROBE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_FLOW_REPLAN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GATEWAY_OUTAGE_BUDGET_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GH_TOKEN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GLM_PROVIDER_FACE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GLM_SLOT_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_EXECUTABLE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_FORCE_GNU": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_INDEX_ARGV_BUDGET": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_INDEX_CHUNK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_INDEX_CONTENT_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_INDEX_JOBS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_INDEX_PROBE_FAST_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_REDIRECT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_REDIRECT_DEADLINE_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_HEARTBEAT_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_HTTP_KEEP_ALIVE_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_HTTP_WRITE_STALL_SECS": {
+      "status": "documented",
+      "owner": "lib/hypercorn_runtime.py",
+      "description": "Seconds without observed buffer drain or TCP acknowledgement progress before resetting a peer; default 300, range 1\u201386400; renews during HTTP/WebSocket writes and normal close, independently of explicit shutdown grace and durable storage budgets."
+    },
+    "TOFU_HTTP_REQUEST_LOG": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_HYPERFRAMES_BIN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ICON_SHOOT_LIB": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_IMAGE_FETCH_MAX_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_IMAGE_UPLOAD_MAX_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_IMAGE_UPLOAD_MAX_PIXELS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INCREMENTAL_TRANSLATE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INLINE_AUDIO_MAX_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INTEGRATION_AUTORUN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INTEGRATION_STABLE_TEST_CMD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INTEGRATION_TEST_CMD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INTEGRATION_WORKSPACE_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_INTERACTIVE_LOGIN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_IOS_CLIENT_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_KIMI_PROVIDER_FACE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_KIMI_SLOT_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_KNOWLEDGE_ENRICH_WORKER_IDLE_SECONDS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_KNOWLEDGE_MAX_TEXT_CHARS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LANG": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LANGDETECT_BACKEND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LIFECYCLE_APPROVED_TTL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LIFECYCLE_GATE_PASSED": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LIFECYCLE_PENDING_TTL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LIFECYCLE_RESTART_COOLDOWN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LINEAR_GIT_CHECKPOINT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LLM_ABORT_POLL_INTERVAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LLM_CONNECT_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LLM_IDLE_HEARTBEAT_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOCAL_AUTODISCOVER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOCAL_CIDRS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOCAL_HEALTH_COOLDOWN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOCAL_HEALTH_INTERVAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOCAL_HEALTH_RESYNC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOCAL_HEALTH_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOCAL_SERVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOCAL_SERVE_BUDGET_GB": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOCAL_SERVE_READY_TIMEOUT_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_AGGREGATES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_AGG_FLUSH_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_AGG_TTL_DAYS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_BUDGET": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_BUDGET_PER_MIN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_COALESCE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_DIGEST_SNAPSHOT_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_MAINTENANCE_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_QUEUE_MAX": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_RECORD_MAX_CHARS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_TOTAL_BUDGET_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOG_TOTAL_BUDGET_MB": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOOP_EXTENDED": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_LOOP_HEARTBEAT_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MAKENSIS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MANAGED_BY": {
+      "status": "documented",
+      "owner": "server_manager.py",
+      "description": "Launch-owner marker read from a managed worker environment to identify bootstrap, desktop or supervisor ownership."
+    },
+    "TOFU_MANAGER_FAILURE_WINDOW_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MANAGER_INTERVAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MANAGER_MAX_FAILURES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MANUAL_RECONCILE_BUDGET_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MAX_INFLIGHT_TASKS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MAX_SSE_PER_PRINCIPAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_AUTO_VENDOR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_BREAKER_BASE_BACKOFF": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_BREAKER_MAX_BACKOFF": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_CACHE_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_COLD_INSTALL_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_CRED_PROBE_INTERVAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_CRED_PROBE_TIMEOUT_SECONDS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_DEGRADED_TIMEOUT_STREAK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_INLINE_TOOL_LIMIT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_KEEPALIVE_INTERVAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_PING_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_PREWARM_NEGATIVE_CACHE_HOURS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_STDIO_IDLE_SECONDS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_SUPPLY_CUTOFF": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MCP_TOOL_EXPOSURE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MIN_DELETE_DEPTH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MLOCK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MLOCK_MAX_USAGE_PCT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MLOCK_MIN_LIMIT_GB": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MOBILE_CLIENT_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MOBILE_CLIENT_VERSION": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MODEL_CATALOG_SYNC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MOTION_SCENE_AUTHOR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NETPATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NETPATH_INTERVAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NETPATH_MAX_INTERVAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NETPATH_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_NUMERIC_THREADS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_OAUTH_LOOPBACK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_OFFICIAL_EVAL_BACKEND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ONNX_THREADS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_OPENCODE_SHA256": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_OPENSOURCE_BUILD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_OPEN_MODE_ALLOW_REMOTE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_OPEN_MODE_EXEMPT_PATHS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_OPEN_MODE_RPM": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_ORPHAN_RESULT_MAX_AGE_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_OVERLEAF_OUTPUT_ORIGINS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_OVERLEAF_TEST_PYTHON": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PAPER_BUILD_SPOOL_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PAPER_CHECKPOINTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PAPER_INSIGHT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PAPER_PDF_STREAM": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PAPER_PODCAST_CRITIC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PAPER_TERMFILL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PDF_MP_START": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PDF_VLM_WORKER_IDLE_SECONDS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PLAYWRIGHT_INSTALL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PORTABLE_SANDBOX": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_POSTGRES_DSN_FILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_POST_TOOL_SNAPSHOT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PRESENCE_DEBUG": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROCESS_ROLE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROCESS_RSS_COOLDOWN_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROCESS_RSS_RECYCLE_MB": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROCESS_RSS_RELIEF_MB": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PRODUCTION_LLM_MAX_429_ATTEMPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROJECT_BRAIN_CUTOVER_BACKUP_CONFIRMED": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROJECT_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROJECT_REFRESH_IDLE_SECONDS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROXY_METRICS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROXY_REACH_PROBE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROXY_TRANSPORT_PROFILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PROXY_TRIAL_METRICS_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PTC_TIER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PUBLIC_HOST": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PUBLIC_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PUBLISHED_PORT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_PYTEST_RUN_ROOT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_QUEUE_REAPER_MAX_DISPATCH_PER_TICK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RATE_LIMIT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RATE_LIMIT_BACKEND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_REDIS_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RELAY_BILLING": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_REMOTE_WORKTREE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_REPLICA_ID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_REQUIRE_FRONTEND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RESEARCH_DISCOVERY_TRANSLATE_DEADLINE_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RESEARCH_EVAL_JUDGES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RESEARCH_EVAL_MODEL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RESTART_GATE_PASSED": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RESTART_STORM_THRESHOLD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RESTART_STORM_WINDOW_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RM_TRASH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUNTIME_STATE_BACKEND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_COMMAND_PTY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_FIND_FASTPATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_GREP_GUARD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_HARDEN_GREP": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_LS_FASTPATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_NETWORK_RESPECT_NO_PROXY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_NETWORK_ROUTE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_PYTHON_CACHE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_PYTHON_CACHE_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_SCAN_GUARD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_SCAN_SEGMENT_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_SCAN_SEGMENT_TIMEOUT_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_SERVER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SEARCH_DEADLINE_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SEARCH_FETCH_URL_DEADLINE_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SEARCH_MCP_MAX_CONCURRENCY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SEARCH_MIN_REQUEST_INTERVAL_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SEARCH_PATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SEARCH_SEARXNG_ENGINES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SEARCH_SEARXNG_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SECRET_ENCRYPTION_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SERVER_WORKER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SHUTDOWN_DRAIN_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SHUTDOWN_HARD_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SITE_DOCTOR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SITE_DOCTOR_COOLDOWN_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SKILLS_ONLINE_DISCOVERY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SKIP_LOCK": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SKIP_NETWORK_E2E": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SKIP_NETWORK_TESTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SMOKE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SSE_SLOT_TTL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STARTUP_PROGRESS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STATIC_MIRROR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STATIC_MIRROR_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STATIC_SEND_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STICKY_CWD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_CONNECTION_FILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_ENABLE_FAULT_INJECTION": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_FAULT_ONCE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_LOGICAL_ACCESS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_LOGICAL_SHADOW": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_LOGICAL_SHADOW_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_MIN_FREE_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_PARENT_PID": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_PREFLIGHT_MAX_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_PROJECT_ROOT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_TEST_BACKEND": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_TEST_POSTGRES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_TEST_POSTGRES_DSN_FILE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_TOKEN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STUCK_TASK_MAX_SILENT_SECS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SUBSCRIPTION_TRUST_CONFIGURED_PROXY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SUMMARY_INPUT_CHAR_CAP": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SUPERVISOR_HOST": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SUPERVISOR_PORT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SUPERVISOR_PYTHON": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SWARM_AUTOCONTINUE_MAX": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SWARM_GLOBAL_WORKERS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SWARM_MAX_429_ATTEMPTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SWARM_MAX_RETRIES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SWARM_OUTPUT_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SWARM_SNAPSHOT_MIN_INTERVAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_SYNC_BODY_TIMEOUT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TASK_RSS_RESERVE_MB": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TEMPLATE_FEED": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TEMPLATE_FEED_TTL_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TEMPLATE_SUPPLY_SYNC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_THEME": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TLS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TOKEN_COUNTER_HF_AUTOFETCH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TOOL_ARGS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TOOL_ROUNDS_FRAME_BUDGET_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TRADING_LIVE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TRANSLATE_CACHE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TRANSLATE_CACHE_TTL_DAYS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TRANSLATE_REFUSAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TRANSLATE_REFUSAL_TTL_DAYS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TRANSLATE_WORKER_IDLE_SECONDS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TRASH_DIRNAME": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TRASH_TTL_DAYS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TREE_INDEX_DISABLE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TTS_MAX_INPUT_CHARS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TURN_DELTA_RECORD_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TURN_SEARCH_PROJECTION_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TURN_STRUCTURAL_RECORD_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_UNIFIED_EDIT_TOOL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_UNREACHABLE_COOLDOWN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_UPDATE_BRANCH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_UPDATE_CHECK_MIN_INTERVAL_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_UPDATE_REMOTE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_UPDATE_REPO": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_UPLOADS_QUOTA_MB": {
+      "status": "documented",
+      "owner": "lib/uploads_budget.py",
+      "description": "Directory-wide quota (MiB) for uploads/images; uploads past the ceiling are rejected with 413. Clamped to [64, 65536] MiB."
+    },
+    "TOFU_VIDEO_ANALYSIS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_VIDEO_MAX_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_VIDEO_MAX_DURATION_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_VIDEO_SCENE_THRESHOLD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_VIDEO_SCRATCH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_VIDEO_SCRATCH_TTL_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_VIDEO_STORYBOARD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_VITE_DEV_SERVER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_WIN_TC_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_WIRE_REVERT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_WORKING_CONTEXT_TOKENS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_WRITE_FRESHNESS_GATE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOOL_HEARTBEAT_INTERVAL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TRADING_ENABLED": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "USER": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "USERNAME": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "VLM_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "VLM_BASE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "VLM_ENABLED": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "VLM_MODEL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "VSCODE_PROXY_URI": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "WINDIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "XDG_DATA_HOME": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "XDG_RUNTIME_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "_TOFU_ENV_REEXEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "_TOFU_REEXEC_PORT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "_TOFU_RUNTIME_HOST": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "_TOFU_RUNTIME_PORT": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "_TOFU_VIA_BOOTSTRAP": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "http_proxy": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "https_proxy": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "no_proxy": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "XDG_CACHE_HOME": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONTENT_SHADOW_GLOBAL_MAX_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONTENT_SHADOW_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONTENT_SHADOW_ROOT_MAX_FILES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONTENT_SHADOW_MAX_FILE_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONTENT_SHADOW": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CONTENT_SHADOW_ROOT_MAX_BYTES": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_CERTIFICATION_EVIDENCE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "EVO_SHOT_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MIGRATION_SKIP_ROW_VERIFY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_MIGRATION_CHILD_STDERR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EVENT_INVARIANTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFUDB_PERF_RETRY_BACKPRESSURE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFUDB_EXPECTED_SHA256": {
+      "status": "legacy",
+      "owner": "lib/storage/supervisor.py",
+      "description": "Operator/test pin of the expected TofuDB engine binary SHA-256; verified before engine launch."
+    },
+    "TOFU_LLM_REPLAY_AUTHOR": {
+      "status": "legacy",
+      "owner": "tests/support/llm_replay/",
+      "description": "Offline re-authoring of committed LLM replay fixtures; writes script.next.jsonl without network."
+    },
+    "TOFU_STORAGE_RPC_DEADLINE_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_RESTART_CRASH_LIMIT": {
+      "status": "documented",
+      "owner": "lib/storage/runtime.py",
+      "description": "Sliding-window restart circuit breaker: more than this many storage crashes/failed starts inside TOFU_STORAGE_RESTART_CRASH_WINDOW_SECONDS stops the restart loop and enters the terminal degraded (fenced) state until process restart (default: 5; hard range: 1..100)."
+    },
+    "TOFU_STORAGE_RESTART_CRASH_WINDOW_SECONDS": {
+      "status": "documented",
+      "owner": "lib/storage/runtime.py",
+      "description": "Sliding window (seconds) the storage restart circuit breaker counts crashes/failed starts over before giving up into the degraded state (default: 600; hard range: 60..86400)."
+    },
+    "TOFUDB_TRANSPORT": {
+      "status": "documented",
+      "owner": "lib/storage/supervisor.py",
+      "description": "Native TofuDB authority transport: auto (default; resolves at launch from the authority volume class \u2014 embedded everywhere except observed network mounts, where the engine's Normal durability tier requires the daemon; classifier in lib/storage/volume_class.py mirrors packages/tofu-db/src/resource_probe.rs), daemon (supervised tofu-db serve child over loopback storage.v2), or embedded (same engine in-process via libtofu_db.so). A transport choice, never a second authority; invalid values fail closed."
+    },
+    "TOFU_DB_DURABILITY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DB_WAL_FLUSH_INTERVAL_MS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_WARMUP_DEADLINE_SECONDS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GIT_PROBE_TIMEOUT_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_TOOL_VERSION_TIMEOUT_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_FASTPATH_DIR": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_STORAGE_FASTPATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_T2V_MODEL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_T2V_API_KEY": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_T2V_BASE_URL": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_CP_WORKERS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GIT_GUARD": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_REMAINDER_CEILING": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_REMAINDER_DRAIN_S": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_GREP_RG": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RG_EXECUTABLE": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_RUN_CP_FASTPATH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_EVAL_LOCAL_SCRATCH": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "ROOTLESS_VM_ALLOW_PRIVATE_LOCAL_ROOTS": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_QMP_START_TIMEOUT_SEC": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFUDB_BENCH_BIN": {
+      "status": "legacy",
+      "owner": "",
+      "description": ""
+    },
+    "TOFU_DB_REQUEST_PROFILE_EVERY": {
+      "status": "documented",
+      "owner": "docs/STORAGE_PERFORMANCE_CHARTER.md",
+      "description": "Opt-in native request profiler: 0/unset disables; positive N samples every Nth dispatch. Rust reads once per process; bounded anonymous metrics, separate embedded queue time. Benchmark records requested launch value."
+    },
+    "TOFUDB_EMBEDDED_LIB": {
+      "status": "documented",
+      "owner": "tests/tofudb/test_tofudb_projection_relocation.py",
+      "description": "Embedded TofuDB shared-library path for projection relocation integration checks; defaults beside the native test binary."
+    },
+    "TOFU_CLIENT_REPORTS_DIR": {
+      "status": "documented",
+      "owner": "lib/client_report_store.py",
+      "description": "Client diagnostic report segment directory override; defaults to client_reports under the configured data root."
+    },
+    "TOFU_TEST_POSTGRES_DSN": {
+      "status": "documented",
+      "owner": "tests/storage/test_conversation_diagnostic_sql.py",
+      "description": "Explicit PostgreSQL DSN for optional diagnostic repository integration checks; absent configuration skips that test backend."
+    },
+    "TOFU_VISUAL_STATIC_ROOT": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_checklist_interventions.py",
+      "description": "Read-only prebuilt frontend static artifact root for isolated browser verification; defaults to this checkout static directory."
+    },
+    "TOFU_PROGRAM_HEAP_MAX_MIB": {
+      "status": "documented",
+      "owner": "runtime_guards.py",
+      "description": "Per-program isolated JavaScript heap ceiling in MiB, derived from launch-probed memory capacity and headroom. Process resource policy owns defaults; resolve_resource_budget clamps explicit overrides to 16..1024 MiB. No resident VM pool; linear-memory guard is twice the heap plus 16 MiB."
+    },
+    "TOFU_NATIVE_EVENT_OUTPUT": {
+      "status": "documented",
+      "owner": "benchmarks/native_event/runtime_measure.py",
+      "description": "Destination path for the native event runtime benchmark JSON report."
+    },
+    "TOFU_NATIVE_EVENT_LIBRARY": {
+      "status": "documented",
+      "owner": "benchmarks/native_event/runtime_measure.py",
+      "description": "Path to the native event benchmark library; the harness also records its content digest."
+    },
+    "TOFU_MARKDOWN_WORKER_OUTPUT": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_markdown_worker_experiment.py",
+      "description": "Optional destination for the Markdown worker browser experiment report."
+    },
+    "TOFU_REPOSITORY_INDEX_OUTPUT": {
+      "status": "documented",
+      "owner": "benchmarks/repository_index/measure.py",
+      "description": "Destination path for the repository index benchmark JSON report."
+    },
+    "MTSSO_ENV": {
+      "status": "documented",
+      "owner": "packages/tofu-mtsso-auth/src/tofu_mtsso_auth/__init__.py",
+      "description": "Existing MTSSO environment fallback when no explicit environment is supplied; defaults to PROD and participates in the owner/environment authentication cache key."
+    },
+    "MTSSO_NODE_EXECUTABLE": {
+      "status": "documented",
+      "owner": "packages/tofu-mtsso-auth/src/tofu_mtsso_auth/__init__.py",
+      "description": "Authoritative Node executable override for the official MTSSO agent bridge; automatic selection is used only without this override."
+    },
+    "TOFU_NODE": {
+      "status": "documented",
+      "owner": "serverctl.py",
+      "description": "Explicit Node executable override used by frontend lifecycle preparation; read from environment or project environment values before automatic runnable Node selection."
+    },
+    "MTSSO_AUTH_MODE": {
+      "status": "documented",
+      "owner": "packages/tofu-mtsso-auth/src/tofu_mtsso_auth/__init__.py",
+      "description": "Existing MTSSO authentication selection: auto (default), official or legacy; other values refuse configuration."
+    },
+    "TOFU_BENCHMARK_PYTHON": {
+      "status": "documented",
+      "owner": "benchmarks/native_http_cli.py",
+      "description": "Existing Python executable override shared by standalone benchmark child-process launchers; falls back to the current interpreter. This does not change application model or storage selection."
+    },
+    "TOFU_ROOTLESS_SUPERVISOR_PID": {
+      "status": "documented",
+      "owner": "rootless_vm/qemu_launcher.py",
+      "description": "Internal positive supervisor PID paired with the inherited descriptor identity for trusted rootless project-command lifecycle ownership."
+    },
+    "TOFU_BENCHMARK_SAMPLES": {
+      "status": "documented",
+      "owner": "benchmarks/native_event/runtime_measure.py",
+      "description": "Native event microbenchmark sample count; default 1000 and fewer than 100 samples are refused by its measurement entry point."
+    },
+    "TOFU_STREAMING_PERF_OUTPUT": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_streaming_markdown_dom.py",
+      "description": "Opt-in output path for raw streaming Markdown DOM performance evidence; the measurement test skips when absent."
+    },
+    "MTSSO_OFFICIAL_EXECUTABLE": {
+      "status": "documented",
+      "owner": "packages/tofu-mtsso-auth/src/tofu_mtsso_auth/__init__.py",
+      "description": "Existing executable override for the official MTSSO authentication command."
+    },
+    "TOFU_MARKDOWN_INLINE_CHECK_OUTPUT": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_markdown_inline_cache.py",
+      "description": "Optional destination for inline Markdown cache browser conformance evidence and source fingerprints."
+    },
+    "TOFU_MARKDOWN_INLINE_MEASURE_OUTPUT": {
+      "status": "documented",
+      "owner": "tests/visual/test_visual_markdown_inline_cache.py",
+      "description": "Optional destination for inline Markdown cache browser performance measurements."
+    },
+    "TOFU_CONTEXT_COMPILER_OUTPUT": {
+      "status": "documented",
+      "owner": "benchmarks/context_compiler/measure.py",
+      "description": "Destination path for the standalone context compiler benchmark JSON report."
+    },
+    "TOFU_ROOTLESS_SUPERVISOR_FD": {
+      "status": "documented",
+      "owner": "rootless_vm/qemu_launcher.py",
+      "description": "Internal trusted project-command supervisor descriptor (at least 3); launcher fstat binds device/inode identity before jail entry. Not a user-facing authority override."
+    },
+    "XDG_CONFIG_HOME": {
+      "status": "documented",
+      "owner": "desktop/autostart.py",
+      "description": "Linux per-user configuration root for the Agent login-startup entry; absolute paths only, default ~/.config. No credentials are stored in the startup entry."
+    }
+  },
+  "legacy_count": 665
+}

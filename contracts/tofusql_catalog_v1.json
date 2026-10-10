@@ -1,0 +1,263 @@
+{
+  "format": "tofu.tofusql-catalog.v1",
+  "catalogVersion": 3,
+  "dialect": {
+    "statement": "single SELECT over catalog tables",
+    "p0": "exactly one catalog table per statement; joins, unions, and subqueries that touch a second table are rejected",
+    "p2": "at most two catalog tables per statement through one INNER JOIN whose ON clause is a conjunction of equalities over declared joinEdges identity columns; both sides must scan with an equality-pinned leading key part, self-joins stay rejected, and the statement-wide entity-read ceiling bounds the combined scans",
+    "notes": [
+      "Callers never address physical storage; key-part columns decode the logical entity key of one physical namespace.",
+      "Equality predicates on leading key-part columns push down to a B+Tree prefix scan; range predicates push down only on restText columns, whose encoding order equals BINARY collation.",
+      "P1 adds conversation and turn lane/update/time index namespaces and the task-event stream family as raw catalog tables with the valueCodec value, which surfaces the raw stored entity value as body when it decodes as JSON and null otherwise; the versionedDocumentJson envelope columns still decode identically.",
+      "P2 identityColumns surface a documented single-field JSON path out of the decoded body as a nullable TEXT column so joins can correlate documented identities that live inside documents rather than keys.",
+      "Every statement runs read-only under the SQLite authorizer and a progress-handler deadline; scans fail closed at the entity-read ceiling instead of degrading the authority."
+    ]
+  },
+  "statementCeilings": {
+    "maximumQueryTextBytes": 16384,
+    "maximumEntityReadsPerStatement": 1000,
+    "maximumResultRows": 2000,
+    "maximumResponseBytes": 8388608,
+    "maximumBodyHydrationBytes": 67108864,
+    "maximumStatementMilliseconds": 30000
+  },
+  "keyEncodings": {
+    "text": "u16 big-endian byte length followed by UTF-8 bytes; equality pushdown only because encoding order is length-major",
+    "restText": "remaining raw UTF-8 bytes; must be the final key part; equality and range pushdown because encoding order equals BINARY collation",
+    "orderedBinary": "remaining raw key bytes that must not decode as one logical value (opaque, usually a tag, text prefix, or fixed-width big-endian integer); must be the final key part; equality pushdown only, and values are addressable through the tofusql_key() table function as a lowercase hex string"
+  },
+  "valueCodec": {
+    "name": "value",
+    "columns": [
+      {
+        "name": "version",
+        "type": "INTEGER",
+        "source": "document envelope version"
+      },
+      {
+        "name": "updated_at_ms",
+        "type": "INTEGER",
+        "source": "document envelope update timestamp in milliseconds"
+      },
+      {
+        "name": "body",
+        "type": "TEXT",
+        "source": "raw stored entity value decoded as JSON when it decodes and null otherwise; versioned document envelopes hydrate their document JSON through the bounded path charged against maximumBodyHydrationBytes"
+      }
+    ]
+  },
+  "tables": [
+    {
+      "table": "conversation_activity_candidates",
+      "namespace": "conversation_activity_candidates_v2",
+      "keyParts": [
+        {
+          "name": "index_key",
+          "encoding": "orderedBinary"
+        }
+      ]
+    },
+    {
+      "table": "conversation_headers",
+      "namespace": "conversation_headers",
+      "keyParts": [
+        {
+          "name": "conversation_id",
+          "encoding": "restText"
+        }
+      ]
+    },
+    {
+      "table": "conversation_trash_by_age",
+      "namespace": "conversation_trash_by_age",
+      "keyParts": [
+        {
+          "name": "deleted_at_ms_be",
+          "encoding": "orderedBinary"
+        }
+      ]
+    },
+    {
+      "table": "conversation_turns",
+      "namespace": "conversation_turns",
+      "keyParts": [
+        {
+          "name": "conversation_id",
+          "encoding": "text"
+        },
+        {
+          "name": "turn_id",
+          "encoding": "text"
+        }
+      ]
+    },
+    {
+      "table": "conversations_by_updated",
+      "namespace": "conversation_by_updated",
+      "keyParts": [
+        {
+          "name": "index_key",
+          "encoding": "orderedBinary"
+        }
+      ]
+    },
+    {
+      "table": "generation_attempts",
+      "namespace": "generation_attempts",
+      "keyParts": [
+        {
+          "name": "conversation_id",
+          "encoding": "text"
+        },
+        {
+          "name": "attempt_id",
+          "encoding": "text"
+        }
+      ],
+      "identityColumns": [
+        {
+          "name": "turn_id",
+          "path": "$.turnId"
+        }
+      ]
+    },
+    {
+      "table": "storage_records",
+      "namespace": "storage_records",
+      "keyParts": [
+        {
+          "name": "record_namespace",
+          "encoding": "text"
+        },
+        {
+          "name": "record_key",
+          "encoding": "restText"
+        }
+      ]
+    },
+    {
+      "table": "task_event_indexes",
+      "namespace": "task_event_index",
+      "keyParts": [
+        {
+          "name": "index_key",
+          "encoding": "orderedBinary"
+        }
+      ]
+    },
+    {
+      "table": "turn_activity_timestamps",
+      "namespace": "turn_activity_timestamps",
+      "keyParts": [
+        {
+          "name": "conversation_id",
+          "encoding": "text"
+        },
+        {
+          "name": "lane_id",
+          "encoding": "text"
+        },
+        {
+          "name": "ordinal_be",
+          "encoding": "orderedBinary"
+        }
+      ]
+    },
+    {
+      "table": "turn_tombstones",
+      "namespace": "turn_tombstones",
+      "keyParts": [
+        {
+          "name": "conversation_id",
+          "encoding": "text"
+        },
+        {
+          "name": "deleted_at_ms_be",
+          "encoding": "orderedBinary"
+        }
+      ]
+    },
+    {
+      "table": "turns_by_lane_compaction",
+      "namespace": "turns_by_lane_compaction",
+      "keyParts": [
+        {
+          "name": "conversation_id",
+          "encoding": "text"
+        },
+        {
+          "name": "lane_id",
+          "encoding": "text"
+        },
+        {
+          "name": "ordinal_be",
+          "encoding": "orderedBinary"
+        }
+      ]
+    },
+    {
+      "table": "turns_by_lane_ordinal",
+      "namespace": "turns_by_lane_ordinal",
+      "keyParts": [
+        {
+          "name": "conversation_id",
+          "encoding": "text"
+        },
+        {
+          "name": "lane_id",
+          "encoding": "text"
+        },
+        {
+          "name": "ordinal_be",
+          "encoding": "orderedBinary"
+        }
+      ]
+    },
+    {
+      "table": "turns_by_updated",
+      "namespace": "turns_by_updated",
+      "keyParts": [
+        {
+          "name": "conversation_id",
+          "encoding": "text"
+        },
+        {
+          "name": "updated_at_ms_be",
+          "encoding": "orderedBinary"
+        }
+      ]
+    }
+  ],
+  "joinEdges": [
+    {
+      "left": {
+        "table": "conversation_turns",
+        "column": "conversation_id"
+      },
+      "right": {
+        "table": "generation_attempts",
+        "column": "conversation_id"
+      }
+    },
+    {
+      "left": {
+        "table": "conversation_turns",
+        "column": "conversation_id"
+      },
+      "right": {
+        "table": "turn_tombstones",
+        "column": "conversation_id"
+      }
+    },
+    {
+      "left": {
+        "table": "conversation_turns",
+        "column": "turn_id"
+      },
+      "right": {
+        "table": "generation_attempts",
+        "column": "turn_id"
+      }
+    }
+  ]
+}

@@ -1,0 +1,234 @@
+/* ── Inline command description: woven onto the header title line (next
+ *   to the root pill), replacing the old detached band below the header.
+ *   Grows to fill the row and truncates with an ellipsis so it never
+ *   pushes the status badge / spinner off the right edge. */
+.ptool-cmd-desc-inline {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* ── Live run_command timer chip (countdown when the call declared a
+ *   `timeout`, elapsed count-up otherwise). Tabular numerals so the width
+ *   does not jitter as the digits change once per second, and flex-shrink:0
+ *   so the description (which owns flex:1) truncates before the timer does —
+ *   the timer is the one thing on this row that must stay readable. */
+.ptool-cmd-timer {
+  flex-shrink: 0;
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text-secondary);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+/* Under 10s left — the command is about to be killed, so stop being quiet. */
+.ptool-cmd-timer-soon {
+  color: #d97706;
+  opacity: 1;
+}
+/* Past the deadline: the backend is SIGKILLing the process tree. */
+.ptool-cmd-timer-over {
+  color: #dc2626;
+  opacity: 1;
+}
+.ptool-cmd-code {
+  margin: 0;
+  padding: 3px 0 5px;
+  background: none;
+  border: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ptool-cmd-code code {
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 11.5px;
+}
+.ptool-cmd-block .ptool-cmd-code code .ptool-cmd-cwd {
+  color: var(--text-tertiary);
+}
+.ptool-cmd-output-wrap {
+  border-top: none;
+}
+.ptool-cmd-toggle {
+  padding: var(--space-1) 0;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  user-select: none;
+  transition: color .15s;
+}
+.ptool-cmd-toggle:hover {
+  color: var(--accent-hover);
+}
+.ptool-cmd-output {
+  display: none;
+  margin: 0;
+  padding: var(--space-1) 0 var(--space-1) 10px;
+  background: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 260px;
+  overflow-y: auto;
+  border-left: 2px solid var(--border);
+}
+.ptool-cmd-output code {
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+}
+/* ★ Scannable QR recovered from terminal output (lib/qr.py → meta.qrImages).
+ * Deliberately OUTSIDE .ptool-cmd-output: that pane is `pre-wrap` +
+ * `break-all` (which is exactly what destroys block-art QR rows) and starts
+ * collapsed. A code the user must point a phone at has to be visible without
+ * expanding anything, and rendered as an image so no text wrapping applies.
+ * White plate + padding is not decoration — it supplies the quiet zone
+ * scanners require, and keeps the code readable under a dark theme where a
+ * transparent PNG would invert to unscannable. */
+.ptool-qr-strip {
+  margin: 6px 0 2px;
+}
+.ptool-qr-label {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-1);
+}
+.ptool-qr-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.ptool-qr-tile {
+  margin: 0;
+  padding: var(--space-2);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  line-height: 0;
+}
+.ptool-qr-tile img {
+  width: 148px;
+  height: 148px;
+  display: block;
+  cursor: zoom-in;
+  /* Never smooth a QR: interpolated module edges are what make a scaled
+   * code undecodable. */
+  image-rendering: pixelated;
+}
+/* Live (streaming) output while a run_command is in-flight.
+ * Always visible (no collapse), capped height with auto-scroll so the
+ * newest lines stay in view. */
+.ptool-cmd-output-live {
+  display: block !important;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--space-1) 0 var(--space-1) 10px;
+  background: none;
+  border-left: 2px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ptool-cmd-output-live code {
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* Live current line (PTY replace-current-line, e.g. a redrawing progress bar):
+ * rendered as the evolving tail after the committed output. Slightly brighter
+ * so it reads as "happening now" vs the settled lines above. */
+
+.ptool-cmd-output-wrap.expanded .ptool-cmd-output {
+  display: block;
+}
+/* Folded output: a done command keeps only its title row; the explicit
+ * 输出 fold chip in the header is the disclosure (owner call 2026-09-05 —
+ * before that the whole header row doubled as an invisible button).
+ * Expansion state is keyed by toolCallId in _cmdOutputExpanded so
+ * re-renders keep the reader's choice. */
+.ptool-cmd-block.output-open .ptool-cmd-output {
+  display: block;
+}
+
+/* ── Fold chips: the explicit per-pane disclosures (owner call 2026-09-05)
+ * ──
+ * A matched pair of ghost buttons on the header row — 命令 for the command
+ * body, 输出 for the result — each rendered only when its pane actually
+ * exists. They supersede the 2026-08-02 "description is the toggle" and
+ * 2026-08-27 "header is the disclosure" calls: one invisible hit area per
+ * half-row was undiscoverable, and the split point moved with description
+ * length. Ghost styling keeps them quieter than the filled verdict chips
+ * beside them; the chevron points right when folded and rotates down when
+ * open, both pure CSS off the block state classes — no JS glyph swaps. */
+.ptool-cmd-fold {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin: 0;
+  padding: 1px 5px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color .12s ease, background .12s ease;
+}
+.ptool-cmd-fold:hover {
+  color: var(--accent-hover);
+  background: rgba(148, 163, 184, 0.12);
+}
+.ptool-cmd-fold svg {
+  width: 10px;
+  height: 10px;
+  transition: transform .12s ease;
+}
+.ptool-cmd-block.cmd-open .ptool-cmd-fold-cmd,
+.ptool-cmd-block.output-open .ptool-cmd-fold-output {
+  color: var(--accent-hover);
+}
+.ptool-cmd-block.cmd-open .ptool-cmd-fold-cmd svg,
+.ptool-cmd-block.output-open .ptool-cmd-fold-output svg {
+  transform: rotate(90deg);
+}
+
+/* ── Collapsible command body (done + running states) ──
+ * When a description conveys intent AND the command is long enough to be
+ * noise (multi-line or > 100 chars — see commandIsCollapsible in the typed
+ * presentation owner), the command <pre> (including working_dir when
+ * supplied) starts COLLAPSED and the header's 命令 fold chip expands it.
+ * The user cares about what the command DID, not the exact shell string.
+ * Short one-liners and
+ * description-less commands never get the class and stay visible. */
+.ptool-cmd-block .ptool-cmd-collapsible {
+  display: none;
+}
+.ptool-cmd-block.cmd-open .ptool-cmd-collapsible {
+  display: block;
+}
+
+/* ── Running: elapsed / timeout-budget readout in the header ── */
+/* When both the elapsed readout and the spinner are present, the elapsed
+ * takes the auto margin (pushes right); the spinner sits just after it. */
+
+/* ── Running: tqdm progress bar parsed from live output ── */
+
+/* Light theme */
+
+/* Tofu theme — warm palette matching the running-block accent */

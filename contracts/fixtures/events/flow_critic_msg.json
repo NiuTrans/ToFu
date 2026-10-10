@@ -1,0 +1,22 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "content": "s",
+  "conversationId": "s",
+  "discard": true,
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "iteration": 1,
+  "next_phase": "s",
+  "requestId": "s",
+  "seq": 1,
+  "synthetic": true,
+  "taskId": "s",
+  "thinking": "s",
+  "turnRole": "s",
+  "type": "flow_critic_msg",
+  "vuMsgId": "s"
+}

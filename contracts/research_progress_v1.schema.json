@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchProgressV1",
+  "description": "Additive research_progress on existing task events. Generic task status is terminal authority; connection state is client-owned. Counts describe observed work, not scientific quality or percentages.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "revision", "last_business_progress_at", "blocked_reason", "execution_state", "quality_state", "stage", "activity", "counts", "artifact_ready"],
+  "properties": {
+    "schema_version": {"const": 1},
+
+    "run_id": {"type": "string", "maxLength": 160},
+    "revision": {"type": "integer", "minimum": 0},
+    "last_business_progress_at": {"type": "integer", "minimum": 0},
+    "blocked_reason": {"type": "string", "maxLength": 500},
+    "execution_state": {"enum": ["pending", "running", "waiting_user", "stop_requested", "completed", "failed", "cancelled"]},
+    "quality_state": {"enum": ["unknown", "passed", "degraded"]},
+    "stage": {"type": "string", "maxLength": 80},
+    "activity": {"type": "string", "maxLength": 80},
+    "artifact_ready": {"type": "boolean"},
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["discovered", "admitted", "parsed", "cache_hits", "failed", "excerpt_covered", "candidates", "accepted", "rejected"],
+      "properties": {
+        "discovered": {"type": "integer", "minimum": 0, "maximum": 200},
+        "admitted": {"type": "integer", "minimum": 0, "maximum": 200},
+        "parsed": {"type": "integer", "minimum": 0, "maximum": 200},
+        "cache_hits": {"type": "integer", "minimum": 0, "maximum": 200},
+        "failed": {"type": "integer", "minimum": 0, "maximum": 200},
+        "excerpt_covered": {"type": ["integer", "null"], "minimum": 0, "maximum": 200},
+        "candidates": {"type": ["integer", "null"], "minimum": 0, "maximum": 200},
+        "accepted": {"type": ["integer", "null"], "minimum": 0, "maximum": 200},
+        "rejected": {"type": ["integer", "null"], "minimum": 0, "maximum": 200}
+      }
+    }
+  }
+}

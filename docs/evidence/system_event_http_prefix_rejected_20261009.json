@@ -1,0 +1,387 @@
+{
+  "format": "tofu.bounded-live-replay-evidence/v1",
+  "scope": "Measure actual bounded TaskRuntime polling against frozen full-suffix polling.\n\nOffline owned task fixtures; no durable authority or real HTTP server. Exact\nprojected payloads, source witnesses, raw timings and separate RSS workers are\nrequired. Outputs remain outside the checkout. Small controls remain mandatory.\n",
+  "verdict": "rejected",
+  "production_promoted": false,
+  "whole_system_admission": false,
+  "reference_revision": "4fdb9e178e75ee074260ec98e0cb245f864212ef",
+  "sources": {
+    "lib/task_replay.py": "d16d2ea879a00decc8f6ced927901872e93c8d812098cbd56cc48b98ea56f3ef",
+    "lib/agent_core/task_runtime.py": "f9b69deba2f309e403637a172879784cc2f98014206fb437e68e7aafd758ac97",
+    "routes/api_v1/tasks.py": "73614164b1948c7695a0a2b8765c7fd8bc9f984db82a7b12f77128e28be2259f",
+    "benchmarks/replay_http_prefix.py": "c264d79ce26ecef29890910e881839c16e7fcabc60e4ec926e1d36fb77596ee4"
+  },
+  "hardware": {
+    "affinity_cpu_ids": [
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      144,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      178
+    ],
+    "worker_cpu_id": 54,
+    "physical_memory_bytes": 236223201280,
+    "available_memory_bytes": 215582380032,
+    "volume_free_bytes": 6168302534656
+  },
+  "python": "3.12.13 | packaged by conda-forge | (main, Mar  5 2026, 16:50:00) [GCC 14.3.0]",
+  "platform": "Linux-5.10.0-136.71.0.mt20240613.547.mt2203sp1.x86_64-x86_64-with-glibc2.28",
+  "latency_observations": 36000,
+  "independent_workers": 72,
+  "cases": [
+    {
+      "case": "empty",
+      "event_count": 0,
+      "ratios": [
+        {
+          "p50_ms": 0.988877543578149,
+          "p95_ms": 0.9440953129091386,
+          "p99_ms": 0.8554588829637945,
+          "cpu_ms_per_operation": 0.9946521907325047,
+          "peak_rss_bytes": 0.9942343940569908
+        },
+        {
+          "p50_ms": 1.0215199909389512,
+          "p95_ms": 0.9777354122693538,
+          "p99_ms": 0.9304876832552109,
+          "cpu_ms_per_operation": 1.0157857411938769,
+          "peak_rss_bytes": 1.0007811628166499
+        },
+        {
+          "p50_ms": 1.8290428795929057,
+          "p95_ms": 1.9184379634206623,
+          "p99_ms": 1.7132710484620006,
+          "cpu_ms_per_operation": 1.8335462929932433,
+          "peak_rss_bytes": 1.003006012024048
+        }
+      ]
+    },
+    {
+      "case": "small",
+      "event_count": 64,
+      "ratios": [
+        {
+          "p50_ms": 0.9913953260975847,
+          "p95_ms": 0.9823331060326438,
+          "p99_ms": 0.9411584557849171,
+          "cpu_ms_per_operation": 0.990977331767618,
+          "peak_rss_bytes": 0.9959937680836858
+        },
+        {
+          "p50_ms": 1.043463644849442,
+          "p95_ms": 1.0940864793263316,
+          "p99_ms": 1.0934633481243419,
+          "cpu_ms_per_operation": 1.038475254629646,
+          "peak_rss_bytes": 1.0
+        },
+        {
+          "p50_ms": 0.9888665897507991,
+          "p95_ms": 1.7197266630722536,
+          "p99_ms": 1.6108122841075332,
+          "cpu_ms_per_operation": 1.1107943251042052,
+          "peak_rss_bytes": 1.0
+        }
+      ]
+    },
+    {
+      "case": "stale",
+      "event_count": 2048,
+      "ratios": [
+        {
+          "p50_ms": 0.9762895250758301,
+          "p95_ms": 0.9798739221048629,
+          "p99_ms": 0.9456108497126944,
+          "cpu_ms_per_operation": 0.9742151277072144,
+          "peak_rss_bytes": 1.0
+        },
+        {
+          "p50_ms": 0.9563768714489982,
+          "p95_ms": 1.210624441404761,
+          "p99_ms": 1.0588339872486514,
+          "cpu_ms_per_operation": 0.9778777282993585,
+          "peak_rss_bytes": 1.0
+        },
+        {
+          "p50_ms": 0.9575378538512178,
+          "p95_ms": 0.9559926992496451,
+          "p99_ms": 0.9473673164676889,
+          "cpu_ms_per_operation": 0.9566082997091214,
+          "peak_rss_bytes": 1.0
+        }
+      ]
+    },
+    {
+      "case": "tail",
+      "event_count": 2048,
+      "ratios": [
+        {
+          "p50_ms": 1.049719168651791,
+          "p95_ms": 0.8395547889478309,
+          "p99_ms": 0.8461892700897997,
+          "cpu_ms_per_operation": 1.0219030160639153,
+          "peak_rss_bytes": 1.0
+        },
+        {
+          "p50_ms": 1.02248997753205,
+          "p95_ms": 1.0645604395604396,
+          "p99_ms": 1.0213774220724516,
+          "cpu_ms_per_operation": 1.0233730774262688,
+          "peak_rss_bytes": 1.0
+        },
+        {
+          "p50_ms": 1.0274664175785073,
+          "p95_ms": 1.130459960291198,
+          "p99_ms": 1.0814348036839554,
+          "cpu_ms_per_operation": 1.0354125776754373,
+          "peak_rss_bytes": 1.0
+        }
+      ]
+    },
+    {
+      "case": "terminal",
+      "event_count": 2048,
+      "ratios": [
+        {
+          "p50_ms": 0.9743903686664839,
+          "p95_ms": 0.9893114376260445,
+          "p99_ms": 0.9324825537942174,
+          "cpu_ms_per_operation": 0.9742753021553657,
+          "peak_rss_bytes": 1.0
+        },
+        {
+          "p50_ms": 0.9869161707181466,
+          "p95_ms": 0.9972501509256244,
+          "p99_ms": 0.6455290408662078,
+          "cpu_ms_per_operation": 0.9719169214096939,
+          "peak_rss_bytes": 1.0
+        },
+        {
+          "p50_ms": 0.9746462652188221,
+          "p95_ms": 1.5829878121351117,
+          "p99_ms": 1.6147818653833979,
+          "cpu_ms_per_operation": 1.0828299086996236,
+          "peak_rss_bytes": 1.0
+        }
+      ]
+    },
+    {
+      "case": "byte_limited",
+      "event_count": 2048,
+      "ratios": [
+        {
+          "p50_ms": 1.0088577029423582,
+          "p95_ms": 1.0102028740224689,
+          "p99_ms": 1.0052791394194398,
+          "cpu_ms_per_operation": 1.0078724346886865,
+          "peak_rss_bytes": 0.9995274740110706
+        },
+        {
+          "p50_ms": 0.9875976147722638,
+          "p95_ms": 0.9978280380356706,
+          "p99_ms": 0.8317812302053706,
+          "cpu_ms_per_operation": 0.9846806067174264,
+          "peak_rss_bytes": 0.9994604801726463
+        },
+        {
+          "p50_ms": 0.9864188750973752,
+          "p95_ms": 1.0501588784563178,
+          "p99_ms": 1.0242329039551314,
+          "cpu_ms_per_operation": 1.0211189754731556,
+          "peak_rss_bytes": 1.0047538200339559
+        }
+      ]
+    }
+  ],
+  "guard_failures": [
+    {
+      "case": "empty",
+      "pair": 2,
+      "metric": "p50_ms",
+      "ratio": 1.8290428795929057
+    },
+    {
+      "case": "empty",
+      "pair": 2,
+      "metric": "p95_ms",
+      "ratio": 1.9184379634206623
+    },
+    {
+      "case": "empty",
+      "pair": 2,
+      "metric": "p99_ms",
+      "ratio": 1.7132710484620006
+    },
+    {
+      "case": "empty",
+      "pair": 2,
+      "metric": "cpu_ms_per_operation",
+      "ratio": 1.8335462929932433
+    },
+    {
+      "case": "small",
+      "pair": 1,
+      "metric": "p95_ms",
+      "ratio": 1.0940864793263316
+    },
+    {
+      "case": "small",
+      "pair": 1,
+      "metric": "p99_ms",
+      "ratio": 1.0934633481243419
+    },
+    {
+      "case": "small",
+      "pair": 2,
+      "metric": "p95_ms",
+      "ratio": 1.7197266630722536
+    },
+    {
+      "case": "small",
+      "pair": 2,
+      "metric": "p99_ms",
+      "ratio": 1.6108122841075332
+    },
+    {
+      "case": "small",
+      "pair": 2,
+      "metric": "cpu_ms_per_operation",
+      "ratio": 1.1107943251042052
+    },
+    {
+      "case": "stale",
+      "pair": 1,
+      "metric": "p95_ms",
+      "ratio": 1.210624441404761
+    },
+    {
+      "case": "stale",
+      "pair": 1,
+      "metric": "p99_ms",
+      "ratio": 1.0588339872486514
+    },
+    {
+      "case": "tail",
+      "pair": 1,
+      "metric": "p95_ms",
+      "ratio": 1.0645604395604396
+    },
+    {
+      "case": "tail",
+      "pair": 2,
+      "metric": "p95_ms",
+      "ratio": 1.130459960291198
+    },
+    {
+      "case": "tail",
+      "pair": 2,
+      "metric": "p99_ms",
+      "ratio": 1.0814348036839554
+    },
+    {
+      "case": "terminal",
+      "pair": 2,
+      "metric": "p95_ms",
+      "ratio": 1.5829878121351117
+    },
+    {
+      "case": "terminal",
+      "pair": 2,
+      "metric": "p99_ms",
+      "ratio": 1.6147818653833979
+    },
+    {
+      "case": "terminal",
+      "pair": 2,
+      "metric": "cpu_ms_per_operation",
+      "ratio": 1.0828299086996236
+    },
+    {
+      "case": "byte_limited",
+      "pair": 2,
+      "metric": "p95_ms",
+      "ratio": 1.0501588784563178
+    }
+  ],
+  "raw_artifact": "/tmp/tofu-system-perf-snapshot/replay-prefix-full.json",
+  "raw_artifact_sha256": "b1851d81ca99a8e020c46c9b8d899cb350f8968bd63e1aa513f28c90cdf1d21b",
+  "candidate_source_snapshot": "/tmp/tofu-system-perf-snapshot/replay-prefix-rejected-sources",
+  "candidate_source_manifest": {
+    "lib/task_replay.py": "d16d2ea879a00decc8f6ced927901872e93c8d812098cbd56cc48b98ea56f3ef",
+    "lib/agent_core/task_runtime.py": "f9b69deba2f309e403637a172879784cc2f98014206fb437e68e7aafd758ac97",
+    "routes/api_v1/tasks.py": "73614164b1948c7695a0a2b8765c7fd8bc9f984db82a7b12f77128e28be2259f",
+    "benchmarks/replay_http_prefix.py": "c264d79ce26ecef29890910e881839c16e7fcabc60e4ec926e1d36fb77596ee4",
+    "tests/tasks_pkg/test_task_replay_prefix.py": "592a034ce2cd9feec47e12a94057b7a157b71ad30840a3ff93a86d52978b2f0e",
+    "tests/tasks_pkg/test_task_poll_extension.py": "c503d0bad619a0cdbf8ce5a941c51567fca967d1109106bfa8079776c2b149e5"
+  },
+  "candidate_patch_sha256": "8d75891f8298dfa46a1667be80d3b9a5ecb146b50d0829ead3b7e36a536d6cdf",
+  "correctness": {
+    "replay_prefix_checks": 26,
+    "existing_replay_http_quality_checks": 65,
+    "plugin_override_candidate": "2 failures: HTTP 500",
+    "plugin_override_unchanged_shared": "2 pass"
+  },
+  "decision": "Withdraw bounded live-poll default: modest long-window gains cannot waive empty/short-page tail and CPU regressions or plugin poll override failures. Preserve complete failed measurement; do not infer scheduler/GC causality.",
+  "limits": [
+    "Offline TaskRuntime polling and canonical HTTP projection; no real network/SSE/durable authority/concurrent producer measurement.",
+    "One launched resource policy: 2048-event retained window; no claim for larger capacities.",
+    "No retained-memory or complete cold-start gate; whole six-domain admission remains incomplete."
+  ]
+}

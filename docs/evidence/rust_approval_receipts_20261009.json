@@ -1,0 +1,19 @@
+{
+  "format": "tofu.native-approval-evidence/v1",
+  "scope": "native receipt gateway and transient agent approval adapter",
+  "whole_application_admission": "incomplete",
+  "tests_passed": 139,
+  "resource_observation": {
+    "mint_operations": 10000,
+    "receipt_count_ceiling": 2,
+    "weighted_identity_bytes_ceiling": 4096,
+    "retained_after_close": 0,
+    "allocator_rss_measured": false
+  },
+  "limitations": [
+    "Trusted mint API records upstream decisions; human/Auto/delegate policy and UI are not implemented",
+    "No Python receipt digest interoperability",
+    "No whole-application CPU, RSS, latency or throughput claim",
+    "Production probe-derived aggregate budgets and settlement adapter remain pending"
+  ]
+}

@@ -1,0 +1,155 @@
+/* ═══════════════════════════════════════════
+   ★ Unified Tool Activity Panel
+   ═══════════════════════════════════════════ */
+.ptool-panel {
+  margin-bottom: var(--space-2);
+  border: none;
+  background: none;
+  overflow: visible;
+  animation: slideUp .3s ease;
+}
+/* No enclosing box in any state — the running affordance lives on the
+   individual round cards + the active tool row, not a panel-wide fill. */
+.ptool-panel-active { border: none; background: none; }
+/* Quiet, un-boxed count affordance (NOT a titled container header): a small
+   muted label with no border/background sitting above the cards. */
+.ptool-panel-header {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-1);
+  font-size: var(--font-size-xs); font-weight: 600; color: var(--text-tertiary);
+  border-bottom: none;
+  user-select: none;
+}
+
+.ptool-panel-label { flex: 1; }
+.ptool-panel-body { padding: 0; contain: layout style; }
+/* ★ Perf: content-visibility:auto on individual tool round slots — off-screen slots skip layout/paint
+ * for long tool-use sessions (50+ rounds). contain-intrinsic-size prevents scrollbar jumps.
+ * NB: slots are now nested one level deeper inside `.ptool-turn` parallel-batch
+ * containers, so these are DESCENDANT (not direct-child) selectors. */
+.ptool-panel-body [data-prn] { content-visibility:auto; contain-intrinsic-size:auto 32px }
+/* ★ During a conversation switch (cv-off is applied by _forceScrollToBottom while the
+ *   scroll position settles), force every tool-round slot to render. Without this, slots
+ *   flash empty — collapsing to their 32px contain-intrinsic-size placeholder — as the
+ *   browser re-evaluates which slots are off-screen against a still-moving scrollTop. */
+.cv-off .ptool-panel-body [data-prn] { content-visibility:visible!important; }
+/* ★ Interactive cards (HG, stdin, approval) MUST NOT be collapsed by content-visibility
+ *   — they contain live inputs, buttons, textareas.  content-visibility:auto with
+ *   contain-intrinsic-size 32px can hide these tall cards (200-300px) when the browser
+ *   incorrectly considers them "off-screen" during a dynamic content swap from a
+ *   one-line spinner to a tall interactive card.  Override to visible for these slots. */
+.ptool-panel-body [data-prn]:has(.hg-card),
+.ptool-panel-body [data-prn]:has(.ptool-cmd-stdin),
+.ptool-panel-body [data-prn]:has(.ptool-pending),
+.ptool-panel-body [data-prn][data-prn-kind="swarm"],
+.ptool-panel-body [data-prn]:has(.sw-panel) { content-visibility:visible; contain-intrinsic-size:auto; }
+/* Swarm panels live as inline rows of the unified ptool-panel — drop
+ * the standalone vertical margin and bring the side margins in line
+ * with the surrounding tool rows so the timeline reads as one column. */
+.ptool-panel-body [data-prn] > .sw-panel { margin: var(--space-1) var(--space-3); }
+
+/* ═══════════════════════════════════════════
+   ★ Tool-round TIMELINE  (.ptool-turn)  — redesigned 2026-07-07
+   One LLM turn = one node on a continuous vertical spine. The old design
+   stacked a FILLED pill ("第N轮" on a colored background) on its own line
+   above every tool row — a choppy, boxy, alternating rhythm. The new
+   model is a quiet timeline: a single hairline spine runs down a left
+   gutter, and each round's ordinal is an unadorned monospace digit
+   sitting in that gutter, aligned to its tool row. NO fill boxes.
+
+   • SOLO turn (one call) → a 2-column grid: [ordinal gutter | tool row].
+     Consecutive solos share the gutter width so their digits align into
+     one column and the spine is unbroken.
+   • MULTI-call turn (≥2 parallel) → a quiet bracket: a thin left rail
+     (no fill) + a collapsible header, visually distinct from the solo
+     spine so a parallel batch reads as one grouped unit.
+   ═══════════════════════════════════════════ */
+.ptool-turn {
+  display: block;
+  position: relative;
+  margin: var(--space-2) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+.ptool-turn:first-child { margin-top: var(--space-1); }
+/* The tool row / interactive card / swarm panel fills the card body. */
+.ptool-turn > [data-prn] { min-width: 0; }
+
+/* Responses Programmatic Tool Calling: one explicit parent card, followed by
+ * the ordinary child-tool rows whose args/results remain inspectable. */
+.ptool-program-turn { border: none; background: none; overflow: visible; }
+.ptool-program-turn > [data-prn-kind="program"] { content-visibility: visible; }
+/* Keep chronology: only canonical execution children receive the shared rail.
+   Artifact origins and unrelated siblings are never folded or regrouped. */
+.ptool-parent-child[data-parent-tool-call-id] {
+  margin-inline-start: var(--space-4);
+  border-inline-start: var(--control-edge-inset) solid var(--border);
+}
+.ptool-parent-child .ptool-parent-child { margin-inline-start: 0; border-inline-start: none; }
+.ptc-card { min-width: 0; max-width: 100%; color: var(--text-secondary); font-family: var(--font-ui); font-size: var(--font-size-md); }
+.ptc-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding: var(--space-1) var(--space-3); min-height: var(--control-h-sm); cursor: pointer; list-style: none; border-radius: var(--radius-sm); }
+.ptc-head::-webkit-details-marker { display: none; }
+.ptc-head:hover { background: var(--bg-hover); }
+.ptc-head:focus-visible, .ptc-detail summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.ptc-chevron { color: var(--text-tertiary); transition: transform var(--motion-fast) var(--ease-standard); }
+.ptc-card[open] > .ptc-head > .ptc-chevron { transform: rotate(90deg); }
+.ptc-body { margin: var(--space-1) var(--space-3) var(--space-2) var(--space-4); padding-inline-start: var(--space-3); border-inline-start: var(--control-edge-inset) solid var(--border); }
+.ptc-title { font-weight: var(--weight-semibold); color: var(--text-primary); }
+.ptc-status { margin-left: auto; max-width: 100%; overflow-wrap: anywhere; font-size: var(--font-size-xs); color: var(--text-tertiary); }
+.ptc-running .ptc-status { color: var(--accent); }
+.ptc-status-error { color: var(--error-text); font-weight: var(--weight-semibold); }
+.ptc-meta { flex-basis: 100%; padding-inline-start: var(--space-3); color: var(--text-tertiary); font-size: var(--font-size-xs); overflow-wrap: anywhere; }
+@media (min-width: 640px) { .ptc-meta { flex-basis: auto; padding-inline-start: 0; } .ptc-status { order: 1; } }
+.ptc-tools { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: 0 0 var(--space-2); }
+.ptc-tool-chip { padding: var(--space-1) var(--space-2); max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary); font: var(--font-size-xs)/var(--leading-title) var(--font-mono); background: var(--bg-primary); }
+.ptc-detail { min-width: 0; margin: var(--space-2) 0 0; color: var(--text-secondary); font-size: var(--font-size-sm); }
+.ptc-detail summary { cursor: pointer; user-select: none; }
+.ptc-detail pre { max-height: 40vh; overflow: auto; margin: var(--space-2) 0 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-primary); color: var(--text-primary); font: var(--font-size-sm)/var(--leading-body) var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ptc-result pre { max-height: 35vh; }
+/* Source preserves tokens; its own scroll container owns long lines. */
+.ptc-code pre { white-space: pre; overflow-wrap: normal; }
+.ptc-result-error summary { color: var(--error-text); }
+.ptc-result-error pre { border-color: var(--error-text); }
+.ptc-observation { margin: var(--space-2) 0; color: var(--text-primary); overflow-wrap: anywhere; }
+.ptc-measurements { display: flex; flex-direction: column; gap: var(--space-1); margin: var(--space-2) 0; color: var(--text-secondary); font-size: var(--font-size-xs); }
+.ptc-needs-model .ptc-status { color: var(--text-primary); }
+/* Quiet monospace ordinal — shared by the solo gutter digit and the
+   multi-call header digit. No background, no border — just the number. */
+.ptool-turn-rno {
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+  font-size: 10px; font-weight: 700; letter-spacing: 0;
+  color: var(--text-tertiary);
+  background: none; border-radius: 0; padding: 0; line-height: 1;
+  text-transform: none; flex-shrink: 0;
+}
+/* Solo round → a plain quiet header strip carrying just the round number
+   (no gutter, no spine). The element also carries `.ptool-turn-rno` above,
+   which supplies the mono font + neutral color. */
+.ptool-turn-rno-solo {
+  display: flex; align-items: center;
+  padding: var(--space-1) var(--space-3); margin: 0;
+}
+/* Multi-call turn → same card chrome as a solo round; its header gets a
+   divider (theme rules below) so the grouped rows read as under a header. */
+.ptool-turn:not([data-batch-size="1"]) > .ptool-turn-head {
+  border-bottom: 1px solid var(--border);
+}
+/* Parallel-call header — clickable collapse toggle. */
+.ptool-turn-head {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  font-size: 10px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  cursor: pointer; user-select: none;
+}
+.ptool-turn-head:hover { color: var(--text-secondary); }
+.ptool-turn-head:hover .ptool-turn-rno { color: var(--text-secondary); }
+.ptool-turn-head svg { flex-shrink: 0; opacity: 0.7; }
+.ptool-turn-label { flex: 1; }
+.ptool-turn-chev { font-size: 10px; color: var(--text-tertiary); transition: transform .18s ease; }
+/* Collapsed — hide the member rows, keep the header. */
+.ptool-turn.collapsed > [data-prn] { display: none; }
+

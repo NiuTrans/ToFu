@@ -1,0 +1,279 @@
+"""Opensource export must not ship tests that import modules it dropped.
+
+The public CI collects the shipped tests against the shipped tree. When the
+export strips a first-party module (the root ``scripts/`` tree minus the keep
+list, ``tofu_db/``, ``bundles/`` …) but keeps a test importing it, the public
+lane fails at collection with ModuleNotFoundError — the dominant red class on
+rangehow/ToFu through 2026-09. The gate in ``export_pkg._verify`` makes the
+invariant mechanical: a shipped test must be collectable against the shipped
+tree.
+"""
+
+import pytest
+
+pytest.importorskip('export', reason='export.py is not shipped in opensource builds')
+
+pytestmark = pytest.mark.unit
+
+
+def _make_src(root):
+    """Minimal first-party layout the verifier treats as importable roots."""
+    (root / 'pkg_core' / 'pricing').mkdir(parents=True)
+    (root / 'pkg_core' / '__init__.py').write_text('', encoding='utf-8')
+    (root / 'pkg_core' / 'pricing' / '__init__.py').write_text('', encoding='utf-8')
+    (root / 'scripts').mkdir()
+    (root / 'scripts' / 'gen_x.py').write_text('X = 1\n', encoding='utf-8')
+    (root / 'tofu_db').mkdir()
+    (root / 'tofu_db' / '__init__.py').write_text('', encoding='utf-8')
+
+
+def _make_dest(dest, test_sources, with_lib=True, with_gen_x=True):
+    tests = dest / 'tests'
+    tests.mkdir(parents=True)
+    for name, source in test_sources.items():
+        (tests / name).write_text(source, encoding='utf-8')
+    if with_lib:
+        (dest / 'pkg_core' / 'pricing').mkdir(parents=True)
+        (dest / 'pkg_core' / '__init__.py').write_text('', encoding='utf-8')
+        (dest / 'pkg_core' / 'pricing' / '__init__.py').write_text('', encoding='utf-8')
+    if with_gen_x:
+        (dest / 'scripts').mkdir(exist_ok=True)
+        (dest / 'scripts' / 'gen_x.py').write_text('X = 1\n', encoding='utf-8')
+
+
+def test_clean_tree_passes(tmp_path):
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {
+        'test_ok.py': 'import pkg_core.pricing\nfrom scripts import gen_x\n\n'
+                      'def test_x():\n    assert True\n',
+    })
+    _verify_exported_test_surface(dest, src)
+
+
+def test_missing_root_module_is_blocked(tmp_path):
+    from export import ExportTestSurfaceError, _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {'test_db.py': 'import tofu_db\n'})
+
+    with pytest.raises(ExportTestSurfaceError, match=r'test_db\.py -> tofu_db'):
+        _verify_exported_test_surface(dest, src)
+
+
+def test_missing_second_level_submodule_is_blocked(tmp_path):
+    from export import ExportTestSurfaceError, _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    (src / 'scripts' / 'gen_wire_fixtures.py').write_text('', encoding='utf-8')
+    dest = tmp_path / 'dest'
+    # scripts/ survives the export, but this one generator does not.
+    _make_dest(dest, {'test_wire.py': 'from scripts import gen_wire_fixtures\n'})
+
+    with pytest.raises(ExportTestSurfaceError,
+                       match=r'test_wire\.py -> scripts\.gen_wire_fixtures'):
+        _verify_exported_test_surface(dest, src)
+
+
+def test_importorskip_is_tolerated(tmp_path):
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {
+        'test_gate.py': "import pytest\n"
+                        "pytest.importorskip('tofu_db', reason='optional')\n",
+    })
+    _verify_exported_test_surface(dest, src)
+
+
+def test_importorskip_guard_suppresses_later_first_party_imports(tmp_path):
+    """The suite's `export` gate: importorskip('export') skips the whole module
+    in public trees, so imports BEHIND it (e.g. export_pkg internals) can never
+    execute there and must not be flagged."""
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    (src / 'export.py').write_text('', encoding='utf-8')
+    (src / 'export_pkg').mkdir()
+    (src / 'export_pkg' / '__init__.py').write_text('', encoding='utf-8')
+    (src / 'export_pkg' / '_handoff.py').write_text('', encoding='utf-8')
+    dest = tmp_path / 'dest'
+    # Neither export.py nor export_pkg/ ships in the public tree.
+    _make_dest(dest, {
+        'test_handoff.py': (
+            "import pytest\n"
+            "pytest.importorskip('export', reason='not shipped')\n"
+            "import export_pkg._handoff as handoff  # noqa: E402\n"
+        ),
+    })
+    _verify_exported_test_surface(dest, src)
+
+
+def test_import_before_the_skip_guard_is_still_flagged(tmp_path):
+    """Ordering matters: an import placed BEFORE the importorskip line would
+    crash collection before the skip can fire."""
+    from export import ExportTestSurfaceError, _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    (src / 'export.py').write_text('', encoding='utf-8')
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {
+        'test_order.py': (
+            "import tofu_db\n"
+            "import pytest\n"
+            "pytest.importorskip('export', reason='not shipped')\n"
+        ),
+    })
+    with pytest.raises(ExportTestSurfaceError, match=r'test_order\.py -> tofu_db'):
+        _verify_exported_test_surface(dest, src)
+
+
+def test_try_guarded_and_function_level_imports_are_tolerated(tmp_path):
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {
+        'test_opt.py': (
+            'try:\n'
+            '    import tofu_db\n'
+            'except ImportError:\n'
+            '    tofu_db = None\n'
+            'def test_lazy():\n'
+            '    import scripts.missing_helper  # deferred, not collection-time\n'
+        ),
+    })
+    _verify_exported_test_surface(dest, src)
+
+
+def test_type_checking_imports_are_tolerated(tmp_path):
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {
+        'test_typing.py': 'from typing import TYPE_CHECKING\n'
+                          'if TYPE_CHECKING:\n'
+                          '    import tofu_db\n',
+    })
+    _verify_exported_test_surface(dest, src)
+
+
+def test_from_import_of_module_attribute_is_not_flagged(tmp_path):
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    dest = tmp_path / 'dest'
+    # `pricing_for_model` is a NAME inside pkg_core/pricing/__init__.py, not a
+    # submodule; only the module part must resolve.
+    _make_dest(dest, {
+        'test_pricing.py': 'from pkg_core.pricing import pricing_for_model\n',
+    })
+    _verify_exported_test_surface(dest, src)
+
+
+def test_package_getattr_tolerates_lazy_submodules(tmp_path):
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    (src / 'pkg_core' / 'lazy').mkdir()
+    (src / 'pkg_core' / 'lazy' / '__init__.py').write_text(
+        'def __getattr__(name):\n    raise AttributeError(name)\n', encoding='utf-8')
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {'test_lazy.py': 'import pkg_core.lazy.deferred\n'})
+    (dest / 'pkg_core' / 'lazy').mkdir()
+    (dest / 'pkg_core' / 'lazy' / '__init__.py').write_text(
+        'def __getattr__(name):\n    raise AttributeError(name)\n', encoding='utf-8')
+    _verify_exported_test_surface(dest, src)
+
+
+def test_third_party_imports_are_ignored(tmp_path):
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {
+        'test_deps.py': 'import pytest\nimport numpy\nfrom flask import Flask\n',
+    })
+    _verify_exported_test_surface(dest, src)
+
+
+def test_findings_report_every_offending_pair(tmp_path):
+    from export import _test_surface_findings
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    dest = tmp_path / 'dest'
+    _make_dest(dest, {
+        'test_a.py': 'import tofu_db\n',
+        'test_b.py': 'import tofu_db\nimport scripts.missing_helper\n',
+        'conftest.py': 'import tofu_db\n',
+    })
+    findings = _test_surface_findings(dest, src)
+    # Path fragments stay split so the suite-health audit's dead-path scan
+    # (category F) does not read these expectations as repo-path references.
+    t = 'tests'
+    assert sorted(findings) == [
+        (t + '/conftest.py', 'tofu_db'),
+        (t + '/test_a.py', 'tofu_db'),
+        (t + '/test_b.py', 'scripts.missing_helper'),
+        (t + '/test_b.py', 'tofu_db'),
+    ]
+
+
+def test_missing_tests_tree_is_a_noop(tmp_path):
+    from export import _verify_exported_test_surface
+
+    src = tmp_path / 'src'
+    src.mkdir()
+    _make_src(src)
+    dest = tmp_path / 'dest'
+    dest.mkdir()
+    _verify_exported_test_surface(dest, src)
+
+
+def test_retained_public_generator_is_not_gitignored(tmp_path, monkeypatch):
+    import subprocess
+    import export_pkg._export_core as core
+
+    source = tmp_path / 'source'
+    target = tmp_path / 'public'
+    (source / 'scripts').mkdir(parents=True)
+    (source / 'scripts/helper.py').write_text('VALUE = 1\n')
+    target.mkdir()
+    (target / '.gitignore').write_text('/scripts/*\n')
+    monkeypatch.setattr(core, 'ROOT', source)
+    monkeypatch.setattr(core, '_OPENSOURCE_KEEP_FILES', {'scripts/helper.py'})
+    core._restore_opensource_kept_files(target)
+    subprocess.run(['git', 'init', '-q'], cwd=target, check=True)
+    retained = subprocess.run(['git', 'check-ignore', 'scripts/helper.py'], cwd=target)
+    private = subprocess.run(['git', 'check-ignore', 'scripts/private.py'], cwd=target, capture_output=True)
+    assert retained.returncode == 1
+    assert private.returncode == 0

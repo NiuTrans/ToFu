@@ -1,0 +1,71 @@
+
+/* Full update log block: header (label + copy button) over a scrollable pre.
+   The pre shows the COMPLETE log verbatim so the operator can read/copy all. */
+.upd-log{margin-top:var(--space-3)}
+.upd-log-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:calc(var(--space-1) * 1.5)}
+.upd-log-label{font-size:var(--font-size-sm);font-weight:700;color:var(--text-secondary)}
+.upd-log-copy{display:inline-flex;align-items:center;gap:calc(var(--space-1) * 1.25);padding:var(--space-1) calc(var(--space-1) * 2.25);background:var(--bg-secondary);border:1px solid var(--border);border-radius:7px;font-size:var(--font-size-sm);color:var(--text-secondary);cursor:pointer;transition:background-color .15s ease,color .15s ease}
+.upd-log-copy:hover{background:var(--bg-tertiary,var(--bg-secondary));color:var(--text-primary)}
+.upd-log-copy svg{flex-shrink:0;display:block}
+.upd-log-copy.copied{color:var(--accent)}
+.upd-log-pre{margin-top:0;max-height:280px}
+.upd-apply-btn{margin-top:var(--space-4);width:100%;padding:calc(var(--space-1) * 2.75) var(--space-4);background:var(--accent);color:var(--text-on-accent);border:none;border-radius:10px;font-size:var(--font-size-lg);font-weight:700;cursor:pointer;transition:background-color .15s ease,opacity .15s ease;display:flex;align-items:center;justify-content:center;gap:var(--space-2)}
+.upd-apply-btn:hover{background:var(--accent-hover)}
+.upd-apply-btn:disabled{opacity:.55;cursor:default}
+.upd-apply-btn svg{width:15px;height:15px}
+/* Restart progress card */
+.upd-apply-btn svg{width:15px;height:15px}
+/* Pending lifecycle approvals (human-approval gate, pt_40d00fd526e5479a) */
+.upd-lc-card{margin-top:var(--space-4);padding:var(--space-3) calc(var(--space-1) * 3.5);border:1px solid var(--border);border-radius:12px;background:var(--bg-tertiary)}
+.upd-lc-title{font-size:var(--font-size-md);font-weight:700;color:var(--text-primary);margin-bottom:calc(var(--space-1) * 2.5)}
+.upd-lc-row{display:flex;align-items:center;justify-content:space-between;gap:calc(var(--space-1) * 2.5);padding:var(--space-2) 0;border-top:1px solid var(--border)}
+.upd-lc-row:first-of-type{border-top:none}
+.upd-lc-meta{font-size:var(--font-size-sm);color:var(--text-secondary);line-height:1.5;word-break:break-all}
+.upd-lc-action{font-weight:700;color:var(--text-primary);text-transform:uppercase}
+.upd-lc-btns{display:flex;gap:var(--space-2);flex-shrink:0}
+.upd-lc-approve{padding:calc(var(--space-1) * 1.5) var(--space-3);background:var(--accent);color:var(--text-on-accent);border:none;border-radius:8px;font-size:var(--font-size-sm);font-weight:700;cursor:pointer}
+.upd-lc-approve:hover{background:var(--accent-hover)}
+.upd-lc-approve:disabled{opacity:.55;cursor:default}
+.upd-lc-deny{padding:calc(var(--space-1) * 1.5) var(--space-3);background:transparent;color:var(--error-text);border:1px solid var(--error-text);border-radius:8px;font-size:var(--font-size-sm);font-weight:700;cursor:pointer}
+.upd-lc-deny:disabled{opacity:.55;cursor:default}
+/* Restart progress card */
+.upd-restart{padding:calc(var(--space-1) * 4.5) var(--space-4);background:linear-gradient(180deg,var(--bg-tertiary),var(--bg-secondary));border:1px solid var(--border);border-radius:14px}
+.upd-restart-head{display:flex;align-items:center;gap:var(--space-3);margin-bottom:var(--space-4)}
+.upd-restart-headtext{flex:1;min-width:0}
+/* Error state: the full refusal detail goes in a copyable log block so the
+   card never grows unbounded and the raw text is one click away. */
+.upd-restart .upd-log{margin-top:calc(var(--space-1) * 0.5)}
+.upd-restart .upd-log-pre{max-height:220px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;overflow:auto}
+.upd-restart-spin{width:22px;height:22px;border:2.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0;box-sizing:border-box}
+.upd-restart-spin.is-done{animation:none;border:none;width:22px;height:22px;background:var(--success-text);border-radius:50%;position:relative}
+.upd-restart-spin.is-done::after{content:'✓';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-on-accent);font-size:var(--font-size-md);font-weight:800}
+.upd-restart-spin.is-error{animation:none;border:none;background:var(--error-text);position:relative}
+.upd-restart-spin.is-error::after{content:'!';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-on-accent);font-size:var(--font-size-lg);font-weight:800}
+.upd-restart-title{font-size:15px;font-weight:700;color:var(--text-primary)}
+.upd-restart-sub{font-size:var(--font-size-sm);color:var(--text-tertiary);margin-top:calc(var(--space-1) * 0.5);line-height:1.4;word-break:break-word;overflow-wrap:anywhere}
+.upd-restart-bar{height:8px;border-radius:6px;background:var(--bg-secondary);border:1px solid var(--border);overflow:hidden}
+.upd-restart-fill{position:relative;height:100%;width:0;border-radius:6px;background:linear-gradient(90deg,var(--accent),var(--accent-hover));transition:width .35s cubic-bezier(.4,0,.2,1);overflow:hidden}
+.upd-restart.is-preparing .upd-restart-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,color-mix(in srgb, var(--text-on-accent) 55%, transparent),transparent);transform:translateX(-100%);animation:updRestartPrepareSweep 1.35s ease-in-out infinite}
+@keyframes updRestartPrepareSweep{to{transform:translateX(100%)}}
+.upd-restart.is-online .upd-restart-fill{background:linear-gradient(90deg,var(--success-text),var(--success-text))}
+.upd-restart.is-error .upd-restart-fill{background:var(--error-text)}
+.upd-restart-foot{display:flex;align-items:center;justify-content:space-between;margin-top:calc(var(--space-1) * 2.5);gap:var(--space-3)}
+.upd-restart-phase{font-size:var(--font-size-sm);color:var(--text-secondary);line-height:1.4}
+.upd-restart-pct{font-size:var(--font-size-sm);font-weight:700;color:var(--text-primary);font-variant-numeric:tabular-nums;flex-shrink:0}
+.upd-restart-actions{display:flex;justify-content:flex-end;margin-top:calc(var(--space-1) * 3.5)}
+@media (prefers-reduced-motion:reduce){.upd-restart-fill{transition:none}.upd-restart.is-preparing .upd-restart-fill::after{animation:none;transform:none;opacity:.35}}
+[data-theme="tofu"] .upd-restart{border:2px solid var(--text-primary);box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .upd-restart-bar{border:2px solid var(--text-primary);background:var(--text-on-accent)}
+[data-theme="tofu"] .upd-restart-fill{background:var(--accent)}
+[data-theme="tofu"] .upd-restart.is-online .upd-restart-fill{background:var(--success-text)}
+[data-theme="tofu"] .upd-restart-spin{border-color:color-mix(in srgb, var(--text-primary) 25%, transparent);border-top-color:var(--accent)}
+.update-modal-footer{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap;padding:calc(var(--space-1) * 3.5) calc(var(--space-1) * 5.5);border-top:1px solid var(--border)}
+.upd-restart-now-btn{display:inline-flex;align-items:center;gap:calc(var(--space-1) * 1.75);padding:var(--space-2) calc(var(--space-1) * 3.5);background:transparent;color:var(--text-secondary);border:1px solid var(--border);border-radius:9px;font-size:var(--font-size-md);font-weight:600;cursor:pointer;transition:background-color .15s ease,color .15s ease,border-color .15s ease}
+.upd-restart-now-btn:hover{background:var(--bg-hover);color:var(--text-primary);border-color:var(--text-tertiary)}
+.upd-restart-now-btn:disabled{opacity:.55;cursor:default}
+.upd-restart-now-btn svg{flex-shrink:0}
+.upd-shutdown-btn{display:inline-flex;align-items:center;gap:calc(var(--space-1) * 1.75);padding:var(--space-2) calc(var(--space-1) * 3.5);background:transparent;color:var(--text-secondary);border:1px solid var(--border);border-radius:9px;font-size:var(--font-size-md);font-weight:600;cursor:pointer;transition:background-color .15s ease,color .15s ease,border-color .15s ease}
+.upd-shutdown-btn:hover{background:var(--error-bg);color:var(--error-text);border-color:var(--error-border)}
+.upd-shutdown-btn:disabled{opacity:.55;cursor:default}
+.upd-shutdown-btn svg{flex-shrink:0}
+.upd-restart-now-hint{font-size:var(--font-size-sm);color:var(--text-tertiary);line-height:1.4}

@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="tofu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tofu UI Kit · 组件画廊</title>
+<!--
+  设计系统厨房水槽页(docs/DESIGN_SYSTEM.md 的活文档)。
+  通过 ?theme=dark|light|tofu 切换主题;previews/ 下的三主题×双宽度截图
+  由 capture.py 生成。本页只消费 static/styles.css 中的令牌与 ui-kit,
+  下方 <style> 仅含画廊自身的展示辅助(色板、间距刻度条),不构成组件样式。
+-->
+<link rel="stylesheet" href="../../frontend/src/styles/fonts.css">
+<link rel="stylesheet" href="../../static/styles.css">
+<style>
+  body{height:auto;overflow:auto;display:block;padding:var(--space-6);background:var(--bg-primary)}
+  .gal{max-width:960px;margin:0 auto}
+  .gal-title{font-family:var(--font-ui);font-size:var(--font-size-3xl);font-weight:var(--weight-bold);color:var(--text-primary)}
+  .gal-sub{font-size:var(--font-size-lg);color:var(--text-secondary);line-height:var(--leading-body)}
+  .gal-h2{font-family:var(--font-ui);font-size:var(--font-size-2xl);font-weight:var(--weight-semibold);color:var(--text-primary);margin:0}
+  .gal-h3{font-family:var(--font-ui);font-size:var(--font-size-md);font-weight:var(--weight-semibold);color:var(--text-tertiary);margin:0;text-transform:uppercase;letter-spacing:0.08em}
+  .gal-swatch{display:flex;align-items:center;gap:var(--space-3)}
+  .gal-chip{width:40px;height:28px;border-radius:var(--radius-xs);border:1px solid var(--border);flex-shrink:0}
+  .gal-swatch code{font-size:var(--font-size-sm);color:var(--text-secondary)}
+  .gal-space{height:12px;border-radius:2px;background:var(--accent);opacity:0.75}
+  .gal-space-row{display:grid;grid-template-columns:88px 1fr 56px;align-items:center;gap:var(--space-3);font-size:var(--font-size-sm);color:var(--text-secondary)}
+  .gal-type div{color:var(--text-primary);font-family:var(--font-ui)}
+  .gal-box{border:1px dashed var(--border);border-radius:var(--radius-sm);padding:var(--space-4)}
+  .gal-note{font-size:var(--font-size-sm);color:var(--text-tertiary);line-height:var(--leading-body)}
+  .gal-theme-btn[aria-pressed="true"]{background:var(--accent);color:var(--text-on-accent);border-color:var(--accent)}
+</style>
+</head>
+<body>
+<main class="gal ui-stack ui-stack--loose">
+
+  <header class="ui-stack">
+    <div class="ui-row ui-row--between ui-row--wrap">
+      <h1 class="gal-title">Tofu UI Kit</h1>
+      <nav class="ui-toolbar" aria-label="主题切换">
+        <button class="ui-btn ui-btn--secondary ui-btn--sm gal-theme-btn" data-gal-theme="dark">Dark</button>
+        <button class="ui-btn ui-btn--secondary ui-btn--sm gal-theme-btn" data-gal-theme="light">Light</button>
+        <button class="ui-btn ui-btn--secondary ui-btn--sm gal-theme-btn" data-gal-theme="tofu">Tofu</button>
+      </nav>
+    </div>
+    <p class="gal-sub">设计系统组件画廊 · 全部控件仅由 <code>00-design-tokens.css</code> 令牌与 <code>30-ui-kit.css</code> 构成 · 切换主题时几何不漂移 · <a href="scaffold.html">新项目脚手架 scaffold.html →</a></p>
+  </header>
+
+  <!-- ── 令牌 ── -->
+  <section class="ui-card ui-stack" aria-label="设计令牌">
+    <h2 class="gal-h2">设计令牌 Tokens</h2>
+    <div class="ui-grid ui-stack--loose" style="--ui-grid-min:200px">
+      <div class="ui-stack ui-stack--tight">
+        <h3 class="gal-h3">颜色</h3>
+        <div class="gal-swatch"><span class="gal-chip" style="background:var(--bg-secondary)"></span><code>--bg-secondary</code></div>
+        <div class="gal-swatch"><span class="gal-chip" style="background:var(--accent)"></span><code>--accent</code></div>
+        <div class="gal-swatch"><span class="gal-chip" style="background:var(--success-text)"></span><code>--success-text</code></div>
+        <div class="gal-swatch"><span class="gal-chip" style="background:var(--warning-text)"></span><code>--warning-text</code></div>
+        <div class="gal-swatch"><span class="gal-chip" style="background:var(--error-text)"></span><code>--error-text</code></div>
+        <div class="gal-swatch"><span class="gal-chip" style="background:var(--info-text)"></span><code>--info-text</code></div>
+      </div>
+      <div class="ui-stack ui-stack--tight">
+        <h3 class="gal-h3">间距标尺</h3>
+        <div class="gal-space-row"><code>--space-1</code><span class="gal-space" style="width:var(--space-1)"></span><span>4</span></div>
+        <div class="gal-space-row"><code>--space-2</code><span class="gal-space" style="width:var(--space-2)"></span><span>8</span></div>
+        <div class="gal-space-row"><code>--space-3</code><span class="gal-space" style="width:var(--space-3)"></span><span>12</span></div>
+        <div class="gal-space-row"><code>--space-4</code><span class="gal-space" style="width:var(--space-4)"></span><span>16</span></div>
+        <div class="gal-space-row"><code>--space-6</code><span class="gal-space" style="width:var(--space-6)"></span><span>24</span></div>
+        <div class="gal-space-row"><code>--space-8</code><span class="gal-space" style="width:var(--space-8)"></span><span>32</span></div>
+        <div class="gal-space-row"><code>--space-12</code><span class="gal-space" style="width:var(--space-12)"></span><span>48</span></div>
+      </div>
+      <div class="ui-stack ui-stack--tight gal-type">
+        <h3 class="gal-h3">字级</h3>
+        <div style="font-size:var(--font-size-3xl)">设计系统 3xl/22</div>
+        <div style="font-size:var(--font-size-2xl)">组件标题 2xl/18</div>
+        <div style="font-size:var(--font-size-xl)">区域标题 xl/16</div>
+        <div style="font-size:var(--font-size-lg)">正文强调 lg/14</div>
+        <div style="font-size:var(--font-size-md)">控件文字 md/13</div>
+        <div style="font-size:var(--font-size-sm)">辅助说明 sm/12</div>
+        <div style="font-size:var(--font-size-xs)">徽章元信息 xs/11</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 布局原语:对齐是构造属性 ── -->
+  <section class="ui-card ui-stack" aria-label="布局原语">
+    <h2 class="gal-h2">布局原语 Layout</h2>
+    <p class="gal-note">工具栏内所有控件共享同一高度标尺(28/34/42),混排天然对齐——不再依赖手工微调 margin。</p>
+    <div class="gal-box ui-toolbar ui-toolbar--between ui-row--wrap">
+      <div class="ui-toolbar">
+        <button class="ui-btn ui-btn--primary">主要操作</button>
+        <button class="ui-btn ui-btn--secondary">次要操作</button>
+        <button class="ui-btn ui-btn--ghost">幽灵按钮</button>
+        <button class="ui-icon-btn" aria-label="更多" title="更多">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="8" cy="13" r="1.5"/></svg>
+        </button>
+      </div>
+      <div class="ui-toolbar">
+        <span class="ui-badge ui-badge--success">运行中</span>
+        <button class="ui-btn ui-btn--secondary ui-btn--sm">小按钮</button>
+      </div>
+    </div>
+    <div class="ui-grid" style="--ui-grid-min:160px">
+      <div class="gal-box">栅格单元 A</div>
+      <div class="gal-box">栅格单元 B</div>
+      <div class="gal-box">栅格单元 C</div>
+    </div>
+  </section>
+
+  <!-- ── 按钮 ── -->
+  <section class="ui-card ui-stack" aria-label="按钮">
+    <h2 class="gal-h2">按钮 Buttons</h2>
+    <div class="ui-stack">
+      <div class="ui-row ui-row--wrap">
+        <button class="ui-btn ui-btn--primary">保存更改</button>
+        <button class="ui-btn ui-btn--secondary">取消</button>
+        <button class="ui-btn ui-btn--ghost">跳过</button>
+        <button class="ui-btn ui-btn--danger">删除对话</button>
+      </div>
+      <div class="ui-row ui-row--wrap">
+        <button class="ui-btn ui-btn--primary ui-btn--sm">小号 主要</button>
+        <button class="ui-btn ui-btn--secondary ui-btn--sm">小号 次要</button>
+        <button class="ui-btn ui-btn--primary ui-btn--lg">大号 主要</button>
+        <button class="ui-btn ui-btn--secondary" disabled>禁用状态</button>
+      </div>
+      <div class="ui-row ui-row--wrap">
+        <span class="ui-tooltip-anchor" data-tooltip="新建对话">
+        <button class="ui-icon-btn ui-icon-btn--sm" aria-label="新建">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+        </button>
+        </span>
+        <span class="ui-tooltip-anchor" data-tooltip="项目设置">
+        <button class="ui-icon-btn" aria-label="设置">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2"/></svg>
+        </button>
+        </span>
+        <span class="ui-tooltip-anchor ui-tooltip-anchor--bottom" data-tooltip="删除(下方提示)">
+        <button class="ui-icon-btn ui-icon-btn--lg" aria-label="删除">
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 4h10M6.5 4V2.8c0-.4.3-.8.8-.8h1.4c.5 0 .8.4.8.8V4M4.5 4l.7 9c0 .5.4 1 1 1h3.6c.6 0 1-.5 1-1l.7-9"/></svg>
+        </button>
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 表单 ── -->
+  <section class="ui-card ui-stack" aria-label="表单">
+    <h2 class="gal-h2">表单 Fields</h2>
+    <div class="ui-grid ui-stack--loose" style="--ui-grid-min:280px">
+      <div class="ui-stack">
+        <div class="ui-field">
+          <label class="ui-field__label" for="gal-f1">项目名称</label>
+          <input class="ui-input" id="gal-f1" placeholder="例如:翻译工作台">
+          <div class="ui-field__hint">名称将显示在侧边栏列表中。</div>
+        </div>
+        <div class="ui-field ui-field--error">
+          <label class="ui-field__label" for="gal-f2">API 密钥<span class="ui-field__label-required"> *</span></label>
+          <input class="ui-input" id="gal-f2" value="sk-invalid" aria-invalid="true">
+          <div class="ui-field__error" role="alert">密钥格式不正确,应以 sk- 开头并包含 32 位字符。</div>
+        </div>
+        <div class="ui-field">
+          <label class="ui-field__label" for="gal-f4">禁用输入</label>
+          <input class="ui-input" id="gal-f4" value="不可编辑的内容" disabled>
+        </div>
+      </div>
+      <div class="ui-stack">
+        <div class="ui-field">
+          <label class="ui-field__label" for="gal-f3">目标语言</label>
+          <div class="ui-select">
+            <select id="gal-f3">
+              <option>简体中文</option>
+              <option>English</option>
+              <option>日本語</option>
+              <option>Français</option>
+            </select>
+          </div>
+          <div class="ui-field__hint">原生 select + 主题自适应 chevron。</div>
+        </div>
+        <div class="ui-field">
+          <label class="ui-field__label" for="gal-frozen-direction">指标方向（createField choices 适配器）</label>
+          <div class="ui-select"><select id="gal-frozen-direction"><option value="">请明确选择</option><option value="higher">越高越好</option><option value="lower">越低越好</option></select></div>
+        </div>
+        <div class="ui-field">
+          <label class="ui-field__label" for="gal-frozen-threshold">最低方向效应（createField number 适配器）</label>
+          <input class="ui-input" id="gal-frozen-threshold" type="number" step="any" value="-0.01">
+        </div>
+        <div class="ui-field">
+          <label class="ui-field__label" for="gal-f5">翻译备注</label>
+          <textarea class="ui-input" id="gal-f5" placeholder="补充上下文,帮助模型理解术语偏好……"></textarea>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 徽章 ── -->
+  <section class="ui-card ui-stack" aria-label="徽章">
+    <h2 class="gal-h2">徽章 Badges</h2>
+    <div class="ui-row ui-row--wrap">
+      <span class="ui-badge">默认</span>
+      <span class="ui-badge ui-badge--success">同步完成</span>
+      <span class="ui-badge ui-badge--warning">等待确认</span>
+      <span class="ui-badge ui-badge--error">构建失败</span>
+      <span class="ui-badge ui-badge--info">队列中 3 项</span>
+    </div>
+  </section>
+
+  <!-- ── 对话框 ── -->
+  <section class="ui-card ui-stack" aria-label="对话框">
+    <h2 class="gal-h2">对话框 Dialog</h2>
+    <p class="gal-note">基于原生 <code>&lt;dialog&gt;</code>:焦点圈定、Esc 关闭、top-layer 渲染均由平台提供,无需一行业务代码。</p>
+    <div class="ui-row">
+      <button class="ui-btn ui-btn--primary" id="gal-open-dialog">打开示例对话框</button>
+      <span class="gal-note" id="gal-dialog-result" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <!-- ── 以下区块由真实 TS 工厂构建(ui-kit.bundle.js,verify/capture 运行时生成)── -->
+
+  <section class="ui-card ui-stack" aria-label="选择控件">
+    <h2 class="gal-h2">选择控件 Choices</h2>
+    <div class="ui-grid" style="--ui-grid-min:200px">
+      <div class="ui-stack" id="gal-checkboxes"></div>
+      <div class="ui-stack" id="gal-radios"></div>
+      <div class="ui-stack" id="gal-switches"></div>
+    </div>
+  </section>
+
+  <section class="ui-card ui-stack" aria-label="标签页">
+    <h2 class="gal-h2">标签页 Tabs</h2>
+    <div id="gal-tabs"></div>
+  </section>
+
+  <section class="ui-card ui-stack" aria-label="下拉菜单">
+    <h2 class="gal-h2">下拉菜单 Dropdown</h2>
+    <div class="ui-row ui-row--wrap">
+      <span id="gal-dropdown"></span>
+      <span class="gal-note" id="gal-dropdown-result" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section class="ui-card ui-stack" aria-label="警告条">
+    <h2 class="gal-h2">警告条 Alerts</h2>
+    <div class="ui-stack" id="gal-alerts"></div>
+  </section>
+
+  <section class="ui-card ui-stack" aria-label="轻提示">
+    <h2 class="gal-h2">轻提示 Toasts</h2>
+    <div class="ui-row ui-row--wrap" id="gal-toast-triggers"></div>
+  </section>
+
+  <section class="ui-card ui-stack" aria-label="加载与进度">
+    <h2 class="gal-h2">加载与进度 Loading</h2>
+    <div class="ui-grid" style="--ui-grid-min:220px">
+      <div class="ui-stack">
+        <h3 class="gal-h3">进度条</h3>
+        <div id="gal-progress"></div>
+        <div id="gal-progress-ind"></div>
+      </div>
+      <div class="ui-stack">
+        <h3 class="gal-h3">Spinner</h3>
+        <div class="ui-row" id="gal-spinners"></div>
+      </div>
+      <div class="ui-stack">
+        <h3 class="gal-h3">骨架屏</h3>
+        <div id="gal-skeleton"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="ui-card ui-stack" aria-label="表格">
+    <h2 class="gal-h2">表格 Table</h2>
+    <table class="ui-table" id="gal-table">
+      <thead><tr><th>语言</th><th>进度</th><th class="ui-table__cell--num">词条</th><th>状态</th></tr></thead>
+      <tbody>
+        <tr><td>English</td><td style="width:40%"><div id="gal-tprog1"></div></td><td class="ui-table__cell--num">1,204</td><td><span class="ui-badge ui-badge--success">已完成</span></td></tr>
+        <tr><td>日本語</td><td><div id="gal-tprog2"></div></td><td class="ui-table__cell--num">856</td><td><span class="ui-badge ui-badge--info">进行中</span></td></tr>
+        <tr><td>Français</td><td><div id="gal-tprog3"></div></td><td class="ui-table__cell--num">92</td><td><span class="ui-badge ui-badge--warning">待校对</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="ui-card ui-stack" aria-label="空状态与抽屉">
+    <h2 class="gal-h2">空状态 Empty / 抽屉 Drawer</h2>
+    <hr class="ui-divider">
+    <div id="gal-empty"></div>
+    <hr class="ui-divider">
+    <div class="ui-row">
+      <button class="ui-btn ui-btn--secondary" id="gal-open-drawer">打开抽屉面板</button>
+      <span class="gal-note" id="gal-drawer-result" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <footer class="gal-note">Tofu UI Kit · 契约见 docs/DESIGN_SYSTEM.md · 新增控件必须在此页登记</footer>
+</main>
+
+<dialog class="ui-dialog" id="gal-dialog" aria-labelledby="gal-dialog-title">
+  <div class="ui-dialog__header">
+    <h2 class="ui-dialog__title" id="gal-dialog-title">删除这个项目?</h2>
+  </div>
+  <div class="ui-dialog__body">
+    项目「翻译工作台」及其全部 12 个对话将被移至回收站。此操作可以在 30 天内撤销。
+  </div>
+  <div class="ui-dialog__footer">
+    <button class="ui-btn ui-btn--secondary" value="cancel">取消</button>
+    <button class="ui-btn ui-btn--danger" value="delete">删除项目</button>
+  </div>
+</dialog>
+
+<script type="module">
+import * as ui from './ui-kit.bundle.js';
+window.__ui = ui;
+
+const root = document.documentElement;
+const params = new URLSearchParams(location.search);
+const theme = params.get('theme') || 'tofu';
+function applyTheme(name){
+  root.setAttribute('data-theme', name);
+  document.querySelectorAll('.gal-theme-btn').forEach((btn) => {
+    btn.setAttribute('aria-pressed', String(btn.dataset.galTheme === name));
+  });
+}
+document.querySelectorAll('.gal-theme-btn').forEach((btn) => {
+  btn.addEventListener('click', () => applyTheme(btn.dataset.galTheme));
+});
+applyTheme(theme);
+
+/* ── 静态 dialog 演示(CSS 结构文档)── */
+const dialog = document.getElementById('gal-dialog');
+const result = document.getElementById('gal-dialog-result');
+document.getElementById('gal-open-dialog').addEventListener('click', () => dialog.showModal());
+dialog.addEventListener('click', (ev) => {
+  const r = dialog.getBoundingClientRect();
+  if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) {
+    dialog.close('backdrop');
+  }
+});
+dialog.querySelectorAll('.ui-dialog__footer .ui-btn').forEach((btn) => {
+  btn.addEventListener('click', () => dialog.close(btn.value));
+});
+dialog.addEventListener('close', () => {
+  result.textContent = '结果:' + (dialog.returnValue || 'esc');
+  result.setAttribute('data-result', dialog.returnValue || 'esc');
+});
+if (params.get('dialog') === 'open') dialog.showModal();
+
+/* ── 工厂驱动演示 ── */
+const mount = (id, node) => document.getElementById(id)?.appendChild(node);
+
+mount('gal-checkboxes', ui.createChoice({ label: '记住我的选择', checked: true }).el);
+mount('gal-checkboxes', ui.createChoice({ label: '包含已归档项目' }).el);
+mount('gal-checkboxes', ui.createChoice({ label: '禁用选项', disabled: true }).el);
+
+mount('gal-radios', ui.createChoice({ type: 'radio', name: 'gal-density', label: '紧凑', checked: true }).el);
+mount('gal-radios', ui.createChoice({ type: 'radio', name: 'gal-density', label: '舒适' }).el);
+mount('gal-radios', ui.createChoice({ type: 'radio', name: 'gal-density', label: '宽松' }).el);
+
+mount('gal-switches', ui.createChoice({ type: 'switch', label: '自动保存', checked: true }).el);
+mount('gal-switches', ui.createChoice({ type: 'switch', label: '桌面通知' }).el);
+
+const tabsResult = document.createElement('p');
+tabsResult.className = 'gal-note';
+mount('gal-tabs', ui.createTabs({
+  tabs: [
+    { id: 'source', label: '原文', panel: Object.assign(document.createElement('div'), { textContent: '源语言内容面板——放置待翻译文本。' }) },
+    { id: 'target', label: '译文', panel: Object.assign(document.createElement('div'), { textContent: '目标语言内容面板——放置模型产出。' }) },
+    { id: 'glossary', label: '术语表', panel: Object.assign(document.createElement('div'), { textContent: '术语约束面板。' }), disabled: true },
+  ],
+  onChange: (id) => { tabsResult.textContent = 'active:' + id; tabsResult.setAttribute('data-active', id); },
+}).el);
+mount('gal-tabs', tabsResult);
+
+const dropdownResult = document.getElementById('gal-dropdown-result');
+mount('gal-dropdown', ui.createDropdown({
+  label: '项目操作',
+  items: [
+    { id: 'rename', label: '重命名' },
+    { id: 'archive', label: '归档' },
+    { id: 'disabled', label: '不可用项', disabled: true },
+    'separator',
+    { id: 'delete', label: '删除项目', danger: true },
+  ],
+  onSelect: (id) => {
+    dropdownResult.textContent = 'select:' + id;
+    dropdownResult.setAttribute('data-select', id);
+  },
+}).el);
+
+mount('gal-alerts', ui.createAlert({ variant: 'info', title: '同步已排期', body: '术语库将在下次同步时更新到 3 个项目。' }).el);
+mount('gal-alerts', ui.createAlert({ variant: 'success', title: '导出完成', body: '12 个文件已写入下载目录。' }).el);
+mount('gal-alerts', ui.createAlert({ variant: 'warning', title: '配额接近上限', body: '本月已使用 82% 的翻译额度。', dismissible: true }).el);
+mount('gal-alerts', ui.createAlert({ variant: 'error', title: '连接中断', body: '无法连接到翻译服务,请检查网络后重试。' }).el);
+
+const toastTriggers = document.getElementById('gal-toast-triggers');
+for (const variant of ['default', 'success', 'warning', 'error', 'info']) {
+  toastTriggers.appendChild(ui.createButton({
+    label: `触发 ${variant}`,
+    variant: 'secondary', size: 'sm',
+    onClick: () => ui.toast(`这是一条 ${variant} 通知`, { variant, title: variant === 'default' ? undefined : variant }),
+  }));
+}
+
+const progress = ui.createProgress({ value: 64, label: '翻译进度' });
+mount('gal-progress', progress.el);
+mount('gal-progress-ind', ui.createProgress({ indeterminate: true, label: '加载中' }).el);
+mount('gal-spinners', ui.createSpinner({ size: 'sm' }));
+mount('gal-spinners', ui.createSpinner({}));
+mount('gal-spinners', ui.createSpinner({ size: 'lg' }));
+mount('gal-skeleton', ui.createSkeleton({ lines: 3 }));
+
+mount('gal-tprog1', ui.createProgress({ value: 100 }).el);
+mount('gal-tprog2', ui.createProgress({ value: 71 }).el);
+mount('gal-tprog3', ui.createProgress({ value: 8 }).el);
+
+mount('gal-empty', ui.createEmptyState({
+  title: '还没有翻译项目',
+  description: '创建第一个项目,导入术语库后即可开始批量翻译。',
+  action: { label: '新建项目', variant: 'primary', onClick: () => ui.toast('打开新建项目向导', { variant: 'info' }) },
+}));
+
+const drawerBody = document.createElement('div');
+drawerBody.className = 'ui-stack';
+drawerBody.appendChild(ui.createField({
+  label: '项目名称',
+  control: Object.assign(document.createElement('input'), { className: 'ui-input', value: '翻译工作台' }),
+  hint: '抽屉内同样可以组合任意控件。',
+}).el);
+drawerBody.appendChild(ui.createAlert({ variant: 'info', title: '自动保存已开启' }).el);
+const drawer = ui.createDrawer({ title: '项目设置', body: drawerBody });
+document.body.appendChild(drawer.el);
+const drawerResult = document.getElementById('gal-drawer-result');
+document.getElementById('gal-open-drawer').addEventListener('click', () => {
+  drawer.open().then(() => {
+    drawerResult.textContent = 'drawer:closed';
+    drawerResult.setAttribute('data-state', 'closed');
+  });
+});
+if (params.get('drawer') === 'open') drawer.open();
+</script>
+</body>
+</html>

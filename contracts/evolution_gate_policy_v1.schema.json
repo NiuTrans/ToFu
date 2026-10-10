@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_gate_policy_v1.schema.json",
+  "title": "Self-evolution gate policy: the gate's own thresholds as an evolvable, versioned artifact",
+  "type": "object",
+  "required": ["schema_version", "regression_margin", "min_lift", "min_group_samples", "monitor_min_samples", "version", "source_mutation_id", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "regression_margin": {"type": "number", "minimum": 0, "maximum": 0.5},
+    "min_lift": {"type": "number", "minimum": 0, "maximum": 1},
+    "min_group_samples": {"type": "integer", "minimum": 1, "maximum": 10},
+    "monitor_min_samples": {"type": "integer", "minimum": 1, "maximum": 10},
+    "version": {"type": "integer", "minimum": 1},
+    "source_mutation_id": {"type": "string", "maxLength": 160},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

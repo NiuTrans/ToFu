@@ -1,0 +1,31 @@
+
+
+/* ── Tool-row request anchor (P6) ──────────────────────────────────
+   One anchor per TOOL ROW — the fix for "which request produced this
+   call?". Stays nearly invisible until the row is hovered so it never
+   competes with the tool content itself. */
+/* ── Tool-row right-hand control group ────────────────────────────
+   THE single owner of a tool row's right edge. The debug entry lives
+   inside it and occupies its own space in the flow.
+
+   Why this exists: the removed `.tc-preview-btn` used to claim the
+   right end via `margin-left:auto` while the debug entry floated over
+   it from a zero-height block with `margin-top:-14px` — two elements
+   each believing they owned the same edge, so they printed on top of
+   each other. `margin-left:auto` now belongs to this wrapper ALONE.
+   Do not re-add `margin-left:auto` to any descendant. */
+.ptool-row-ctl{display:inline-flex;align-items:center;gap:6px;margin-left:auto;flex-shrink:0}
+.ptool-row-ctl:empty{display:none}
+
+/* Debug entry per tool row — ONE control opening ONE view: the message state
+   right after that round's tools ran (a superset of the request that produced
+   them). Always visible: a hover-only control is a control the user never
+   discovers. Quiet by default so it does not compete with the tool content,
+   full strength on hover/focus. */
+.ri-tool-anchor{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;line-height:1.5;color:var(--text-tertiary);background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;flex-shrink:0;opacity:.6;transition:opacity .15s ease,color .15s ease,border-color .15s ease}
+.ri-tool-anchor:hover,.ri-tool-anchor:focus-visible{opacity:1;color:var(--accent);border-color:var(--accent)}
+.ri-tool-anchor svg{display:block}
+.ri-tool-anchor-label{letter-spacing:.02em}
+/* Swarm panels carry no shared row header, so their entry gets its own
+   right-aligned strip UNDER the panel — a real block in normal flow. */
+.ri-tool-anchor-row{display:flex;justify-content:flex-end;margin:2px 10px var(--space-1)}

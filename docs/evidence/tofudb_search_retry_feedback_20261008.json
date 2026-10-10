@@ -1,0 +1,67 @@
+{
+  "format": "tofudb.search-retry-feedback/v1",
+  "source_baseline_sha256": "b4107c5d5151c72d41905c5cb7eefa7e9b455e5d2bf5fcc75949195a7e471229",
+  "candidate_source_sha256": "5c69659aa11c0f56437decde0c4b40fa10626079f6a7e8193300934ed99622fd",
+  "live_observation": {
+    "captured_utc": "2026-10-08T03:47:04.998434+00:00",
+    "request_profile_enabled": false,
+    "stage_counters": {
+      "ck_segments": {
+        "calls": 1,
+        "summed_elapsed_ms": 3304.404
+      },
+      "authority_wait": {
+        "calls": 47331,
+        "summed_elapsed_ms": 17219.325
+      },
+      "rotation_park": {
+        "calls": 99,
+        "summed_elapsed_ms": 529624.686
+      }
+    },
+    "search_failed_rounds": 1903,
+    "search_rebuilt_conversations": 0,
+    "search_indexed_turns": 0,
+    "peak_connections": 15,
+    "connection_budget": 512,
+    "loaded_executable_replaced": true,
+    "loaded_source_identity": "unavailable",
+    "scope": "Completed process-global stage counters; summed waits are not one outage, disjoint elapsed time, or proof of causal contribution."
+  },
+  "deterministic_scheduling_measurement": {
+    "horizon_seconds": 60,
+    "maintenance_interval_ms": 250,
+    "source_attempt_cost_ms": 0,
+    "baseline_attempts": 240,
+    "candidate_attempts": 8,
+    "scope": "Synthetic persistent search failure with a continuously reset maintenance cadence; not a production throughput or latency result."
+  },
+  "resource_measurement": {
+    "retry_record_bytes_linux": 40,
+    "maximum_admitted_scopes": 64,
+    "maximum_retry_state_payload_bytes": 2560,
+    "additional_threads": 0,
+    "additional_persistent_state_bytes": 0,
+    "scope": "Measured size_of retry records; excludes the Vec allocator header and allocation rounding."
+  },
+  "verification": {
+    "fault_recovery_tests_passed": 3,
+    "native_library_first_run": {
+      "passed": 1639,
+      "failed": 1,
+      "ignored": 3,
+      "failure": "Frozen workspace catalog fixture had 363 entries versus the frozen generated 367. Runtime code unchanged; fixture synchronized to 367 and focused recheck required."
+    },
+    "checks": "Failure feedback remains scope-local; unrelated maintenance commits; repaired projection acknowledges the durable dirty token; source reopens with exact data; retry ceiling allows continued repair attempts.",
+    "native_catalog_recheck": {
+      "passed": 1,
+      "failed": 0,
+      "note": "Copied the matching 367-operation catalog fixture and refreshed its mtime so Cargo rebuilt the embedded include_str fixture. Runtime source identity unchanged."
+    },
+    "native_library_verified_total": {
+      "passed": 1640,
+      "ignored": 3,
+      "scope": "1639 successes from full library run plus the one corrected-fixture focused recheck; not a claim that the initial full run was green."
+    }
+  }
+}

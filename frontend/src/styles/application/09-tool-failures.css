@@ -1,0 +1,56 @@
+
+/* ── Interrupted tool round — task aborted (Stop) while this round was
+      in-flight; the backend dangling-round sweep marks status='aborted'. ── */
+.ptool-interrupted {
+  background: rgba(148, 163, 184, 0.04);
+  border-color: rgba(148, 163, 184, 0.12);
+  opacity: 0.75;
+}
+.ptool-badge-interrupted {
+  background: var(--chip-warn-bg);
+  color: var(--chip-warn-color);
+  border: 1px solid var(--chip-warn-border);
+}
+
+/* ── Failed tool round — the tool RAN but never produced a result (raised,
+      or cancelled by the parallel-pool timeout ceiling); backend stamps
+      status='error'. Warm red tint (vs. the amber 'interrupted') so a failure
+      reads differently from a user Stop at a glance. ── */
+.ptool-error {
+  background: rgba(220, 38, 38, 0.05);
+  border-color: rgba(220, 38, 38, 0.18);
+}
+/* The reason can be a long unbroken string (URL, JSON payload). As a nowrap
+ * flex sibling it out-shrinks .ptool-text (whose flex-basis is 0), squeezing
+ * the command text to a ~1-char column that wraps one letter per line. Give
+ * the reason its own full-width line under the row and wrap it there. */
+.ptool-line.ptool-error,
+.ptool-line.ptool-rejected {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+.ptool-error-reason {
+  flex: 1 1 100%;
+  /* Align with .ptool-text: 16px icon + 8px gap. */
+  margin-left: var(--space-6);
+  color: var(--error-text, #f87171);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+  opacity: 0.85;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* A rejected call never ran, so its reason is the ONLY diagnostic there is,
+ * and a failed call's clipped tail is exactly the part that explains the
+ * failure — show both whole. Other tool output keeps the 4-line clamp. */
+.ptool-line.ptool-rejected .ptool-error-reason,
+.ptool-line.ptool-error .ptool-error-reason {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}

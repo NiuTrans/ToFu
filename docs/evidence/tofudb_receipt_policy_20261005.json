@@ -1,0 +1,1601 @@
+{
+  "experiment": "tofudb.receipt-response-classification/v1",
+  "date": "2026-10-05",
+  "decision": "rejected; production code, configured backend and installed artifacts unchanged",
+  "problem": "Receipt admission deserializes and discards a complete response only to distinguish null and a root object whose final ok field equals false. Prior escaped workload observer identified about 0.99 ms here; allocations versus lexing needed separation.",
+  "implementation": "Private non-materializing root classifier uses the original CheckedJson traversal for ordinary child fields. Root null and final duplicate ok:false suppress receipts; all fields parsed; first reserved Serde marker in any map retains Value fallback. Malformed JSON preserves the old conservative true behavior. Existing validate implementation and proof/deadline/worker/receipt identity paths are unchanged.",
+  "baseline": {
+    "source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+    "private_baseline_commit": "095688347e105d69d27f395c67a5e77b2653ff60",
+    "worktree": "/path/to/your/project"
+  },
+  "candidate": {
+    "source_sha256": "fcbfd23fdd3effefda4ceec5cecc09703b3087e3acd83c106dea535db038d36c",
+    "build_info": {
+      "embedded_allocator": "mimalloc",
+      "format": "tofu-db-build.v1",
+      "source_sha256": "fcbfd23fdd3effefda4ceec5cecc09703b3087e3acd83c106dea535db038d36c",
+      "version": "0.2.0"
+    },
+    "binary_sha256": "0148c8674f62a265440538a7f61438d34a6582f1d61c2654ef51a92e1b9df157",
+    "library_sha256": "1ae8d5c6b1e98511f6e6d777a41587d7dc04bdc3973a404d107217b62be052da",
+    "release_build_exit_code": 0
+  },
+  "private_prototype_commit": "fdb039535",
+  "private_final_source_commit": "090ed06585f729791454c0ce9645fb83b938f289",
+  "gates": {
+    "library_unique_passed": 1564,
+    "existing_ignored": 2,
+    "library_full_passed_before_catalog_recompile": 1563,
+    "isolated_catalog_after_recompile_passed": 1,
+    "integration_passed": 38,
+    "unique_native_passed_total": 1602,
+    "integration_exit_code": 0,
+    "response_parity_tests": 7,
+    "full_command_failure_logs_retained": true,
+    "scope": "Library checks pass across the full run and isolated corrected catalog recompile. All integration targets pass together. No assertion that the earlier full command exited zero."
+  },
+  "default_off_writes": {
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate"
+    ],
+    "writes_per_leg_per_shape": 200,
+    "exact_readbacks_total": 6560,
+    "rows": [
+      {
+        "pattern": "repetitive",
+        "content_bytes": 8192,
+        "metrics": {
+          "mean_ms": {
+            "baseline": 0.26275000000000004,
+            "candidate": 0.2555,
+            "reduction_percent": 2.75927687916272,
+            "all_legs": {
+              "baseline": [
+                0.252,
+                0.257,
+                0.28,
+                0.262
+              ],
+              "candidate": [
+                0.255,
+                0.247,
+                0.272,
+                0.248
+              ]
+            }
+          },
+          "p50_ms": {
+            "baseline": 0.251,
+            "candidate": 0.24625,
+            "reduction_percent": 1.8924302788844605,
+            "all_legs": {
+              "baseline": [
+                0.244,
+                0.245,
+                0.263,
+                0.252
+              ],
+              "candidate": [
+                0.244,
+                0.244,
+                0.253,
+                0.244
+              ]
+            }
+          },
+          "p99_ms": {
+            "baseline": 0.417,
+            "candidate": 0.42075,
+            "reduction_percent": -0.899280575539585,
+            "all_legs": {
+              "baseline": [
+                0.453,
+                0.419,
+                0.448,
+                0.348
+              ],
+              "candidate": [
+                0.501,
+                0.325,
+                0.546,
+                0.311
+              ]
+            }
+          },
+          "timed_cpu_seconds": {
+            "baseline": 0.05611743250000002,
+            "candidate": 0.05471512075,
+            "reduction_percent": 2.4988879346894977,
+            "all_legs": {
+              "baseline": [
+                0.05480392900000003,
+                0.05495565000000002,
+                0.05873573300000001,
+                0.055974418000000026
+              ],
+              "candidate": [
+                0.05457131399999998,
+                0.05362336200000001,
+                0.05648805800000001,
+                0.054177749
+              ]
+            }
+          },
+          "timed_phase_wall_seconds": {
+            "baseline": 0.05308336764574051,
+            "candidate": 0.05164858512580395,
+            "reduction_percent": 2.7028852606183373,
+            "all_legs": {
+              "baseline": [
+                0.05092877894639969,
+                0.051929496228694916,
+                0.056404486298561096,
+                0.053070709109306335
+              ],
+              "candidate": [
+                0.05150904506444931,
+                0.04989942908287048,
+                0.05507493019104004,
+                0.05011093616485596
+              ]
+            }
+          },
+          "max_rss_kib": {
+            "baseline": 52916.0,
+            "candidate": 53054.0,
+            "reduction_percent": -0.26079068712676623,
+            "all_legs": {
+              "baseline": [
+                53004,
+                52524,
+                53496,
+                52640
+              ],
+              "candidate": [
+                52820,
+                53100,
+                53136,
+                53160
+              ]
+            }
+          }
+        }
+      },
+      {
+        "pattern": "repetitive",
+        "content_bytes": 262144,
+        "metrics": {
+          "mean_ms": {
+            "baseline": 1.863,
+            "candidate": 1.7825,
+            "reduction_percent": 4.320987654320985,
+            "all_legs": {
+              "baseline": [
+                1.862,
+                1.865,
+                1.864,
+                1.861
+              ],
+              "candidate": [
+                1.783,
+                1.785,
+                1.78,
+                1.782
+              ]
+            }
+          },
+          "p50_ms": {
+            "baseline": 1.84275,
+            "candidate": 1.7485,
+            "reduction_percent": 5.114638447971787,
+            "all_legs": {
+              "baseline": [
+                1.845,
+                1.853,
+                1.832,
+                1.841
+              ],
+              "candidate": [
+                1.745,
+                1.757,
+                1.742,
+                1.75
+              ]
+            }
+          },
+          "p99_ms": {
+            "baseline": 2.275,
+            "candidate": 2.1317500000000003,
+            "reduction_percent": 6.296703296703276,
+            "all_legs": {
+              "baseline": [
+                2.241,
+                2.19,
+                2.37,
+                2.299
+              ],
+              "candidate": [
+                2.112,
+                2.104,
+                2.125,
+                2.186
+              ]
+            }
+          },
+          "timed_cpu_seconds": {
+            "baseline": 0.3836654945,
+            "candidate": 0.36782722725,
+            "reduction_percent": 4.128144823302582,
+            "all_legs": {
+              "baseline": [
+                0.382749271,
+                0.38469851900000007,
+                0.383660903,
+                0.38355328499999997
+              ],
+              "candidate": [
+                0.367863119,
+                0.36902444,
+                0.366213373,
+                0.36820797699999996
+              ]
+            }
+          },
+          "timed_phase_wall_seconds": {
+            "baseline": 0.3779631685465574,
+            "candidate": 0.36171719059348106,
+            "reduction_percent": 4.298296581529259,
+            "all_legs": {
+              "baseline": [
+                0.37781668454408646,
+                0.37831753492355347,
+                0.3782024532556534,
+                0.3775160014629364
+              ],
+              "candidate": [
+                0.36179114878177643,
+                0.3623078018426895,
+                0.36106763035058975,
+                0.36170218139886856
+              ]
+            }
+          },
+          "max_rss_kib": {
+            "baseline": 148007.0,
+            "candidate": 146616.0,
+            "reduction_percent": 0.9398204138993393,
+            "all_legs": {
+              "baseline": [
+                148032,
+                151144,
+                146704,
+                146148
+              ],
+              "candidate": [
+                146344,
+                146996,
+                146300,
+                146824
+              ]
+            }
+          }
+        }
+      },
+      {
+        "pattern": "unique",
+        "content_bytes": 262144,
+        "metrics": {
+          "mean_ms": {
+            "baseline": 5.961,
+            "candidate": 6.21,
+            "reduction_percent": -4.17715148465021,
+            "all_legs": {
+              "baseline": [
+                6.719,
+                5.27,
+                5.217,
+                6.638
+              ],
+              "candidate": [
+                5.116,
+                6.516,
+                6.518,
+                6.69
+              ]
+            }
+          },
+          "p50_ms": {
+            "baseline": 5.14925,
+            "candidate": 5.1122499999999995,
+            "reduction_percent": 0.7185512453270038,
+            "all_legs": {
+              "baseline": [
+                5.157,
+                5.146,
+                5.089,
+                5.205
+              ],
+              "candidate": [
+                5.052,
+                5.101,
+                5.101,
+                5.195
+              ]
+            }
+          },
+          "p99_ms": {
+            "baseline": 7.99875,
+            "candidate": 8.90325,
+            "reduction_percent": -11.308016877637117,
+            "all_legs": {
+              "baseline": [
+                7.617,
+                6.871,
+                6.824,
+                10.683
+              ],
+              "candidate": [
+                6.183,
+                10.409,
+                9.236,
+                9.785
+              ]
+            }
+          },
+          "timed_cpu_seconds": {
+            "baseline": 1.7484204030000001,
+            "candidate": 1.8099090655,
+            "reduction_percent": -3.51681222630984,
+            "all_legs": {
+              "baseline": [
+                1.8938752500000002,
+                1.6134651610000001,
+                1.577550407,
+                1.9087907940000002
+              ],
+              "candidate": [
+                1.5676209559999998,
+                1.870151134,
+                1.8766025710000003,
+                1.9252616009999999
+              ]
+            }
+          },
+          "timed_phase_wall_seconds": {
+            "baseline": 1.324746573343873,
+            "candidate": 1.3733363039791584,
+            "reduction_percent": -3.6678510149029453,
+            "all_legs": {
+              "baseline": [
+                1.4771764501929283,
+                1.1850694864988327,
+                1.1749521121382713,
+                1.4617882445454597
+              ],
+              "candidate": [
+                1.1546158120036125,
+                1.4345442801713943,
+                1.4349999278783798,
+                1.469185195863247
+              ]
+            }
+          },
+          "max_rss_kib": {
+            "baseline": 681313.0,
+            "candidate": 715761.0,
+            "reduction_percent": -5.0561195808681125,
+            "all_legs": {
+              "baseline": [
+                758532,
+                591832,
+                601648,
+                773240
+              ],
+              "candidate": [
+                608720,
+                755848,
+                769056,
+                729420
+              ]
+            }
+          }
+        }
+      },
+      {
+        "pattern": "escaped",
+        "content_bytes": 262144,
+        "metrics": {
+          "mean_ms": {
+            "baseline": 10.8335,
+            "candidate": 11.029,
+            "reduction_percent": -1.8045876217288814,
+            "all_legs": {
+              "baseline": [
+                11.154,
+                11.234,
+                11.126,
+                9.82
+              ],
+              "candidate": [
+                11.1,
+                11.049,
+                10.932,
+                11.035
+              ]
+            }
+          },
+          "p50_ms": {
+            "baseline": 9.67625,
+            "candidate": 9.56575,
+            "reduction_percent": 1.141971321534685,
+            "all_legs": {
+              "baseline": [
+                9.602,
+                9.737,
+                9.666,
+                9.7
+              ],
+              "candidate": [
+                9.584,
+                9.556,
+                9.555,
+                9.568
+              ]
+            }
+          },
+          "p99_ms": {
+            "baseline": 16.9345,
+            "candidate": 18.43075,
+            "reduction_percent": -8.83551330124892,
+            "all_legs": {
+              "baseline": [
+                19.473,
+                18.54,
+                17.591,
+                12.134
+              ],
+              "candidate": [
+                20.391,
+                21.196,
+                12.76,
+                19.376
+              ]
+            }
+          },
+          "timed_cpu_seconds": {
+            "baseline": 2.8984751165000002,
+            "candidate": 3.0190798945,
+            "reduction_percent": -4.160973379189592,
+            "all_legs": {
+              "baseline": [
+                3.057837471,
+                3.0725988430000015,
+                3.0334502139999984,
+                2.430013938000002
+              ],
+              "candidate": [
+                3.0494720069999985,
+                3.0493063560000024,
+                2.9710155479999996,
+                3.006525667
+              ]
+            }
+          },
+          "timed_phase_wall_seconds": {
+            "baseline": 2.264071274548769,
+            "candidate": 2.3029622454196215,
+            "reduction_percent": -1.7177449892165297,
+            "all_legs": {
+              "baseline": [
+                2.3271221965551376,
+                2.3467151448130608,
+                2.3206996023654938,
+                2.061748154461384
+              ],
+              "candidate": [
+                2.3160932809114456,
+                2.304756611585617,
+                2.285441294312477,
+                2.305557794868946
+              ]
+            }
+          },
+          "max_rss_kib": {
+            "baseline": 994135.0,
+            "candidate": 923920.0,
+            "reduction_percent": 7.062924049550611,
+            "all_legs": {
+              "baseline": [
+                936456,
+                992880,
+                999692,
+                1047512
+              ],
+              "candidate": [
+                944468,
+                899956,
+                940300,
+                910956
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "scope": "Strict native production SDK on disposable local xfs. Timed latency excludes content generation; timed process CPU and phase wall include content generation. RSS is cumulative process high-water across shapes, not per-case native heap. Per-leg P99 has 200 samples and cannot certify tail dominance. Fresh processes, shared host; no performance credit for compile-overlapped driver validation."
+  },
+  "default_off_point_read_control": {
+    "exact_timed_reads": 160000,
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate"
+    ],
+    "metrics": {
+      "mean_ms": {
+        "baseline": 0.0235,
+        "candidate": 0.02375,
+        "reduction_percent": -1.0638297872340496,
+        "all_legs": {
+          "baseline": [
+            0.023,
+            0.024,
+            0.023,
+            0.024
+          ],
+          "candidate": [
+            0.023,
+            0.024,
+            0.024,
+            0.024
+          ]
+        }
+      },
+      "p99_ms": {
+        "baseline": 0.029249999999999998,
+        "candidate": 0.029750000000000002,
+        "reduction_percent": -1.7094017094017255,
+        "all_legs": {
+          "baseline": [
+            0.029,
+            0.03,
+            0.028,
+            0.03
+          ],
+          "candidate": [
+            0.028,
+            0.033,
+            0.029,
+            0.029
+          ]
+        }
+      },
+      "process_cpu_seconds_including_exact_checks": {
+        "baseline": 0.5244096025,
+        "candidate": 0.5298544599999999,
+        "reduction_percent": -1.0382833331126662,
+        "all_legs": {
+          "baseline": [
+            0.5167275819999999,
+            0.5286154439999999,
+            0.518902384,
+            0.533393
+          ],
+          "candidate": [
+            0.521049815,
+            0.54147375,
+            0.5280108349999999,
+            0.52888344
+          ]
+        }
+      }
+    },
+    "scope": "Fresh process/authority SDK point reads; every complete response equals independently checked reference. CPU includes comparison and loop bookkeeping. P99 mean is a mean of per-leg summaries, not pooled."
+  },
+  "observer": {
+    "summary": [
+      {
+        "role": "baseline",
+        "pattern": "repetitive",
+        "content_bytes": 8192,
+        "requests": 25,
+        "policy": {
+          "calls": 25,
+          "exclusiveNanos": 143120,
+          "inclusiveNanos": 143120,
+          "stage": "ir_receipt_response_policy"
+        },
+        "dispatch_nanos": 6441118,
+        "top_exclusive_stages": [
+          {
+            "calls": 75,
+            "exclusiveNanos": 970718,
+            "inclusiveNanos": 970718,
+            "stage": "blob_encode"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 704995,
+            "inclusiveNanos": 704995,
+            "stage": "wal_barrier_wait"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 644635,
+            "inclusiveNanos": 644635,
+            "stage": "semantic_transaction_compile"
+          },
+          {
+            "calls": 75,
+            "exclusiveNanos": 602924,
+            "inclusiveNanos": 1580885,
+            "stage": "blob_stage"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 434233,
+            "inclusiveNanos": 518744,
+            "stage": "apply"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 423297,
+            "inclusiveNanos": 1937384,
+            "stage": "authority_hold"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 261605,
+            "inclusiveNanos": 881684,
+            "stage": "ta_document"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 246820,
+            "inclusiveNanos": 424839,
+            "stage": "wal"
+          }
+        ],
+        "ledger_reconciled": true,
+        "invalid_spans": 0,
+        "dropped": 0,
+        "active_request_bytes": 7208
+      },
+      {
+        "role": "baseline",
+        "pattern": "repetitive",
+        "content_bytes": 262144,
+        "requests": 25,
+        "policy": {
+          "calls": 25,
+          "exclusiveNanos": 1503828,
+          "inclusiveNanos": 1503828,
+          "stage": "ir_receipt_response_policy"
+        },
+        "dispatch_nanos": 40819506,
+        "top_exclusive_stages": [
+          {
+            "calls": 25,
+            "exclusiveNanos": 13488458,
+            "inclusiveNanos": 13488458,
+            "stage": "semantic_transaction_compile"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 7342384,
+            "inclusiveNanos": 9325485,
+            "stage": "authority_hold"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 5053282,
+            "inclusiveNanos": 5053282,
+            "stage": "blob_encode"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 3683781,
+            "inclusiveNanos": 8742097,
+            "stage": "blob_stage"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 2489495,
+            "inclusiveNanos": 7220533,
+            "stage": "ta_document"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 2300535,
+            "inclusiveNanos": 2302099,
+            "stage": "ta_receipt"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 1503828,
+            "inclusiveNanos": 1503828,
+            "stage": "ir_receipt_response_policy"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 1452860,
+            "inclusiveNanos": 5534734,
+            "stage": "ta_sync"
+          }
+        ],
+        "ledger_reconciled": true,
+        "invalid_spans": 0,
+        "dropped": 0,
+        "active_request_bytes": 7208
+      },
+      {
+        "role": "baseline",
+        "pattern": "unique",
+        "content_bytes": 262144,
+        "requests": 25,
+        "policy": {
+          "calls": 25,
+          "exclusiveNanos": 1508907,
+          "inclusiveNanos": 1508907,
+          "stage": "ir_receipt_response_policy"
+        },
+        "dispatch_nanos": 132920932,
+        "top_exclusive_stages": [
+          {
+            "calls": 25,
+            "exclusiveNanos": 39056204,
+            "inclusiveNanos": 48117406,
+            "stage": "ta_receipt"
+          },
+          {
+            "calls": 75,
+            "exclusiveNanos": 22475067,
+            "inclusiveNanos": 22475067,
+            "stage": "blob_encode"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 13585565,
+            "inclusiveNanos": 13585565,
+            "stage": "semantic_transaction_compile"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 11613901,
+            "inclusiveNanos": 16763342,
+            "stage": "wal"
+          },
+          {
+            "calls": 75,
+            "exclusiveNanos": 11081109,
+            "inclusiveNanos": 33568701,
+            "stage": "blob_stage"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 6755054,
+            "inclusiveNanos": 36912141,
+            "stage": "authority_hold"
+          },
+          {
+            "calls": 151,
+            "exclusiveNanos": 5336443,
+            "inclusiveNanos": 5359751,
+            "stage": "put_deferred"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 5119280,
+            "inclusiveNanos": 5119280,
+            "stage": "vfs_write"
+          }
+        ],
+        "ledger_reconciled": true,
+        "invalid_spans": 0,
+        "dropped": 0,
+        "active_request_bytes": 7208
+      },
+      {
+        "role": "baseline",
+        "pattern": "escaped",
+        "content_bytes": 262144,
+        "requests": 25,
+        "policy": {
+          "calls": 25,
+          "exclusiveNanos": 24540988,
+          "inclusiveNanos": 24540988,
+          "stage": "ir_receipt_response_policy"
+        },
+        "dispatch_nanos": 155894974,
+        "top_exclusive_stages": [
+          {
+            "calls": 25,
+            "exclusiveNanos": 49222636,
+            "inclusiveNanos": 49222636,
+            "stage": "semantic_transaction_compile"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 35174477,
+            "inclusiveNanos": 37481483,
+            "stage": "authority_hold"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 25975159,
+            "inclusiveNanos": 32023296,
+            "stage": "ta_document"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 24540988,
+            "inclusiveNanos": 24540988,
+            "stage": "ir_receipt_response_policy"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 6570800,
+            "inclusiveNanos": 6570800,
+            "stage": "blob_encode"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 4823495,
+            "inclusiveNanos": 11404919,
+            "stage": "blob_stage"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 3496745,
+            "inclusiveNanos": 3499297,
+            "stage": "ta_receipt"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 2064355,
+            "inclusiveNanos": 7503880,
+            "stage": "ta_sync"
+          }
+        ],
+        "ledger_reconciled": true,
+        "invalid_spans": 0,
+        "dropped": 0,
+        "active_request_bytes": 7208
+      },
+      {
+        "role": "candidate",
+        "pattern": "repetitive",
+        "content_bytes": 8192,
+        "requests": 25,
+        "policy": {
+          "calls": 25,
+          "exclusiveNanos": 82840,
+          "inclusiveNanos": 82840,
+          "stage": "ir_receipt_response_policy"
+        },
+        "dispatch_nanos": 6175979,
+        "top_exclusive_stages": [
+          {
+            "calls": 75,
+            "exclusiveNanos": 1012578,
+            "inclusiveNanos": 1012578,
+            "stage": "blob_encode"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 649262,
+            "inclusiveNanos": 649262,
+            "stage": "semantic_transaction_compile"
+          },
+          {
+            "calls": 75,
+            "exclusiveNanos": 618417,
+            "inclusiveNanos": 1638372,
+            "stage": "blob_stage"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 457275,
+            "inclusiveNanos": 457275,
+            "stage": "wal_barrier_wait"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 434463,
+            "inclusiveNanos": 520215,
+            "stage": "apply"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 413237,
+            "inclusiveNanos": 1935154,
+            "stage": "authority_hold"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 258951,
+            "inclusiveNanos": 912858,
+            "stage": "ta_document"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 249273,
+            "inclusiveNanos": 439846,
+            "stage": "wal"
+          }
+        ],
+        "ledger_reconciled": true,
+        "invalid_spans": 0,
+        "dropped": 0,
+        "active_request_bytes": 7208
+      },
+      {
+        "role": "candidate",
+        "pattern": "repetitive",
+        "content_bytes": 262144,
+        "requests": 25,
+        "policy": {
+          "calls": 25,
+          "exclusiveNanos": 1153933,
+          "inclusiveNanos": 1153933,
+          "stage": "ir_receipt_response_policy"
+        },
+        "dispatch_nanos": 39320356,
+        "top_exclusive_stages": [
+          {
+            "calls": 25,
+            "exclusiveNanos": 13752419,
+            "inclusiveNanos": 13752419,
+            "stage": "semantic_transaction_compile"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 5677995,
+            "inclusiveNanos": 7816386,
+            "stage": "authority_hold"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 5023220,
+            "inclusiveNanos": 5023220,
+            "stage": "blob_encode"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 3668767,
+            "inclusiveNanos": 8697325,
+            "stage": "blob_stage"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 2473549,
+            "inclusiveNanos": 2475303,
+            "stage": "ta_receipt"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 2455124,
+            "inclusiveNanos": 7234080,
+            "stage": "ta_document"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 1494286,
+            "inclusiveNanos": 5482648,
+            "stage": "ta_sync"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 1153933,
+            "inclusiveNanos": 1153933,
+            "stage": "ir_receipt_response_policy"
+          }
+        ],
+        "ledger_reconciled": true,
+        "invalid_spans": 0,
+        "dropped": 0,
+        "active_request_bytes": 7208
+      },
+      {
+        "role": "candidate",
+        "pattern": "unique",
+        "content_bytes": 262144,
+        "requests": 25,
+        "policy": {
+          "calls": 25,
+          "exclusiveNanos": 1182524,
+          "inclusiveNanos": 1182524,
+          "stage": "ir_receipt_response_policy"
+        },
+        "dispatch_nanos": 133025356,
+        "top_exclusive_stages": [
+          {
+            "calls": 25,
+            "exclusiveNanos": 39509266,
+            "inclusiveNanos": 49134688,
+            "stage": "ta_receipt"
+          },
+          {
+            "calls": 75,
+            "exclusiveNanos": 23377854,
+            "inclusiveNanos": 23377854,
+            "stage": "blob_encode"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 14280194,
+            "inclusiveNanos": 14280194,
+            "stage": "semantic_transaction_compile"
+          },
+          {
+            "calls": 75,
+            "exclusiveNanos": 11202916,
+            "inclusiveNanos": 34592438,
+            "stage": "blob_stage"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 10120183,
+            "inclusiveNanos": 15584080,
+            "stage": "wal"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 6031028,
+            "inclusiveNanos": 35073457,
+            "stage": "authority_hold"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 5433630,
+            "inclusiveNanos": 5433630,
+            "stage": "vfs_write"
+          },
+          {
+            "calls": 151,
+            "exclusiveNanos": 5221083,
+            "inclusiveNanos": 5264620,
+            "stage": "put_deferred"
+          }
+        ],
+        "ledger_reconciled": true,
+        "invalid_spans": 0,
+        "dropped": 0,
+        "active_request_bytes": 7208
+      },
+      {
+        "role": "candidate",
+        "pattern": "escaped",
+        "content_bytes": 262144,
+        "requests": 25,
+        "policy": {
+          "calls": 25,
+          "exclusiveNanos": 24201901,
+          "inclusiveNanos": 24201901,
+          "stage": "ir_receipt_response_policy"
+        },
+        "dispatch_nanos": 154472009,
+        "top_exclusive_stages": [
+          {
+            "calls": 25,
+            "exclusiveNanos": 49765411,
+            "inclusiveNanos": 49765411,
+            "stage": "semantic_transaction_compile"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 33353523,
+            "inclusiveNanos": 35605039,
+            "stage": "authority_hold"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 26346911,
+            "inclusiveNanos": 32251484,
+            "stage": "ta_document"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 24201901,
+            "inclusiveNanos": 24201901,
+            "stage": "ir_receipt_response_policy"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 6280806,
+            "inclusiveNanos": 6280806,
+            "stage": "blob_encode"
+          },
+          {
+            "calls": 50,
+            "exclusiveNanos": 4845348,
+            "inclusiveNanos": 11138083,
+            "stage": "blob_stage"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 3269103,
+            "inclusiveNanos": 3270801,
+            "stage": "ta_receipt"
+          },
+          {
+            "calls": 25,
+            "exclusiveNanos": 1906686,
+            "inclusiveNanos": 7226663,
+            "stage": "ta_sync"
+          }
+        ],
+        "ledger_reconciled": true,
+        "invalid_spans": 0,
+        "dropped": 0,
+        "active_request_bytes": 7208
+      }
+    ],
+    "exact_content_readbacks": 200,
+    "scope": "Separate sequential profiled roles, four fresh handles each, 25 append commands per shape including warmup. No dropped samples, invalid spans or ledger mismatch. Perturbed wall spans only, no comparative CPU/performance credit.",
+    "finding": "Escaped policy stays 981.64 -> 968.076 microseconds per command: removing Value materialization leaves almost all lexical/unescape cost. Repetitive large policy 60.153 -> 46.157 us, unique 60.356 -> 47.301 us; end-to-end mixed regressions defeat adopting that local win."
+  },
+  "actual_sdk_replay": {
+    "roles": {
+      "baseline": [
+        {
+          "role": "baseline",
+          "pattern": "repetitive",
+          "initial_and_two_replays_equal": true,
+          "divergent_command_rejected": "database_conflict",
+          "exact_original_content_after_conflict": true,
+          "metadata": {
+            "scope": "storage-operations-not-active-conversations",
+            "performance_verdict": "not_assessed",
+            "uncovered": [
+              "active-conversation-streaming",
+              "1000-running-attempts",
+              "scheduled-arrival-latency",
+              "browser-send-feedback"
+            ],
+            "benchmark_source_sha256": "134cf320ee87d591027a35d9f4d6e714122874c6be045141ff7fe4ddd7ebdf62",
+            "engine_order": [
+              "tofudb"
+            ],
+            "python_version": "3.12.13",
+            "platform": "linux",
+            "temporary_directory": "/tmp",
+            "authority_dir_parent": null,
+            "latency_clock": "perf_counter_ns",
+            "throughput_basis": "summed-request-latency",
+            "tofudb_binary": {
+              "path": "/tmp/tofudb-perf-binary-iv9oq4md/tofu-db",
+              "sha256": "6e5a17482f3e00172ef945fd9213eba60204ecbd401b8449aea814393913752b",
+              "bytes": 19265072
+            },
+            "tofudb_binary_source": "/path/to/your/project",
+            "tofudb_build_identity": {
+              "embedded_allocator": "mimalloc",
+              "format": "tofu-db-build.v1",
+              "source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+              "version": "0.2.0"
+            },
+            "checkout_source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+            "source_matches_checkout": true,
+            "tofudb_client_mode": "embedded",
+            "tofudb_shared_library": {
+              "sha256": "7da205482e9bd8e857e131ec4b50947bae27842a1d172f99575d9e092fdd1566",
+              "bytes": 17372920,
+              "build_identity": {
+                "source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8"
+              }
+            },
+            "embedded_source_matches_checkout": true,
+            "benchmark_added_retries": 0,
+            "equivalent_durability": true,
+            "tofudb_durability": "strict",
+            "tofudb_wal_flush_ms": 10,
+            "tofudb_wire_client": {
+              "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+              "crc32c": "python",
+              "large_text_json": "orjson-compatible-subset",
+              "json_accelerator_version": "3.11.9"
+            }
+          }
+        },
+        {
+          "role": "baseline",
+          "pattern": "unique",
+          "initial_and_two_replays_equal": true,
+          "divergent_command_rejected": "database_conflict",
+          "exact_original_content_after_conflict": true,
+          "metadata": {
+            "scope": "storage-operations-not-active-conversations",
+            "performance_verdict": "not_assessed",
+            "uncovered": [
+              "active-conversation-streaming",
+              "1000-running-attempts",
+              "scheduled-arrival-latency",
+              "browser-send-feedback"
+            ],
+            "benchmark_source_sha256": "134cf320ee87d591027a35d9f4d6e714122874c6be045141ff7fe4ddd7ebdf62",
+            "engine_order": [
+              "tofudb"
+            ],
+            "python_version": "3.12.13",
+            "platform": "linux",
+            "temporary_directory": "/tmp",
+            "authority_dir_parent": null,
+            "latency_clock": "perf_counter_ns",
+            "throughput_basis": "summed-request-latency",
+            "tofudb_binary": {
+              "path": "/tmp/tofudb-perf-binary-zc4zx616/tofu-db",
+              "sha256": "6e5a17482f3e00172ef945fd9213eba60204ecbd401b8449aea814393913752b",
+              "bytes": 19265072
+            },
+            "tofudb_binary_source": "/path/to/your/project",
+            "tofudb_build_identity": {
+              "embedded_allocator": "mimalloc",
+              "format": "tofu-db-build.v1",
+              "source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+              "version": "0.2.0"
+            },
+            "checkout_source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+            "source_matches_checkout": true,
+            "tofudb_client_mode": "embedded",
+            "tofudb_shared_library": {
+              "sha256": "7da205482e9bd8e857e131ec4b50947bae27842a1d172f99575d9e092fdd1566",
+              "bytes": 17372920,
+              "build_identity": {
+                "source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8"
+              }
+            },
+            "embedded_source_matches_checkout": true,
+            "benchmark_added_retries": 0,
+            "equivalent_durability": true,
+            "tofudb_durability": "strict",
+            "tofudb_wal_flush_ms": 10,
+            "tofudb_wire_client": {
+              "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+              "crc32c": "python",
+              "large_text_json": "orjson-compatible-subset",
+              "json_accelerator_version": "3.11.9"
+            }
+          }
+        },
+        {
+          "role": "baseline",
+          "pattern": "escaped",
+          "initial_and_two_replays_equal": true,
+          "divergent_command_rejected": "database_conflict",
+          "exact_original_content_after_conflict": true,
+          "metadata": {
+            "scope": "storage-operations-not-active-conversations",
+            "performance_verdict": "not_assessed",
+            "uncovered": [
+              "active-conversation-streaming",
+              "1000-running-attempts",
+              "scheduled-arrival-latency",
+              "browser-send-feedback"
+            ],
+            "benchmark_source_sha256": "134cf320ee87d591027a35d9f4d6e714122874c6be045141ff7fe4ddd7ebdf62",
+            "engine_order": [
+              "tofudb"
+            ],
+            "python_version": "3.12.13",
+            "platform": "linux",
+            "temporary_directory": "/tmp",
+            "authority_dir_parent": null,
+            "latency_clock": "perf_counter_ns",
+            "throughput_basis": "summed-request-latency",
+            "tofudb_binary": {
+              "path": "/tmp/tofudb-perf-binary-l7xzqkg7/tofu-db",
+              "sha256": "6e5a17482f3e00172ef945fd9213eba60204ecbd401b8449aea814393913752b",
+              "bytes": 19265072
+            },
+            "tofudb_binary_source": "/path/to/your/project",
+            "tofudb_build_identity": {
+              "embedded_allocator": "mimalloc",
+              "format": "tofu-db-build.v1",
+              "source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+              "version": "0.2.0"
+            },
+            "checkout_source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+            "source_matches_checkout": true,
+            "tofudb_client_mode": "embedded",
+            "tofudb_shared_library": {
+              "sha256": "7da205482e9bd8e857e131ec4b50947bae27842a1d172f99575d9e092fdd1566",
+              "bytes": 17372920,
+              "build_identity": {
+                "source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8"
+              }
+            },
+            "embedded_source_matches_checkout": true,
+            "benchmark_added_retries": 0,
+            "equivalent_durability": true,
+            "tofudb_durability": "strict",
+            "tofudb_wal_flush_ms": 10,
+            "tofudb_wire_client": {
+              "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+              "crc32c": "python",
+              "large_text_json": "orjson-compatible-subset",
+              "json_accelerator_version": "3.11.9"
+            }
+          }
+        }
+      ],
+      "candidate": [
+        {
+          "role": "candidate",
+          "pattern": "repetitive",
+          "initial_and_two_replays_equal": true,
+          "divergent_command_rejected": "database_conflict",
+          "exact_original_content_after_conflict": true,
+          "metadata": {
+            "scope": "storage-operations-not-active-conversations",
+            "performance_verdict": "not_assessed",
+            "uncovered": [
+              "active-conversation-streaming",
+              "1000-running-attempts",
+              "scheduled-arrival-latency",
+              "browser-send-feedback"
+            ],
+            "benchmark_source_sha256": "134cf320ee87d591027a35d9f4d6e714122874c6be045141ff7fe4ddd7ebdf62",
+            "engine_order": [
+              "tofudb"
+            ],
+            "python_version": "3.12.13",
+            "platform": "linux",
+            "temporary_directory": "/tmp",
+            "authority_dir_parent": null,
+            "latency_clock": "perf_counter_ns",
+            "throughput_basis": "summed-request-latency",
+            "tofudb_binary": {
+              "path": "/tmp/tofudb-perf-binary-nwy8l4u1/tofu-db",
+              "sha256": "0148c8674f62a265440538a7f61438d34a6582f1d61c2654ef51a92e1b9df157",
+              "bytes": 19269304
+            },
+            "tofudb_binary_source": "/path/to/your/project",
+            "tofudb_build_identity": {
+              "embedded_allocator": "mimalloc",
+              "format": "tofu-db-build.v1",
+              "source_sha256": "fcbfd23fdd3effefda4ceec5cecc09703b3087e3acd83c106dea535db038d36c",
+              "version": "0.2.0"
+            },
+            "checkout_source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+            "source_matches_checkout": false,
+            "tofudb_client_mode": "embedded",
+            "tofudb_shared_library": {
+              "sha256": "1ae8d5c6b1e98511f6e6d777a41587d7dc04bdc3973a404d107217b62be052da",
+              "bytes": 17377312,
+              "build_identity": {
+                "source_sha256": "fcbfd23fdd3effefda4ceec5cecc09703b3087e3acd83c106dea535db038d36c"
+              }
+            },
+            "embedded_source_matches_checkout": false,
+            "benchmark_added_retries": 0,
+            "equivalent_durability": true,
+            "tofudb_durability": "strict",
+            "tofudb_wal_flush_ms": 10,
+            "tofudb_wire_client": {
+              "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+              "crc32c": "python",
+              "large_text_json": "orjson-compatible-subset",
+              "json_accelerator_version": "3.11.9"
+            }
+          }
+        },
+        {
+          "role": "candidate",
+          "pattern": "unique",
+          "initial_and_two_replays_equal": true,
+          "divergent_command_rejected": "database_conflict",
+          "exact_original_content_after_conflict": true,
+          "metadata": {
+            "scope": "storage-operations-not-active-conversations",
+            "performance_verdict": "not_assessed",
+            "uncovered": [
+              "active-conversation-streaming",
+              "1000-running-attempts",
+              "scheduled-arrival-latency",
+              "browser-send-feedback"
+            ],
+            "benchmark_source_sha256": "134cf320ee87d591027a35d9f4d6e714122874c6be045141ff7fe4ddd7ebdf62",
+            "engine_order": [
+              "tofudb"
+            ],
+            "python_version": "3.12.13",
+            "platform": "linux",
+            "temporary_directory": "/tmp",
+            "authority_dir_parent": null,
+            "latency_clock": "perf_counter_ns",
+            "throughput_basis": "summed-request-latency",
+            "tofudb_binary": {
+              "path": "/tmp/tofudb-perf-binary-h7mgs_dj/tofu-db",
+              "sha256": "0148c8674f62a265440538a7f61438d34a6582f1d61c2654ef51a92e1b9df157",
+              "bytes": 19269304
+            },
+            "tofudb_binary_source": "/path/to/your/project",
+            "tofudb_build_identity": {
+              "embedded_allocator": "mimalloc",
+              "format": "tofu-db-build.v1",
+              "source_sha256": "fcbfd23fdd3effefda4ceec5cecc09703b3087e3acd83c106dea535db038d36c",
+              "version": "0.2.0"
+            },
+            "checkout_source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+            "source_matches_checkout": false,
+            "tofudb_client_mode": "embedded",
+            "tofudb_shared_library": {
+              "sha256": "1ae8d5c6b1e98511f6e6d777a41587d7dc04bdc3973a404d107217b62be052da",
+              "bytes": 17377312,
+              "build_identity": {
+                "source_sha256": "fcbfd23fdd3effefda4ceec5cecc09703b3087e3acd83c106dea535db038d36c"
+              }
+            },
+            "embedded_source_matches_checkout": false,
+            "benchmark_added_retries": 0,
+            "equivalent_durability": true,
+            "tofudb_durability": "strict",
+            "tofudb_wal_flush_ms": 10,
+            "tofudb_wire_client": {
+              "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+              "crc32c": "python",
+              "large_text_json": "orjson-compatible-subset",
+              "json_accelerator_version": "3.11.9"
+            }
+          }
+        },
+        {
+          "role": "candidate",
+          "pattern": "escaped",
+          "initial_and_two_replays_equal": true,
+          "divergent_command_rejected": "database_conflict",
+          "exact_original_content_after_conflict": true,
+          "metadata": {
+            "scope": "storage-operations-not-active-conversations",
+            "performance_verdict": "not_assessed",
+            "uncovered": [
+              "active-conversation-streaming",
+              "1000-running-attempts",
+              "scheduled-arrival-latency",
+              "browser-send-feedback"
+            ],
+            "benchmark_source_sha256": "134cf320ee87d591027a35d9f4d6e714122874c6be045141ff7fe4ddd7ebdf62",
+            "engine_order": [
+              "tofudb"
+            ],
+            "python_version": "3.12.13",
+            "platform": "linux",
+            "temporary_directory": "/tmp",
+            "authority_dir_parent": null,
+            "latency_clock": "perf_counter_ns",
+            "throughput_basis": "summed-request-latency",
+            "tofudb_binary": {
+              "path": "/tmp/tofudb-perf-binary-luyrjn1w/tofu-db",
+              "sha256": "0148c8674f62a265440538a7f61438d34a6582f1d61c2654ef51a92e1b9df157",
+              "bytes": 19269304
+            },
+            "tofudb_binary_source": "/path/to/your/project",
+            "tofudb_build_identity": {
+              "embedded_allocator": "mimalloc",
+              "format": "tofu-db-build.v1",
+              "source_sha256": "fcbfd23fdd3effefda4ceec5cecc09703b3087e3acd83c106dea535db038d36c",
+              "version": "0.2.0"
+            },
+            "checkout_source_sha256": "ac65e77a521fc20f4b671f3d8630a41e140666d82ba3f4be72f63a1f7aa77dc8",
+            "source_matches_checkout": false,
+            "tofudb_client_mode": "embedded",
+            "tofudb_shared_library": {
+              "sha256": "1ae8d5c6b1e98511f6e6d777a41587d7dc04bdc3973a404d107217b62be052da",
+              "bytes": 17377312,
+              "build_identity": {
+                "source_sha256": "fcbfd23fdd3effefda4ceec5cecc09703b3087e3acd83c106dea535db038d36c"
+              }
+            },
+            "embedded_source_matches_checkout": false,
+            "benchmark_added_retries": 0,
+            "equivalent_durability": true,
+            "tofudb_durability": "strict",
+            "tofudb_wal_flush_ms": 10,
+            "tofudb_wire_client": {
+              "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+              "crc32c": "python",
+              "large_text_json": "orjson-compatible-subset",
+              "json_accelerator_version": "3.11.9"
+            }
+          }
+        }
+      ]
+    },
+    "scope": "For repetitive/unique/escaped 256 KiB payloads in each role: initial execution, immediate repeat and graceful reopen repeat return equal complete semantic values; first committed-events carrier is validated/unwrapped according to the application command contract. Divergent same-command reuse rejects with database_conflict and the stored original content remains exact. Not process-SIGKILL certification."
+  },
+  "failed_or_uncredited_steps": [
+    {
+      "step": "initial compile",
+      "reason": "ReceiptKeyVisitor forwarding needs explicit serde::de::Error bound; corrected before any successful build or measurement."
+    },
+    {
+      "step": "first full Cargo command",
+      "reason": "Isolated snapshot omitted already-integrated feature guards in two examples; copied reviewed current examples. Not a new allocator edit."
+    },
+    {
+      "step": "library full gate",
+      "reason": "Retained generated code has 366 operations but initial private contract snapshot had 363. Copied current matching contract. copy2 retained its old mtime so Cargo reused an embedded old test catalog; private timestamp refresh forced recompilation and isolated catalog test passed. 1563 other library tests already passed; all 38 integration tests pass together."
+    },
+    {
+      "step": "initial replay probe and diagnostic replay",
+      "reason": "First command returns committed-events carrier while receipt replay returns stored semantic value. Initial raw payload comparison was invalid; content-free failure receipt retained. Corrected only the disposable verifier to unwrap the declared carrier; baseline and candidate both pass afterward."
+    }
+  ],
+  "resources": {
+    "new_resident_workers_caches_queues_counters": 0,
+    "scope": "Temporary visitor state and serde parser scratch only; fixed recursion and existing input limits. No new admission or persisted format. Process HWM is cumulative across four shapes and cannot attribute native heap or codec memory."
+  },
+  "limits": [
+    "Fresh strict local xfs authorities only for default-off A/B; shared host activity is uncontrolled.",
+    "Per-write-leg P99 uses 200 samples; adverse tails retained, no comprehensive tail claim.",
+    "Timed write CPU and phase wall include content generation; latency excludes it. Read CPU includes exact comparison/loop bookkeeping.",
+    "No active-conversation capacity, provider/browser, production activation or all-metric SQLite dominance certification."
+  ],
+  "next_root_target": {
+    "decision": "Carry receipt policy evidence from actual response production through selected IR result, rather than replacing one full JSON parser with another.",
+    "requirements": [
+      "Proof binds actual immutable encoded allocation and actual selected response, never an operation-name whitelist.",
+      "Mutable slot access/result replacement must invalidate the proof; raw literals, unknown markers and serialized receipt replay retain the old fallback.",
+      "Null/final duplicate ok:false and malformed-input true behavior stay exact. Serde root markers and ok values that reinterpret through RawValue need explicit unknown fallback.",
+      "Receipt policy is not the final integrity validator: old parse errors already return true; final semantic response validation must remain intact.",
+      "No receipt content/digest/replay, owner/CAS, watchdog, deadline, durability or memory-budget changes; same-source end-to-end and read controls decide acceptance."
+    ]
+  },
+  "raw_directory": "/path/to/your/project",
+  "raw_sha256": {
+    "baseline.json": "d4e9ab17c3a40de5a58ce66c34db4a223c7c23fb630edd979f1e3dd03124c594",
+    "build-receipt.json": "9293a7a69fd439ec4297a0c89d229ebb9b56ff8a4b6941091ea04abcff2ae655",
+    "candidate.patch": "7a827aee49b1cb826c303f64fa535b7003ade029d28a891acf05568f272698d4",
+    "gates.json": "c5c56b194cdcc9d22755bf56ae96129a57e3cb1e8aeb03d5cec1505115d21505",
+    "encode-comparison.json": "c82f98d2a32adc732ff2f87c99d56b32bca8b46b905403802ef41e886e57b04c",
+    "read-comparison.json": "3d0e39cdf2365744e252c7ca51b577bb023d28aa29fcd0734d56d6e9461b66da",
+    "observer-summary.json": "220cee62904158f4016d7031747efe3fcdfabe1c2126bbbe090336d6c51be036",
+    "baseline-observer.json": "757df0a8f1150f6c78eedf204103ab51807a96f6223a58a964da4ff5acd473e9",
+    "candidate-observer.json": "bd28dd22389fccabfbaeffca56f67b5c068d081e822fbc4a6bf8165186d43489",
+    "replay-baseline.json": "71b4e419b924b984d8c64e17c303322c85bf3cb9fc72db9520b404f2579348f3",
+    "replay-candidate.json": "5c651e90034ffa3a566fec565270386e9f2562c24fe76c349d253bc73ae2bbbb",
+    "replay-baseline-failure.json": "c7d16f8e568aebf8f4ceb0f34cc7cb5fa51545daa00be1003b980bb9c78dafa8",
+    "response-tests.log": "ac11a45000219a7605a3c9acd3460a6167e828a6e08a83de76883f495c410793",
+    "response-tests-fixed.log": "24b7d87568377ce91be68cd0191b0296bb4f8a268f409305a7edd1f9e1606a6f",
+    "full-native-tests.log": "00572e1940b8fd1e637c5c9462d38115b58e50bcaee3c31e83b9077c92183706",
+    "full-native-tests-fixed.log": "86733d175f895906daf3861d6e52a793b4dab0fbee16ecd246d255ce1c72abf2",
+    "full-native-tests-catalog-fixed.log": "526b6a0f95d1f537f0df56de23487708fb40f0950d092f209c9fc99d9bae5ea5",
+    "catalog-isolated-tests.log": "855581f621623164a19559eba4a2c2b4964025c7bf8c36dbf495b835a4340eef",
+    "integration-tests.log": "edb7eccc98f6f78a0593e956512ee7794e0ebae74e11dfc89aa20874f8f11bac",
+    "build.log": "58de98ebc5d2626c5a6f7cb930b891cc1e919c74dfd1dda0e15b10ec87432429",
+    "encode_probe.py": "4b2c51f8a2ee226b07596e64a7917fae23b48757a5cf8ef61ef8b45a2bb23b02",
+    "paired_encode_probe.py": "4e6c3fd0cbc9a53e650b443a62ede5b8cb9cbc36ba687467c2f18cd995ccc463",
+    "read_control.py": "72ba183ec9dd4ad6f6b8d93cb4db22743f3a9602f7c6465d1e5a91969414a333",
+    "replay_probe.py": "de17f85c12eab5a9981ea3e5603a585b3d6823b9e0a2ae2fbdaea4ddd03934f6",
+    "encode-1-baseline.json": "414009415301371670012408dcd02d9a6edd6b195e1b78d86958c9144a938e96",
+    "read-1-baseline.json": "a13019d3a9ee6bbdc3f1552c142ef18f834c4b195213236edc5926098f47eb54",
+    "encode-2-candidate.json": "71a8fd4753c17052172cc35ac511b64530507bd7bbac6a894d429d80d0145450",
+    "read-2-candidate.json": "8f68f7ef3d1c3110f5c24437624359d9426cd34c33d10731e0e063994230b028",
+    "encode-3-candidate.json": "7a1d28f3befd846948a406b256310df7d4ddafb7add8478995e3341864a084c3",
+    "read-3-candidate.json": "b7b1f75d4e86f6b5e3e87e121ef88fff9abed9abbabf0bafc7f6cc3f62c70f8a",
+    "encode-4-baseline.json": "bf877bdc46427b84f0dd55a01fd892e2ff804b5ad350b269e4f6c044df3468be",
+    "read-4-baseline.json": "20ce0143465412ee2185ac095bb752af92ef3483afcfd6dc373b9891de843782",
+    "encode-5-candidate.json": "b706d455d299b216a6e03be82b52f8bbed4cea9e7e76d0f54f937e4e1d5b01e7",
+    "read-5-candidate.json": "6829fcec8dd0d475963c8800a49a48b7e97aacbef5d4097a0591c92687c0a72d",
+    "encode-6-baseline.json": "ab1211d403012f20def890923a01ed5b1590e7395a85f446b5a2c72dd1f6ac95",
+    "read-6-baseline.json": "1ee206c151559c667728b2f97fafcd1de952ab7111e178789faf262bdc6a7977",
+    "encode-7-baseline.json": "202e6763da3afe6586ef9124b4502b0d5a5b0775722ac223e6aa587813b54d71",
+    "read-7-baseline.json": "7277b88587c47646e43b5023f795d0b20752eb3607b19f770c609ac903463131",
+    "encode-8-candidate.json": "179253cb1486d9be4b6f75dec85df89b87f84f325c75360b59081af17980a242",
+    "read-8-candidate.json": "2145a253c3f8c82c4d79486e4a04ac13b0af4000a024821a9f6214a0235a978d"
+  }
+}

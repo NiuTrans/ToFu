@@ -1,0 +1,309 @@
+# Ingest, papers, translation, and media
+This domain turns uploaded or remote source material into validated text,
+durable paper/library state, derived reports, translations, audio, images, and
+video artifacts. It owns content-specific pipelines; generic task execution,
+storage, and model transport remain separate domains. The enabled `generate_image` schema stays within 400 tokens while preserving incremental source editing, exact saved-reference reuse, project/server and multi-root routing, aspect/resolution choices, and optional sibling SVG tracing.
+
+## Ownership
+| Concern | Owner |
+|---|---|
+| PDF extraction and page policy | `lib/pdf_parser/` |
+| File-to-text routing | `lib/file_reader/`, parser packages |
+| Paper library and ingestion | `lib/paper/library.py`, `harvest.py`, paper routes; [research cycle contract](../RESEARCH_CYCLE.md) |
+| Research workbench | `lib/research/`, `frontend/src/features/evolution/research/`; [research cycle](../RESEARCH_CYCLE.md), [frontend boundaries](../FRONTEND_ARCHITECTURE.md). Reuses task execution, reader and owner-scoped workspace CAS. |
+| Paper reports/review/insight/QA | focused modules under `lib/paper/`; typed browser owners compose once through `frontend/src/features/paper/panel-owners.ts`; retained report/reader presentation lives only in manifest bundle `paper-reader-presenters` |
+| Paper podcast and browser media presentation | `lib/paper/podcast_engine/`, `podcast_runtime.py`; the same typed-owner composition boundary; retained podcast/video presentation lives only in manifest bundle `paper-media-presenters` |
+| Paper translation | `lib/paper/translate_engine.py`, `translate_runtime.py` |
+| Immutable TeX builds and artifacts | `lib/paper/builds/`, `routes/api_v1/paper_builds.py`; [build service](../PAPER_BUILDS.md) |
+| General translation | `lib/translate/` |
+| Transcription/audio | `lib/transcription/`, audio routes |
+| Image generation/editing; shared MIME sniff/fullscreen/download UI | `lib/image_mime.py`; focused image services and tools; `frontend/src/image-viewer-actions.ts` |
+| Chat document/video attachments | `lib/media_attachments.py`, `lib/knowledge/`, `routes/api_v1/media.py` |
+| Chat video analysis | `lib/video_analysis/`, `routes/api_v1/videos.py` |
+| Motion video / conversational slide editor | `lib/motion_video/`, motion routes/tools; `frontend/src/features/slides.ts` and typed `features/slides/` owners ([render lifecycle](../RENDER_CONTRACT.md#projection-and-dom-rules)); owner-scoped slide API retains patch/rollback authority. |
+| Durable artifacts | artifact/storage services, Sidecar domain operations |
+
+## Ingest flow
+1. Validate type, size, and source authority before expensive work.
+2. Stream or stage bytes through the upload boundary; never trust a filename as a storage path.
+3. Select one parser through the file router.
+4. Preserve page/section provenance and isolate page-level parser failures.
+5. Canonicalize extracted text and metadata.
+6. Commit the source row and required derived metadata atomically.
+7. Start optional report, translation, podcast, or video work through a declared
+   task runtime.
+
+Remote fetches cross the shared URL/egress safety boundary. Parser fallback is
+explicit and diagnosed; it must not silently return an empty successful
+document.
+
+## Chat attachment state
+
+The owner-scoped Knowledge repository is the single persistence authority for
+chat documents/videos: one original, parsed chunks, and derived visuals. The
+chat layer has no parallel PDF-text store, video directory, or frame registry.
+
+Scopes are `draft`, `attachment` (explicit ref), `library` (global retrieval), and `shared` (both, one source). Digest reuse changes scope instead of copying bytes; removing one side of a `shared` document demotes it to the other scope, and source plus derived assets are deleted together only when neither surface retains it.
+
+New Turns carry at most 20 server-resolved refs in `projection.attachments` and 20 image refs in `projection.images`, never text, transcripts, frames, originals, or base64; missing/foreign IDs are rejected. Frozen historical inline images are not rewritten — only the conversation `refs` view swaps eligible duplicate bytes for an authenticated owner/revision/index-fenced lazy URL, leaving `full`, persistence, and model reconstruction unchanged. Native MCP image results are owner-scoped `attachment` documents: each image is capped at 8 MiB, each Turn at 40 MiB, and persistence failure does not fail the tool's text result. Continue/checkpoint-resume preserves existing image refs; regenerate owns a fresh list.
+At model-request time, relevant text shares a 96k-character request budget while bounded document visuals/model-aware video frames become request-local blocks. `att_media_<document-id>` and `/api/v1/media/attachments/<id>/source` reopen owner-authorized content without exposing its disk path.
+
+Attachment text allowance is allocated in transcript order. Adding an attachment does not redistribute an older attachment's already-sent text. Exhaustion emits an explicit marker and recovery reference; the aggregate/per-document ceilings remain enforced. Completed-task replay retains admitted text and rechecks source availability before reuse. Tool screenshots use the same immutable media source store, with bounded `toolModelContent` references distinct from UI display text; model hydration checks the owner and returns a detached image block projection.
+
+## Chat archive drops (source folders)
+
+A `.zip`/`.tar(.gz)` dropped on the composer is treated as a *folder*, not a file: its value is the tree (`\input{chapters/…}`, figure paths), which only survives extraction to a real directory. `POST /api/v1/media/attachments/expand-archive` spools the upload and extracts it atomically via `lib.paper.archive` (zip-slip/link defense, 512 files / 64 MiB total / 32 MiB per file / 128 MiB compressed) into the managed chat workspace `uploads/workspaces/<stem>/` (`lib/chat_workspace.py`), then the client mounts the extracted folder as a project root through the normal `set_paths` path and — when TeX main candidates are returned — fires the paper-preview discovery hint. Unlike `POST /api/v1/project/upload-archive` (which requires an already-attached root), this works with no project set, so a ChatGPT-style 'drop a source zip on the input box' flows straight into a compilable workspace. The composer chip is excluded from the model's document-attachment lane (no `attachmentId`, no text body) — the model reads the tree through the workspace tools, not the attachment budget.
+
+Documents commit before `ready`. Videos reserve launch-probed worker capacity,
+TTL-reclaim scratch, and commit the original before analysis; turns may reference `processing` video. Frames/storyboard/transcript replace atomically; durable status survives worker registry expiry/restart. Transcript and storyboard calls each mint a bounded request-only model-routing v2 group for the attachment owner, hard-pin provider-only dispatch to that group, and dispose it after the background stage; they never borrow a process-global credential.
+Historical `pdfTexts`, `videos`, and `/api/videos/<filename>` are read-only compatibility. Classic local PDF extraction tracks unfinished work without count admission;
+independent pooled parses start in separate one-worker processes on demand.
+The launch probe governs idle reuse, while explicit parser/output policy stays
+at the parser boundary. Future timeout does not release still-running work or
+start a second parse; only construction failure before publication permits an
+inline fallback. An ambiguous submission joins its own executor before release.
+Knowledge holds that same lease across validation, text, OCR, visual/source persistence, and repository commit; per-image and input validation remain separate policies; aggregate visual bytes are file-backed and OCR retains its text ceiling. One document create/replace is a single storage transaction, so its aggregate index footprint (records, asset references, and one write per derived search term) is bounded by the authority's per-transaction write budget (`maximumEntityTransactionWrites`, contracts/tofudb_ir_v1.json): oversized term footprints are proportionally trimmed per chunk — never emptied — and noted in document warnings instead of failing the ingest. VLM PDF transcription starts independent whole-document work on demand; launch-probed workers govern idle reuse. Separate page-call/rendering policy, task deadlines, actual 429 attempts and owner-scoped cancellation remain, while fresh terminal results are retained for their retrieval TTL without count eviction. Optional knowledge-asset vision descriptions start independent opted-in owners on demand. The launch probe governs idle reuse, each owner turn claims one durable asset, and restart recovery traverses every exclusive-owner-ID inventory page. Same-owner deduplication and stop/revive ownership remain; surplus idle carriers retire immediately. Before claiming an asset, each worker verifies the owner's runnable v2 vision routes; its paid description call uses a bounded request-only group under a hard pin and disposes that group in `finally`. This keeps image bytes in the repository instead of a memory queue and prevents one large corpus from starving another owner. Single-page classic fallback, expansion bounds, line/math normalization and cleanup live once in `text._extract_classic_page`; the caller retains document locking, global heading inference, admission, ordered progress and whole-document truncation. Problem: page jobs need identical page policy. Decision: share the serial helper; duplicating worker fallback/normalization risks diverging extractor provenance. This refactor alone changes no scheduling or defaults.
+
+## Paper state
+
+The paper library and derived records are owner-scoped Sidecar state. Normal browser
+shelf reads use one fail-open file snapshot, hydrate one owner/id detail, and retain two.
+Reader detail omits legacy Babel; metadata/QA writes serialize; hashes stay canonical.
+First content retries until ack; typed Report/Review state caps each language and validated reading-position map at 2,048 entries, retains 12 report snapshots, generation-fences same-paper starts, and hands provisional Stop intent to the returned task ID. At most 32 rebuttal drafts of 40,000 characters survive locally. Known papers start by hash: live/cache hits read no body, a true miss projects at most 120,000 owned characters, and only an explicit pre-dispatch source miss permits one bounded browser fallback. Reopen resolves live work plus preferred/fallback cache in one HTTP request; one owner-scoped Sidecar aggregate selects the base and returns only that language's Insight/termfill/checkpoint rows (four queries to one, at most eight offered siblings), without importing generation engines. Stale translation aborts, and cancellation-fenced tasks are never rejoined. **Translation Studio — Problem/Decision/Alternatives:** language-only fences could publish a former paper’s translation, and eager language/tab activation obscured paid intent. `babel.ts` binds the browser cache map to its source and freezes source id/hash/text/language per run; cache/start/poll/push/Stop and finally all check the same run. Source/session replacement or explicit Stop aborts known and late-created tasks, and abort acknowledgement comes from the retained API transport. `babel-reader.ts` shows source provenance, explicit language/Generate/Stop, actual progress, up to 32 artifact headings with paper Q&A, original-PDF access and clean Markdown/copy export. Only validated non-empty terminal text is saved/rendered, once; one reader scope owns listeners, one export URL/timer, and no background poller beyond the existing task. Rejected alternatives: guessed original-page links, partial-progress publication and a separate translator/Agent. Guards: `test_frontend_paper_babel.py`, `test_visual_paper_translation_reader.py`.
+
+Long pipelines checkpoint at semantic stages (see Invariants). Abort closes
+runtime state and prevents later background callbacks from overwriting a
+terminal result. Auto-research overlaps its two independent primary judges behind a two-call ceiling; only material disagreement adds a third call, and final repository publication retries after every model-backed checkpoint. The survey boundary treats `open_gaps[].id` as a mechanical cross-stage handle: missing or duplicate model-authored handles are repaired deterministically after evidence verification, while the stage gate rejects any artifact still lacking a usable handle before ideation begins.
+
+A completed auto-research direction opens an owner-scoped Research Foundry program. `contracts/research_program_v1.schema.json` is the authority for its falsification protocol, capability bindings, run/claim caps, LaTeX source tree, and compile/publication receipts. `PUT` uses compare-and-swap (409 on stale); submission readiness is derived, never a stored percentage. `research-action` jobs (`experiment`/`analyze`/`manuscript`/`compile`/`publish`) reuse the guarded Paper Agent loop with a narrower least-authority epoch: an MCP tool runs only when its exact namespaced name + schema hash are saved under a capability, and deterministic settlement requires a successful call receipt (model prose cannot assert a passing run/compile/publish).
+Report/Q&A/Deepen loops freeze one `PaperToolEpochV2` (provider wire projection + server-owned executable catalog); `tools.schemaBudgetTokens` applies the optional-tool cost target, and the fixed `search_tools`/`execute_tools` pair routes through the shared permission/validation/approval/settlement pipeline. These stages share one finite-progress policy: three identical call+world rounds halt before a fourth duplicate execution, and an aborted Q&A loop stays `aborted`.
+
+Shipped/default paper tools budget through an internal
+`ToolResultEnvelopeV2`, then put only its sparse semantic projection in the
+model message and retain the bounded evidence sidecar on the round. One result
+is at most 8,000 model-visible tokens and all results from one logical model
+round are at most 24,000. Oversized evidence is stored only through the semantic, owner-scoped
+artifact repository and continued with `read_tool_artifact` or
+`search_tool_artifact`; production paper application data never exposes a disk
+path or SQLite detail. Batched local file reads reuse the shared per-file
+projection contract, so every requested path remains represented even when a
+large first file exhausts preview space; paper adapters consume the same
+request-local sidecar before persisting their round state. Continuation tools
+join a non-empty paper epoch only for
+a positive owner, while owner-less compatibility calls stay bounded and return
+no invented recovery handle. The registered `tool_result_v2` experiment may
+explicitly select the bounded legacy adapter for its control arm. Such a run is
+request-local: it neither reads nor overwrites the canonical report/deepen
+cache, and its model+config fingerprint cannot join another arm's live task.
+
+The reading workbench (`frontend/src/features/paper/workbench.ts`) is the default Paper entry.
+**Problem:** six peer tabs hide a useful reading order and scatter media discovery.
+**Decision:** show the selected source, a settled report's canonical thesis/excerpt, up to six real report headings, and a Studio shelf. Report lookup reuses the report owner with `readOnly`, so a pending regeneration intent cannot start paid work from the overview.
+Question actions reuse paper QA; Studio opens the existing podcast/video/translation/review owners. Media badges reflect only a matching paper hash and otherwise invite an explicit lookup. The kit owns navigation, keyboard behavior, and controls.
+**Alternatives:** a second summary generation/cache or media polling loop would duplicate authority and cost; neither is introduced. The workbench retains one DOM and no background poller. Canonical report excerpts remain identified as generated interpretation; the original stays visible in the paired PDF reader.
+
+Q&A source checking (`frontend/src/features/paper/evidence.ts`) treats short answer blockquotes as unverified search queries.
+**Problem:** section references and model-generated page numbers do not prove that an answer matches the source. **Decision:** request at most three verbatim paper excerpts, distinguish report interpretations/external findings, and search the displayed PDF. Only actual PDF text matches receive page actions; a match confirms wording, not the answer's interpretation. Misses, unavailable text, truncation and failures remain explicit.
+Search shares the PDF reader's page/text/result budgets and normalizes whitespace/NFKC only; it adds no index, provider call or durable cache. One dialog/search is aborted on dismissal, paper teardown or replacement; source generation and selected-paper identity fence late results and navigation. Page actions show the source before layout-dependent navigation and restore reader focus after modal dismissal. At most six short quotes per settled bubble receive kit actions.
+**Alternatives:** trusting model page numbers or adding a second citation store would introduce unverified authority; fuzzy matching could misrepresent support. Neither is used.
+
+**Report/review reader — Problem/Decision/Alternatives:** the desktop TOC disappears on phones and cached documents lack visible source identity. `report-reader.ts` adds the source, reading purpose, original-PDF action and a keyboard chapter menu bounded to 32 actual artifact headings; ready states use the shared factory with explicit generation. Source id/hash and teardown fence every control; the Report owner releases reader scopes, while retained rendering keeps audit cards, anchors, progress, notes and deepen. Rejected alternatives: inferred page citations, a second summary generator and replacing the existing task owner. Initial library hydration preserves the upload input node and newer source selection/optimistic rows; late results cannot clear them (`test_frontend_paper_entry_race.py`). Notes and deepen bind the clicked canonical document, freeze source/language across replies, fence late tasks and acknowledge cancellation; failed note mutations retain input in one kit dialog. XP projections retain only the current source, with weak view bindings; each depth job owns one cancellable wait/push, and source change releases jobs/editors. Verification measures 32 navigation items, one editor, and zero old XP projections across 100 same-id hash replacements. Guards: `test_frontend_paper_report_reader.py`, `test_frontend_paper_notes_deepen.py`, `test_visual_paper_report_reader.py`.
+
+**Reading/Review model picker — Problem:** actions delegated on `document` share their opening click with the outside-dismiss listener; `stopPropagation()` cannot silence listeners on the same node. **Decision:** dismiss only clicks outside `.paper-report-model-picker`, let selection/toggle own dismissal, and close the sibling menu when opening. Keep model availability and defaults on the shared model projection. **Alternative rejected:** `stopImmediatePropagation()` would suppress unrelated document actions. Guards: `test_frontend_paper_model_picker.py` exercises the production action registry; `test_visual_paper_model_picker.py` repeats SVG-descendant selection in both reading views.
+
+The reading experience projects one canonical experience manifest from report state. Section anchors are proposed by the model but resolved deterministically
+against the stored document. Cost/progress comes from recorded task/model usage, not a client estimate. “Deepen” is an explicit bounded task that starts from a
+resolved section; it does not hide a second report inside the first response.
+Localized metadata uses language-qualified semantic keys rather than duplicating
+the source record.
+
+Podcast generation separates structured spoken script, deterministic formula,
+figure, and terminology validation, optional critic repair, TTS, audio assembly,
+and artifact publication. Script draft/revision/critic calls propagate task cancellation and use the finite production 429 budget. Short/full scripts admit at most 24/64 segments and 160 synthesis chunks; segment calls use a launch-probed 1..2 personal fan-out (distributed 4, hard ceiling 8), stop new admission after failure/abort, and retain at most 32 MiB per part / 192 MiB before ordered assembly. Motion-video topic/report scripts and scene authors likewise use two hard-error slot attempts plus the finite 429 budget; task-backed calls propagate cancellation through request waits and transient backoff. Director mode adds exactly one contrasting draft and at most one bounded critic after both deterministic gates; standard remains the one-call control, and mode changes checkpoint/dedup identity. Motion narration reuses the TTS fan-out for at most 16 scenes / 64 chunks, rejects scenes over 60 seconds or incompatible provider WAV parameters, removes failed partials, and binds text/timing/settings plus bounded file hashes in the immediately persisted resume manifest. Motion stock preflight admits at most one request per scene, 16 MiB per image or 32 MiB per video, localises bytes inside the job lifecycle, and writes bounded public attribution without credentials. Slide outlines/authors/QA use the finite text-model policy; independent pages overlap behind the 1..2 personal fan-out and only exact authored YAML with bounded size/hash plus zero-LLM validation resumes. Image preflight has a separate 1..2 personal fan-out, two hard attempts, finite 429s, six-image/20-MiB bounds, while caller and streamed remote images are capped at 20 items/40 URLs and 192 MiB per channel with exact crash caches. Invalid scripts never reach TTS; a partial audio file never becomes the published podcast or narrated video.
+
+Ordinary server registration keeps only report, podcast, deepen, QA, translation, and recommendation task authorities; engines load on requests. A startup interruption sweep may load the podcast worker shell, but the LLM script and TTS/audio stages remain dormant until generation reaches each stage. The arXiv fetch/search routes retain only a lightweight typed query failure and patchable call seams; XML/Atom parsing, search activation, and HTTP title lookup load on the first real request. Review route registration resolves venue/prompt metadata but leaves deterministic review text processing and the shared language-detection cascade dormant.
+
+The same `POST /api/paper/fetch-arxiv-stream` route also ingests a direct public PDF URL (any http(s) link whose path ends in `.pdf`). The landing input classifies arXiv reference vs PDF link vs title query and routes the first two through this one stream — a PDF link is never title-searched. `lib/paper/pdf_url.py` (lazily imported, like the arXiv seams) owns the structural check, a deterministic content-keyed cache name (`pdfurl_<sha256-16>_<basename>.pdf`), and a best-effort title probe (metadata `/Title`, else filename stem). A PDF link normalizes `arxiv_id` to `''` at every SSE stage and in the persisted row (never `null`), and downloads through the same SSRF-guarded `http_get` seam and byte ceiling as an arXiv fetch. Browser contract: a pasted PDF link emits exactly one `fetch-arxiv-stream` POST and zero `search-arxiv` calls (locked by `tests/e2e/test_e2e_journeys.py::test_paper_landing_pastes_direct_pdf_link_to_fetch_stream`).
+
+## Translation
+
+The SDK agent entry accepts `text`, `source_lang`, and `target_lang`, and
+forwards language options to the same asynchronous translation executor as
+the browser. It rejects invalid option types before task creation. A
+per-request `model` override is unsupported and returns HTTP 400 explicitly;
+the route does not advertise or silently ignore a model selection that the
+executor cannot honor. Translation retains its configured provider policy.
+
+The shared work lane starts independent translation and whole-PDF jobs on
+demand. Launch-probed worker counts size only idle reuse; local task queues and
+translation-provider calls have no count admission quota. Fresh PDF results
+remain available for their retrieval TTL rather than being evicted by a burst.
+Actual provider health/billing policy, request deadlines and ownership remain
+authoritative. The lane detaches cancelled not-yet-picked-up jobs under its
+scheduler lock, then invokes Future callbacks after releasing that lock.
+Removed jobs complete the executor cancellation notification handshake, so
+`wait()` and `as_completed()` observe their terminal state even though no
+worker will consume them. Direct Future cancellation and lane shutdown use
+the same notification owner; cancellation racing worker pickup is counted once.
+
+Translation separates language/direction detection, segmentation, LLM work,
+validation, and durable commit. Segment caches key canonical content plus
+source/target language and relevant policy. A refusal, wrong-language result,
+truncated or over-generated result is invalid and never cacheable.
+Literal `<think>` mentions in source documents are protected placeholders; only a leading MiniMax reasoning wrapper is stripped from a completion
+so a documented tag cannot truncate the rest of the translation. Incremental idle retirement and terminal consumption atomically close queue admission; late finalizers are rejected so the coordinator uses its whole-turn fallback instead of acknowledging work without a consumer.
+
+**Completed-segment handoff — Problem:** five-minute idle retirement discarded validated preview translations, while whole-turn provider failure prevented reconstruction. **Decision:** the existing task-local preview state retains only completed source/translation pairs across worker retirement, under the same Turn call ceiling (32 preview entries on the reference personal profile, plus one terminal reasoning block). Sources are bounded at 32,000 characters, outputs at twice that; 33 maximal pairs retain at most 3,168,000 text characters, not the full task or an idle thread. Idle retirement best-effort commits only to a settled, owner-scoped Turn; a live Turn or transient write failure keeps that bounded cache for terminal handoff without another provider request. Stable attempt-scoped block IDs plus source equality are rechecked on every CAS retry, so edited/replaced blocks never receive old cached translations. Empty or already-translated deliverables still hand off cached segments. Finalize transfers the cache and cancellation invalidates it even if the queue already closed. **Alternatives rejected:** extending worker TTL retains threads for tool waits; editing live Turn projections bypasses executor authority; retaining an unbounded global cache or depending on whole-turn success recreates the loss. Live previews remain reconstructible, not durable-before-visible; process restart uses the owner-scoped bounded boot sweep (32 recently active conversations, seven-day age, up to 16 missing translations each), not the volatile cache.
+Settled-turn enrichment excludes translated/target-language/protected/cache hits and batches 16 segments or 6,000 source characters per call. Whole-turn success commits before task settlement; whole-turn failure records its durable `_translateFailed` verdict and terminal error first. Either outcome may then re-admit independent narration/reasoning enrichment behind the owner's existing bounded translation queue, with no independent durable lifecycle. Explicit abort and identity-invalid work do not schedule it; queued enrichment skips a Turn that has resumed generation. A segment-only commit never creates `_translateDone`, clears `_translateFailed`, or converts the failed task to success. It receives one shared 15-second wall budget, one upstream-429 attempt per call, and immediate-only shared-contention admission. Saturation may drop it; only a provider response that damages placeholder order/ownership may fall back to isolated validation, while dispatch/capacity failures skip the optional batch without fan-out and can never change the whole-turn task from success to failure.
+General, PPTX, settled-turn whole-output, and paper translation share one owner-fair lane (personal resource-probed root capacity (1..48 workers)/4..32 pending; distributed 16/128; idle retirement 60/600 seconds). The worker value FIFO-caps active MT/LLM calls across that lane, synchronous send work, and incremental accumulators; the queue value also caps provider waiters, with retryable fail-fast saturation and no local redispatch. Cache/identity/protected fast paths take no slot. Tasks remain `pending` until entry and queued abort frees capacity. A dispatch allows 4..8 actual rate-limit responses in personal mode (16 distributed, hard ceiling 64); capacity polls are free, exhaustion stops the workflow and later paper chunks. Non-terminal incremental previews additionally yield before transport to an already-active shared-contention gate; their call count and one-429 circuit live on the Task/Turn across idle accumulator retirement, while terminal reasoning, final/send translations, and interactive Agent dispatch retain their ordinary user-cancellable wait policy.
+Each LLM translation candidate also enters request-local strict billing-stop admission. A recorded key-wide 402 or matching model quota stop wins over a persistent manual-ON override for this optional work only; it cannot be last-resort promoted or bypassed through `smart_chat`'s direct default-key fallback. Healthy sibling models/providers remain usable, while a wholly rejected pool terminates before an upstream request, 300-ms cooldown poll, outer backoff, or per-segment fallback fan-out and projects as retryable `no_slot`/503. Attended Agent calls retain the ordinary Settings user-supremacy contract.
+
+Paper and general translation share validation/cache/MT primitives but keep distinct provenance stores. Paper work packs 8,000-character semantic slices under 1,000,000-character, 128-slice, and two-hour ceilings; validated output stops at 2,000,000 characters/4,000,000 UTF-8 bytes, chunks retain only progress plus replay deltas, the browser renders the complete artifact once, and terminal polling carries either its done event or its caught-up snapshot rather than both.
+Automatic-model work may reuse cache/MT; `force` skips cache reads, while an explicit model stays strictly pinned. LLM slices fail closed on empty/no-op/wrong-language/truncated/over-generated output; a rejected slice, abort, deadline, or unconfirmed owner-repository write fails the whole task. Canonical reports require a non-empty body and confirmed write; request-local experiment arms explicitly suppress that write. Measured cost evidence stays in `CHANGELOG.md`.
+
+General-translation route registration retains only constants, pure prompt
+transforms, the typed refusal identity, and the shared task authority. The
+`lib.translate` and `lib.translate.runtime` compatibility facades resolve the
+LLM/MT engine, worker, incremental commit path, and PPTX translator only when
+that operation starts. Adding a package-level export must preserve this focused
+import boundary; route discovery is not authority to initialize an engine.
+## Media artifacts
+
+Binary results are artifact references with MIME type, size, owner, lifecycle,
+and provenance. Text companions are retained where the UI or accessibility
+contract requires them. Audio/video clocks begin when meaningful processing
+starts, not at unrelated page load or queue creation.
+
+Motion-video quality gates operate on declared creative plans, timelines,
+asset briefs, subtitle geometry, and render verdicts. A render process is not
+successful merely because it exited zero; required output and quality
+contracts must pass.
+
+## Failure semantics
+- Unsupported/oversized/malformed input: reject before task creation.
+- Page parser failure: preserve page identity and surface diagnostics; follow
+  the declared isolation/fallback policy.
+- Duplicate source: return/reuse canonical identity without duplicating state.
+- Invalid model-derived content: fail the stage and retain the last complete
+  checkpoint.
+- Abort: stop publication and settle the task once.
+- Artifact storage failure: terminal persistence error; do not return a dangling
+  URL or phantom success.
+
+## Invariants
+- One PDF extraction authority and one file-router decision point.
+- Owner identity is explicit for source rows, derived rows, and artifacts.
+- Shipped/default Paper tool results obey 8k/24k model-visible budgets without
+  exemptions; an explicit legacy experiment control remains bounded and
+  request-local.
+- A full-paper wire budget never removes a capability from its owner-scoped
+  Tool Search execution catalog.
+- Report/deepen in-flight reuse requires an exact model+config fingerprint;
+  long-agent policy requests never read or mutate canonical derived caches.
+- Source commit and required metadata are atomic.
+- Derived work records source hash/version and stage provenance.
+- Checkpoints are complete, idempotent semantic boundaries.
+- Invalid/refused/truncated output is never cached as success.
+- Binary payloads stay out of JSON transcripts and ordinary logs.
+- Chat metadata is owner-resolved and model projection is request-local/bounded;
+  client fields and request-specific base64 are never persisted authority.
+- Routes parse/project; pipeline and persistence semantics live in services.
+
+## Change routing
+| Change | Start here | Verify |
+|---|---|---|
+| PDF extraction | `lib/pdf_parser/` | page isolation, layout policy, dependency contract |
+| Paper metadata/storage | `lib/paper/library.py` + Sidecar operations | owner isolation, hash, atomic upload |
+| Report/insight/QA | focused paper engine/runtime | grounding, checkpoint, abort |
+| Podcast | `podcast_engine/`, runtime | script validation, audio artifact |
+| Translation | `lib/translate/` or paper translator | language identity, refusal, cache |
+| Chat document/video attachment | `lib/media_attachments.py` + `lib/knowledge/` | owner scope, digest reuse, bounded projection, one delete lifecycle |
+| Chat video analysis | `lib/video_analysis/` | durable source-before-work, atomic evidence commit, restart/status fallback |
+| Motion video | `lib/motion_video/` | plan, assets, quality gate, render settlement |
+
+**Knowledge HTML extraction.** Problem: building general BeautifulSoup objects
+adds allocations and repeated traversal before document indexing. Decision:
+`lib/knowledge/html_text.py` owns a per-call lightweight tree and exact heading,
+table, entity, hidden-content and text-node projection. The ingest adapter loads
+it only for HTML; parser faults retain the existing text fallback. Open-tag and
+whitespace counters keep deep/malformed documents from quadratic stack scans.
+Reject regex-only stripping (loses structural recovery) and global parse caches
+(require extra input retention/invalidation). The immutable pre-change oracle,
+exact corpus checks and full-extraction measurements are in
+[knowledge HTML evidence](../evidence/system_knowledge_html_20261007.json).
+
+## Test map
+```bash
+pytest -q tests/pdf_parser/test_pdf_parser_page_isolation.py tests/pdf_parser/test_pymupdf_layout_policy.py tests/paper/test_paper_ingest_persist.py tests/paper/test_paper_upload_atomic.py tests/paper/test_paper_hash_canonical.py
+pytest -q tests/paper/test_paper_report_abort.py tests/paper/test_paper_checkpoints.py tests/paper/test_paper_arxiv_startup_boundary.py tests/startup/test_text_lang_startup_boundary.py
+pytest -q tests/paper/test_paper_request_policy.py tests/paper/test_paper_full_tools.py tests/paper/test_paper_deepen.py tests/paper/test_paper_podcast_api.py tests/paper/test_paper_podcast_script.py
+pytest -q tests/translate/test_translate_identity_invariant.py tests/translate/test_translate_refusal_cache.py tests/translate/test_translate_startup_boundary.py tests/translate/test_translate_dispatch_deadline.py tests/knowledge/test_knowledge_data_layer.py tests/knowledge/test_knowledge_enrichment_budget.py tests/knowledge/test_knowledge_pdf_resource_budget.py tests/video_analysis/test_video_analysis.py tests/frontend/test_frontend_authoritative_composer.py
+pytest -q tests/motion_video/test_motion_video_engine.py tests/motion_video/test_motion_video_gate_verdict.py tests/research/test_research_workspace.py tests/research/test_research_program_v1.py tests/research/test_research_reading_browser.py
+```
+**Podcast Studio — Problem/Decision/Alternatives:** estimated speech lengths cannot support faithful chapter navigation. The script and critic reuse the guarded Paper Agent lifecycle with the authoritative source and no tool grant; deterministic validators and bounded revisions remain. Optional `meta.timelineV1` follows `contracts/paper_podcast_timeline_v1.schema.json` and records actual PCM frame boundaries including injected pauses; MP3-only and inconsistent-PCM outputs withhold it. A 64-segment fixture measures 3,175 bytes of metadata. Studio owns one audio/listener/sleep-timer scope, supports measured chapter seeks and transcript highlighting, and delegates chapter questions to paper Q&A; selecting another paper releases playback without aborting durable generation. Legacy artifacts retain playback/transcripts without estimated seeks. Rejected alternatives: scaling model estimates to audio length and duplicating Agent/tool execution. Guards: `test_paper_podcast_timeline.py`, `test_frontend_paper_podcast_artifact.py`, `test_visual_paper_podcast_reader.py`.
+**Video Studio — Problem/Decision/Alternatives:** reading was obscured by render parameters and eagerly loaded scene players. The typed artifact reader presents one film, caption-led chapters, narration and existing paper Q&A; a scene preview opens on demand (browser fixture: one permanent video element, at most two with the preview, main film paused). Structured source beats reuse the shared Tofu Agent with verified finish/abort and no tools; Motion scene authors retain their existing Agent and quality gates. `list_motion_scenes` API metadata owns caption/program-time projections from `_timeline.py`; planned start/end never authorizes seeks. Legacy/inconsistent timing remains readable without jump controls. Media pollers consume the transport-owned Response.json() envelope projection before the shared replay gate. Late start/revision replies are fenced; explicit Stop aborts a late-created task while view detachment preserves durable work. Failed or unadopted revisions retain the current film; an applied update refreshes it while preserving playback position. Rejected alternatives: separate paper rendering/Agent pipelines and estimated chapter clocks. Guards: `test_paper_video_agent.py`, the disk-fallback scene API test, `test_frontend_paper_video_artifact.py`, and `test_visual_paper_video_reader.py`.
+
+Research independent evaluation accepts an explicit shared `model_budget_admit` port. Primary parallel judges and disagreement tie-breaks receive the same account; typed budget refusal propagates instead of becoming degraded review data. Discovery-wide durable budget binding remains required before enabling goal limits.
+
+The discovery review wrapper forwards an explicitly supplied budget port; review and revision layers propagate typed budget refusal rather than publishing it as ordinary degraded science. Goal-budget admission remains disabled pending complete pipeline accounting.
+
+Discovery survey forwards an explicit shared budget through `build_survey` and every hierarchical `BoundedCalls` dispatch. Typed refusal escapes the survey abort-result projection. Existing local reservations and unknown-usage records remain conservative; this does not establish complete discovery-wide accounting or enable goal limits.
+
+Discovery ideation forwards an explicit shared model budget to candidate generation, empty-final retries, all independent rubric judges, and revision generation. Typed generation refusal propagates before abort-result projection; existing worker failure fencing stops queued judging. Discovery-wide durable accounting remains required before admitting goal limits.
+
+Discovery query translation forwards the explicit shared budget through translation attempts, including streaming previews and non-stream dispatch. Typed budget refusal bypasses deadline/refusal-cache and web-fallback projections; ordinary unavailable translation still permits web discovery. Complete durable discovery accounting remains required before admitting goal limits.
+
+Budget-bound ideation search/fetch tools bind the auxiliary filter account around the joined batch and explicitly copy its request context into each worker. Swallowed filter/worker budget refusals reappear before a tool result is returned; default batch behavior and normal search errors remain. Other tool model paths and durable discovery-wide accounting still require validation.
+
+Video analysis starts processing on demand. Its reservation token transfers
+cleanup ownership from the upload route to the worker; it does not reserve a
+capacity slot. Actual worker-start failures still clean staged input and report
+an error. Paper builds, subscribers and retained readers likewise have no local
+count admission quota; immutable receipt and owner-scoped lease checks remain.
+
+Overleaf transfer demand — Problem: a two-request host window delayed leased independent artifact chunks. Decision: all authorized chunks start through the shared demand executor; the retired mcp_transfer_requests field is removed from the canonical/generated contract. Each validated, decoded chunk goes to one caller-owned anonymous spool at its planned offset, leaving no body in its Future. Only the caller feeds the cache receiver in artifact/offset order; all readers join before the spool closes. Lease identity, EOF/length checks, final digest, cancellation, revocation and publication remain. Alternatives: larger windows retain waiting; retaining all completed response strings inflates RAM; concurrent cache appends lose order. Measurement: a controlled 32-read / 2,097,152-byte fixture completed in 165.15 ms with idle hint 1, zero surviving threads and zero spool descriptors; transient spool data is bounded by the admitted receipt byte set, and its lifetime ends after joined cleanup.
+
+Overleaf export ownership — Problem: the MCP exporter refused independent builds behind one global compiler slot, eight records and worst-case aggregate byte reservations. Decision: independent identities start immediately and retain immutable anonymous-file leases until release/expiry; duplicates share one completion and never compile twice. A cancelled duplicate waiter cannot cancel its producer. Aggregate record/cache admission fields are retired from the canonical/generated contract; the legacy constructor cache hint grants no refusal. Individual artifact/build framing bounds and real file failures remain explicit. Shutdown cancels and joins producers before closing borrowed streams. Alternatives: larger slots preserve refusal; evicting live leases breaks transferred identity; duplicate compilation loses same-request evidence. Controlled 32-export rendezvous, duplicate cancellation, physical disk failure and lease-retirement tests verify the boundary. Measurement: 32 controlled exports reach the compiler concurrently, retain all 32 readable leases and retire 64 anonymous artifact descriptors on joined close.
+
+VLM batch demand — Problem: synchronous PDF transcription retained a thread count ceiling after the task registry moved to demand ownership. Decision: every eligible page batch starts through the shared executor; worker parameters and launch policy are idle reuse hints. A genuinely unstarted batch receives its ordinary positioned error/progress outcome while published siblings remain owned. Batch grouping, model assignment, explicit aborts, output ordering and finite 429 attempts retain their contracts. Alternatives: larger fixed pools still queue; dropped batches lose page evidence; detached model calls lose cleanup. Rendezvous and real worker-start failure tests verify this boundary. Measurement: a controlled 32-batch rendezvous with idle hint 1 completed in 12.24 ms; output order, one progress outcome per batch and zero surviving threads were verified.
+
+VLM page ownership — Problem: launch-memory page admission rejected complete PDFs and eager lists retained every JPEG. Decision: retire TOFU_PDF_VLM_MAX_PAGES from the resource contract and launch projection; preserve only explicit caller page budgets. Rendered JPEGs go to one caller-owned anonymous file with resident offset metadata; independent model batches read their slices only while calling. Executor exit joins all readers before file close, including aborts and callback failures; render/write failures close both document and spool and propagate their real cause. VLM rendering uses one owned native child per document; in-process callers retain their MuPDF safety lock. Alternatives: raising page caps preserves refusal; eager all-page lists scale RAM with the document; closing before join invalidates borrowed inputs. The spool grows only with rendered document bytes and is reclaimed on return/error, with no persistent cache or admission byte quota. Measurement: a controlled 2,051-page / 2,100,224-byte fixture completed in 26.96 ms with eight concurrent batches and idle hint 1, preserved all ordered pages and retired its one spool descriptor.
+
+VLM render process ownership — Problem: a global MuPDF lock serialized independent VLM documents even after demand dispatch. Decision: each VLM render starts a standalone child immediately, writes length-framed JPEGs straight to the caller-owned anonymous spool, and returns a checked completion. The shared render kernel owns document close and explicit page budgets in both process and in-process entry points; the child never imports application bootstrap or receives account credentials. Cancellation and callback failures terminate, escalate to kill if needed, and join the child before closing source/output descriptors. Signal failure retains ownership until exit; launch/native/framing failures never publish partial pages or retry ambiguously. Alternatives: removing the lock inside one process risks unsafe MuPDF concurrency; larger process windows preserve waiting; pipe/result image lists duplicate document-wide RAM. Child concurrency follows active demand, with no resident idle render pool. Temporary growth is source bytes plus JPEG/frame bytes per active document and ends on joined completion. Measurement: 16 real controlled children rendezvoused and rendered 524,288 JPEG bytes in 408.90 ms; every child and source/spool descriptor retired. Native PDF smoke testing runs when the host-installed MuPDF library is compatible.
+
+
+Knowledge asset ownership — Problem: asset-count and aggregate-byte limits
+silently omitted visuals and the old result list retained all originals in RAM.
+Decision: anonymous-file sequences retain ordered raw bytes and metadata; only
+offsets remain resident, and the store reads one visual at a time. Count/total
+byte and Knowledge page knobs are retired; per-image validation keeps its owner.
+Metadata updates preserve original raw offsets, including OCR and nested-email
+caption adaptation. Explicit store close runs on success and rollback; spool I/O
+failure aborts extraction rather than becoming a skipped image or successful
+partial import. Alternatives: larger quotas still omit evidence; unlimited lists
+retain corpus-sized memory; repeating extraction changes the observed source.
+Verify `test_asset_spool_demand.py`: 2,049 assets exceeding old count/byte knobs
+remain available, input objects release immediately, metadata updates preserve
+raw bytes, and later durable-write failure closes the spool and rolls back files.
+
+Controlled extraction measurement: 2,049 synthetic visuals retained 2,106,372
+raw bytes in 465 ms, with 1,956,084 peak tracemalloc bytes including ZIP metadata
+and spool offsets. Originals are not retained by the result; each store read
+loads one visual. This measures extraction ownership, not image decoding or
+durable backend throughput. PDF tests also retain all 401 visual candidates on
+one page beyond the old asset-count quota.
+
+
+Classic PDF page ownership — Problem: a launch-derived page estimate and a
+4,096-page hard cap silently narrowed caller ranges and omitted late evidence.
+Decision: zero means actual document length, and positive max_pages selects the
+caller range without a resource clamp. Rich/raw text traversal, image traversal
+and processed/truncated metadata resolve the same effective range. Structured
+conversion uses its whole-document path only when compatible with the explicit
+caller range. Output/image projections, deadlines, native safety locking and
+joined process ownership retain their separate contracts. The legacy launch
+page estimate may size process/timeout hints, but grants no traversal quota.
+Alternatives: larger caps still omit evidence; removing output budgets changes
+context/transport authority; dropping native safety locking is unproven. Verify
+`test_classic_page_demand.py`: 5,001 pages survive despite old knob 1, explicit
+range 2 remains 2, and a requested 10,000 is not silently reduced to 4,096.

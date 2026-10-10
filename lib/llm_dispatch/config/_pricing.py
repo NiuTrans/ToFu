@@ -1,0 +1,254 @@
+"""lib/llm_dispatch/config/_pricing.py — Pricing-tier tables & resolution.
+
+The ``PRICING_TIERS`` table defines named price brackets (currently just
+``'cheap'``).  A model earns a tier tag when its input AND output prices
+fall strictly below the tier's input/output thresholds.  The tags in
+``MANAGED_TIER_TAGS`` are **fully owned by this module** — any function
+that calls :func:`reevaluate_pricing_tags` will add missing tags and
+remove stale ones based on live pricing data.
+
+Adding a new tier is a one-line change: append a row to ``PRICING_TIERS``
+and every code path re-evaluates automatically.
+"""
+
+from lib.log import get_logger
+
+logger = get_logger(__name__)
+
+# ══════════════════════════════════════════════════════════════
+#  Pricing tier table — single source of truth
+# ══════════════════════════════════════════════════════════════
+# Each row: (tag, input_max_per_1m, output_max_per_1m).
+# A model earns the tag when its input price < input_max AND its output
+# price < output_max (both strict).  When only a blended $/1K cost is
+# available, we compare blended_1m <= (input_max + output_max) / 2.
+#
+# Reference for 'cheap' bracket: Claude Sonnet 4.6 — input $3/1M,
+# output $15/1M.  A model strictly cheaper on both axes is "cheap".
+PRICING_TIERS: list[tuple[str, float, float]] = [
+    ('cheap', 3.0, 15.0),
+    # Future tiers go here, e.g.:
+    # ('ultra_cheap', 0.5, 2.0),
+    # ('mid',         10.0, 40.0),
+]
+
+# Tier tags whose presence/absence is managed by reevaluate_pricing_tags.
+# Never put operational capability tags (text / vision / thinking / …) here.
+MANAGED_TIER_TAGS: frozenset[str] = frozenset(tag for tag, *_ in PRICING_TIERS)
+
+# Caps that indicate a non-chat model — pricing tier tags never apply. Any
+# stale managed tags are actively removed from these models so persisted
+# catalogue data cannot misrepresent cost metadata as chat protocol support.
+# Single
+# source of truth is lib.model_info.capability_taxonomy — this alias imports
+# the dispatcher-shaped set (includes 'audio_chat', which matters for the
+# subset check above). Keep debug/reeval_pricing_tags.py skip-sets in sync.
+from lib.model_info.capability_taxonomy import (
+    DISPATCHER_NON_CHAT_CAPS as _NON_CHAT_CAPS,
+)
+
+
+def _resolve_prices(model_id: str,
+                    input_price: float = None,
+                    output_price: float = None) -> tuple[float | None, float | None]:
+    """Return (input, output) per-1M USD for *model_id*.
+
+    Explicit args win over the MODEL_PRICING table lookup.  Returns
+    ``(None, None)`` when neither source yields both values.
+    """
+    inp, out = input_price, output_price
+    if inp is None or out is None:
+        try:
+            from lib.pricing import pricing_for_model
+        except Exception as e:
+            logger.debug('[PricingTiers] MODEL_PRICING unavailable: %s', e)
+            return inp, out
+        pricing = pricing_for_model(model_id)
+        if pricing:
+            if inp is None:
+                inp = pricing.get('input')
+            if out is None:
+                out = pricing.get('output')
+    return inp, out
+
+
+def _tier_matches(tier: tuple[str, float, float],
+                  inp: float | None,
+                  out: float | None,
+                  fallback_cost_per_1k: float | None) -> bool:
+    """Return True if the given prices place the model inside *tier*."""
+    _tag, in_max, out_max = tier
+    if inp is not None and out is not None:
+        return inp < in_max and out < out_max
+    if fallback_cost_per_1k is not None and fallback_cost_per_1k > 0:
+        blended_1m = fallback_cost_per_1k * 1000.0
+        # Symmetric-pricing fallback: midpoint threshold.
+        return blended_1m <= (in_max + out_max) / 2.0
+    return False
+
+
+def get_pricing_tiers(model_id: str,
+                      fallback_cost_per_1k: float = None,
+                      input_price: float = None,
+                      output_price: float = None) -> set[str]:
+    """Return the set of tier tags that apply to *model_id*.
+
+    Returns the empty set for models with no pricing data, or when the
+    model is strictly more expensive than every tier's thresholds.
+    Callers MUST skip non-chat models (image_gen / embedding) themselves
+    — this function does not know a model's other capabilities.
+    """
+    inp, out = _resolve_prices(model_id, input_price, output_price)
+    tags: set[str] = set()
+    for tier in PRICING_TIERS:
+        if _tier_matches(tier, inp, out, fallback_cost_per_1k):
+            tags.add(tier[0])
+    return tags
+
+
+def _row_price_usd(m: dict, top_key: str, nested_key: str):
+    """Shared resolver behind _model_input_price / _model_output_price.
+
+    Top-level ``input_price`` / ``output_price`` (auto-discovery, OpenRouter
+    enrichment) are always USD. Values taken from the nested ``pricing``
+    override honor its declared ``currency`` — registration accepts CNY rows
+    (lib.model_registration converts for cost accounting), so tier evaluation
+    must convert too or a ¥-priced row is compared raw against USD brackets.
+    """
+    v = m.get(top_key)
+    if v is not None:
+        return v
+    pinfo = m.get('pricing')
+    if not isinstance(pinfo, dict):
+        return None
+    v = pinfo.get(nested_key)
+    if (v is not None and isinstance(v, (int, float))
+            and str(pinfo.get('currency') or 'USD').upper() == 'CNY'):
+        try:
+            from lib.pricing import DEFAULT_USD_CNY_RATE
+        except ImportError:
+            DEFAULT_USD_CNY_RATE = 7.24
+        v = v / DEFAULT_USD_CNY_RATE
+    return v
+
+
+def _model_input_price(m: dict):
+    """Resolve a model entry's per-1M input price (USD) from its on-disk shapes.
+
+    Top-level ``input_price`` is what auto-discovery/OpenRouter enrichment
+    writes; the nested ``pricing: {input, output, …}`` dict is the
+    per-provider override a user (or a provider template) declares — the same
+    dict ``routes/config.py`` registers into ``PROVIDER_PRICING`` so cost
+    accounting honors it. Tier evaluation must see BOTH or a user-set price
+    silently fails to update the 'cheap' tag.
+    """
+    return _row_price_usd(m, 'input_price', 'input')
+
+
+def _model_output_price(m: dict):
+    """Output-price twin of :func:`_model_input_price`."""
+    return _row_price_usd(m, 'output_price', 'output')
+
+
+def reevaluate_pricing_tags(models: list[dict], *, log_prefix: str = '',
+                            strip_unpriced: bool = True) -> dict:
+    """Re-evaluate all managed pricing-tier tags on *models* in place.
+
+    For each model dict, computes the desired tier-tag set from live
+    pricing data (``input_price`` / ``output_price`` → ``MODEL_PRICING``
+    → ``cost`` blended fallback) and rewrites the model's
+    ``capabilities`` list so every tag in :data:`MANAGED_TIER_TAGS`
+    matches the desired set.  Non-tier capabilities (text / vision /
+    thinking / image_gen / embedding / …) are left untouched.
+
+    Non-chat models (image_gen / embedding / audio-only caps) keep their
+    operational capabilities but lose any stale managed pricing tags.
+
+    Args:
+        models: List of model dicts with at least ``model_id`` and
+            ``capabilities`` keys.  May also carry ``input_price``,
+            ``output_price``, ``cost``.  Mutated in place.
+        log_prefix: Optional prefix for log messages (e.g. a provider
+            id) — shown as ``[PricingTags] <prefix> …`` in logs.
+        strip_unpriced: When True (default), a model with no pricing evidence
+            anywhere loses managed tags it carries. Pass False at authoring
+            seams (provider-template onboarding) so a hand-declared tag
+            survives until pricing data exists to confirm or refute it.
+
+    Returns:
+        ``{'added': {tag: n, …}, 'removed': {tag: n, …}, 'changed': n,
+          'total': n}`` — per-tag counts of models that gained / lost
+        each managed tag, plus totals.
+    """
+    added: dict[str, int] = {t: 0 for t in MANAGED_TIER_TAGS}
+    removed: dict[str, int] = {t: 0 for t in MANAGED_TIER_TAGS}
+    changed = 0
+
+    for m in models:
+        mid = m.get('model_id', '')
+        if not mid:
+            continue
+        caps_raw = m.get('capabilities') or []
+        caps = set(caps_raw) if isinstance(caps_raw, (list, set, tuple)) else {'text'}
+
+        # Non-chat models never carry pricing tiers. Merely skipping them
+        # preserves stale tags from older catalogues; strip those tags so a
+        # persisted {embedding, cheap} record cannot leak into chat routing.
+        if caps & _NON_CHAT_CAPS:
+            stale_tier_tags = caps & MANAGED_TIER_TAGS
+            if stale_tier_tags:
+                for tag in stale_tier_tags:
+                    caps.discard(tag)
+                    removed[tag] += 1
+                m['capabilities'] = sorted(caps)
+                changed += 1
+            continue
+
+        row_inp = _model_input_price(m)
+        row_out = _model_output_price(m)
+        if not strip_unpriced:
+            eff_inp, eff_out = _resolve_prices(mid, row_inp, row_out)
+            has_evidence = (eff_inp is not None and eff_out is not None) \
+                or bool(m.get('cost'))
+            if not has_evidence:
+                continue
+        desired = get_pricing_tiers(
+            mid,
+            fallback_cost_per_1k=m.get('cost'),
+            input_price=row_inp,
+            output_price=row_out,
+        )
+
+        current_tier_tags = caps & MANAGED_TIER_TAGS
+        if current_tier_tags == desired:
+            continue
+
+        # Apply diff: strip any managed tag not desired, add any desired tag missing.
+        for tag in MANAGED_TIER_TAGS - desired:
+            if tag in caps:
+                caps.discard(tag)
+                removed[tag] += 1
+        for tag in desired - current_tier_tags:
+            caps.add(tag)
+            added[tag] += 1
+
+        m['capabilities'] = sorted(caps)
+        changed += 1
+
+    if changed:
+        parts = []
+        for tag in sorted(MANAGED_TIER_TAGS):
+            a, r = added.get(tag, 0), removed.get(tag, 0)
+            if a or r:
+                parts.append('%s +%d/-%d' % (tag, a, r))
+        summary = ', '.join(parts) or 'no net change'
+        prefix = ('%s ' % log_prefix) if log_prefix else ''
+        logger.info('[PricingTags] %sre-evaluated %d/%d models: %s',
+                    prefix, changed, len(models), summary)
+
+    return {
+        'added': added,
+        'removed': removed,
+        'changed': changed,
+        'total': len(models),
+    }

@@ -1,0 +1,3 @@
+include rust/kernel.rs
+include setup.py
+include README.md

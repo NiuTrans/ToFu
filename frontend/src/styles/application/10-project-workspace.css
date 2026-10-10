@@ -1,0 +1,109 @@
+/* ── Left pane: docked browser fills the column, list scrolls inside ── */
+.pm-browser-pane { display: flex; min-width: 0; min-height: 0; }
+.pm-browser-pane .folder-browser {
+  flex: 1; display: flex; flex-direction: column;
+  margin-bottom: 0; min-height: 0;
+  border-radius: var(--radius);
+}
+.pm-browser-pane .folder-browser-list { flex: 1 1 auto; max-height: none; min-height: 0; }
+.pm-browser-pane .folder-browser-header,
+.pm-browser-pane .folder-browser-footer { flex-shrink: 0; }
+.folder-browser-hint {
+  flex: 1; font-size: var(--font-size-xs); color: var(--text-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.folder-browser-footer .btn { display: inline-flex; align-items: center; gap: 5px; }
+
+/* Pinned status + action bar — never scrolls away */
+.pm-workbench #projectModalStatus:not(:empty) { flex-shrink: 0; margin: 0 var(--space-6); }
+.pm-workbench .modal-actions {
+  flex-shrink: 0; margin: 0; padding: 14px var(--space-6);
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.pm-apply-hint {
+  flex: 1 1 260px;
+  margin-right: auto;
+  color: var(--text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  text-align: left;
+}
+
+/* ── Section card ── */
+.pm-section {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px var(--space-4);
+  margin-bottom: var(--space-3);
+}
+.pm-section-label {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: var(--font-size-xs); font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: 10px;
+}
+
+/* ── Multi-path folder tags ── */
+.mp-empty-hint {
+  color: var(--text-tertiary);
+  font-size: var(--font-size-sm);
+  font-style: italic;
+  padding: var(--space-1) 0;
+}
+
+/* ── Add path row ── */
+.mp-add-row {
+  display: flex; gap: var(--space-2); align-items: center;
+  flex-shrink: 0;
+}
+.pm-rail-workspace .mp-add-row { margin-bottom: 10px; }
+.mp-add-row .mp-path-input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg, var(--bg-secondary));
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-family: 'JetBrains Mono', monospace;
+  margin: 0;
+}
+.mp-add-row .mp-path-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+.mp-add-row .mp-path-input::placeholder { font-family: inherit; color: var(--text-tertiary); }
+/* Tofu: match the input's box model to the neo-brutalist Add button so the pair reads as one unit */
+[data-theme="tofu"] .mp-add-row .mp-path-input {
+  border: 2px solid #1a1814;
+  border-radius:var(--radius-sm);
+  background: #F5F3ED;
+}
+[data-theme="tofu"] .mp-add-row .mp-path-input:focus {
+  border-color: #1a1814;
+  box-shadow:var(--clay-sm);
+}
+
+/* legacy compat — older .project-path-row markup */
+.btn-icon {
+  width: 38px; min-width: 38px; height: 36px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
+}
+.btn-icon:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-light);
+}
+

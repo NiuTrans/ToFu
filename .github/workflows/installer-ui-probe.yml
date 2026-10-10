@@ -1,0 +1,59 @@
+# installer-ui-probe.yml — pixel-level runtime verification of the custom
+# NSIS wizard on a REAL Windows runner (manual dispatch only).
+#
+# Why this exists (2026-08-07 blank-wizard hunt): the build box's wine
+# cannot run 32-bit apps (SIGSYS), so every wizard fix since the 2026-08-04
+# redesign shipped with "first pixel proof rides the owner's real-machine
+# acceptance" — two hypothesis fixes died that way (Z-order pin, opaque
+# labels). This workflow closes the loop: build the TOFU_DIAG installer
+# variant with a stub payload (the wizard pages are payload-independent),
+# drive it with debug/win_ci_shot.py (PrintWindow frames per page +
+# BM_CLICK page turns + nav-button text readback), and upload the frames,
+# the buttons/summary JSON, and the %TEMP% diag log as artifacts.
+#
+# It is MANUAL on purpose: it is a diagnostic instrument, not a gate —
+# trigger it when the wizard's runtime behavior is in question.
+name: installer-ui-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'NSI target to probe (agent = TofuAgent wizard)'
+        required: true
+        default: 'agent'
+        type: choice
+        options: ['agent', 'full']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the probe's only pip dependency
+        run: pip install pillow
+
+      - name: Install NSIS
+        run: choco install nsis -y
+
+      - name: Build the diag installer and drive the wizard
+        shell: pwsh
+        run: |
+          python debug/win_ci_shot.py --out probe-out --target "${{ inputs.target }}"
+
+      - name: Upload the probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wizard-probe-${{ inputs.target }}
+          path: probe-out/
+          if-no-files-found: warn

@@ -1,0 +1,170 @@
+/* ── Recent project paths (lives inside a .pm-section) ── */
+.recent-paths { margin: 0; }
+/* Clear-all button — sits at the right edge of the .pm-section-label header */
+.recent-paths .recent-paths-clear {
+  margin-left: auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0;
+  background: none; border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+  transition: color 0.15s, background-color 0.15s;
+}
+.recent-paths .recent-paths-clear:hover {
+  background: rgba(239, 68, 68, 0.10);
+  color: #ef4444;
+}
+
+/* Search box — mirrors the Workspace add-row input for a unified look */
+.recent-search {
+  position: relative;
+  display: flex; align-items: center;
+  margin-bottom: 10px; flex-shrink: 0;
+}
+/* Folder-browser filter row — reuses the recent-search input/clear component
+   (including its .modal-input specificity guards), just re-framed as a row
+   under the browser header. */
+.browse-search {
+  margin-bottom: 0;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+/* Selector is chained (.recent-search .recent-search-input → (0,2,0)) because the
+   base `.modal input` bleed (styles.css .modal mega-line, (0,1,1)) out-specifies a
+   bare .recent-search-input (0,1,0): its margin-bottom:16px inflated .recent-search
+   to 48px and dropped the absolute clear button ~8px below the input's true middle
+   (and its padding:10px 12px killed the 30px right padding that clears the button).
+   Mirrors the .mp-add-row .mp-path-input pattern. Guarded by
+   tests/search/test_recent_search_tofu_specificity.py. */
+.recent-search .recent-search-input {
+  flex: 1; min-width: 0;
+  padding: 6px 30px 6px var(--space-3);
+  height: 32px; box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg, var(--bg-secondary));
+  color: var(--text-primary);
+  font-size: 12.5px; line-height: 20px;
+  font-family: 'JetBrains Mono', monospace;
+  margin: 0;
+}
+.recent-search .recent-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+.recent-search .recent-search-input::placeholder { color: var(--text-tertiary); font-family: inherit; }
+.recent-search-clear {
+  position: absolute; right: 6px;
+  top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0;
+  background: none; border: none;
+  color: var(--text-tertiary); cursor: pointer;
+  border-radius: 50%;
+  transition: color 0.15s, background-color 0.15s;
+}
+/* Respect the [hidden] attr — the class rule's explicit display must not win over it */
+.recent-search-clear[hidden] { display: none; }
+.recent-search-clear:hover { color: var(--text-primary); background: var(--bg-hover); }
+/* Kill the SVG baseline descender gap so the ✕ sits dead-center in the flex box */
+.recent-search-clear > svg { display: block; }
+
+/* Matched-substring highlight in results */
+.recent-hl {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* Empty / no-match state */
+.recent-paths-empty {
+  padding: 14px var(--space-1);
+  text-align: center;
+  font-size: var(--font-size-sm);
+  color: var(--text-tertiary);
+}
+.recent-paths-list {
+  display: flex; flex-direction: column;
+  gap: var(--space-1);
+  flex: 1 1 auto; overflow-y: auto; min-height: 0;
+  scrollbar-width: thin;
+  margin: 0 -6px; padding: 0 6px;
+}
+.recent-path-item {
+  display: flex; align-items: center;
+  gap: var(--space-2);
+  padding: 7px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  min-width: 0;
+  transition: color 0.12s, background-color 0.12s, border-color 0.12s;
+}
+.recent-path-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+.recent-path-text {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.recent-path-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-path-item:hover .recent-path-name { color: var(--accent); }
+
+.recent-path-item.recent-path-missing { opacity: 0.75; border-style: dashed; }
+.recent-path-item.recent-path-missing:hover .recent-path-name { color: var(--error-text, #c0392b); }
+.recent-missing-badge {
+  margin-left: 6px; padding: 0 5px; font-size: 10px; line-height: 16px;
+  border-radius: 4px; background: var(--error-bg, rgba(192, 57, 43, 0.12));
+  color: var(--error-text, #c0392b); vertical-align: 1px;
+}
+.pm-hint {
+  display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2);
+  padding: var(--space-2) 10px; font-size: var(--font-size-sm); border-radius: var(--radius-xs);
+  border: 1px solid var(--border, #d8d2c4);
+  background: var(--bg-hover, rgba(0, 0, 0, 0.03));
+}
+.pm-hint-text { flex: 1; word-break: break-all; }
+.pm-hint-btn {
+  flex: none; padding: 3px 10px; font-size: var(--font-size-sm); cursor: pointer;
+  border-radius: var(--radius-xs); border: 1px solid var(--border, #d8d2c4);
+  background: transparent; color: inherit;
+}
+.pm-hint-btn-primary {
+  background: var(--accent); color: #fff; border-color: transparent;
+}
+.recent-path-full {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+.recent-path-count {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  background: var(--bg-secondary);
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+#projectModalStatus:not(:empty) {
+  margin: var(--space-1) 0 var(--space-3);
+}
+

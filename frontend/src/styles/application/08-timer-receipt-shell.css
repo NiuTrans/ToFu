@@ -1,0 +1,75 @@
+/* Timer receipt shell, explicit state and identity. Metadata and checks own their own bodies. */
+.timer-watcher-block {
+  margin: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: var(--font-size-md)/var(--leading-body) var(--font-ui);
+  overflow: hidden;
+}
+.timer-watcher-active, .timer-watcher-orphaned { border-color: var(--warning-border); }
+.timer-watcher-triggered { border-color: var(--success-border); }
+.timer-watcher-warn { border-color: var(--error-border); }
+.timer-watcher-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  min-block-size: var(--control-h-md);
+  border-bottom: var(--control-edge-inset) solid var(--border);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  touch-action: manipulation;
+}
+.timer-watcher-header:hover { background: var(--bg-hover); }
+.timer-watcher-header:focus-visible,
+.timer-meta-row-instr:focus-visible,
+.timer-poll-has-detail:focus-visible {
+  outline: calc(2 * var(--control-edge-inset)) solid var(--accent);
+  outline-offset: calc(-1 * var(--control-edge-inset));
+}
+.timer-watcher-icon { display: inline-flex; flex: 0 0 auto; color: var(--text-secondary); }
+.timer-watcher-active .timer-watcher-icon, .timer-watcher-orphaned .timer-watcher-icon { color: var(--warning-text); }
+.timer-watcher-triggered .timer-watcher-icon { color: var(--success-text); }
+.timer-watcher-warn .timer-watcher-icon { color: var(--error-text); }
+.timer-watcher-label { flex: 1 1 12ch; min-inline-size: 0; font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.timer-toggle { display: inline-flex; flex: 0 0 auto; color: var(--text-secondary); transition: transform var(--motion-fast) var(--ease-standard); }
+.timer-watcher-header[aria-expanded="false"] .timer-toggle { transform: rotate(-90deg); }
+.timer-watcher-body { display: none; padding: var(--space-2) var(--space-3); }
+.timer-watcher-body.expanded { display: block; }
+.timer-id-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-block-size: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font: var(--font-size-sm)/var(--leading-title) var(--font-mono);
+  cursor: pointer;
+}
+.timer-id-chip:hover, .timer-id-chip.copied { color: var(--text-primary); border-color: var(--accent); }
+.timer-id-chip:focus-visible { outline: calc(2 * var(--control-edge-inset)) solid var(--accent); outline-offset: var(--space-1); }
+.timer-id-txt { max-inline-size: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timer-kind-badge, .timer-poll-toolcount, .timer-poll-model, .timer-poll-id {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-1);
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+.timer-kind-badge { flex: 0 0 auto; }
+.timer-kind-code { color: var(--success-text); border-color: var(--success-border); }
+.timer-kind-hybrid { color: var(--info-text); border-color: var(--info-border); }

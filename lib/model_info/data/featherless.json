@@ -1,0 +1,16 @@
+{
+  "brand": "featherless",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "featherless",
+  "category": "relay",
+  "name": "Featherless AI",
+  "base_url": "https://api.featherless.ai/v1",
+  "catalog_source": {"url": "https://featherless.ai/docs/getting-started", "checked_at": "2026-09-08"},
+  "catalog_mode": "curated",
+  "offering_recipes": [
+    {"model_id": "Qwen/Qwen3.5-9B", "capabilities": ["text"]},
+    {"model_id": "Qwen/Qwen3.6-27B", "capabilities": ["text"]},
+    {"model_id": "meta-llama/Llama-3.3-70B-Instruct", "capabilities": ["text"]},
+    {"model_id": "Qwen/Qwen2.5-7B-Instruct", "capabilities": ["text"]}
+  ]
+}

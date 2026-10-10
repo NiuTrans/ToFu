@@ -1,0 +1,5142 @@
+{
+  "scope": "Frozen current tracked source plus prior caller closure; full before/after file hashes and runtime Python imports checked. Original1000x4x8192 uncoalesced one-second scheduled harness. One window per transport, no causal comparison to SDK67. Embedded abandonment is not SIGKILL. No live store changes.",
+  "build": {
+    "source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+    "library_sha256": "aff0e80251f1d4ffaf90552f0788a01de0b2b5954f7c53548d9ee51d3643c3cb",
+    "scope": "Current refreshed full-caller baseline; no deployment"
+  },
+  "rows": [
+    {
+      "label": "current-embedded-0",
+      "report": {
+        "format": "tofu.conversation-concurrency/v2",
+        "backend": "tofudb",
+        "restart_while_running": true,
+        "requested_native_profile_every": "0",
+        "stream_interval_ms": 1000.0,
+        "stream_event_kind": "phase",
+        "carry_stream_events": true,
+        "terminal_barrier": false,
+        "rpc_deadline_seconds": 30,
+        "arrival_model": "fixed-schedule-per-conversation; queue delay included even when prior events are late",
+        "benchmark_source_sha256": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+        "scope": "production-executor-and-durable-turns-with-barrier-provider",
+        "conversations": 1000,
+        "rounds": 4,
+        "chunk_bytes": 8192,
+        "recover_interrupted": false,
+        "filesystem": "xfs",
+        "durability": "strict",
+        "binary_sha256": "d29d1b05d6fa80c2df0f6617a375193386670ceba0ab1b2a8de251530292ec80",
+        "phase_ms": {
+          "productive": 11548.48900437355,
+          "recovery_readback": 476.0662391781807,
+          "executor_shutdown": 60.69263815879822,
+          "sampler_stop": 0.22714585065841675,
+          "verification": 7929.043121635914,
+          "final_freeze": 0.016108155250549316,
+          "cleanup": 683.967262506485
+        },
+        "resource_observation_scope": "productive workload and recovery readback; excludes offline verification and cleanup",
+        "authority": {
+          "backend": "tofudb",
+          "authority_directory": "/tmp/tofudb-perf-authority-at_2rjx5",
+          "filesystem": "xfs",
+          "durability": "strict",
+          "rpc_deadline_seconds": 30.0,
+          "crash_scope": "in-process-abandon",
+          "build_identity": {
+            "embedded_allocator": "mimalloc",
+            "format": "tofu-db-build.v1",
+            "source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+            "version": "0.2.0"
+          },
+          "checkout_source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+          "source_matches_checkout": true,
+          "client_mode": "embedded",
+          "shared_library_sha256": "aff0e80251f1d4ffaf90552f0788a01de0b2b5954f7c53548d9ee51d3643c3cb",
+          "embedded_build_identity": {
+            "source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7"
+          }
+        },
+        "engine_logs": [
+          null,
+          null,
+          null
+        ],
+        "readiness_observation": {
+          "probes": 20,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "client_peak_rss_bytes": 2319659008,
+        "engine_peak_rss_bytes": 2320019456,
+        "peak_simultaneous_running": 1000,
+        "admission_seconds": 1.6661120876669884,
+        "client_rss_bytes_at_barrier": 457138176,
+        "engine_rss_bytes_at_barrier": 457138176,
+        "admission_storage_metrics": {
+          "authority": {
+            "contendedMilliseconds": 0,
+            "wedged": false
+          },
+          "backend": "tofudb",
+          "backgroundPacker": {
+            "discardedBytes": 0,
+            "discardedSegments": 0,
+            "failedRounds": 0,
+            "failedWalRetirements": 0,
+            "foregroundDrainUnpaces": 0,
+            "pacingWaitNanoseconds": 0,
+            "pacingWaits": 0,
+            "packedBytes": 25192805,
+            "packedSegments": 3,
+            "retiredWals": 2
+          },
+          "backgroundPackerPacing": {
+            "adaptive": true,
+            "paceBytesPerSecond": null
+          },
+          "canonicalJsonProofCache": {
+            "accountedBytes": 0,
+            "available": true,
+            "capacityBytes": 33554432,
+            "entries": 0,
+            "evictions": 0,
+            "hits": 0,
+            "maximumEntries": 65528,
+            "misses": 0,
+            "recencyEntries": 0
+          },
+          "commitStages": [
+            {
+              "calls": 3006,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 19823988
+                },
+                {
+                  "calls": 6,
+                  "component": "maintenance",
+                  "totalNanos": 37544
+                }
+              ],
+              "stage": "prepare",
+              "totalNanos": 19861532
+            },
+            {
+              "calls": 3006,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 214049809
+                },
+                {
+                  "calls": 6,
+                  "component": "maintenance",
+                  "totalNanos": 298076
+                }
+              ],
+              "stage": "engine_commit",
+              "totalNanos": 214347885
+            },
+            {
+              "calls": 3006,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 188951094
+                },
+                {
+                  "calls": 6,
+                  "component": "maintenance",
+                  "totalNanos": 46114
+                }
+              ],
+              "stage": "apply",
+              "totalNanos": 188997208
+            },
+            {
+              "calls": 45,
+              "components": [
+                {
+                  "calls": 45,
+                  "component": "maintenance",
+                  "totalNanos": 150199649
+                }
+              ],
+              "stage": "apply_batch",
+              "totalNanos": 150199649
+            },
+            {
+              "calls": 3048,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 127006972
+                },
+                {
+                  "calls": 48,
+                  "component": "maintenance",
+                  "totalNanos": 45673978
+                }
+              ],
+              "stage": "wal",
+              "totalNanos": 172680950
+            },
+            {
+              "calls": 3048,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 16799718
+                },
+                {
+                  "calls": 48,
+                  "component": "maintenance",
+                  "totalNanos": 21222219
+                }
+              ],
+              "stage": "encode",
+              "totalNanos": 38021937
+            },
+            {
+              "calls": 3048,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 2231720
+                },
+                {
+                  "calls": 48,
+                  "component": "maintenance",
+                  "totalNanos": 2556769
+                }
+              ],
+              "stage": "carried",
+              "totalNanos": 4788489
+            },
+            {
+              "calls": 3001,
+              "components": [
+                {
+                  "calls": 3001,
+                  "component": "foreground",
+                  "totalNanos": 1034623931
+                }
+              ],
+              "stage": "ir_steps",
+              "totalNanos": 1034623931
+            },
+            {
+              "calls": 3001,
+              "components": [
+                {
+                  "calls": 3001,
+                  "component": "foreground",
+                  "totalNanos": 965835424
+                }
+              ],
+              "stage": "ir_commit",
+              "totalNanos": 965835424
+            },
+            {
+              "calls": 504549,
+              "components": [
+                {
+                  "calls": 491163,
+                  "component": "foreground",
+                  "totalNanos": 389595849
+                },
+                {
+                  "calls": 13386,
+                  "component": "maintenance",
+                  "totalNanos": 18579189
+                }
+              ],
+              "stage": "load_node",
+              "totalNanos": 408175038
+            },
+            {
+              "calls": 18471,
+              "components": [
+                {
+                  "calls": 18471,
+                  "component": "maintenance",
+                  "totalNanos": 72496615
+                }
+              ],
+              "stage": "store_page",
+              "totalNanos": 72496615
+            },
+            {
+              "calls": 18518,
+              "components": [
+                {
+                  "calls": 5,
+                  "component": "foreground",
+                  "totalNanos": 3871402
+                },
+                {
+                  "calls": 18513,
+                  "component": "maintenance",
+                  "totalNanos": 8151298
+                }
+              ],
+              "stage": "put_deferred",
+              "totalNanos": 12022700
+            },
+            {
+              "calls": 5244,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "foreground",
+                  "totalNanos": 21987
+                },
+                {
+                  "calls": 3,
+                  "component": "rotation_driver",
+                  "totalNanos": 9490418
+                },
+                {
+                  "calls": 5237,
+                  "component": "background_packer",
+                  "totalNanos": 8824017
+                }
+              ],
+              "stage": "block_get",
+              "totalNanos": 18336422
+            },
+            {
+              "calls": 3006,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 38241814
+                },
+                {
+                  "calls": 6,
+                  "component": "maintenance",
+                  "totalNanos": 14478
+                }
+              ],
+              "stage": "builder",
+              "totalNanos": 38256292
+            },
+            {
+              "calls": 3048,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 22358824
+                },
+                {
+                  "calls": 48,
+                  "component": "maintenance",
+                  "totalNanos": 835155
+                }
+              ],
+              "stage": "checkpoint_if",
+              "totalNanos": 23193979
+            },
+            {
+              "calls": 3048,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 13705903
+                },
+                {
+                  "calls": 48,
+                  "component": "maintenance",
+                  "totalNanos": 224374
+                }
+              ],
+              "stage": "commit_tail",
+              "totalNanos": 13930277
+            },
+            {
+              "calls": 5244,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "foreground",
+                  "totalNanos": 379
+                },
+                {
+                  "calls": 3,
+                  "component": "rotation_driver",
+                  "totalNanos": 2391
+                },
+                {
+                  "calls": 5237,
+                  "component": "background_packer",
+                  "totalNanos": 1438938
+                }
+              ],
+              "stage": "get_pending",
+              "totalNanos": 1441708
+            },
+            {
+              "calls": 5,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "foreground",
+                  "totalNanos": 3187
+                },
+                {
+                  "calls": 1,
+                  "component": "rotation_driver",
+                  "totalNanos": 618
+                }
+              ],
+              "stage": "get_cache",
+              "totalNanos": 3805
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 14899
+                },
+                {
+                  "calls": 1,
+                  "component": "rotation_driver",
+                  "totalNanos": 4085107
+                }
+              ],
+              "stage": "get_unc_ok",
+              "totalNanos": 4100006
+            },
+            {
+              "calls": 4,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "foreground",
+                  "totalNanos": 4734
+                }
+              ],
+              "stage": "put_stage",
+              "totalNanos": 4734
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "background_packer",
+                  "totalNanos": 5379888
+                }
+              ],
+              "stage": "ck_remove",
+              "totalNanos": 5379888
+            },
+            {
+              "calls": 4,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "rotation_driver",
+                  "totalNanos": 407377
+                }
+              ],
+              "stage": "flush_dirty",
+              "totalNanos": 407377
+            },
+            {
+              "calls": 27,
+              "components": [
+                {
+                  "calls": 25,
+                  "component": "foreground",
+                  "totalNanos": 20847045
+                },
+                {
+                  "calls": 2,
+                  "component": "maintenance",
+                  "totalNanos": 809659
+                }
+              ],
+              "stage": "history_stage",
+              "totalNanos": 21656704
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "pack_adoption_driver",
+                  "totalNanos": 145451
+                }
+              ],
+              "stage": "pack_retire",
+              "totalNanos": 145451
+            },
+            {
+              "calls": 3,
+              "components": [
+                {
+                  "calls": 3,
+                  "component": "background_packer",
+                  "totalNanos": 72095
+                }
+              ],
+              "stage": "pack_filter",
+              "totalNanos": 72095
+            },
+            {
+              "calls": 3003,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 460987
+                },
+                {
+                  "calls": 3,
+                  "component": "maintenance",
+                  "totalNanos": 232
+                }
+              ],
+              "stage": "ta_prepare_merge",
+              "totalNanos": 461219
+            },
+            {
+              "calls": 3003,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 12267200
+                },
+                {
+                  "calls": 3,
+                  "component": "maintenance",
+                  "totalNanos": 5784
+                }
+              ],
+              "stage": "ta_prepare_fast",
+              "totalNanos": 12272984
+            },
+            {
+              "calls": 6037,
+              "components": [
+                {
+                  "calls": 6037,
+                  "component": "foreground",
+                  "totalNanos": 63575823358
+                }
+              ],
+              "stage": "authority_wait",
+              "totalNanos": 63575823358
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 409643
+                }
+              ],
+              "stage": "command_execute",
+              "totalNanos": 409643
+            },
+            {
+              "calls": 3000,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 16750847
+                }
+              ],
+              "stage": "wal_barrier_wait",
+              "totalNanos": 16750847
+            },
+            {
+              "calls": 58074,
+              "components": [
+                {
+                  "calls": 58024,
+                  "component": "foreground",
+                  "totalNanos": 62625406
+                },
+                {
+                  "calls": 50,
+                  "component": "maintenance",
+                  "totalNanos": 11412
+                }
+              ],
+              "stage": "overlay_point",
+              "totalNanos": 62636818
+            },
+            {
+              "calls": 12001,
+              "components": [
+                {
+                  "calls": 11986,
+                  "component": "foreground",
+                  "totalNanos": 1253748
+                },
+                {
+                  "calls": 15,
+                  "component": "maintenance",
+                  "totalNanos": 1229
+                }
+              ],
+              "stage": "overlay_view",
+              "totalNanos": 1254977
+            },
+            {
+              "calls": 3000,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 1122264616
+                }
+              ],
+              "stage": "parallel_prepare",
+              "totalNanos": 1122264616
+            },
+            {
+              "calls": 3000,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 965085728
+                }
+              ],
+              "stage": "parallel_commit",
+              "totalNanos": 965085728
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "parallel_fallback",
+              "totalNanos": 0
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "parallel_commit_busy",
+              "totalNanos": 0
+            },
+            {
+              "calls": 2610,
+              "components": [
+                {
+                  "calls": 2610,
+                  "component": "foreground",
+                  "totalNanos": 75201830923
+                }
+              ],
+              "stage": "parallel_snapshot_wait",
+              "totalNanos": 75201830923
+            },
+            {
+              "calls": 18,
+              "components": [
+                {
+                  "calls": 18,
+                  "component": "rotation_driver",
+                  "totalNanos": 64275741
+                }
+              ],
+              "stage": "history_decode",
+              "totalNanos": 64275741
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 1150
+                }
+              ],
+              "stage": "overlay_replay",
+              "totalNanos": 1150
+            },
+            {
+              "calls": 7,
+              "components": [
+                {
+                  "calls": 5,
+                  "component": "foreground",
+                  "totalNanos": 0
+                },
+                {
+                  "calls": 2,
+                  "component": "rotation_driver",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "pack_filter_incomplete",
+              "totalNanos": 0
+            },
+            {
+              "calls": 42,
+              "components": [
+                {
+                  "calls": 42,
+                  "component": "maintenance",
+                  "totalNanos": 76673
+                }
+              ],
+              "stage": "overlay_prepare_capture",
+              "totalNanos": 76673
+            },
+            {
+              "calls": 42,
+              "components": [
+                {
+                  "calls": 42,
+                  "component": "maintenance",
+                  "totalNanos": 280650483
+                }
+              ],
+              "stage": "overlay_prepare_encode",
+              "totalNanos": 280650483
+            },
+            {
+              "calls": 42,
+              "components": [
+                {
+                  "calls": 42,
+                  "component": "maintenance",
+                  "totalNanos": 153548225
+                }
+              ],
+              "stage": "overlay_prepare_publish",
+              "totalNanos": 153548225
+            },
+            {
+              "calls": 3043,
+              "components": [
+                {
+                  "calls": 3043,
+                  "component": "wal_barrier",
+                  "totalNanos": 197184000
+                }
+              ],
+              "stage": "wal_barrier_sync",
+              "totalNanos": 197184000
+            },
+            {
+              "calls": 6,
+              "components": [
+                {
+                  "calls": 6,
+                  "component": "wal_barrier",
+                  "totalNanos": 345
+                }
+              ],
+              "stage": "wal_barrier_reschedule",
+              "totalNanos": 345
+            },
+            {
+              "calls": 504549,
+              "components": [
+                {
+                  "calls": 491163,
+                  "component": "foreground",
+                  "totalNanos": 138894630
+                },
+                {
+                  "calls": 13386,
+                  "component": "maintenance",
+                  "totalNanos": 2127459
+                }
+              ],
+              "stage": "entity_page_cache_read_wait",
+              "totalNanos": 141022089
+            },
+            {
+              "calls": 14329,
+              "components": [
+                {
+                  "calls": 11289,
+                  "component": "foreground",
+                  "totalNanos": 9900232
+                },
+                {
+                  "calls": 3040,
+                  "component": "maintenance",
+                  "totalNanos": 3625499
+                }
+              ],
+              "stage": "entity_page_source_read",
+              "totalNanos": 13525731
+            },
+            {
+              "calls": 14329,
+              "components": [
+                {
+                  "calls": 11289,
+                  "component": "foreground",
+                  "totalNanos": 37439175
+                },
+                {
+                  "calls": 3040,
+                  "component": "maintenance",
+                  "totalNanos": 5688344
+                }
+              ],
+              "stage": "entity_page_decode",
+              "totalNanos": 43127519
+            },
+            {
+              "calls": 14329,
+              "components": [
+                {
+                  "calls": 11289,
+                  "component": "foreground",
+                  "totalNanos": 16941974
+                },
+                {
+                  "calls": 3040,
+                  "component": "maintenance",
+                  "totalNanos": 1026672
+                }
+              ],
+              "stage": "entity_page_cache_write_wait",
+              "totalNanos": 17968646
+            }
+          ],
+          "contract": "tofu-db.system-metrics.v1",
+          "decodedBlobChunkCache": {
+            "accountedBytes": 0,
+            "available": true,
+            "capacityBytes": 134217728,
+            "entries": 0,
+            "evictions": 0,
+            "hits": 0,
+            "misses": 0,
+            "recencyEntries": 0,
+            "wholeBlob": {
+              "accountedBytes": 0,
+              "available": true,
+              "capacityBytes": 33554432,
+              "entries": 0,
+              "evictions": 0,
+              "lookups": 0,
+              "manifestMatches": 0,
+              "recencyEntries": 0,
+              "reused": 0
+            }
+          },
+          "durability": {
+            "checkpoint": 2,
+            "checkpointHistoryTailBytes": 0,
+            "dropFlushFailures": 0,
+            "flushDeferred": 0,
+            "historyDecodeAttempts": 18,
+            "historyDecodeSourceBytes": 63650111,
+            "historyDecodedTransactions": 2194,
+            "maxCheckpointHistoryTailBytes": 0,
+            "maxRotationWindowBytes": 0,
+            "overlayMaterializedBlocks": 18510,
+            "overlayMaterializedBytes": 55331916,
+            "overlayMergeCommits": 42,
+            "overlayMergedEntries": 66292,
+            "overlayMergedPositions": 74716,
+            "overlaySupersededPositions": 8424,
+            "overlayWalPressureAttempts": 0,
+            "overlayWalPressurePendingEntries": 0,
+            "projectionCheckpointBytes": 0,
+            "projectionPatchBytes": 0,
+            "projectionPatchesApplied": 0,
+            "publishControl": 8,
+            "rotationWindowBytes": 0,
+            "rotationWindowTransactions": 0,
+            "walAppend": 0,
+            "walEncodedBytes": 89404206
+          },
+          "maintenance": {
+            "attemptEventPruneAttempts": 0,
+            "attemptEventPruneBacklogRounds": 0,
+            "attemptEventsPruned": 0,
+            "committedTransactions": 0,
+            "completedMounts": 0,
+            "conflictDeferrals": 0,
+            "currentIdleIntervalMilliseconds": 250,
+            "droppedTerminalRecords": 0,
+            "failedRounds": 0,
+            "foregroundDeferrals": 3,
+            "historyCompactions": 0,
+            "materializedBytes": 0,
+            "materializedRows": 0,
+            "noWorkRounds": 0,
+            "overlayBackgroundChunks": 42,
+            "overlayBackgroundWakes": 52,
+            "publishedBackgroundPacks": 0,
+            "retainedHistorySegments": 0,
+            "retiredHistorySegments": 0,
+            "rounds": 5,
+            "searchAcknowledgedTokens": 0,
+            "searchDirtyConversations": 32,
+            "searchFailedRounds": 0,
+            "searchForegroundDeferrals": 5,
+            "searchIndexedTurns": 0,
+            "searchMaximumFailureBackoffMilliseconds": 0,
+            "searchPageBudgetExhaustions": 0,
+            "searchRebuiltConversations": 0,
+            "searchRemovedConversations": 0,
+            "searchRetryDeferrals": 0,
+            "searchSkippedOversizedTurns": 0,
+            "searchSourceBytes": 0,
+            "searchSourcePages": 0,
+            "tombstoneCompactionRounds": 0,
+            "tombstoneEntriesReclaimed": 0,
+            "tombstonePagesRewritten": 0,
+            "toolResultArtifactsPruned": 0,
+            "toolResultPruneBacklogRounds": 0
+          },
+          "onlineBackup": {
+            "epoch_in_progress": false,
+            "epochs_completed": 0,
+            "epochs_failed": 0,
+            "last_error": null,
+            "last_report": null,
+            "last_success_unix_ms": null,
+            "replicated_sequence": null,
+            "replication_interval_ms": null
+          },
+          "onlineGarbageCollector": {
+            "deferred_epochs": 0,
+            "epoch_in_progress": false,
+            "epochs_completed": 0,
+            "last_epoch_duration_ms": 0,
+            "last_epoch_reclaimed_bytes": 0,
+            "marks_built": 0,
+            "total_compacted_blocks": 0,
+            "total_consolidated_victims": 0,
+            "total_consolidations": 0,
+            "total_orphan_segments_removed": 0,
+            "total_reclaimed_blocks": 0,
+            "total_reclaimed_bytes": 0,
+            "total_segments_retired": 0,
+            "total_segments_rewritten": 0,
+            "total_temporary_files_removed": 0
+          },
+          "protocol": "storage.v2",
+          "publishedReadView": {
+            "available": true,
+            "metadataBytes": 1472,
+            "ownedPinHandles": 0,
+            "publications": 3046,
+            "retainedViews": 1,
+            "successfulReads": 0
+          },
+          "requestProfile": {
+            "enabled": false
+          },
+          "resourceBudget": {
+            "authorityGcMaximumBlocksPerRound": 65536,
+            "authorityGcMaximumOrphanPayloadSegmentFilesRemoved": 1,
+            "authorityGcMaximumPayloadSegmentFilesScanned": 4163,
+            "authorityGcMaximumPayloadSegmentsScanned": 16,
+            "authorityGcMaximumTemporaryBlockFilesRemoved": 1,
+            "authorityGcMaximumTemporaryBytes": 1073741824,
+            "authorityGcMaximumVictimBytes": 268435456,
+            "authorityGcMinimumPayloadCompactionBlocks": 128,
+            "blockCacheBytes": 2147483648,
+            "canonicalJsonProofCacheBytes": 33554432,
+            "checkpointMaterializeBatchBytes": 33554432,
+            "connectionStackBytes": 1048576,
+            "decodedBlobChunkCacheBytes": 134217728,
+            "embeddedRequestMemoryBytes": 6403298432,
+            "entityPageCacheBytes": 1073741824,
+            "historyRetainedSegments": 64,
+            "leanFallback": false,
+            "logicalCpus": 63,
+            "maintenanceIdleIntervalMilliseconds": 250,
+            "maintenanceWorkerStackBytes": 524288,
+            "maximumConnections": 512,
+            "maximumFrameBytes": 134217728,
+            "maximumMaintenanceScopes": 64,
+            "maximumMaintenanceWorkers": 1,
+            "memoryCapacityBytes": 236223201280,
+            "memoryHeadroomBytes": 204905549824,
+            "minimumWritableVolumeFreeBytes": 150994944,
+            "overlayBudgetBytes": 268435456,
+            "overlayWalWatermarkBytes": 50331648,
+            "paperBuildRetainedMaximumBytes": 536870912,
+            "payloadSegmentCacheBytes": 3201649216,
+            "registeredMaintenanceScopes": 1,
+            "searchProjectionAvailable": true,
+            "searchProjectionConfigured": true,
+            "searchProjectionMaximumBytesPerOwner": 4294967296,
+            "sessionIdleTimeoutMilliseconds": 300000,
+            "sessionIoTimeoutMilliseconds": 30000,
+            "timerLiveCapacity": 16,
+            "volumeFreeBytes": 6180874928128,
+            "wholeBlobProofCacheBytes": 33554432
+          },
+          "walDurability": "strict"
+        },
+        "running_restart_ms": 919.113537,
+        "recovered_running": 1000,
+        "storage_metrics": {
+          "authority": {
+            "contendedMilliseconds": 0,
+            "wedged": false
+          },
+          "backend": "tofudb",
+          "backgroundPacker": {
+            "discardedBytes": 0,
+            "discardedSegments": 0,
+            "failedRounds": 0,
+            "failedWalRetirements": 0,
+            "foregroundDrainUnpaces": 0,
+            "pacingWaitNanoseconds": 0,
+            "pacingWaits": 0,
+            "packedBytes": 146053779,
+            "packedSegments": 7,
+            "retiredWals": 19
+          },
+          "backgroundPackerPacing": {
+            "adaptive": true,
+            "paceBytesPerSecond": null
+          },
+          "canonicalJsonProofCache": {
+            "accountedBytes": 0,
+            "available": true,
+            "capacityBytes": 33554432,
+            "entries": 0,
+            "evictions": 0,
+            "hits": 0,
+            "maximumEntries": 65528,
+            "misses": 0,
+            "recencyEntries": 0
+          },
+          "commitStages": [
+            {
+              "calls": 8652,
+              "components": [
+                {
+                  "calls": 8112,
+                  "component": "foreground",
+                  "totalNanos": 1203447030
+                },
+                {
+                  "calls": 540,
+                  "component": "maintenance",
+                  "totalNanos": 127018079
+                }
+              ],
+              "stage": "prepare",
+              "totalNanos": 1330465109
+            },
+            {
+              "calls": 8540,
+              "components": [
+                {
+                  "calls": 8000,
+                  "component": "foreground",
+                  "totalNanos": 709050035
+                },
+                {
+                  "calls": 540,
+                  "component": "maintenance",
+                  "totalNanos": 634071487
+                }
+              ],
+              "stage": "engine_commit",
+              "totalNanos": 1343121522
+            },
+            {
+              "calls": 8540,
+              "components": [
+                {
+                  "calls": 8000,
+                  "component": "foreground",
+                  "totalNanos": 561408866
+                },
+                {
+                  "calls": 540,
+                  "component": "maintenance",
+                  "totalNanos": 1596193
+                }
+              ],
+              "stage": "apply",
+              "totalNanos": 563005059
+            },
+            {
+              "calls": 929,
+              "components": [
+                {
+                  "calls": 139,
+                  "component": "foreground",
+                  "totalNanos": 914008185
+                },
+                {
+                  "calls": 790,
+                  "component": "maintenance",
+                  "totalNanos": 3018485039
+                }
+              ],
+              "stage": "apply_batch",
+              "totalNanos": 3932493224
+            },
+            {
+              "calls": 8868,
+              "components": [
+                {
+                  "calls": 8021,
+                  "component": "foreground",
+                  "totalNanos": 477922433
+                },
+                {
+                  "calls": 847,
+                  "component": "maintenance",
+                  "totalNanos": 450839572
+                }
+              ],
+              "stage": "wal",
+              "totalNanos": 928762005
+            },
+            {
+              "calls": 8980,
+              "components": [
+                {
+                  "calls": 8133,
+                  "component": "foreground",
+                  "totalNanos": 77992951
+                },
+                {
+                  "calls": 847,
+                  "component": "maintenance",
+                  "totalNanos": 138181102
+                }
+              ],
+              "stage": "encode",
+              "totalNanos": 216174053
+            },
+            {
+              "calls": 8980,
+              "components": [
+                {
+                  "calls": 8133,
+                  "component": "foreground",
+                  "totalNanos": 33177394
+                },
+                {
+                  "calls": 847,
+                  "component": "maintenance",
+                  "totalNanos": 37052248
+                }
+              ],
+              "stage": "carried",
+              "totalNanos": 70229642
+            },
+            {
+              "calls": 13114,
+              "components": [
+                {
+                  "calls": 13114,
+                  "component": "foreground",
+                  "totalNanos": 11731793478
+                }
+              ],
+              "stage": "ir_steps",
+              "totalNanos": 11731793478
+            },
+            {
+              "calls": 8114,
+              "components": [
+                {
+                  "calls": 8114,
+                  "component": "foreground",
+                  "totalNanos": 5308805300
+                }
+              ],
+              "stage": "ir_commit",
+              "totalNanos": 5308805300
+            },
+            {
+              "calls": 2990449,
+              "components": [
+                {
+                  "calls": 2113320,
+                  "component": "foreground",
+                  "totalNanos": 3357806954
+                },
+                {
+                  "calls": 877129,
+                  "component": "maintenance",
+                  "totalNanos": 869799081
+                }
+              ],
+              "stage": "load_node",
+              "totalNanos": 4227606035
+            },
+            {
+              "calls": 533968,
+              "components": [
+                {
+                  "calls": 129621,
+                  "component": "foreground",
+                  "totalNanos": 609048151
+                },
+                {
+                  "calls": 404347,
+                  "component": "maintenance",
+                  "totalNanos": 1406965299
+                }
+              ],
+              "stage": "store_page",
+              "totalNanos": 2016013450
+            },
+            {
+              "calls": 388419,
+              "components": [
+                {
+                  "calls": 155114,
+                  "component": "foreground",
+                  "totalNanos": 606585968
+                },
+                {
+                  "calls": 233305,
+                  "component": "maintenance",
+                  "totalNanos": 193695901
+                }
+              ],
+              "stage": "put_deferred",
+              "totalNanos": 800281869
+            },
+            {
+              "calls": 61751,
+              "components": [
+                {
+                  "calls": 6,
+                  "component": "foreground",
+                  "totalNanos": 83141
+                },
+                {
+                  "calls": 22,
+                  "component": "rotation_driver",
+                  "totalNanos": 40329503
+                },
+                {
+                  "calls": 61706,
+                  "component": "background_packer",
+                  "totalNanos": 71924892
+                },
+                {
+                  "calls": 17,
+                  "component": "maintenance",
+                  "totalNanos": 19472
+                }
+              ],
+              "stage": "block_get",
+              "totalNanos": 112357008
+            },
+            {
+              "calls": 8540,
+              "components": [
+                {
+                  "calls": 8000,
+                  "component": "foreground",
+                  "totalNanos": 109775667
+                },
+                {
+                  "calls": 540,
+                  "component": "maintenance",
+                  "totalNanos": 4246123
+                }
+              ],
+              "stage": "builder",
+              "totalNanos": 114021790
+            },
+            {
+              "calls": 8980,
+              "components": [
+                {
+                  "calls": 8133,
+                  "component": "foreground",
+                  "totalNanos": 73757786
+                },
+                {
+                  "calls": 847,
+                  "component": "maintenance",
+                  "totalNanos": 20106775
+                }
+              ],
+              "stage": "checkpoint_if",
+              "totalNanos": 93864561
+            },
+            {
+              "calls": 8868,
+              "components": [
+                {
+                  "calls": 8021,
+                  "component": "foreground",
+                  "totalNanos": 26050117
+                },
+                {
+                  "calls": 847,
+                  "component": "maintenance",
+                  "totalNanos": 2311041
+                }
+              ],
+              "stage": "commit_tail",
+              "totalNanos": 28361158
+            },
+            {
+              "calls": 61751,
+              "components": [
+                {
+                  "calls": 6,
+                  "component": "foreground",
+                  "totalNanos": 748
+                },
+                {
+                  "calls": 22,
+                  "component": "rotation_driver",
+                  "totalNanos": 16596
+                },
+                {
+                  "calls": 61706,
+                  "component": "background_packer",
+                  "totalNanos": 23219439
+                },
+                {
+                  "calls": 17,
+                  "component": "maintenance",
+                  "totalNanos": 1524
+                }
+              ],
+              "stage": "get_pending",
+              "totalNanos": 23238307
+            },
+            {
+              "calls": 27,
+              "components": [
+                {
+                  "calls": 6,
+                  "component": "foreground",
+                  "totalNanos": 3507
+                },
+                {
+                  "calls": 2,
+                  "component": "rotation_driver",
+                  "totalNanos": 1147
+                },
+                {
+                  "calls": 2,
+                  "component": "background_packer",
+                  "totalNanos": 1365
+                },
+                {
+                  "calls": 17,
+                  "component": "maintenance",
+                  "totalNanos": 6925
+                }
+              ],
+              "stage": "get_cache",
+              "totalNanos": 12944
+            },
+            {
+              "calls": 8,
+              "components": [
+                {
+                  "calls": 3,
+                  "component": "foreground",
+                  "totalNanos": 70587
+                },
+                {
+                  "calls": 2,
+                  "component": "rotation_driver",
+                  "totalNanos": 7642873
+                },
+                {
+                  "calls": 2,
+                  "component": "background_packer",
+                  "totalNanos": 7358702
+                },
+                {
+                  "calls": 1,
+                  "component": "maintenance",
+                  "totalNanos": 3788
+                }
+              ],
+              "stage": "get_unc_ok",
+              "totalNanos": 15075950
+            },
+            {
+              "calls": 25024,
+              "components": [
+                {
+                  "calls": 25017,
+                  "component": "foreground",
+                  "totalNanos": 23156193
+                },
+                {
+                  "calls": 7,
+                  "component": "maintenance",
+                  "totalNanos": 6448
+                }
+              ],
+              "stage": "put_stage",
+              "totalNanos": 23162641
+            },
+            {
+              "calls": 21,
+              "components": [
+                {
+                  "calls": 21,
+                  "component": "background_packer",
+                  "totalNanos": 66002447
+                }
+              ],
+              "stage": "ck_remove",
+              "totalNanos": 66002447
+            },
+            {
+              "calls": 43,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "foreground",
+                  "totalNanos": 236761
+                },
+                {
+                  "calls": 40,
+                  "component": "rotation_driver",
+                  "totalNanos": 3870482
+                },
+                {
+                  "calls": 1,
+                  "component": "maintenance",
+                  "totalNanos": 73583
+                }
+              ],
+              "stage": "flush_dirty",
+              "totalNanos": 4180826
+            },
+            {
+              "calls": 101,
+              "components": [
+                {
+                  "calls": 81,
+                  "component": "foreground",
+                  "totalNanos": 70098956
+                },
+                {
+                  "calls": 20,
+                  "component": "maintenance",
+                  "totalNanos": 19854624
+                }
+              ],
+              "stage": "history_stage",
+              "totalNanos": 89953580
+            },
+            {
+              "calls": 8,
+              "components": [
+                {
+                  "calls": 8,
+                  "component": "pack_adoption_driver",
+                  "totalNanos": 9815227
+                }
+              ],
+              "stage": "pack_retire",
+              "totalNanos": 9815227
+            },
+            {
+              "calls": 104,
+              "components": [
+                {
+                  "calls": 10,
+                  "component": "background_packer",
+                  "totalNanos": 810681
+                },
+                {
+                  "calls": 94,
+                  "component": "maintenance",
+                  "totalNanos": 15709000
+                }
+              ],
+              "stage": "pack_filter",
+              "totalNanos": 16519681
+            },
+            {
+              "calls": 8321,
+              "components": [
+                {
+                  "calls": 8112,
+                  "component": "foreground",
+                  "totalNanos": 1141517608
+                },
+                {
+                  "calls": 209,
+                  "component": "maintenance",
+                  "totalNanos": 12124
+                }
+              ],
+              "stage": "ta_prepare_merge",
+              "totalNanos": 1141529732
+            },
+            {
+              "calls": 8209,
+              "components": [
+                {
+                  "calls": 8000,
+                  "component": "foreground",
+                  "totalNanos": 39083072
+                },
+                {
+                  "calls": 209,
+                  "component": "maintenance",
+                  "totalNanos": 207068
+                }
+              ],
+              "stage": "ta_prepare_fast",
+              "totalNanos": 39290140
+            },
+            {
+              "calls": 16401,
+              "components": [
+                {
+                  "calls": 16401,
+                  "component": "foreground",
+                  "totalNanos": 375345765655
+                }
+              ],
+              "stage": "authority_wait",
+              "totalNanos": 375345765655
+            },
+            {
+              "calls": 71,
+              "components": [
+                {
+                  "calls": 71,
+                  "component": "foreground",
+                  "totalNanos": 443069215
+                }
+              ],
+              "stage": "command_execute",
+              "totalNanos": 443069215
+            },
+            {
+              "calls": 8043,
+              "components": [
+                {
+                  "calls": 8043,
+                  "component": "foreground",
+                  "totalNanos": 83358925
+                }
+              ],
+              "stage": "wal_barrier_wait",
+              "totalNanos": 83358925
+            },
+            {
+              "calls": 5113,
+              "components": [
+                {
+                  "calls": 5113,
+                  "component": "foreground",
+                  "totalNanos": 1594680672
+                }
+              ],
+              "stage": "turn_event_load",
+              "totalNanos": 1594680672
+            },
+            {
+              "calls": 5113,
+              "components": [
+                {
+                  "calls": 5113,
+                  "component": "foreground",
+                  "totalNanos": 343420156
+                }
+              ],
+              "stage": "turn_event_projection",
+              "totalNanos": 343420156
+            },
+            {
+              "calls": 5113,
+              "components": [
+                {
+                  "calls": 5113,
+                  "component": "foreground",
+                  "totalNanos": 4153134038
+                }
+              ],
+              "stage": "turn_event_store",
+              "totalNanos": 4153134038
+            },
+            {
+              "calls": 5113,
+              "components": [
+                {
+                  "calls": 5113,
+                  "component": "foreground",
+                  "totalNanos": 2612321291
+                }
+              ],
+              "stage": "turn_event_publish",
+              "totalNanos": 2612321291
+            },
+            {
+              "calls": 302492,
+              "components": [
+                {
+                  "calls": 168616,
+                  "component": "foreground",
+                  "totalNanos": 210670981
+                },
+                {
+                  "calls": 133876,
+                  "component": "maintenance",
+                  "totalNanos": 3515146
+                }
+              ],
+              "stage": "overlay_point",
+              "totalNanos": 214186127
+            },
+            {
+              "calls": 38011,
+              "components": [
+                {
+                  "calls": 37224,
+                  "component": "foreground",
+                  "totalNanos": 3904279
+                },
+                {
+                  "calls": 787,
+                  "component": "maintenance",
+                  "totalNanos": 38355
+                }
+              ],
+              "stage": "overlay_view",
+              "totalNanos": 3942634
+            },
+            {
+              "calls": 10114,
+              "components": [
+                {
+                  "calls": 10114,
+                  "component": "foreground",
+                  "totalNanos": 3556850251
+                }
+              ],
+              "stage": "blob_encode",
+              "totalNanos": 3556850251
+            },
+            {
+              "calls": 10114,
+              "components": [
+                {
+                  "calls": 10114,
+                  "component": "foreground",
+                  "totalNanos": 3856275112
+                }
+              ],
+              "stage": "blob_stage",
+              "totalNanos": 3856275112
+            },
+            {
+              "calls": 8043,
+              "components": [
+                {
+                  "calls": 8043,
+                  "component": "foreground",
+                  "totalNanos": 10106156600
+                }
+              ],
+              "stage": "parallel_prepare",
+              "totalNanos": 10106156600
+            },
+            {
+              "calls": 8043,
+              "components": [
+                {
+                  "calls": 8043,
+                  "component": "foreground",
+                  "totalNanos": 4974868300
+                }
+              ],
+              "stage": "parallel_commit",
+              "totalNanos": 4974868300
+            },
+            {
+              "calls": 71,
+              "components": [
+                {
+                  "calls": 71,
+                  "component": "foreground",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "parallel_fallback",
+              "totalNanos": 0
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "foreground",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "parallel_commit_busy",
+              "totalNanos": 0
+            },
+            {
+              "calls": 69,
+              "components": [
+                {
+                  "calls": 69,
+                  "component": "foreground",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "parallel_commit_rotation",
+              "totalNanos": 0
+            },
+            {
+              "calls": 6990,
+              "components": [
+                {
+                  "calls": 6990,
+                  "component": "foreground",
+                  "totalNanos": 388680475926
+                }
+              ],
+              "stage": "parallel_snapshot_wait",
+              "totalNanos": 388680475926
+            },
+            {
+              "calls": 286,
+              "components": [
+                {
+                  "calls": 191,
+                  "component": "rotation_driver",
+                  "totalNanos": 489665887
+                },
+                {
+                  "calls": 95,
+                  "component": "maintenance",
+                  "totalNanos": 226439712
+                }
+              ],
+              "stage": "history_decode",
+              "totalNanos": 716105599
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 813
+                }
+              ],
+              "stage": "history_lookup",
+              "totalNanos": 813
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 1380706
+                }
+              ],
+              "stage": "history_range",
+              "totalNanos": 1380706
+            },
+            {
+              "calls": 3,
+              "components": [
+                {
+                  "calls": 3,
+                  "component": "foreground",
+                  "totalNanos": 4976639
+                }
+              ],
+              "stage": "overlay_replay",
+              "totalNanos": 4976639
+            },
+            {
+              "calls": 139,
+              "components": [
+                {
+                  "calls": 139,
+                  "component": "foreground",
+                  "totalNanos": 83469547
+                }
+              ],
+              "stage": "overlay_select",
+              "totalNanos": 83469547
+            },
+            {
+              "calls": 139,
+              "components": [
+                {
+                  "calls": 139,
+                  "component": "foreground",
+                  "totalNanos": 31953698
+                }
+              ],
+              "stage": "overlay_carry_budget",
+              "totalNanos": 31953698
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "foreground",
+                  "totalNanos": 727541708
+                }
+              ],
+              "stage": "embedded_stop_total",
+              "totalNanos": 727541708
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 1559549
+                }
+              ],
+              "stage": "embedded_stop_maintenance",
+              "totalNanos": 1559549
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 2048168
+                }
+              ],
+              "stage": "embedded_stop_packer",
+              "totalNanos": 2048168
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 200261989
+                }
+              ],
+              "stage": "embedded_stop_gc",
+              "totalNanos": 200261989
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 250294948
+                }
+              ],
+              "stage": "embedded_stop_backup",
+              "totalNanos": 250294948
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 250517081
+                }
+              ],
+              "stage": "embedded_stop_watch",
+              "totalNanos": 250517081
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 128945
+                }
+              ],
+              "stage": "embedded_stop_archive",
+              "totalNanos": 128945
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 15299711
+                }
+              ],
+              "stage": "embedded_stop_adoption",
+              "totalNanos": 15299711
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 7308797
+                }
+              ],
+              "stage": "embedded_stop_rotation",
+              "totalNanos": 7308797
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 119792
+                }
+              ],
+              "stage": "embedded_stop_barrier",
+              "totalNanos": 119792
+            },
+            {
+              "calls": 25202,
+              "components": [
+                {
+                  "calls": 25064,
+                  "component": "foreground",
+                  "totalNanos": 0
+                },
+                {
+                  "calls": 33,
+                  "component": "rotation_driver",
+                  "totalNanos": 0
+                },
+                {
+                  "calls": 2,
+                  "component": "background_packer",
+                  "totalNanos": 0
+                },
+                {
+                  "calls": 103,
+                  "component": "maintenance",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "pack_filter_incomplete",
+              "totalNanos": 0
+            },
+            {
+              "calls": 308,
+              "components": [
+                {
+                  "calls": 308,
+                  "component": "maintenance",
+                  "totalNanos": 432287
+                }
+              ],
+              "stage": "overlay_prepare_capture",
+              "totalNanos": 432287
+            },
+            {
+              "calls": 308,
+              "components": [
+                {
+                  "calls": 308,
+                  "component": "maintenance",
+                  "totalNanos": 3894992400
+                }
+              ],
+              "stage": "overlay_prepare_encode",
+              "totalNanos": 3894992400
+            },
+            {
+              "calls": 308,
+              "components": [
+                {
+                  "calls": 308,
+                  "component": "maintenance",
+                  "totalNanos": 982837255
+                }
+              ],
+              "stage": "overlay_prepare_publish",
+              "totalNanos": 982837255
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "maintenance",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "overlay_prepare_stale",
+              "totalNanos": 0
+            },
+            {
+              "calls": 2238,
+              "components": [
+                {
+                  "calls": 2224,
+                  "component": "foreground",
+                  "totalNanos": 555055787
+                },
+                {
+                  "calls": 14,
+                  "component": "maintenance",
+                  "totalNanos": 3256005
+                }
+              ],
+              "stage": "projection_head_materialize",
+              "totalNanos": 558311792
+            },
+            {
+              "calls": 2238,
+              "components": [
+                {
+                  "calls": 2224,
+                  "component": "foreground",
+                  "totalNanos": 307644689
+                },
+                {
+                  "calls": 14,
+                  "component": "maintenance",
+                  "totalNanos": 1864388
+                }
+              ],
+              "stage": "projection_head_checkpoint",
+              "totalNanos": 309509077
+            },
+            {
+              "calls": 2238,
+              "components": [
+                {
+                  "calls": 2224,
+                  "component": "foreground",
+                  "totalNanos": 182516076
+                },
+                {
+                  "calls": 14,
+                  "component": "maintenance",
+                  "totalNanos": 1058933
+                }
+              ],
+              "stage": "projection_head_patch_load",
+              "totalNanos": 183575009
+            },
+            {
+              "calls": 2238,
+              "components": [
+                {
+                  "calls": 2224,
+                  "component": "foreground",
+                  "totalNanos": 60710689
+                },
+                {
+                  "calls": 14,
+                  "component": "maintenance",
+                  "totalNanos": 306801
+                }
+              ],
+              "stage": "projection_head_patch_apply",
+              "totalNanos": 61017490
+            },
+            {
+              "calls": 8532,
+              "components": [
+                {
+                  "calls": 8532,
+                  "component": "wal_barrier",
+                  "totalNanos": 708516041
+                }
+              ],
+              "stage": "wal_barrier_sync",
+              "totalNanos": 708516041
+            },
+            {
+              "calls": 15,
+              "components": [
+                {
+                  "calls": 15,
+                  "component": "wal_barrier",
+                  "totalNanos": 961
+                }
+              ],
+              "stage": "wal_barrier_reschedule",
+              "totalNanos": 961
+            },
+            {
+              "calls": 2990447,
+              "components": [
+                {
+                  "calls": 2113318,
+                  "component": "foreground",
+                  "totalNanos": 599500806
+                },
+                {
+                  "calls": 877129,
+                  "component": "maintenance",
+                  "totalNanos": 80957407
+                }
+              ],
+              "stage": "entity_page_cache_read_wait",
+              "totalNanos": 680458213
+            },
+            {
+              "calls": 228439,
+              "components": [
+                {
+                  "calls": 125339,
+                  "component": "foreground",
+                  "totalNanos": 1464610093
+                },
+                {
+                  "calls": 103100,
+                  "component": "maintenance",
+                  "totalNanos": 283004959
+                }
+              ],
+              "stage": "entity_page_source_read",
+              "totalNanos": 1747615052
+            },
+            {
+              "calls": 228439,
+              "components": [
+                {
+                  "calls": 125339,
+                  "component": "foreground",
+                  "totalNanos": 321050999
+                },
+                {
+                  "calls": 103100,
+                  "component": "maintenance",
+                  "totalNanos": 154534636
+                }
+              ],
+              "stage": "entity_page_decode",
+              "totalNanos": 475585635
+            },
+            {
+              "calls": 228437,
+              "components": [
+                {
+                  "calls": 125337,
+                  "component": "foreground",
+                  "totalNanos": 90220122
+                },
+                {
+                  "calls": 103100,
+                  "component": "maintenance",
+                  "totalNanos": 20346280
+                }
+              ],
+              "stage": "entity_page_cache_write_wait",
+              "totalNanos": 110566402
+            }
+          ],
+          "contract": "tofu-db.system-metrics.v1",
+          "decodedBlobChunkCache": {
+            "accountedBytes": 134205272,
+            "available": true,
+            "capacityBytes": 134217728,
+            "entries": 2759,
+            "evictions": 2257,
+            "hits": 2329,
+            "misses": 5164,
+            "recencyEntries": 2759,
+            "wholeBlob": {
+              "accountedBytes": 33552837,
+              "available": true,
+              "capacityBytes": 33554432,
+              "entries": 3025,
+              "evictions": 1991,
+              "lookups": 7493,
+              "manifestMatches": 2329,
+              "recencyEntries": 3025,
+              "reused": 2329
+            }
+          },
+          "durability": {
+            "checkpoint": 20,
+            "checkpointHistoryTailBytes": 0,
+            "dropFlushFailures": 0,
+            "flushDeferred": 6,
+            "historyDecodeAttempts": 286,
+            "historyDecodeSourceBytes": 1017763729,
+            "historyDecodedTransactions": 14441,
+            "maxCheckpointHistoryTailBytes": 0,
+            "maxRotationWindowBytes": 0,
+            "overlayMaterializedBlocks": 233726,
+            "overlayMaterializedBytes": 521499525,
+            "overlayMergeCommits": 328,
+            "overlayMergedEntries": 208791,
+            "overlayMergedPositions": 222586,
+            "overlaySupersededPositions": 13795,
+            "overlayWalPressureAttempts": 120,
+            "overlayWalPressurePendingEntries": 993765,
+            "projectionCheckpointBytes": 111490446,
+            "projectionPatchBytes": 37197798,
+            "projectionPatchesApplied": 2238,
+            "publishControl": 83,
+            "rotationWindowBytes": 0,
+            "rotationWindowTransactions": 0,
+            "walAppend": 0,
+            "walEncodedBytes": 732171121
+          },
+          "maintenance": {
+            "attemptEventPruneAttempts": 0,
+            "attemptEventPruneBacklogRounds": 0,
+            "attemptEventsPruned": 0,
+            "committedTransactions": 0,
+            "completedMounts": 0,
+            "conflictDeferrals": 0,
+            "currentIdleIntervalMilliseconds": 250,
+            "droppedTerminalRecords": 0,
+            "failedRounds": 0,
+            "foregroundDeferrals": 1,
+            "historyCompactions": 1,
+            "materializedBytes": 0,
+            "materializedRows": 0,
+            "noWorkRounds": 0,
+            "overlayBackgroundChunks": 265,
+            "overlayBackgroundWakes": 118,
+            "publishedBackgroundPacks": 0,
+            "retainedHistorySegments": 64,
+            "retiredHistorySegments": 83,
+            "rounds": 9,
+            "searchAcknowledgedTokens": 141,
+            "searchDirtyConversations": 144,
+            "searchFailedRounds": 0,
+            "searchForegroundDeferrals": 5,
+            "searchIndexedTurns": 94,
+            "searchMaximumFailureBackoffMilliseconds": 0,
+            "searchPageBudgetExhaustions": 0,
+            "searchRebuiltConversations": 78,
+            "searchRemovedConversations": 0,
+            "searchRetryDeferrals": 0,
+            "searchSkippedOversizedTurns": 0,
+            "searchSourceBytes": 1163420,
+            "searchSourcePages": 156,
+            "tombstoneCompactionRounds": 0,
+            "tombstoneEntriesReclaimed": 0,
+            "tombstonePagesRewritten": 0,
+            "toolResultArtifactsPruned": 0,
+            "toolResultPruneBacklogRounds": 0
+          },
+          "onlineBackup": {
+            "epoch_in_progress": false,
+            "epochs_completed": 0,
+            "epochs_failed": 0,
+            "last_error": null,
+            "last_report": null,
+            "last_success_unix_ms": null,
+            "replicated_sequence": null,
+            "replication_interval_ms": null
+          },
+          "onlineGarbageCollector": {
+            "deferred_epochs": 0,
+            "epoch_in_progress": false,
+            "epochs_completed": 0,
+            "last_epoch_duration_ms": 0,
+            "last_epoch_reclaimed_bytes": 0,
+            "marks_built": 0,
+            "total_compacted_blocks": 0,
+            "total_consolidated_victims": 0,
+            "total_consolidations": 0,
+            "total_orphan_segments_removed": 0,
+            "total_reclaimed_blocks": 0,
+            "total_reclaimed_bytes": 0,
+            "total_segments_retired": 0,
+            "total_segments_rewritten": 0,
+            "total_temporary_files_removed": 0
+          },
+          "protocol": "storage.v2",
+          "publishedReadView": {
+            "available": true,
+            "metadataBytes": 1472,
+            "ownedPinHandles": 0,
+            "publications": 5373,
+            "retainedViews": 1,
+            "successfulReads": 5000
+          },
+          "requestProfile": {
+            "enabled": false
+          },
+          "resourceBudget": {
+            "authorityGcMaximumBlocksPerRound": 65536,
+            "authorityGcMaximumOrphanPayloadSegmentFilesRemoved": 1,
+            "authorityGcMaximumPayloadSegmentFilesScanned": 4163,
+            "authorityGcMaximumPayloadSegmentsScanned": 16,
+            "authorityGcMaximumTemporaryBlockFilesRemoved": 1,
+            "authorityGcMaximumTemporaryBytes": 1073741824,
+            "authorityGcMaximumVictimBytes": 268435456,
+            "authorityGcMinimumPayloadCompactionBlocks": 128,
+            "blockCacheBytes": 2147483648,
+            "canonicalJsonProofCacheBytes": 33554432,
+            "checkpointMaterializeBatchBytes": 33554432,
+            "connectionStackBytes": 1048576,
+            "decodedBlobChunkCacheBytes": 134217728,
+            "embeddedRequestMemoryBytes": 6387029504,
+            "entityPageCacheBytes": 1073741824,
+            "historyRetainedSegments": 64,
+            "leanFallback": false,
+            "logicalCpus": 63,
+            "maintenanceIdleIntervalMilliseconds": 250,
+            "maintenanceWorkerStackBytes": 524288,
+            "maximumConnections": 512,
+            "maximumFrameBytes": 134217728,
+            "maximumMaintenanceScopes": 64,
+            "maximumMaintenanceWorkers": 1,
+            "memoryCapacityBytes": 236223201280,
+            "memoryHeadroomBytes": 204384944128,
+            "minimumWritableVolumeFreeBytes": 150994944,
+            "overlayBudgetBytes": 268435456,
+            "overlayWalWatermarkBytes": 50331648,
+            "paperBuildRetainedMaximumBytes": 536870912,
+            "payloadSegmentCacheBytes": 3193514752,
+            "registeredMaintenanceScopes": 1,
+            "searchProjectionAvailable": true,
+            "searchProjectionConfigured": true,
+            "searchProjectionMaximumBytesPerOwner": 4294967296,
+            "sessionIdleTimeoutMilliseconds": 300000,
+            "sessionIoTimeoutMilliseconds": 30000,
+            "timerLiveCapacity": 16,
+            "volumeFreeBytes": 6180776615936,
+            "wholeBlobProofCacheBytes": 33554432
+          },
+          "walDurability": "strict"
+        },
+        "restart_ms": 2884.828835,
+        "recovered_exact_replay": 1000,
+        "recovered_exact_content": 1000,
+        "recovered_completed": 1000,
+        "integrity_returncode": 0,
+        "integrity_scope": "offline-after-abandon",
+        "integrity_summary": "format=tofu-db.verify.v1 verdict=ok control_generation=120 durable_sequence=8555 wal_records=44 wal_tail_truncated_bytes=0 payload_segments_ok=139/139 pages_verified=26791 semantic_verified=17000 history_blocks_verified=95133 wal_blocks_verified=15307 missing_blocks=0\nperformance=[{\"phase\":\"control\",\"elapsed_ns\":84886,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"wal\",\"elapsed_ns\":21730248,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"open\",\"elapsed_ns\":222344191,\"history_decode_attempts\":8,\"history_decode_source_bytes\":28643463,\"history_decoded_transactions\":120},{\"phase\":\"merge\",\"elapsed_ns\":138558111,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"payload\",\"elapsed_ns\":106322831,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"loose\",\"elapsed_ns\":717099588,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"graph\",\"elapsed_ns\":573459571,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"history\",\"elapsed_ns\":1587675344,\"history_decode_attempts\":128,\"history_decode_source_bytes\":465142276,\"history_decoded_transactions\":3242},{\"phase\":\"close\",\"elapsed_ns\":4030222,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0}]\n",
+        "verification_phase_ms": {
+          "freeze": 4541.027933359146,
+          "offline_integrity": 3388.003595173359
+        },
+        "freeze_phase_ms": {
+          "client_close": 0.03462284803390503,
+          "embedded_abandon": 4540.987640619278
+        },
+        "errors": [],
+        "stage_failures": {},
+        "expected_stream_events": 4000,
+        "observed_stream_events": 4000,
+        "error_count": 0,
+        "wall_seconds": 23.58849188685417,
+        "latency_ms": {
+          "accept": {
+            "count": 1000,
+            "p95": 283.58062356710434,
+            "total_ms": 138497.6297840476,
+            "p50": 134.9257081747055,
+            "p99": 294.0560281276703,
+            "max": 295.6240698695183
+          },
+          "bind": {
+            "count": 1000,
+            "p95": 290.35864770412445,
+            "total_ms": 170687.35866993666,
+            "p50": 216.48824959993362,
+            "p99": 293.2436466217041,
+            "max": 295.8831638097763
+          },
+          "start": {
+            "count": 1000,
+            "p95": 272.7822959423065,
+            "total_ms": 165688.45487385988,
+            "p50": 181.97587132453918,
+            "p99": 291.12135618925095,
+            "max": 294.1159978508949
+          },
+          "submit_to_running": {
+            "count": 1000,
+            "p95": 696.2428763508797,
+            "total_ms": 475628.5122334957,
+            "p50": 626.8999204039574,
+            "p99": 698.9786475896835,
+            "max": 701.3360112905502
+          },
+          "stream": {
+            "count": 4000,
+            "p95": 1714.0683382749557,
+            "total_ms": 2847524.3266522884,
+            "p50": 578.4194022417068,
+            "p99": 1848.481111228466,
+            "max": 1879.6095103025436
+          },
+          "stream_scheduled": {
+            "count": 4000,
+            "p95": 1742.435246706009,
+            "total_ms": 3564553.856872022,
+            "p50": 914.2016768455505,
+            "p99": 1884.788729250431,
+            "max": 1907.6990187168121
+          },
+          "settle": {
+            "count": 1000,
+            "p95": 4418.50420832634,
+            "total_ms": 3561768.7519192696,
+            "p50": 3363.2247522473335,
+            "p99": 5253.918468952179,
+            "max": 5407.137423753738
+          },
+          "settle_scheduled": {
+            "count": 1000,
+            "p95": 5603.085078299046,
+            "total_ms": 4241714.73620832,
+            "p50": 3993.929974734783,
+            "p99": 5824.919335544109,
+            "max": 5876.894526183605
+          }
+        },
+        "correctness_passed": true,
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": false,
+          "coverage_passed": false,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 698.9786475896835,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 1884.788729250431,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": false
+            },
+            "settle": {
+              "p99_ms": 5253.918468952179,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": false
+            }
+          },
+          "failures": [
+            "stream_scheduled: missing/invalid samples or P99 above 1000 ms",
+            "settle: missing/invalid samples or P99 above 5000 ms"
+          ],
+          "coverage_gaps": [
+            "in-process abandon is not a process-crash durability test"
+          ],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "passed": false
+      },
+      "scope_receipt": {
+        "schema_scope": "generated current frozen catalog",
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "loaded_frozen_modules": {
+          "serverctl_pkg": "serverctl_pkg/__init__.py",
+          "serverctl_pkg.native_engine": "serverctl_pkg/native_engine.py",
+          "tofu_db": "tofu_db/__init__.py",
+          "tofu_db.generated_v2": "tofu_db/generated_v2.py",
+          "tofu_db._loopback": "tofu_db/_loopback.py",
+          "tofu_db.generated_contract": "tofu_db/generated_contract.py",
+          "tofu_db.wire": "tofu_db/wire.py",
+          "scripts.tofudb_perf_compare": "scripts/tofudb_perf_compare.py",
+          "benchmarks.conversation_acceptance": "benchmarks/conversation_acceptance.py",
+          "scripts.tofudb_v2_client": "scripts/tofudb_v2_client.py",
+          "scripts.tofudb_bench": "scripts/tofudb_bench.py",
+          "benchmarks.conversation_authority": "benchmarks/conversation_authority.py",
+          "benchmarks.conversation_concurrency": "benchmarks/conversation_concurrency.py",
+          "runtime_path_policy": "runtime_path_policy.py",
+          "lib.config_dir": "lib/config_dir.py",
+          "lib.log_record_values": "lib/log_record_values.py",
+          "lib.log": "lib/log.py",
+          "lib.feature_registry": "lib/feature_registry.py",
+          "tofu_trading": "plugins/tofu-trading/tofu_trading/__init__.py",
+          "tofu_trading.flags": "plugins/tofu-trading/tofu_trading/flags.py",
+          "lib.search_profiles": "lib/search_profiles.py",
+          "lib": "lib/__init__.py",
+          "lib.agent_core": "lib/agent_core/__init__.py",
+          "lib.observability": "lib/observability.py",
+          "lib.agent_core.worker_executor": "lib/agent_core/worker_executor.py",
+          "lib.error_envelope._constants": "lib/error_envelope/_constants.py",
+          "lib.error_envelope._classify": "lib/error_envelope/_classify.py",
+          "lib.error_envelope._schema": "lib/error_envelope/_schema.py",
+          "lib.error_envelope._build": "lib/error_envelope/_build.py",
+          "lib.error_envelope._serde": "lib/error_envelope/_serde.py",
+          "lib.error_envelope._causes": "lib/error_envelope/_causes.py",
+          "lib.error_envelope": "lib/error_envelope/__init__.py",
+          "lib.conversation_sync": "lib/conversation_sync/__init__.py",
+          "lib.conversation_sync.dispatch_contract": "lib/conversation_sync/dispatch_contract.py",
+          "lib.identity": "lib/identity.py",
+          "lib.storage.errors": "lib/storage/errors.py",
+          "lib.storage.frame_admission": "lib/storage/frame_admission.py",
+          "lib.storage.commit_events": "lib/storage/commit_events.py",
+          "lib.storage.protocol": "lib/storage/protocol.py",
+          "lib.storage.retry_log": "lib/storage/retry_log.py",
+          "lib.storage.client": "lib/storage/client.py",
+          "bootstrap_pkg": "bootstrap_pkg/__init__.py",
+          "bootstrap_pkg.resource_policy_generated": "bootstrap_pkg/resource_policy_generated.py",
+          "runtime_guards": "runtime_guards.py",
+          "lib.storage_event_policy": "lib/storage_event_policy.py",
+          "lib.storage_metric_policy": "lib/storage_metric_policy.py",
+          "lib.storage.event_batcher": "lib/storage/event_batcher.py",
+          "lib.storage.manifest": "lib/storage/manifest.py",
+          "lib.storage.connection_file": "lib/storage/connection_file.py",
+          "lib.storage.startup_budget": "lib/storage/startup_budget.py",
+          "lib.storage.startup_control": "lib/storage/startup_control.py",
+          "lib.storage.supervisor": "lib/storage/supervisor.py",
+          "lib.storage.runtime": "lib/storage/runtime.py",
+          "lib.storage.service": "lib/storage/service.py",
+          "lib.storage": "lib/storage/__init__.py",
+          "lib.tasks_pkg": "lib/tasks_pkg/__init__.py",
+          "lib.tasks_pkg.failure_attribution": "lib/tasks_pkg/failure_attribution.py",
+          "lib.tools": "lib/tools/__init__.py",
+          "lib.tools.result_envelope": "lib/tools/result_envelope.py",
+          "lib.storage_projection": "lib/storage_projection.py",
+          "lib.tool_round_identity": "lib/tool_round_identity.py",
+          "lib.tool_caller_identity": "lib/tool_caller_identity.py",
+          "lib.tool_round_replay": "lib/tool_round_replay.py",
+          "lib.llm": "lib/llm/__init__.py",
+          "lib.llm.stream_result": "lib/llm/stream_result.py",
+          "lib.turn_verdict": "lib/turn_verdict/__init__.py",
+          "lib.attachments": "lib/attachments.py",
+          "lib.conversation_sync.generated_contract": "lib/conversation_sync/generated_contract.py",
+          "lib.tasks_pkg.segments._types": "lib/tasks_pkg/segments/_types.py",
+          "lib.tasks_pkg.segments._assemble": "lib/tasks_pkg/segments/_assemble.py",
+          "lib.tasks_pkg.segments._derive": "lib/tasks_pkg/segments/_derive.py",
+          "lib.tool_history_projection": "lib/tool_history_projection.py",
+          "lib.tasks_pkg.segments._project": "lib/tasks_pkg/segments/_project.py",
+          "lib.tasks_pkg.segments._edit": "lib/tasks_pkg/segments/_edit.py",
+          "lib.tasks_pkg.segments._serde": "lib/tasks_pkg/segments/_serde.py",
+          "lib.tasks_pkg.segments": "lib/tasks_pkg/segments/__init__.py",
+          "lib.swarm": "lib/swarm/__init__.py",
+          "lib.swarm.presentation_budget": "lib/swarm/presentation_budget.py",
+          "lib.turn_image_transport": "lib/turn_image_transport.py",
+          "lib.plan_contract": "lib/plan_contract.py",
+          "lib.agent_core.events": "lib/agent_core/events.py",
+          "lib.tool_rejection": "lib/tool_rejection.py",
+          "lib.turn_activity_timeline": "lib/turn_activity_timeline.py",
+          "lib.turn_projection_patch": "lib/turn_projection_patch.py",
+          "lib.turn_projection_segments": "lib/turn_projection_segments.py",
+          "lib.turn_lifecycle": "lib/turn_lifecycle.py",
+          "tofu_db.embedded": "tofu_db/embedded.py",
+          "lib.conversation_sync.settings_policy": "lib/conversation_sync/settings_policy.py",
+          "lib.storage.generated_v2_semantics": "lib/storage/generated_v2_semantics.py",
+          "lib.storage.v2_semantics": "lib/storage/v2_semantics.py",
+          "scripts.generated_storage_operations": "scripts/generated_storage_operations.py",
+          "lib.storage.v2_client": "lib/storage/v2_client.py",
+          "lib.storage.v2_embedded_client": "lib/storage/v2_embedded_client.py",
+          "lib.background_command_projection": "lib/background_command_projection.py",
+          "lib.agent_core.publication": "lib/agent_core/publication.py",
+          "lib.conversation_sync.attempt_identity": "lib/conversation_sync/attempt_identity.py",
+          "lib.orchestration": "lib/orchestration/__init__.py",
+          "lib.orchestration.wire_formats": "lib/orchestration/wire_formats.py",
+          "lib.task_replay": "lib/task_replay.py",
+          "lib.agent_core.task_runtime_policy": "lib/agent_core/task_runtime_policy.py",
+          "lib.agent_core.execution_session": "lib/agent_core/execution_session.py",
+          "lib.ids": "lib/ids.py",
+          "lib.agent_core.task_abort_signal": "lib/agent_core/task_abort_signal.py",
+          "lib.agent_core.task_runtime": "lib/agent_core/task_runtime.py",
+          "lib.tasks_pkg.manager.runtime": "lib/tasks_pkg/manager/runtime.py",
+          "lib.tasks_pkg.manager._provider_ingress_guard": "lib/tasks_pkg/manager/_provider_ingress_guard.py",
+          "lib.tasks_pkg.manager._events": "lib/tasks_pkg/manager/_events.py",
+          "lib.task_result_checkpoint_contract": "lib/task_result_checkpoint_contract.py",
+          "lib.tasks_pkg.manager._persist": "lib/tasks_pkg/manager/_persist.py",
+          "lib.tasks_pkg.manager._maintenance": "lib/tasks_pkg/manager/_maintenance.py",
+          "lib.runtime_state_store": "lib/runtime_state_store.py",
+          "lib.tasks_pkg.manager._pending_resume": "lib/tasks_pkg/manager/_pending_resume.py",
+          "lib.tasks_pkg.manager._recovery": "lib/tasks_pkg/manager/_recovery.py",
+          "lib.tasks_pkg.manager._registry": "lib/tasks_pkg/manager/_registry.py",
+          "lib.tasks_pkg.manager._sync": "lib/tasks_pkg/manager/_sync.py",
+          "lib.tasks_pkg.manager._terminal": "lib/tasks_pkg/manager/_terminal.py",
+          "lib.tasks_pkg.manager.prepared": "lib/tasks_pkg/manager/prepared.py",
+          "lib.tasks_pkg.manager": "lib/tasks_pkg/manager/__init__.py",
+          "lib.orchestration.message_compat": "lib/orchestration/message_compat.py",
+          "lib.turn_trace_contract": "lib/turn_trace_contract.py",
+          "lib.tasks_pkg.turn_trace": "lib/tasks_pkg/turn_trace.py",
+          "lib.model_catalog._creator_families": "lib/model_catalog/_creator_families.py",
+          "lib.model_catalog._creator_identity": "lib/model_catalog/_creator_identity.py",
+          "lib.model_catalog": "lib/model_catalog/__init__.py",
+          "lib.model_info._family": "lib/model_info/_family.py",
+          "lib.model_info._openai_gpt56": "lib/model_info/_openai_gpt56.py",
+          "lib.model_info._capabilities": "lib/model_info/_capabilities.py",
+          "lib.model_info._max_output": "lib/model_info/_max_output.py",
+          "lib.model_info._limits": "lib/model_info/_limits.py",
+          "lib.model_info._video": "lib/model_info/_video.py",
+          "lib.model_info._context": "lib/model_info/_context.py",
+          "lib.model_info._folds": "lib/model_info/_folds.py",
+          "lib.model_info._release": "lib/model_info/_release.py",
+          "lib.model_info": "lib/model_info/__init__.py",
+          "lib.pricing._tables": "lib/pricing/_tables.py",
+          "lib.pricing._peak": "lib/pricing/_peak.py",
+          "lib.pricing._provider": "lib/pricing/_provider.py",
+          "lib.pricing._refresh": "lib/pricing/_refresh.py",
+          "lib.pricing": "lib/pricing/__init__.py",
+          "lib.provider_headers": "lib/provider_headers.py",
+          "lib.model_routing.domain": "lib/model_routing/domain.py",
+          "lib.secret_envelope": "lib/secret_envelope.py",
+          "lib.model_routing.change_notifications": "lib/model_routing/change_notifications.py",
+          "lib.model_routing.credential_envelope": "lib/model_routing/credential_envelope.py",
+          "lib.model_routing.repository": "lib/model_routing/repository.py",
+          "lib.model_routing.inference": "lib/model_routing/inference.py",
+          "lib.model_routing.migration": "lib/model_routing/migration.py",
+          "lib.model_routing.health": "lib/model_routing/health.py",
+          "lib.model_routing.routing": "lib/model_routing/routing.py",
+          "lib.model_routing.offering_metadata": "lib/model_routing/offering_metadata.py",
+          "lib.model_routing.discovered_provider": "lib/model_routing/discovered_provider.py",
+          "lib.model_routing.managed_provider": "lib/model_routing/managed_provider.py",
+          "lib.model_routing.bootstrap": "lib/model_routing/bootstrap.py",
+          "lib.model_routing.local_provider": "lib/model_routing/local_provider.py",
+          "lib.model_routing": "lib/model_routing/__init__.py",
+          "lib.tasks_pkg.turn_trace_ledger": "lib/tasks_pkg/turn_trace_ledger.py",
+          "lib.tasks_pkg.plan_mode": "lib/tasks_pkg/plan_mode.py",
+          "lib.agent_core.model_context_limits": "lib/agent_core/model_context_limits.py",
+          "lib.storage.generated_model_context_projection": "lib/storage/generated_model_context_projection.py",
+          "lib.storage.model_continuation": "lib/storage/model_continuation.py",
+          "lib.tasks_pkg.model_replay": "lib/tasks_pkg/model_replay.py",
+          "lib.turn_source_queue_contract": "lib/turn_source_queue_contract.py",
+          "lib.message_queue": "lib/message_queue.py",
+          "lib.tools.resource_policy": "lib/tools/resource_policy.py",
+          "lib.tasks_pkg.background_commands": "lib/tasks_pkg/background_commands.py"
+        },
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec",
+        "scope": "Original1000x4x8192 uncoalesced harness. Complete frozen callers/contracts/native; all manifest bytes checked before/after and runtime imports checked. Embedded abandonment is not process SIGKILL."
+      }
+    },
+    {
+      "label": "current-application-0",
+      "report": {
+        "format": "tofu.conversation-concurrency/v2",
+        "backend": "tofudb",
+        "restart_while_running": true,
+        "requested_native_profile_every": "0",
+        "stream_interval_ms": 1000.0,
+        "stream_event_kind": "phase",
+        "carry_stream_events": true,
+        "terminal_barrier": false,
+        "rpc_deadline_seconds": 30,
+        "arrival_model": "fixed-schedule-per-conversation; queue delay included even when prior events are late",
+        "benchmark_source_sha256": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+        "scope": "production-executor-and-durable-turns-with-barrier-provider",
+        "conversations": 1000,
+        "rounds": 4,
+        "chunk_bytes": 8192,
+        "recover_interrupted": false,
+        "filesystem": "xfs",
+        "durability": "strict",
+        "binary_sha256": "d29d1b05d6fa80c2df0f6617a375193386670ceba0ab1b2a8de251530292ec80",
+        "phase_ms": {
+          "productive": 10035.641893744469,
+          "recovery_readback": 1337.2602090239525,
+          "executor_shutdown": 50.529807806015015,
+          "sampler_stop": 0.07821619510650635,
+          "verification": 6015.065163373947,
+          "final_freeze": 0.016182661056518555,
+          "cleanup": 367.71081387996674
+        },
+        "resource_observation_scope": "productive workload and recovery readback; excludes offline verification and cleanup",
+        "authority": {
+          "backend": "tofudb",
+          "authority_directory": "/tmp/tofudb-perf-authority-y0fbv7w3",
+          "filesystem": "xfs",
+          "durability": "strict",
+          "rpc_deadline_seconds": 30.0,
+          "crash_scope": "sigkill",
+          "build_identity": {
+            "embedded_allocator": "mimalloc",
+            "format": "tofu-db-build.v1",
+            "source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+            "version": "0.2.0"
+          },
+          "checkout_source_sha256": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+          "source_matches_checkout": true,
+          "client_mode": "application"
+        },
+        "engine_logs": [
+          "/tmp/tofudb-perf-serve-3juxof1i.log",
+          "/tmp/tofudb-perf-serve-w8elwvi3.log",
+          "/tmp/tofudb-perf-serve-tn82cx1p.log"
+        ],
+        "readiness_observation": {
+          "probes": 22,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        },
+        "client_peak_rss_bytes": 119689216,
+        "engine_peak_rss_bytes": 2168610816,
+        "peak_simultaneous_running": 1000,
+        "admission_seconds": 1.4305071085691452,
+        "client_rss_bytes_at_barrier": 54185984,
+        "engine_rss_bytes_at_barrier": 395931648,
+        "admission_storage_metrics": {
+          "authority": {
+            "contendedMilliseconds": 0,
+            "wedged": false
+          },
+          "backend": "tofudb",
+          "backgroundPacker": {
+            "discardedBytes": 0,
+            "discardedSegments": 0,
+            "failedRounds": 0,
+            "failedWalRetirements": 0,
+            "foregroundDrainUnpaces": 0,
+            "pacingWaitNanoseconds": 0,
+            "pacingWaits": 0,
+            "packedBytes": 11417419,
+            "packedSegments": 2,
+            "retiredWals": 2
+          },
+          "backgroundPackerPacing": {
+            "adaptive": true,
+            "paceBytesPerSecond": null
+          },
+          "canonicalJsonProofCache": {
+            "accountedBytes": 0,
+            "available": true,
+            "capacityBytes": 33554432,
+            "entries": 0,
+            "evictions": 0,
+            "hits": 0,
+            "maximumEntries": 65528,
+            "misses": 0,
+            "recencyEntries": 0
+          },
+          "commitStages": [
+            {
+              "calls": 3007,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 17807037
+                },
+                {
+                  "calls": 7,
+                  "component": "maintenance",
+                  "totalNanos": 30827
+                }
+              ],
+              "stage": "prepare",
+              "totalNanos": 17837864
+            },
+            {
+              "calls": 3007,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 213601123
+                },
+                {
+                  "calls": 7,
+                  "component": "maintenance",
+                  "totalNanos": 333201
+                }
+              ],
+              "stage": "engine_commit",
+              "totalNanos": 213934324
+            },
+            {
+              "calls": 3007,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 183089662
+                },
+                {
+                  "calls": 7,
+                  "component": "maintenance",
+                  "totalNanos": 72748
+                }
+              ],
+              "stage": "apply",
+              "totalNanos": 183162410
+            },
+            {
+              "calls": 45,
+              "components": [
+                {
+                  "calls": 45,
+                  "component": "maintenance",
+                  "totalNanos": 126051387
+                }
+              ],
+              "stage": "apply_batch",
+              "totalNanos": 126051387
+            },
+            {
+              "calls": 3049,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 126360634
+                },
+                {
+                  "calls": 49,
+                  "component": "maintenance",
+                  "totalNanos": 35629281
+                }
+              ],
+              "stage": "wal",
+              "totalNanos": 161989915
+            },
+            {
+              "calls": 3049,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 19542315
+                },
+                {
+                  "calls": 49,
+                  "component": "maintenance",
+                  "totalNanos": 17491702
+                }
+              ],
+              "stage": "encode",
+              "totalNanos": 37034017
+            },
+            {
+              "calls": 3049,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 2284868
+                },
+                {
+                  "calls": 49,
+                  "component": "maintenance",
+                  "totalNanos": 2215920
+                }
+              ],
+              "stage": "carried",
+              "totalNanos": 4500788
+            },
+            {
+              "calls": 3000,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 969924225
+                }
+              ],
+              "stage": "ir_steps",
+              "totalNanos": 969924225
+            },
+            {
+              "calls": 3000,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 878104736
+                }
+              ],
+              "stage": "ir_commit",
+              "totalNanos": 878104736
+            },
+            {
+              "calls": 376639,
+              "components": [
+                {
+                  "calls": 365612,
+                  "component": "foreground",
+                  "totalNanos": 334290075
+                },
+                {
+                  "calls": 11027,
+                  "component": "maintenance",
+                  "totalNanos": 17012539
+                }
+              ],
+              "stage": "load_node",
+              "totalNanos": 351302614
+            },
+            {
+              "calls": 16094,
+              "components": [
+                {
+                  "calls": 16094,
+                  "component": "maintenance",
+                  "totalNanos": 60146065
+                }
+              ],
+              "stage": "store_page",
+              "totalNanos": 60146065
+            },
+            {
+              "calls": 16141,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "foreground",
+                  "totalNanos": 2918608
+                },
+                {
+                  "calls": 16137,
+                  "component": "maintenance",
+                  "totalNanos": 8091790
+                }
+              ],
+              "stage": "put_deferred",
+              "totalNanos": 11010398
+            },
+            {
+              "calls": 948,
+              "components": [
+                {
+                  "calls": 7,
+                  "component": "foreground",
+                  "totalNanos": 20360
+                },
+                {
+                  "calls": 3,
+                  "component": "rotation_driver",
+                  "totalNanos": 8805598
+                },
+                {
+                  "calls": 938,
+                  "component": "background_packer",
+                  "totalNanos": 5630913
+                }
+              ],
+              "stage": "block_get",
+              "totalNanos": 14456871
+            },
+            {
+              "calls": 3007,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 38361649
+                },
+                {
+                  "calls": 7,
+                  "component": "maintenance",
+                  "totalNanos": 18510
+                }
+              ],
+              "stage": "builder",
+              "totalNanos": 38380159
+            },
+            {
+              "calls": 3049,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 20453668
+                },
+                {
+                  "calls": 49,
+                  "component": "maintenance",
+                  "totalNanos": 2716297
+                }
+              ],
+              "stage": "checkpoint_if",
+              "totalNanos": 23169965
+            },
+            {
+              "calls": 3049,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 16145304
+                },
+                {
+                  "calls": 49,
+                  "component": "maintenance",
+                  "totalNanos": 275525
+                }
+              ],
+              "stage": "commit_tail",
+              "totalNanos": 16420829
+            },
+            {
+              "calls": 948,
+              "components": [
+                {
+                  "calls": 7,
+                  "component": "foreground",
+                  "totalNanos": 756
+                },
+                {
+                  "calls": 3,
+                  "component": "rotation_driver",
+                  "totalNanos": 2169
+                },
+                {
+                  "calls": 938,
+                  "component": "background_packer",
+                  "totalNanos": 206543
+                }
+              ],
+              "stage": "get_pending",
+              "totalNanos": 209468
+            },
+            {
+              "calls": 8,
+              "components": [
+                {
+                  "calls": 7,
+                  "component": "foreground",
+                  "totalNanos": 5956
+                },
+                {
+                  "calls": 1,
+                  "component": "rotation_driver",
+                  "totalNanos": 593
+                }
+              ],
+              "stage": "get_cache",
+              "totalNanos": 6549
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 8968
+                },
+                {
+                  "calls": 1,
+                  "component": "rotation_driver",
+                  "totalNanos": 3795998
+                }
+              ],
+              "stage": "get_unc_ok",
+              "totalNanos": 3804966
+            },
+            {
+              "calls": 4,
+              "components": [
+                {
+                  "calls": 3,
+                  "component": "foreground",
+                  "totalNanos": 2910
+                },
+                {
+                  "calls": 1,
+                  "component": "maintenance",
+                  "totalNanos": 909
+                }
+              ],
+              "stage": "put_stage",
+              "totalNanos": 3819
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "background_packer",
+                  "totalNanos": 6819213
+                }
+              ],
+              "stage": "ck_remove",
+              "totalNanos": 6819213
+            },
+            {
+              "calls": 4,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "rotation_driver",
+                  "totalNanos": 376014
+                }
+              ],
+              "stage": "flush_dirty",
+              "totalNanos": 376014
+            },
+            {
+              "calls": 26,
+              "components": [
+                {
+                  "calls": 24,
+                  "component": "foreground",
+                  "totalNanos": 19106906
+                },
+                {
+                  "calls": 2,
+                  "component": "maintenance",
+                  "totalNanos": 2693573
+                }
+              ],
+              "stage": "history_stage",
+              "totalNanos": 21800479
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "pack_adoption_driver",
+                  "totalNanos": 120597
+                }
+              ],
+              "stage": "pack_retire",
+              "totalNanos": 120597
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "background_packer",
+                  "totalNanos": 19501
+                }
+              ],
+              "stage": "pack_filter",
+              "totalNanos": 19501
+            },
+            {
+              "calls": 3004,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 342279
+                },
+                {
+                  "calls": 4,
+                  "component": "maintenance",
+                  "totalNanos": 418
+                }
+              ],
+              "stage": "ta_prepare_merge",
+              "totalNanos": 342697
+            },
+            {
+              "calls": 3004,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 11135984
+                },
+                {
+                  "calls": 4,
+                  "component": "maintenance",
+                  "totalNanos": 7989
+                }
+              ],
+              "stage": "ta_prepare_fast",
+              "totalNanos": 11143973
+            },
+            {
+              "calls": 6020,
+              "components": [
+                {
+                  "calls": 6020,
+                  "component": "foreground",
+                  "totalNanos": 45533745532
+                }
+              ],
+              "stage": "authority_wait",
+              "totalNanos": 45533745532
+            },
+            {
+              "calls": 3000,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 15128891
+                }
+              ],
+              "stage": "wal_barrier_wait",
+              "totalNanos": 15128891
+            },
+            {
+              "calls": 58076,
+              "components": [
+                {
+                  "calls": 58002,
+                  "component": "foreground",
+                  "totalNanos": 69861465
+                },
+                {
+                  "calls": 74,
+                  "component": "maintenance",
+                  "totalNanos": 18671
+                }
+              ],
+              "stage": "overlay_point",
+              "totalNanos": 69880136
+            },
+            {
+              "calls": 11850,
+              "components": [
+                {
+                  "calls": 11829,
+                  "component": "foreground",
+                  "totalNanos": 1285193
+                },
+                {
+                  "calls": 21,
+                  "component": "maintenance",
+                  "totalNanos": 1494
+                }
+              ],
+              "stage": "overlay_view",
+              "totalNanos": 1286687
+            },
+            {
+              "calls": 3000,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 1061926444
+                }
+              ],
+              "stage": "parallel_prepare",
+              "totalNanos": 1061926444
+            },
+            {
+              "calls": 3000,
+              "components": [
+                {
+                  "calls": 3000,
+                  "component": "foreground",
+                  "totalNanos": 877578853
+                }
+              ],
+              "stage": "parallel_commit",
+              "totalNanos": 877578853
+            },
+            {
+              "calls": 1346,
+              "components": [
+                {
+                  "calls": 1346,
+                  "component": "foreground",
+                  "totalNanos": 54069983609
+                }
+              ],
+              "stage": "parallel_snapshot_wait",
+              "totalNanos": 54069983609
+            },
+            {
+              "calls": 17,
+              "components": [
+                {
+                  "calls": 17,
+                  "component": "rotation_driver",
+                  "totalNanos": 71416350
+                }
+              ],
+              "stage": "history_decode",
+              "totalNanos": 71416350
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 829
+                }
+              ],
+              "stage": "overlay_replay",
+              "totalNanos": 829
+            },
+            {
+              "calls": 43,
+              "components": [
+                {
+                  "calls": 43,
+                  "component": "maintenance",
+                  "totalNanos": 62787
+                }
+              ],
+              "stage": "overlay_prepare_capture",
+              "totalNanos": 62787
+            },
+            {
+              "calls": 42,
+              "components": [
+                {
+                  "calls": 42,
+                  "component": "maintenance",
+                  "totalNanos": 239684632
+                }
+              ],
+              "stage": "overlay_prepare_encode",
+              "totalNanos": 239684632
+            },
+            {
+              "calls": 42,
+              "components": [
+                {
+                  "calls": 42,
+                  "component": "maintenance",
+                  "totalNanos": 141915978
+                }
+              ],
+              "stage": "overlay_prepare_publish",
+              "totalNanos": 141915978
+            },
+            {
+              "calls": 3046,
+              "components": [
+                {
+                  "calls": 3046,
+                  "component": "wal_barrier",
+                  "totalNanos": 191792050
+                }
+              ],
+              "stage": "wal_barrier_sync",
+              "totalNanos": 191792050
+            },
+            {
+              "calls": 3,
+              "components": [
+                {
+                  "calls": 3,
+                  "component": "wal_barrier",
+                  "totalNanos": 136
+                }
+              ],
+              "stage": "wal_barrier_reschedule",
+              "totalNanos": 136
+            },
+            {
+              "calls": 376639,
+              "components": [
+                {
+                  "calls": 365612,
+                  "component": "foreground",
+                  "totalNanos": 147012919
+                },
+                {
+                  "calls": 11027,
+                  "component": "maintenance",
+                  "totalNanos": 768026
+                }
+              ],
+              "stage": "entity_page_cache_read_wait",
+              "totalNanos": 147780945
+            },
+            {
+              "calls": 11391,
+              "components": [
+                {
+                  "calls": 8055,
+                  "component": "foreground",
+                  "totalNanos": 8407432
+                },
+                {
+                  "calls": 3336,
+                  "component": "maintenance",
+                  "totalNanos": 5475658
+                }
+              ],
+              "stage": "entity_page_source_read",
+              "totalNanos": 13883090
+            },
+            {
+              "calls": 11391,
+              "components": [
+                {
+                  "calls": 8055,
+                  "component": "foreground",
+                  "totalNanos": 25353074
+                },
+                {
+                  "calls": 3336,
+                  "component": "maintenance",
+                  "totalNanos": 5428307
+                }
+              ],
+              "stage": "entity_page_decode",
+              "totalNanos": 30781381
+            },
+            {
+              "calls": 11391,
+              "components": [
+                {
+                  "calls": 8055,
+                  "component": "foreground",
+                  "totalNanos": 21922914
+                },
+                {
+                  "calls": 3336,
+                  "component": "maintenance",
+                  "totalNanos": 477434
+                }
+              ],
+              "stage": "entity_page_cache_write_wait",
+              "totalNanos": 22400348
+            }
+          ],
+          "contract": "tofu-db.system-metrics.v1",
+          "decodedBlobChunkCache": {
+            "accountedBytes": 0,
+            "available": true,
+            "capacityBytes": 134217728,
+            "entries": 0,
+            "evictions": 0,
+            "hits": 0,
+            "misses": 0,
+            "recencyEntries": 0,
+            "wholeBlob": {
+              "accountedBytes": 0,
+              "available": true,
+              "capacityBytes": 33554432,
+              "entries": 0,
+              "evictions": 0,
+              "lookups": 0,
+              "manifestMatches": 0,
+              "recencyEntries": 0,
+              "reused": 0
+            }
+          },
+          "durability": {
+            "checkpoint": 2,
+            "checkpointHistoryTailBytes": 0,
+            "dropFlushFailures": 0,
+            "flushDeferred": 0,
+            "historyDecodeAttempts": 17,
+            "historyDecodeSourceBytes": 63285635,
+            "historyDecodedTransactions": 2594,
+            "maxCheckpointHistoryTailBytes": 0,
+            "maxRotationWindowBytes": 0,
+            "overlayMaterializedBlocks": 16133,
+            "overlayMaterializedBytes": 45229094,
+            "overlayMergeCommits": 42,
+            "overlayMergedEntries": 51679,
+            "overlayMergedPositions": 74655,
+            "overlaySupersededPositions": 22976,
+            "overlayWalPressureAttempts": 0,
+            "overlayWalPressurePendingEntries": 0,
+            "projectionCheckpointBytes": 0,
+            "projectionPatchBytes": 0,
+            "projectionPatchesApplied": 0,
+            "publishControl": 8,
+            "rotationWindowBytes": 0,
+            "rotationWindowTransactions": 0,
+            "walAppend": 0,
+            "walEncodedBytes": 79162663
+          },
+          "listener": {
+            "acceptedConnections": 217,
+            "activeConnections": 217,
+            "completedConnections": 0,
+            "failedConnections": 0,
+            "peakActiveConnections": 217,
+            "rejectedConnections": 0,
+            "requestFrames": 0,
+            "responseFrames": 0
+          },
+          "maintenance": {
+            "attemptEventPruneAttempts": 0,
+            "attemptEventPruneBacklogRounds": 0,
+            "attemptEventsPruned": 0,
+            "committedTransactions": 0,
+            "completedMounts": 0,
+            "conflictDeferrals": 0,
+            "currentIdleIntervalMilliseconds": 250,
+            "droppedTerminalRecords": 0,
+            "failedRounds": 0,
+            "foregroundDeferrals": 1,
+            "historyCompactions": 0,
+            "materializedBytes": 0,
+            "materializedRows": 0,
+            "noWorkRounds": 0,
+            "overlayBackgroundChunks": 42,
+            "overlayBackgroundWakes": 47,
+            "publishedBackgroundPacks": 0,
+            "retainedHistorySegments": 0,
+            "retiredHistorySegments": 0,
+            "rounds": 4,
+            "searchAcknowledgedTokens": 0,
+            "searchDirtyConversations": 48,
+            "searchFailedRounds": 0,
+            "searchForegroundDeferrals": 4,
+            "searchIndexedTurns": 0,
+            "searchMaximumFailureBackoffMilliseconds": 0,
+            "searchPageBudgetExhaustions": 0,
+            "searchRebuiltConversations": 0,
+            "searchRemovedConversations": 0,
+            "searchRetryDeferrals": 0,
+            "searchSkippedOversizedTurns": 0,
+            "searchSourceBytes": 0,
+            "searchSourcePages": 0,
+            "tombstoneCompactionRounds": 0,
+            "tombstoneEntriesReclaimed": 0,
+            "tombstonePagesRewritten": 0,
+            "toolResultArtifactsPruned": 0,
+            "toolResultPruneBacklogRounds": 0
+          },
+          "onlineBackup": {
+            "epoch_in_progress": false,
+            "epochs_completed": 0,
+            "epochs_failed": 0,
+            "last_error": null,
+            "last_report": null,
+            "last_success_unix_ms": null,
+            "replicated_sequence": null,
+            "replication_interval_ms": null
+          },
+          "onlineGarbageCollector": {
+            "deferred_epochs": 0,
+            "epoch_in_progress": false,
+            "epochs_completed": 0,
+            "last_epoch_duration_ms": 0,
+            "last_epoch_reclaimed_bytes": 0,
+            "marks_built": 0,
+            "total_compacted_blocks": 0,
+            "total_consolidated_victims": 0,
+            "total_consolidations": 0,
+            "total_orphan_segments_removed": 0,
+            "total_reclaimed_blocks": 0,
+            "total_reclaimed_bytes": 0,
+            "total_segments_retired": 0,
+            "total_segments_rewritten": 0,
+            "total_temporary_files_removed": 0
+          },
+          "protocol": "storage.v2",
+          "publishedReadView": {
+            "available": true,
+            "metadataBytes": 1472,
+            "ownedPinHandles": 0,
+            "publications": 3047,
+            "retainedViews": 1,
+            "successfulReads": 0
+          },
+          "requestProfile": {
+            "enabled": false
+          },
+          "resourceBudget": {
+            "authorityGcMaximumBlocksPerRound": 65536,
+            "authorityGcMaximumOrphanPayloadSegmentFilesRemoved": 1,
+            "authorityGcMaximumPayloadSegmentFilesScanned": 4163,
+            "authorityGcMaximumPayloadSegmentsScanned": 16,
+            "authorityGcMaximumTemporaryBlockFilesRemoved": 1,
+            "authorityGcMaximumTemporaryBytes": 1073741824,
+            "authorityGcMaximumVictimBytes": 268435456,
+            "authorityGcMinimumPayloadCompactionBlocks": 128,
+            "blockCacheBytes": 2147483648,
+            "canonicalJsonProofCacheBytes": 33554432,
+            "checkpointMaterializeBatchBytes": 33554432,
+            "connectionStackBytes": 1048576,
+            "decodedBlobChunkCacheBytes": 134217728,
+            "embeddedRequestMemoryBytes": 6404961792,
+            "entityPageCacheBytes": 1073741824,
+            "historyRetainedSegments": 64,
+            "leanFallback": false,
+            "logicalCpus": 63,
+            "maintenanceIdleIntervalMilliseconds": 250,
+            "maintenanceWorkerStackBytes": 524288,
+            "maximumConnections": 512,
+            "maximumFrameBytes": 134217728,
+            "maximumMaintenanceScopes": 64,
+            "maximumMaintenanceWorkers": 1,
+            "memoryCapacityBytes": 236223201280,
+            "memoryHeadroomBytes": 204958777344,
+            "minimumWritableVolumeFreeBytes": 150994944,
+            "overlayBudgetBytes": 268435456,
+            "overlayWalWatermarkBytes": 50331648,
+            "paperBuildRetainedMaximumBytes": 536870912,
+            "payloadSegmentCacheBytes": 3202480896,
+            "registeredMaintenanceScopes": 1,
+            "searchProjectionAvailable": true,
+            "searchProjectionConfigured": true,
+            "searchProjectionMaximumBytesPerOwner": 4294967296,
+            "sessionIdleTimeoutMilliseconds": 300000,
+            "sessionIoTimeoutMilliseconds": 30000,
+            "timerLiveCapacity": 16,
+            "volumeFreeBytes": 6180575961088,
+            "wholeBlobProofCacheBytes": 33554432
+          },
+          "walDurability": "strict"
+        },
+        "running_restart_ms": 109.380451,
+        "recovered_running": 1000,
+        "storage_metrics": {
+          "authority": {
+            "contendedMilliseconds": 0,
+            "wedged": false
+          },
+          "backend": "tofudb",
+          "backgroundPacker": {
+            "discardedBytes": 0,
+            "discardedSegments": 0,
+            "failedRounds": 0,
+            "failedWalRetirements": 0,
+            "foregroundDrainUnpaces": 0,
+            "pacingWaitNanoseconds": 0,
+            "pacingWaits": 0,
+            "packedBytes": 93837927,
+            "packedSegments": 6,
+            "retiredWals": 20
+          },
+          "backgroundPackerPacing": {
+            "adaptive": true,
+            "paceBytesPerSecond": null
+          },
+          "canonicalJsonProofCache": {
+            "accountedBytes": 0,
+            "available": true,
+            "capacityBytes": 33554432,
+            "entries": 0,
+            "evictions": 0,
+            "hits": 0,
+            "maximumEntries": 65528,
+            "misses": 0,
+            "recencyEntries": 0
+          },
+          "commitStages": [
+            {
+              "calls": 6332,
+              "components": [
+                {
+                  "calls": 5000,
+                  "component": "foreground",
+                  "totalNanos": 89835277
+                },
+                {
+                  "calls": 1332,
+                  "component": "maintenance",
+                  "totalNanos": 139374341
+                }
+              ],
+              "stage": "prepare",
+              "totalNanos": 229209618
+            },
+            {
+              "calls": 6332,
+              "components": [
+                {
+                  "calls": 5000,
+                  "component": "foreground",
+                  "totalNanos": 495345606
+                },
+                {
+                  "calls": 1332,
+                  "component": "maintenance",
+                  "totalNanos": 797306384
+                }
+              ],
+              "stage": "engine_commit",
+              "totalNanos": 1292651990
+            },
+            {
+              "calls": 6332,
+              "components": [
+                {
+                  "calls": 5000,
+                  "component": "foreground",
+                  "totalNanos": 375202981
+                },
+                {
+                  "calls": 1332,
+                  "component": "maintenance",
+                  "totalNanos": 8141898
+                }
+              ],
+              "stage": "apply",
+              "totalNanos": 383344879
+            },
+            {
+              "calls": 739,
+              "components": [
+                {
+                  "calls": 6,
+                  "component": "foreground",
+                  "totalNanos": 36955612
+                },
+                {
+                  "calls": 733,
+                  "component": "maintenance",
+                  "totalNanos": 3039031892
+                }
+              ],
+              "stage": "apply_batch",
+              "totalNanos": 3075987504
+            },
+            {
+              "calls": 6613,
+              "components": [
+                {
+                  "calls": 5003,
+                  "component": "foreground",
+                  "totalNanos": 307084107
+                },
+                {
+                  "calls": 1610,
+                  "component": "maintenance",
+                  "totalNanos": 451230133
+                }
+              ],
+              "stage": "wal",
+              "totalNanos": 758314240
+            },
+            {
+              "calls": 6613,
+              "components": [
+                {
+                  "calls": 5003,
+                  "component": "foreground",
+                  "totalNanos": 26866312
+                },
+                {
+                  "calls": 1610,
+                  "component": "maintenance",
+                  "totalNanos": 134114051
+                }
+              ],
+              "stage": "encode",
+              "totalNanos": 160980363
+            },
+            {
+              "calls": 6613,
+              "components": [
+                {
+                  "calls": 5003,
+                  "component": "foreground",
+                  "totalNanos": 10797242
+                },
+                {
+                  "calls": 1610,
+                  "component": "maintenance",
+                  "totalNanos": 38938783
+                }
+              ],
+              "stage": "carried",
+              "totalNanos": 49736025
+            },
+            {
+              "calls": 10004,
+              "components": [
+                {
+                  "calls": 10004,
+                  "component": "foreground",
+                  "totalNanos": 12209432156
+                }
+              ],
+              "stage": "ir_steps",
+              "totalNanos": 12209432156
+            },
+            {
+              "calls": 5004,
+              "components": [
+                {
+                  "calls": 5004,
+                  "component": "foreground",
+                  "totalNanos": 3190689579
+                }
+              ],
+              "stage": "ir_commit",
+              "totalNanos": 3190689579
+            },
+            {
+              "calls": 2449950,
+              "components": [
+                {
+                  "calls": 1517627,
+                  "component": "foreground",
+                  "totalNanos": 2931533816
+                },
+                {
+                  "calls": 932323,
+                  "component": "maintenance",
+                  "totalNanos": 923321339
+                }
+              ],
+              "stage": "load_node",
+              "totalNanos": 3854855155
+            },
+            {
+              "calls": 417985,
+              "components": [
+                {
+                  "calls": 5941,
+                  "component": "foreground",
+                  "totalNanos": 22486302
+                },
+                {
+                  "calls": 412044,
+                  "component": "maintenance",
+                  "totalNanos": 1408501257
+                }
+              ],
+              "stage": "store_page",
+              "totalNanos": 1430987559
+            },
+            {
+              "calls": 260168,
+              "components": [
+                {
+                  "calls": 30962,
+                  "component": "foreground",
+                  "totalNanos": 270443640
+                },
+                {
+                  "calls": 229206,
+                  "component": "maintenance",
+                  "totalNanos": 218377881
+                }
+              ],
+              "stage": "put_deferred",
+              "totalNanos": 488821521
+            },
+            {
+              "calls": 39638,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "foreground",
+                  "totalNanos": 72766
+                },
+                {
+                  "calls": 20,
+                  "component": "rotation_driver",
+                  "totalNanos": 29079970
+                },
+                {
+                  "calls": 38669,
+                  "component": "background_packer",
+                  "totalNanos": 105774863
+                },
+                {
+                  "calls": 947,
+                  "component": "maintenance",
+                  "totalNanos": 727378
+                }
+              ],
+              "stage": "block_get",
+              "totalNanos": 135654977
+            },
+            {
+              "calls": 6332,
+              "components": [
+                {
+                  "calls": 5000,
+                  "component": "foreground",
+                  "totalNanos": 99819687
+                },
+                {
+                  "calls": 1332,
+                  "component": "maintenance",
+                  "totalNanos": 6182052
+                }
+              ],
+              "stage": "builder",
+              "totalNanos": 106001739
+            },
+            {
+              "calls": 6613,
+              "components": [
+                {
+                  "calls": 5003,
+                  "component": "foreground",
+                  "totalNanos": 45281602
+                },
+                {
+                  "calls": 1610,
+                  "component": "maintenance",
+                  "totalNanos": 22171602
+                }
+              ],
+              "stage": "checkpoint_if",
+              "totalNanos": 67453204
+            },
+            {
+              "calls": 6613,
+              "components": [
+                {
+                  "calls": 5003,
+                  "component": "foreground",
+                  "totalNanos": 12815177
+                },
+                {
+                  "calls": 1610,
+                  "component": "maintenance",
+                  "totalNanos": 2214226
+                }
+              ],
+              "stage": "commit_tail",
+              "totalNanos": 15029403
+            },
+            {
+              "calls": 39638,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "foreground",
+                  "totalNanos": 6298
+                },
+                {
+                  "calls": 20,
+                  "component": "rotation_driver",
+                  "totalNanos": 15113
+                },
+                {
+                  "calls": 38669,
+                  "component": "background_packer",
+                  "totalNanos": 21950279
+                },
+                {
+                  "calls": 947,
+                  "component": "maintenance",
+                  "totalNanos": 167827
+                }
+              ],
+              "stage": "get_pending",
+              "totalNanos": 22139517
+            },
+            {
+              "calls": 11127,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "foreground",
+                  "totalNanos": 351
+                },
+                {
+                  "calls": 1,
+                  "component": "rotation_driver",
+                  "totalNanos": 333
+                },
+                {
+                  "calls": 10177,
+                  "component": "background_packer",
+                  "totalNanos": 2219314
+                },
+                {
+                  "calls": 947,
+                  "component": "maintenance",
+                  "totalNanos": 317556
+                }
+              ],
+              "stage": "get_cache",
+              "totalNanos": 2537554
+            },
+            {
+              "calls": 9993,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "foreground",
+                  "totalNanos": 50588
+                },
+                {
+                  "calls": 1,
+                  "component": "rotation_driver",
+                  "totalNanos": 2082353
+                },
+                {
+                  "calls": 9988,
+                  "component": "background_packer",
+                  "totalNanos": 48918168
+                },
+                {
+                  "calls": 2,
+                  "component": "maintenance",
+                  "totalNanos": 18690
+                }
+              ],
+              "stage": "get_unc_ok",
+              "totalNanos": 51069799
+            },
+            {
+              "calls": 26895,
+              "components": [
+                {
+                  "calls": 25015,
+                  "component": "foreground",
+                  "totalNanos": 24002295
+                },
+                {
+                  "calls": 1880,
+                  "component": "maintenance",
+                  "totalNanos": 1123007
+                }
+              ],
+              "stage": "put_stage",
+              "totalNanos": 25125302
+            },
+            {
+              "calls": 20,
+              "components": [
+                {
+                  "calls": 20,
+                  "component": "background_packer",
+                  "totalNanos": 48277046
+                }
+              ],
+              "stage": "ck_remove",
+              "totalNanos": 48277046
+            },
+            {
+              "calls": 39,
+              "components": [
+                {
+                  "calls": 38,
+                  "component": "rotation_driver",
+                  "totalNanos": 3569002
+                },
+                {
+                  "calls": 1,
+                  "component": "maintenance",
+                  "totalNanos": 55281
+                }
+              ],
+              "stage": "flush_dirty",
+              "totalNanos": 3624283
+            },
+            {
+              "calls": 85,
+              "components": [
+                {
+                  "calls": 57,
+                  "component": "foreground",
+                  "totalNanos": 43229347
+                },
+                {
+                  "calls": 28,
+                  "component": "maintenance",
+                  "totalNanos": 21696058
+                }
+              ],
+              "stage": "history_stage",
+              "totalNanos": 64925405
+            },
+            {
+              "calls": 5,
+              "components": [
+                {
+                  "calls": 5,
+                  "component": "pack_adoption_driver",
+                  "totalNanos": 6455655
+                }
+              ],
+              "stage": "pack_retire",
+              "totalNanos": 6455655
+            },
+            {
+              "calls": 42,
+              "components": [
+                {
+                  "calls": 6,
+                  "component": "background_packer",
+                  "totalNanos": 505935
+                },
+                {
+                  "calls": 36,
+                  "component": "maintenance",
+                  "totalNanos": 3320492
+                }
+              ],
+              "stage": "pack_filter",
+              "totalNanos": 3826427
+            },
+            {
+              "calls": 6039,
+              "components": [
+                {
+                  "calls": 5000,
+                  "component": "foreground",
+                  "totalNanos": 50461532
+                },
+                {
+                  "calls": 1039,
+                  "component": "maintenance",
+                  "totalNanos": 71860
+                }
+              ],
+              "stage": "ta_prepare_merge",
+              "totalNanos": 50533392
+            },
+            {
+              "calls": 6039,
+              "components": [
+                {
+                  "calls": 5000,
+                  "component": "foreground",
+                  "totalNanos": 26368396
+                },
+                {
+                  "calls": 1039,
+                  "component": "maintenance",
+                  "totalNanos": 1100452
+                }
+              ],
+              "stage": "ta_prepare_fast",
+              "totalNanos": 27468848
+            },
+            {
+              "calls": 10397,
+              "components": [
+                {
+                  "calls": 10397,
+                  "component": "foreground",
+                  "totalNanos": 201915813156
+                }
+              ],
+              "stage": "authority_wait",
+              "totalNanos": 201915813156
+            },
+            {
+              "calls": 4,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "foreground",
+                  "totalNanos": 6028039
+                }
+              ],
+              "stage": "command_execute",
+              "totalNanos": 6028039
+            },
+            {
+              "calls": 5000,
+              "components": [
+                {
+                  "calls": 5000,
+                  "component": "foreground",
+                  "totalNanos": 43687897
+                }
+              ],
+              "stage": "wal_barrier_wait",
+              "totalNanos": 43687897
+            },
+            {
+              "calls": 5004,
+              "components": [
+                {
+                  "calls": 5004,
+                  "component": "foreground",
+                  "totalNanos": 1362545375
+                }
+              ],
+              "stage": "turn_event_load",
+              "totalNanos": 1362545375
+            },
+            {
+              "calls": 5004,
+              "components": [
+                {
+                  "calls": 5004,
+                  "component": "foreground",
+                  "totalNanos": 326491494
+                }
+              ],
+              "stage": "turn_event_projection",
+              "totalNanos": 326491494
+            },
+            {
+              "calls": 5004,
+              "components": [
+                {
+                  "calls": 5004,
+                  "component": "foreground",
+                  "totalNanos": 4946555277
+                }
+              ],
+              "stage": "turn_event_store",
+              "totalNanos": 4946555277
+            },
+            {
+              "calls": 5004,
+              "components": [
+                {
+                  "calls": 5004,
+                  "component": "foreground",
+                  "totalNanos": 3516018393
+                }
+              ],
+              "stage": "turn_event_publish",
+              "totalNanos": 3516018393
+            },
+            {
+              "calls": 251079,
+              "components": [
+                {
+                  "calls": 108061,
+                  "component": "foreground",
+                  "totalNanos": 150144740
+                },
+                {
+                  "calls": 143018,
+                  "component": "maintenance",
+                  "totalNanos": 6234696
+                }
+              ],
+              "stage": "overlay_point",
+              "totalNanos": 156379436
+            },
+            {
+              "calls": 26540,
+              "components": [
+                {
+                  "calls": 24862,
+                  "component": "foreground",
+                  "totalNanos": 2701659
+                },
+                {
+                  "calls": 1678,
+                  "component": "maintenance",
+                  "totalNanos": 97959
+                }
+              ],
+              "stage": "overlay_view",
+              "totalNanos": 2799618
+            },
+            {
+              "calls": 10949,
+              "components": [
+                {
+                  "calls": 10008,
+                  "component": "foreground",
+                  "totalNanos": 5325142198
+                },
+                {
+                  "calls": 941,
+                  "component": "maintenance",
+                  "totalNanos": 117638370
+                }
+              ],
+              "stage": "blob_encode",
+              "totalNanos": 5442780568
+            },
+            {
+              "calls": 10949,
+              "components": [
+                {
+                  "calls": 10008,
+                  "component": "foreground",
+                  "totalNanos": 5634291386
+                },
+                {
+                  "calls": 941,
+                  "component": "maintenance",
+                  "totalNanos": 160109514
+                }
+              ],
+              "stage": "blob_stage",
+              "totalNanos": 5794400900
+            },
+            {
+              "calls": 5000,
+              "components": [
+                {
+                  "calls": 5000,
+                  "component": "foreground",
+                  "totalNanos": 10513086942
+                }
+              ],
+              "stage": "parallel_prepare",
+              "totalNanos": 10513086942
+            },
+            {
+              "calls": 5000,
+              "components": [
+                {
+                  "calls": 5000,
+                  "component": "foreground",
+                  "totalNanos": 3189076571
+                }
+              ],
+              "stage": "parallel_commit",
+              "totalNanos": 3189076571
+            },
+            {
+              "calls": 4,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "foreground",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "parallel_fallback",
+              "totalNanos": 0
+            },
+            {
+              "calls": 4,
+              "components": [
+                {
+                  "calls": 4,
+                  "component": "foreground",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "parallel_commit_busy",
+              "totalNanos": 0
+            },
+            {
+              "calls": 3259,
+              "components": [
+                {
+                  "calls": 3259,
+                  "component": "foreground",
+                  "totalNanos": 468115515089
+                }
+              ],
+              "stage": "parallel_snapshot_wait",
+              "totalNanos": 468115515089
+            },
+            {
+              "calls": 216,
+              "components": [
+                {
+                  "calls": 180,
+                  "component": "rotation_driver",
+                  "totalNanos": 432903118
+                },
+                {
+                  "calls": 36,
+                  "component": "maintenance",
+                  "totalNanos": 92129981
+                }
+              ],
+              "stage": "history_decode",
+              "totalNanos": 525033099
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 505
+                }
+              ],
+              "stage": "history_lookup",
+              "totalNanos": 505
+            },
+            {
+              "calls": 1,
+              "components": [
+                {
+                  "calls": 1,
+                  "component": "foreground",
+                  "totalNanos": 1267948
+                }
+              ],
+              "stage": "history_range",
+              "totalNanos": 1267948
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "foreground",
+                  "totalNanos": 5358446
+                }
+              ],
+              "stage": "overlay_replay",
+              "totalNanos": 5358446
+            },
+            {
+              "calls": 6,
+              "components": [
+                {
+                  "calls": 6,
+                  "component": "foreground",
+                  "totalNanos": 4444760
+                }
+              ],
+              "stage": "overlay_select",
+              "totalNanos": 4444760
+            },
+            {
+              "calls": 6,
+              "components": [
+                {
+                  "calls": 6,
+                  "component": "foreground",
+                  "totalNanos": 1191052
+                }
+              ],
+              "stage": "overlay_carry_budget",
+              "totalNanos": 1191052
+            },
+            {
+              "calls": 27282,
+              "components": [
+                {
+                  "calls": 25285,
+                  "component": "foreground",
+                  "totalNanos": 0
+                },
+                {
+                  "calls": 36,
+                  "component": "rotation_driver",
+                  "totalNanos": 0
+                },
+                {
+                  "calls": 3,
+                  "component": "background_packer",
+                  "totalNanos": 0
+                },
+                {
+                  "calls": 1958,
+                  "component": "maintenance",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "pack_filter_incomplete",
+              "totalNanos": 0
+            },
+            {
+              "calls": 281,
+              "components": [
+                {
+                  "calls": 281,
+                  "component": "maintenance",
+                  "totalNanos": 365432
+                }
+              ],
+              "stage": "overlay_prepare_capture",
+              "totalNanos": 365432
+            },
+            {
+              "calls": 281,
+              "components": [
+                {
+                  "calls": 281,
+                  "component": "maintenance",
+                  "totalNanos": 3835433665
+                }
+              ],
+              "stage": "overlay_prepare_encode",
+              "totalNanos": 3835433665
+            },
+            {
+              "calls": 281,
+              "components": [
+                {
+                  "calls": 281,
+                  "component": "maintenance",
+                  "totalNanos": 881033621
+                }
+              ],
+              "stage": "overlay_prepare_publish",
+              "totalNanos": 881033621
+            },
+            {
+              "calls": 3,
+              "components": [
+                {
+                  "calls": 3,
+                  "component": "maintenance",
+                  "totalNanos": 0
+                }
+              ],
+              "stage": "overlay_prepare_stale",
+              "totalNanos": 0
+            },
+            {
+              "calls": 2005,
+              "components": [
+                {
+                  "calls": 2000,
+                  "component": "foreground",
+                  "totalNanos": 449078254
+                },
+                {
+                  "calls": 5,
+                  "component": "maintenance",
+                  "totalNanos": 1282372
+                }
+              ],
+              "stage": "projection_head_materialize",
+              "totalNanos": 450360626
+            },
+            {
+              "calls": 2005,
+              "components": [
+                {
+                  "calls": 2000,
+                  "component": "foreground",
+                  "totalNanos": 253449293
+                },
+                {
+                  "calls": 5,
+                  "component": "maintenance",
+                  "totalNanos": 760208
+                }
+              ],
+              "stage": "projection_head_checkpoint",
+              "totalNanos": 254209501
+            },
+            {
+              "calls": 2005,
+              "components": [
+                {
+                  "calls": 2000,
+                  "component": "foreground",
+                  "totalNanos": 145876457
+                },
+                {
+                  "calls": 5,
+                  "component": "maintenance",
+                  "totalNanos": 399289
+                }
+              ],
+              "stage": "projection_head_patch_load",
+              "totalNanos": 146275746
+            },
+            {
+              "calls": 2005,
+              "components": [
+                {
+                  "calls": 2000,
+                  "component": "foreground",
+                  "totalNanos": 45956424
+                },
+                {
+                  "calls": 5,
+                  "component": "maintenance",
+                  "totalNanos": 113672
+                }
+              ],
+              "stage": "projection_head_patch_apply",
+              "totalNanos": 46070096
+            },
+            {
+              "calls": 6320,
+              "components": [
+                {
+                  "calls": 6320,
+                  "component": "wal_barrier",
+                  "totalNanos": 568426367
+                }
+              ],
+              "stage": "wal_barrier_sync",
+              "totalNanos": 568426367
+            },
+            {
+              "calls": 2,
+              "components": [
+                {
+                  "calls": 2,
+                  "component": "wal_barrier",
+                  "totalNanos": 78
+                }
+              ],
+              "stage": "wal_barrier_reschedule",
+              "totalNanos": 78
+            },
+            {
+              "calls": 2449948,
+              "components": [
+                {
+                  "calls": 1517625,
+                  "component": "foreground",
+                  "totalNanos": 376810664
+                },
+                {
+                  "calls": 932323,
+                  "component": "maintenance",
+                  "totalNanos": 90334467
+                }
+              ],
+              "stage": "entity_page_cache_read_wait",
+              "totalNanos": 467145131
+            },
+            {
+              "calls": 213225,
+              "components": [
+                {
+                  "calls": 105333,
+                  "component": "foreground",
+                  "totalNanos": 1556833140
+                },
+                {
+                  "calls": 107892,
+                  "component": "maintenance",
+                  "totalNanos": 295074661
+                }
+              ],
+              "stage": "entity_page_source_read",
+              "totalNanos": 1851907801
+            },
+            {
+              "calls": 213225,
+              "components": [
+                {
+                  "calls": 105333,
+                  "component": "foreground",
+                  "totalNanos": 280489282
+                },
+                {
+                  "calls": 107892,
+                  "component": "maintenance",
+                  "totalNanos": 155947716
+                }
+              ],
+              "stage": "entity_page_decode",
+              "totalNanos": 436436998
+            },
+            {
+              "calls": 213223,
+              "components": [
+                {
+                  "calls": 105331,
+                  "component": "foreground",
+                  "totalNanos": 65900162
+                },
+                {
+                  "calls": 107892,
+                  "component": "maintenance",
+                  "totalNanos": 20402791
+                }
+              ],
+              "stage": "entity_page_cache_write_wait",
+              "totalNanos": 86302953
+            }
+          ],
+          "contract": "tofu-db.system-metrics.v1",
+          "decodedBlobChunkCache": {
+            "accountedBytes": 134154377,
+            "available": true,
+            "capacityBytes": 134217728,
+            "entries": 2177,
+            "evictions": 3770,
+            "hits": 2018,
+            "misses": 5951,
+            "recencyEntries": 2177,
+            "wholeBlob": {
+              "accountedBytes": 33543271,
+              "available": true,
+              "capacityBytes": 33554432,
+              "entries": 2586,
+              "evictions": 3361,
+              "lookups": 7969,
+              "manifestMatches": 2018,
+              "recencyEntries": 2586,
+              "reused": 2018
+            }
+          },
+          "durability": {
+            "checkpoint": 19,
+            "checkpointHistoryTailBytes": 0,
+            "dropFlushFailures": 0,
+            "flushDeferred": 7,
+            "historyDecodeAttempts": 216,
+            "historyDecodeSourceBytes": 741536061,
+            "historyDecodedTransactions": 9699,
+            "maxCheckpointHistoryTailBytes": 0,
+            "maxRotationWindowBytes": 0,
+            "overlayMaterializedBlocks": 213252,
+            "overlayMaterializedBytes": 457672879,
+            "overlayMergeCommits": 281,
+            "overlayMergedEntries": 141165,
+            "overlayMergedPositions": 147777,
+            "overlaySupersededPositions": 6612,
+            "overlayWalPressureAttempts": 0,
+            "overlayWalPressurePendingEntries": 0,
+            "projectionCheckpointBytes": 99883085,
+            "projectionPatchBytes": 33325105,
+            "projectionPatchesApplied": 2005,
+            "publishControl": 77,
+            "rotationWindowBytes": 0,
+            "rotationWindowTransactions": 0,
+            "walAppend": 0,
+            "walEncodedBytes": 650014891
+          },
+          "listener": {
+            "acceptedConnections": 257,
+            "activeConnections": 257,
+            "completedConnections": 0,
+            "failedConnections": 0,
+            "peakActiveConnections": 257,
+            "rejectedConnections": 0,
+            "requestFrames": 0,
+            "responseFrames": 0
+          },
+          "maintenance": {
+            "attemptEventPruneAttempts": 0,
+            "attemptEventPruneBacklogRounds": 0,
+            "attemptEventsPruned": 0,
+            "committedTransactions": 0,
+            "completedMounts": 0,
+            "conflictDeferrals": 0,
+            "currentIdleIntervalMilliseconds": 250,
+            "droppedTerminalRecords": 0,
+            "failedRounds": 0,
+            "foregroundDeferrals": 2,
+            "historyCompactions": 1,
+            "materializedBytes": 0,
+            "materializedRows": 0,
+            "noWorkRounds": 0,
+            "overlayBackgroundChunks": 278,
+            "overlayBackgroundWakes": 131,
+            "publishedBackgroundPacks": 0,
+            "retainedHistorySegments": 64,
+            "retiredHistorySegments": 1,
+            "rounds": 9,
+            "searchAcknowledgedTokens": 133,
+            "searchDirtyConversations": 144,
+            "searchFailedRounds": 0,
+            "searchForegroundDeferrals": 5,
+            "searchIndexedTurns": 86,
+            "searchMaximumFailureBackoffMilliseconds": 0,
+            "searchPageBudgetExhaustions": 0,
+            "searchRebuiltConversations": 69,
+            "searchRemovedConversations": 0,
+            "searchRetryDeferrals": 0,
+            "searchSkippedOversizedTurns": 0,
+            "searchSourceBytes": 1219077,
+            "searchSourcePages": 138,
+            "tombstoneCompactionRounds": 0,
+            "tombstoneEntriesReclaimed": 0,
+            "tombstonePagesRewritten": 0,
+            "toolResultArtifactsPruned": 0,
+            "toolResultPruneBacklogRounds": 0
+          },
+          "onlineBackup": {
+            "epoch_in_progress": false,
+            "epochs_completed": 0,
+            "epochs_failed": 0,
+            "last_error": null,
+            "last_report": null,
+            "last_success_unix_ms": null,
+            "replicated_sequence": null,
+            "replication_interval_ms": null
+          },
+          "onlineGarbageCollector": {
+            "deferred_epochs": 0,
+            "epoch_in_progress": false,
+            "epochs_completed": 0,
+            "last_epoch_duration_ms": 0,
+            "last_epoch_reclaimed_bytes": 0,
+            "marks_built": 0,
+            "total_compacted_blocks": 0,
+            "total_consolidated_victims": 0,
+            "total_consolidations": 0,
+            "total_orphan_segments_removed": 0,
+            "total_reclaimed_blocks": 0,
+            "total_reclaimed_bytes": 0,
+            "total_segments_retired": 0,
+            "total_segments_rewritten": 0,
+            "total_temporary_files_removed": 0
+          },
+          "protocol": "storage.v2",
+          "publishedReadView": {
+            "available": true,
+            "metadataBytes": 1472,
+            "ownedPinHandles": 0,
+            "publications": 6321,
+            "retainedViews": 1,
+            "successfulReads": 4999
+          },
+          "requestProfile": {
+            "enabled": false
+          },
+          "resourceBudget": {
+            "authorityGcMaximumBlocksPerRound": 65536,
+            "authorityGcMaximumOrphanPayloadSegmentFilesRemoved": 1,
+            "authorityGcMaximumPayloadSegmentFilesScanned": 4163,
+            "authorityGcMaximumPayloadSegmentsScanned": 16,
+            "authorityGcMaximumTemporaryBlockFilesRemoved": 1,
+            "authorityGcMaximumTemporaryBytes": 1073741824,
+            "authorityGcMaximumVictimBytes": 268435456,
+            "authorityGcMinimumPayloadCompactionBlocks": 128,
+            "blockCacheBytes": 2147483648,
+            "canonicalJsonProofCacheBytes": 33554432,
+            "checkpointMaterializeBatchBytes": 33554432,
+            "connectionStackBytes": 1048576,
+            "decodedBlobChunkCacheBytes": 134217728,
+            "embeddedRequestMemoryBytes": 6401910656,
+            "entityPageCacheBytes": 1073741824,
+            "historyRetainedSegments": 64,
+            "leanFallback": false,
+            "logicalCpus": 63,
+            "maintenanceIdleIntervalMilliseconds": 250,
+            "maintenanceWorkerStackBytes": 524288,
+            "maximumConnections": 512,
+            "maximumFrameBytes": 134217728,
+            "maximumMaintenanceScopes": 64,
+            "maximumMaintenanceWorkers": 1,
+            "memoryCapacityBytes": 236223201280,
+            "memoryHeadroomBytes": 204861140992,
+            "minimumWritableVolumeFreeBytes": 150994944,
+            "overlayBudgetBytes": 268435456,
+            "overlayWalWatermarkBytes": 50331648,
+            "paperBuildRetainedMaximumBytes": 536870912,
+            "payloadSegmentCacheBytes": 3200955328,
+            "registeredMaintenanceScopes": 1,
+            "searchProjectionAvailable": true,
+            "searchProjectionConfigured": true,
+            "searchProjectionMaximumBytesPerOwner": 4294967296,
+            "sessionIdleTimeoutMilliseconds": 300000,
+            "sessionIoTimeoutMilliseconds": 30000,
+            "timerLiveCapacity": 16,
+            "volumeFreeBytes": 6180483059712,
+            "wholeBlobProofCacheBytes": 33554432
+          },
+          "walDurability": "strict"
+        },
+        "restart_ms": 587.709425,
+        "recovered_exact_replay": 1000,
+        "recovered_exact_content": 1000,
+        "recovered_completed": 1000,
+        "integrity_returncode": 0,
+        "integrity_scope": "offline-after-sigkill",
+        "integrity_summary": "format=tofu-db.verify.v1 verdict=ok control_generation=112 durable_sequence=9372 wal_records=943 wal_tail_truncated_bytes=0 payload_segments_ok=10/10 pages_verified=26648 semantic_verified=18874 history_blocks_verified=254465 wal_blocks_verified=9870 missing_blocks=0\nperformance=[{\"phase\":\"control\",\"elapsed_ns\":72776,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"wal\",\"elapsed_ns\":35099564,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"open\",\"elapsed_ns\":203105870,\"history_decode_attempts\":13,\"history_decode_source_bytes\":42771110,\"history_decoded_transactions\":117},{\"phase\":\"merge\",\"elapsed_ns\":69349532,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"payload\",\"elapsed_ns\":20327830,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"loose\",\"elapsed_ns\":653995711,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"graph\",\"elapsed_ns\":487644908,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0},{\"phase\":\"history\",\"elapsed_ns\":4463243338,\"history_decode_attempts\":392,\"history_decode_source_bytes\":1347113068,\"history_decoded_transactions\":16222},{\"phase\":\"close\",\"elapsed_ns\":3681246,\"history_decode_attempts\":0,\"history_decode_source_bytes\":0,\"history_decoded_transactions\":0}]\n",
+        "verification_phase_ms": {
+          "freeze": 63.81361186504364,
+          "offline_integrity": 5951.239340007305
+        },
+        "freeze_phase_ms": {
+          "client_close": 0.3354176878929138,
+          "process_kill_join": 63.43035399913788
+        },
+        "errors": [],
+        "stage_failures": {},
+        "expected_stream_events": 4000,
+        "observed_stream_events": 4000,
+        "error_count": 0,
+        "wall_seconds": 18.399426259100437,
+        "latency_ms": {
+          "accept": {
+            "count": 1000,
+            "p95": 91.19245409965515,
+            "total_ms": 38640.930496156216,
+            "p50": 22.47259020805359,
+            "p99": 103.35294902324677,
+            "max": 117.90435016155243
+          },
+          "bind": {
+            "count": 1000,
+            "p95": 91.15144610404968,
+            "total_ms": 36632.78790563345,
+            "p50": 24.797700345516205,
+            "p99": 100.59075802564621,
+            "max": 104.55199331045151
+          },
+          "start": {
+            "count": 1000,
+            "p95": 88.85381370782852,
+            "total_ms": 35585.89691668749,
+            "p50": 28.64454686641693,
+            "p99": 98.2305258512497,
+            "max": 103.1063124537468
+          },
+          "submit_to_running": {
+            "count": 1000,
+            "p95": 249.22220408916473,
+            "total_ms": 112148.8329693675,
+            "p50": 70.17497718334198,
+            "p99": 255.84515184164047,
+            "max": 263.6786252260208
+          },
+          "stream": {
+            "count": 4000,
+            "p95": 1656.337097287178,
+            "total_ms": 2501085.2530375123,
+            "p50": 500.0640004873276,
+            "p99": 1758.7551102042198,
+            "max": 1816.7908638715744
+          },
+          "stream_scheduled": {
+            "count": 4000,
+            "p95": 1703.7511095404625,
+            "total_ms": 3179339.2670974135,
+            "p50": 769.36886459589,
+            "p99": 1813.9281272888184,
+            "max": 1854.7539860010147
+          },
+          "settle": {
+            "count": 1000,
+            "p95": 3891.09355956316,
+            "total_ms": 2445238.6286482215,
+            "p50": 2152.744635939598,
+            "p99": 4066.4663910865784,
+            "max": 4122.291222214699
+          },
+          "settle_scheduled": {
+            "count": 1000,
+            "p95": 4969.430200755596,
+            "total_ms": 3081427.2308573127,
+            "p50": 2766.2104591727257,
+            "p99": 5234.080597758293,
+            "max": 5295.138947665691
+          }
+        },
+        "correctness_passed": true,
+        "acceptance": {
+          "policy": "tofu.conversation-concurrency-policy/v2",
+          "correctness_passed": true,
+          "latency_passed": false,
+          "coverage_passed": true,
+          "passed": false,
+          "metrics": {
+            "submit_to_running": {
+              "p99_ms": 255.84515184164047,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            },
+            "stream_scheduled": {
+              "p99_ms": 1813.9281272888184,
+              "budget_ms": 1000,
+              "samples": 4000,
+              "expected_samples": 4000,
+              "passed": false
+            },
+            "settle": {
+              "p99_ms": 4066.4663910865784,
+              "budget_ms": 5000,
+              "samples": 1000,
+              "expected_samples": 1000,
+              "passed": true
+            }
+          },
+          "failures": [
+            "stream_scheduled: missing/invalid samples or P99 above 1000 ms"
+          ],
+          "coverage_gaps": [],
+          "uncovered": [
+            "real-provider-capacity",
+            "browser-send-to-visible-feedback",
+            "sustained-soak"
+          ]
+        },
+        "passed": false
+      },
+      "scope_receipt": {
+        "schema_scope": "generated current frozen catalog",
+        "native_source": "014bb341b8f1fecc5b0ca4b5aa17216158aa615f9bd07d128bf0ce75b97891c7",
+        "loaded_frozen_modules": {
+          "serverctl_pkg": "serverctl_pkg/__init__.py",
+          "serverctl_pkg.native_engine": "serverctl_pkg/native_engine.py",
+          "tofu_db": "tofu_db/__init__.py",
+          "tofu_db.generated_v2": "tofu_db/generated_v2.py",
+          "tofu_db._loopback": "tofu_db/_loopback.py",
+          "tofu_db.generated_contract": "tofu_db/generated_contract.py",
+          "tofu_db.wire": "tofu_db/wire.py",
+          "scripts.tofudb_perf_compare": "scripts/tofudb_perf_compare.py",
+          "benchmarks.conversation_acceptance": "benchmarks/conversation_acceptance.py",
+          "scripts.tofudb_v2_client": "scripts/tofudb_v2_client.py",
+          "scripts.tofudb_bench": "scripts/tofudb_bench.py",
+          "benchmarks.conversation_authority": "benchmarks/conversation_authority.py",
+          "benchmarks.conversation_concurrency": "benchmarks/conversation_concurrency.py",
+          "runtime_path_policy": "runtime_path_policy.py",
+          "lib.config_dir": "lib/config_dir.py",
+          "lib.log_record_values": "lib/log_record_values.py",
+          "lib.log": "lib/log.py",
+          "lib.feature_registry": "lib/feature_registry.py",
+          "tofu_trading": "plugins/tofu-trading/tofu_trading/__init__.py",
+          "tofu_trading.flags": "plugins/tofu-trading/tofu_trading/flags.py",
+          "lib.search_profiles": "lib/search_profiles.py",
+          "lib": "lib/__init__.py",
+          "lib.agent_core": "lib/agent_core/__init__.py",
+          "lib.observability": "lib/observability.py",
+          "lib.agent_core.worker_executor": "lib/agent_core/worker_executor.py",
+          "lib.error_envelope._constants": "lib/error_envelope/_constants.py",
+          "lib.error_envelope._classify": "lib/error_envelope/_classify.py",
+          "lib.error_envelope._schema": "lib/error_envelope/_schema.py",
+          "lib.error_envelope._build": "lib/error_envelope/_build.py",
+          "lib.error_envelope._serde": "lib/error_envelope/_serde.py",
+          "lib.error_envelope._causes": "lib/error_envelope/_causes.py",
+          "lib.error_envelope": "lib/error_envelope/__init__.py",
+          "lib.conversation_sync": "lib/conversation_sync/__init__.py",
+          "lib.conversation_sync.dispatch_contract": "lib/conversation_sync/dispatch_contract.py",
+          "lib.identity": "lib/identity.py",
+          "lib.storage.errors": "lib/storage/errors.py",
+          "lib.storage.frame_admission": "lib/storage/frame_admission.py",
+          "lib.storage.commit_events": "lib/storage/commit_events.py",
+          "lib.storage.protocol": "lib/storage/protocol.py",
+          "lib.storage.retry_log": "lib/storage/retry_log.py",
+          "lib.storage.client": "lib/storage/client.py",
+          "bootstrap_pkg": "bootstrap_pkg/__init__.py",
+          "bootstrap_pkg.resource_policy_generated": "bootstrap_pkg/resource_policy_generated.py",
+          "runtime_guards": "runtime_guards.py",
+          "lib.storage_event_policy": "lib/storage_event_policy.py",
+          "lib.storage_metric_policy": "lib/storage_metric_policy.py",
+          "lib.storage.event_batcher": "lib/storage/event_batcher.py",
+          "lib.storage.manifest": "lib/storage/manifest.py",
+          "lib.storage.connection_file": "lib/storage/connection_file.py",
+          "lib.storage.startup_budget": "lib/storage/startup_budget.py",
+          "lib.storage.startup_control": "lib/storage/startup_control.py",
+          "lib.storage.supervisor": "lib/storage/supervisor.py",
+          "lib.storage.runtime": "lib/storage/runtime.py",
+          "lib.storage.service": "lib/storage/service.py",
+          "lib.storage": "lib/storage/__init__.py",
+          "lib.tasks_pkg": "lib/tasks_pkg/__init__.py",
+          "lib.tasks_pkg.failure_attribution": "lib/tasks_pkg/failure_attribution.py",
+          "lib.tools": "lib/tools/__init__.py",
+          "lib.tools.result_envelope": "lib/tools/result_envelope.py",
+          "lib.storage_projection": "lib/storage_projection.py",
+          "lib.tool_round_identity": "lib/tool_round_identity.py",
+          "lib.tool_caller_identity": "lib/tool_caller_identity.py",
+          "lib.tool_round_replay": "lib/tool_round_replay.py",
+          "lib.llm": "lib/llm/__init__.py",
+          "lib.llm.stream_result": "lib/llm/stream_result.py",
+          "lib.turn_verdict": "lib/turn_verdict/__init__.py",
+          "lib.attachments": "lib/attachments.py",
+          "lib.conversation_sync.generated_contract": "lib/conversation_sync/generated_contract.py",
+          "lib.tasks_pkg.segments._types": "lib/tasks_pkg/segments/_types.py",
+          "lib.tasks_pkg.segments._assemble": "lib/tasks_pkg/segments/_assemble.py",
+          "lib.tasks_pkg.segments._derive": "lib/tasks_pkg/segments/_derive.py",
+          "lib.tool_history_projection": "lib/tool_history_projection.py",
+          "lib.tasks_pkg.segments._project": "lib/tasks_pkg/segments/_project.py",
+          "lib.tasks_pkg.segments._edit": "lib/tasks_pkg/segments/_edit.py",
+          "lib.tasks_pkg.segments._serde": "lib/tasks_pkg/segments/_serde.py",
+          "lib.tasks_pkg.segments": "lib/tasks_pkg/segments/__init__.py",
+          "lib.swarm": "lib/swarm/__init__.py",
+          "lib.swarm.presentation_budget": "lib/swarm/presentation_budget.py",
+          "lib.turn_image_transport": "lib/turn_image_transport.py",
+          "lib.plan_contract": "lib/plan_contract.py",
+          "lib.agent_core.events": "lib/agent_core/events.py",
+          "lib.tool_rejection": "lib/tool_rejection.py",
+          "lib.turn_activity_timeline": "lib/turn_activity_timeline.py",
+          "lib.turn_projection_patch": "lib/turn_projection_patch.py",
+          "lib.turn_projection_segments": "lib/turn_projection_segments.py",
+          "lib.turn_lifecycle": "lib/turn_lifecycle.py",
+          "lib.conversation_sync.settings_policy": "lib/conversation_sync/settings_policy.py",
+          "lib.storage.generated_v2_semantics": "lib/storage/generated_v2_semantics.py",
+          "lib.storage.v2_semantics": "lib/storage/v2_semantics.py",
+          "scripts.generated_storage_operations": "scripts/generated_storage_operations.py",
+          "lib.storage.v2_client": "lib/storage/v2_client.py",
+          "tofu_db._crc32c_accelerator": "tofu_db/_crc32c_accelerator.py",
+          "lib.background_command_projection": "lib/background_command_projection.py",
+          "lib.agent_core.publication": "lib/agent_core/publication.py",
+          "lib.conversation_sync.attempt_identity": "lib/conversation_sync/attempt_identity.py",
+          "lib.orchestration": "lib/orchestration/__init__.py",
+          "lib.orchestration.wire_formats": "lib/orchestration/wire_formats.py",
+          "lib.task_replay": "lib/task_replay.py",
+          "lib.agent_core.task_runtime_policy": "lib/agent_core/task_runtime_policy.py",
+          "lib.agent_core.execution_session": "lib/agent_core/execution_session.py",
+          "lib.ids": "lib/ids.py",
+          "lib.agent_core.task_abort_signal": "lib/agent_core/task_abort_signal.py",
+          "lib.agent_core.task_runtime": "lib/agent_core/task_runtime.py",
+          "lib.tasks_pkg.manager.runtime": "lib/tasks_pkg/manager/runtime.py",
+          "lib.tasks_pkg.manager._provider_ingress_guard": "lib/tasks_pkg/manager/_provider_ingress_guard.py",
+          "lib.tasks_pkg.manager._events": "lib/tasks_pkg/manager/_events.py",
+          "lib.task_result_checkpoint_contract": "lib/task_result_checkpoint_contract.py",
+          "lib.tasks_pkg.manager._persist": "lib/tasks_pkg/manager/_persist.py",
+          "lib.tasks_pkg.manager._maintenance": "lib/tasks_pkg/manager/_maintenance.py",
+          "lib.runtime_state_store": "lib/runtime_state_store.py",
+          "lib.tasks_pkg.manager._pending_resume": "lib/tasks_pkg/manager/_pending_resume.py",
+          "lib.tasks_pkg.manager._recovery": "lib/tasks_pkg/manager/_recovery.py",
+          "lib.tasks_pkg.manager._registry": "lib/tasks_pkg/manager/_registry.py",
+          "lib.tasks_pkg.manager._sync": "lib/tasks_pkg/manager/_sync.py",
+          "lib.tasks_pkg.manager._terminal": "lib/tasks_pkg/manager/_terminal.py",
+          "lib.tasks_pkg.manager.prepared": "lib/tasks_pkg/manager/prepared.py",
+          "lib.tasks_pkg.manager": "lib/tasks_pkg/manager/__init__.py",
+          "lib.orchestration.message_compat": "lib/orchestration/message_compat.py",
+          "lib.turn_trace_contract": "lib/turn_trace_contract.py",
+          "lib.tasks_pkg.turn_trace": "lib/tasks_pkg/turn_trace.py",
+          "lib.model_catalog._creator_families": "lib/model_catalog/_creator_families.py",
+          "lib.model_catalog._creator_identity": "lib/model_catalog/_creator_identity.py",
+          "lib.model_catalog": "lib/model_catalog/__init__.py",
+          "lib.model_info._family": "lib/model_info/_family.py",
+          "lib.model_info._openai_gpt56": "lib/model_info/_openai_gpt56.py",
+          "lib.model_info._capabilities": "lib/model_info/_capabilities.py",
+          "lib.model_info._max_output": "lib/model_info/_max_output.py",
+          "lib.model_info._limits": "lib/model_info/_limits.py",
+          "lib.model_info._video": "lib/model_info/_video.py",
+          "lib.model_info._context": "lib/model_info/_context.py",
+          "lib.model_info._folds": "lib/model_info/_folds.py",
+          "lib.model_info._release": "lib/model_info/_release.py",
+          "lib.model_info": "lib/model_info/__init__.py",
+          "lib.pricing._tables": "lib/pricing/_tables.py",
+          "lib.pricing._peak": "lib/pricing/_peak.py",
+          "lib.pricing._provider": "lib/pricing/_provider.py",
+          "lib.pricing._refresh": "lib/pricing/_refresh.py",
+          "lib.pricing": "lib/pricing/__init__.py",
+          "lib.provider_headers": "lib/provider_headers.py",
+          "lib.model_routing.domain": "lib/model_routing/domain.py",
+          "lib.secret_envelope": "lib/secret_envelope.py",
+          "lib.model_routing.change_notifications": "lib/model_routing/change_notifications.py",
+          "lib.model_routing.credential_envelope": "lib/model_routing/credential_envelope.py",
+          "lib.model_routing.repository": "lib/model_routing/repository.py",
+          "lib.model_routing.inference": "lib/model_routing/inference.py",
+          "lib.model_routing.migration": "lib/model_routing/migration.py",
+          "lib.model_routing.health": "lib/model_routing/health.py",
+          "lib.model_routing.routing": "lib/model_routing/routing.py",
+          "lib.model_routing.offering_metadata": "lib/model_routing/offering_metadata.py",
+          "lib.model_routing.discovered_provider": "lib/model_routing/discovered_provider.py",
+          "lib.model_routing.managed_provider": "lib/model_routing/managed_provider.py",
+          "lib.model_routing.bootstrap": "lib/model_routing/bootstrap.py",
+          "lib.model_routing.local_provider": "lib/model_routing/local_provider.py",
+          "lib.model_routing": "lib/model_routing/__init__.py",
+          "lib.tasks_pkg.turn_trace_ledger": "lib/tasks_pkg/turn_trace_ledger.py",
+          "lib.tasks_pkg.plan_mode": "lib/tasks_pkg/plan_mode.py",
+          "lib.agent_core.model_context_limits": "lib/agent_core/model_context_limits.py",
+          "lib.storage.generated_model_context_projection": "lib/storage/generated_model_context_projection.py",
+          "lib.storage.model_continuation": "lib/storage/model_continuation.py",
+          "lib.tasks_pkg.model_replay": "lib/tasks_pkg/model_replay.py",
+          "lib.turn_source_queue_contract": "lib/turn_source_queue_contract.py",
+          "lib.message_queue": "lib/message_queue.py",
+          "lib.tools.resource_policy": "lib/tools/resource_policy.py",
+          "lib.tasks_pkg.background_commands": "lib/tasks_pkg/background_commands.py"
+        },
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec",
+        "scope": "Original1000x4x8192 uncoalesced harness. Complete frozen callers/contracts/native; all manifest bytes checked before/after and runtime imports checked. Embedded abandonment is not process SIGKILL."
+      }
+    }
+  ],
+  "decision": "Current native correctness and scope guards verified, performance goal not achieved. Baseline only, no new optimization admitted."
+}

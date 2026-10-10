@@ -1,0 +1,323 @@
+{
+  "decision": "Admit archive worker component ownership correction; not a performance superiority claim",
+  "private_source_commit": "d1b6a02c8",
+  "parent_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+  "candidate_source": "6d3e37c7cafdb1ca0ad7252c6d3613ecf9168d30d0b09eeac6d546e0e18c135e",
+  "reviewed_paths": [
+    "packages/tofu-db/src/transcript_archive.rs",
+    "packages/tofu-db/src/fsync_stats.rs",
+    "packages/tofu-db/src/transcript_archive/tests.rs",
+    "docs/STORAGE_OPERATIONS.md"
+  ],
+  "verification": {
+    "archive_tests": "18passed1.01s",
+    "full_library": "1637passed3ignored120.57s",
+    "release": "binary+library optimized embedded-mimalloc4m45s;bothsourceverified",
+    "attribution": {
+      "scope": "Singleprofile32original1000x4x8192mechanism check, notperformanceadmission",
+      "source": {
+        "parent_native_source": "05e89f429f6b01fd7a4238cacd9ea6b387a5fa092d31f00cea341e976ce7f028",
+        "candidate_native_source": "6d3e37c7cafdb1ca0ad7252c6d3613ecf9168d30d0b09eeac6d546e0e18c135e",
+        "worktree": "/tmp/tofudb-archive-component-20261008",
+        "scope": "Archive worker component classification; cfgtest getter and realworker thread-local isolation regression. No scheduling changes yet."
+      },
+      "correctness": {
+        "correctness_passed": true,
+        "error_count": 0,
+        "observed_stream_events": 4000,
+        "recovered_exact_content": 1000,
+        "recovered_exact_replay": 1000,
+        "integrity_returncode": 0,
+        "readiness_observation": {
+          "probes": 20,
+          "unhealthy_probes": 0,
+          "max_consecutive_unhealthy": 0,
+          "max_contended_milliseconds": 0,
+          "failure_examples": []
+        }
+      },
+      "archive_acceptance": {
+        "acceptedMessages": 1854,
+        "acceptedPages": 927,
+        "fixedCounterBytes": 16,
+        "scope": "process-wide accepted background commits while request profiling is enabled; not durable or per-owner coverage"
+      },
+      "prepare": {
+        "calls": 6206,
+        "components": [
+          {
+            "calls": 5000,
+            "component": "foreground",
+            "totalNanos": 74530886
+          },
+          {
+            "calls": 1206,
+            "component": "maintenance",
+            "totalNanos": 21506295
+          }
+        ],
+        "stage": "prepare",
+        "totalNanos": 96037181
+      },
+      "ir_commit": {
+        "calls": 5000,
+        "components": [
+          {
+            "calls": 5000,
+            "component": "foreground",
+            "totalNanos": 3158314457
+          }
+        ],
+        "stage": "ir_commit",
+        "totalNanos": 3158314457
+      },
+      "blob_encode": {
+        "calls": 10128,
+        "components": [
+          {
+            "calls": 10000,
+            "component": "foreground",
+            "totalNanos": 5216487465
+          },
+          {
+            "calls": 128,
+            "component": "maintenance",
+            "totalNanos": 14969703
+          }
+        ],
+        "stage": "blob_encode",
+        "totalNanos": 5231457168
+      },
+      "p99_ms": {
+        "submit_to_running": 66.15570932626724,
+        "stream_scheduled": 1829.6276926994324,
+        "settle": 4033.3122462034225
+      },
+      "raw_sha256": "453dd26a97056965054ae1d60dfc6d092e35054a3ee79d6412644fb7053f6972",
+      "decision": "Mechanismverified:5000FGprepare=5000IRcommit,927acceptedarchivepages now accountedbackground. Unprofiledmacrocomparison pending."
+    },
+    "macro": {
+      "scope": "Original1000x4x8192 application+embeddedABBA pertransport; profileoff; embedded reopen notSIGKILL",
+      "python_hashes": {
+        "benchmarks/conversation_concurrency.py": "2a487d21eda6c47838d0cf22199f5e214c9d846eff32d6a4ff569e38a06c820d",
+        "benchmarks/conversation_authority.py": "28a59b37485c979bdebab67220347686a0c641ab97b8faee21eb50f679b90a39",
+        "benchmarks/conversation_acceptance.py": "9966fbda267e158b0767a88a0457172d608c7c1107d117787fc630c89fbbe414",
+        "lib/storage/v2_client.py": "7fdc4dcc4cc515743817783e2f636fc64ed25367b2c01e8f49cc45164c262cc6",
+        "lib/storage/v2_embedded_client.py": "a6470fba82bf5439af2a85314323e49fc27472b3f0166d02decb5ffc1ac1b38f",
+        "lib/turn_lifecycle.py": "72689f68bc3198271fb1cf7f0c4cf3d5c453a586e17c1483ae64a95fdf4d8372"
+      },
+      "rows": [
+        {
+          "label": "application-baseline-0",
+          "variant": "baseline",
+          "transport": "application",
+          "exit_code": 1,
+          "correctness": true,
+          "errors": 0,
+          "events": 4000,
+          "exact_content": 1000,
+          "exact_replay": 1000,
+          "integrity": 0,
+          "readiness": {
+            "probes": 21,
+            "unhealthy_probes": 0,
+            "max_consecutive_unhealthy": 0,
+            "max_contended_milliseconds": 0,
+            "failure_examples": []
+          },
+          "p99_ms": {
+            "submit_to_running": 60.44613569974899,
+            "stream_scheduled": 1823.4285861253738,
+            "settle": 4323.056474328041
+          },
+          "raw_sha256": "e29878976c74f878baec99dbaf6a3090c0fee1a034ef7fd27ce84f43a1c9fe93"
+        },
+        {
+          "label": "application-candidate-0",
+          "variant": "candidate",
+          "transport": "application",
+          "exit_code": 1,
+          "correctness": true,
+          "errors": 0,
+          "events": 4000,
+          "exact_content": 1000,
+          "exact_replay": 1000,
+          "integrity": 0,
+          "readiness": {
+            "probes": 21,
+            "unhealthy_probes": 0,
+            "max_consecutive_unhealthy": 0,
+            "max_contended_milliseconds": 0,
+            "failure_examples": []
+          },
+          "p99_ms": {
+            "submit_to_running": 50.95875263214111,
+            "stream_scheduled": 1800.8146807551384,
+            "settle": 3721.453368663788
+          },
+          "raw_sha256": "efd7a1530a38274c2c5081ab68b479a9211216f617af8d58004f513eb3c94269"
+        },
+        {
+          "label": "application-candidate-1",
+          "variant": "candidate",
+          "transport": "application",
+          "exit_code": 1,
+          "correctness": true,
+          "errors": 0,
+          "events": 4000,
+          "exact_content": 1000,
+          "exact_replay": 1000,
+          "integrity": 0,
+          "readiness": {
+            "probes": 21,
+            "unhealthy_probes": 0,
+            "max_consecutive_unhealthy": 0,
+            "max_contended_milliseconds": 0,
+            "failure_examples": []
+          },
+          "p99_ms": {
+            "submit_to_running": 49.21070486307144,
+            "stream_scheduled": 1799.783855676651,
+            "settle": 4157.052263617516
+          },
+          "raw_sha256": "83000493c011b181e33f22c5f26ffeb72bdfd6cb00b754a36f89c95b07016e12"
+        },
+        {
+          "label": "application-baseline-1",
+          "variant": "baseline",
+          "transport": "application",
+          "exit_code": 1,
+          "correctness": true,
+          "errors": 0,
+          "events": 4000,
+          "exact_content": 1000,
+          "exact_replay": 1000,
+          "integrity": 0,
+          "readiness": {
+            "probes": 21,
+            "unhealthy_probes": 0,
+            "max_consecutive_unhealthy": 0,
+            "max_contended_milliseconds": 0,
+            "failure_examples": []
+          },
+          "p99_ms": {
+            "submit_to_running": 54.15446311235428,
+            "stream_scheduled": 1781.82103484869,
+            "settle": 4140.896528959274
+          },
+          "raw_sha256": "cecd2f345e382de62ee5ac7a913cdbba2ccf95cc37ceb71d1918c517751b9038"
+        },
+        {
+          "label": "embedded-baseline-0",
+          "variant": "baseline",
+          "transport": "embedded",
+          "exit_code": 1,
+          "correctness": true,
+          "errors": 0,
+          "events": 4000,
+          "exact_content": 1000,
+          "exact_replay": 1000,
+          "integrity": 0,
+          "readiness": {
+            "probes": 18,
+            "unhealthy_probes": 0,
+            "max_consecutive_unhealthy": 0,
+            "max_contended_milliseconds": 0,
+            "failure_examples": []
+          },
+          "p99_ms": {
+            "submit_to_running": 662.3469144105911,
+            "stream_scheduled": 1190.4667988419533,
+            "settle": 2930.9379681944847
+          },
+          "raw_sha256": "865df095671f1266ef35d0aeeaef711e366a2e807408c68b136a65e27c1f2c02"
+        },
+        {
+          "label": "embedded-candidate-0",
+          "variant": "candidate",
+          "transport": "embedded",
+          "exit_code": 1,
+          "correctness": true,
+          "errors": 0,
+          "events": 4000,
+          "exact_content": 1000,
+          "exact_replay": 1000,
+          "integrity": 0,
+          "readiness": {
+            "probes": 17,
+            "unhealthy_probes": 0,
+            "max_consecutive_unhealthy": 0,
+            "max_contended_milliseconds": 0,
+            "failure_examples": []
+          },
+          "p99_ms": {
+            "submit_to_running": 662.2168868780136,
+            "stream_scheduled": 1210.9475508332253,
+            "settle": 2780.4574370384216
+          },
+          "raw_sha256": "fefc7844db2aef1285a01983d03c1105fab9174bb5ebd80b8e1c24e30885213b"
+        },
+        {
+          "label": "embedded-candidate-1",
+          "variant": "candidate",
+          "transport": "embedded",
+          "exit_code": 1,
+          "correctness": true,
+          "errors": 0,
+          "events": 4000,
+          "exact_content": 1000,
+          "exact_replay": 1000,
+          "integrity": 0,
+          "readiness": {
+            "probes": 19,
+            "unhealthy_probes": 0,
+            "max_consecutive_unhealthy": 0,
+            "max_contended_milliseconds": 0,
+            "failure_examples": []
+          },
+          "p99_ms": {
+            "submit_to_running": 700.3711089491844,
+            "stream_scheduled": 1191.3879290223122,
+            "settle": 3366.6543811559677
+          },
+          "raw_sha256": "98bd636192301b89d276bd3070c9ba908833214461873dec2f54373f5de086d4"
+        },
+        {
+          "label": "embedded-baseline-1",
+          "variant": "baseline",
+          "transport": "embedded",
+          "exit_code": 1,
+          "correctness": true,
+          "errors": 0,
+          "events": 4000,
+          "exact_content": 1000,
+          "exact_replay": 1000,
+          "integrity": 0,
+          "readiness": {
+            "probes": 19,
+            "unhealthy_probes": 0,
+            "max_consecutive_unhealthy": 0,
+            "max_contended_milliseconds": 0,
+            "failure_examples": []
+          },
+          "p99_ms": {
+            "submit_to_running": 683.6810782551765,
+            "stream_scheduled": 1210.6026113033295,
+            "settle": 3315.4200837016106
+          },
+          "raw_sha256": "73b2a205f9fefadd2442cd65974c1461743dbc3b2cebf54bb49112d0e248ade6"
+        }
+      ]
+    }
+  },
+  "problem": "Archive seal worker defaults foreground; its commits enter foreground_counters and contaminate maintenance pressure sampling. Three existingprofiledruns match extraFGprepares toacceptedarchivepages within0–1atomicreadskew.",
+  "change": "Register worker maintenance once at threadentry; realthreadtest checks workerlabel and unchanged callerlabel. Testgetter cfgtest only.",
+  "resource_effect": "Existingthread and fixedcomponentarrays; no newresidentconcurrency or persistentgrowth. One existingTLSassignment perworkerstart.",
+  "limits": [
+    "Macro improvements are mixed and small except one settlement observation; no stable speedup claimed.",
+    "All8originalruns still fail1s stream gate. Current whole-database/all-SQLite/provider/browser/soak objective remains unproven.",
+    "Embedded reopen is notSIGKILL.",
+    "Only4reviewedpaths may integrate; privatecommit77files includes pre-existing currentbaseline, not wholesale merge."
+  ],
+  "next": "With corrected pressure ownership, investigate archive catch-up competition under measured foreground request pressure; preserve archive durability/replay witnesses andbounded recovery."
+}

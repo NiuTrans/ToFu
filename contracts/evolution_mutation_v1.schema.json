@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/evolution_mutation_v1.schema.json",
+  "title": "Self-evolution gated mutation: versioned, evidenced, confirmable, revertible change to evolution stores or configuration",
+  "type": "object",
+  "required": ["schema_version", "mutation_id", "kind", "payload", "evidence_episode_ids", "status", "version", "parent_version", "requires_confirmation", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "mutation_id": {"type": "string", "maxLength": 160},
+    "kind": {"enum": ["prompt_variant", "routing_change", "budget_policy", "retrieval_policy", "macro_tool", "skill_candidate", "flow_template"]},
+    "payload": {"type": "object", "maxProperties": 16, "description": "Kind-specific change body owned by the gate applier; small and structured, never a code blob."},
+    "evidence_episode_ids": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string", "maxLength": 160}, "description": "Episode receipts justifying the mutation; mutations without evidence cannot be proposed."},
+    "status": {"enum": ["proposed", "confirmed", "active", "rejected", "rolled_back"]},
+    "version": {"type": "integer", "minimum": 1},
+    "parent_version": {"type": "integer", "minimum": 0, "description": "0 only for the first mutation of its kind; rollback re-activates the parent chain."},
+    "activation_intent": {"type": "object", "required": ["started_at", "context_fingerprint"], "properties": {"started_at": {"type": "integer", "minimum": 0}, "context_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}, "additionalProperties": false, "description": "CAS-admitted budget-policy activation; freezes controls before effects and remains until completion."},
+    "rejection_reason": {"type": "string", "maxLength": 500},
+    "requires_confirmation": {"const": true},
+    "created_at": {"type": "integer", "minimum": 0},
+    "updated_at": {"type": "integer", "minimum": 0}
+  },
+  "allOf": [{"if": {"required": ["activation_intent"]}, "then": {"properties": {"kind": {"const": "budget_policy"}, "status": {"const": "confirmed"}}}}],
+  "additionalProperties": false
+}

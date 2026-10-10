@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MCP server-local workspace path declaration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "filesystem",
+    "parameters"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "filesystem": {
+      "const": "server-local"
+    },
+    "parameters": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 16,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "enum": [
+              "read",
+              "write"
+            ]
+          },
+          "create_parents": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    }
+  },
+  "x-metadata-key": "tofu/local-paths",
+  "x-legacy-adapters": {
+    "xuecheng": {
+      "prepare_doc_edit": {
+        "out_path": {
+          "access": "write",
+          "create_parents": true
+        }
+      },
+      "update_doc": {
+        "from_file": {
+          "access": "read"
+        }
+      }
+    }
+  },
+  "x-limits": {
+    "path_chars": 4096,
+    "path_components": 64
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "result": "dual_index_boundary_cases=2128",
+  "scope": "Standalone frozen native sequence/key index source with private generic monotonic-prefix cut/AVL join. Exact dual-index record/payload equality against repeated-delete oracle; original snapshot rows retained; all four tree balances/heights checked; remaining pending-byte accounting and full-drop resident=0 checked.",
+  "fixtures": {
+    "sequences": [
+      1,
+      3,
+      9
+    ],
+    "keys_per_sequence": [
+      1,
+      4,
+      17
+    ],
+    "insertion_orders": [
+      "ascending",
+      "descending"
+    ],
+    "boundaries": "every sequence through count+1 and every key through count+1, both partial-key and whole-sequence covers; repeated keys across versions; values and tombstones"
+  },
+  "source_hashes": {
+    "index.rs": "2e37240dbef5c0d927220bab1b311e8a31f5220fbb081d51facd8a1620e0867c",
+    "main.rs": "c569612ee801954d2d7663d455ecd6bb606e7d9ef1c55c0e3c03c2ea50dd4316"
+  },
+  "limitations": "No full EntityOverlay integration, persisted recovery/fault injection or native macro timing. Standalone System allocator. Not exhaustive input-space proof.",
+  "decision": "Proceed to isolated native candidate and relevant overlay tests before full harness admission. No production source merged."
+}

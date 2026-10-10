@@ -1,0 +1,16 @@
+{
+  "brand": "sambanova",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "sambanova",
+  "category": "relay",
+  "name": "SambaNova",
+  "base_url": "https://api.sambanova.ai/v1",
+  "catalog_source": {"url": "https://docs.sambanova.ai/cloud/docs/get-started/supported-models", "checked_at": "2026-09-08"},
+  "catalog_mode": "curated",
+  "offering_recipes": [
+    {"model_id": "DeepSeek-V3.2", "capabilities": ["text"]},
+    {"model_id": "Meta-Llama-3.3-70B-Instruct", "capabilities": ["text"]},
+    {"model_id": "gpt-oss-120b", "capabilities": ["text", "thinking", "cheap"]},
+    {"model_id": "MiniMax-M3", "capabilities": ["text", "vision", "cheap"]}
+  ]
+}

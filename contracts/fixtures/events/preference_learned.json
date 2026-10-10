@@ -1,0 +1,23 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "change_id": "s",
+  "context_type": "s",
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "id": "s",
+  "item_id": "s",
+  "kind": "s",
+  "pending": true,
+  "requestId": "s",
+  "seq": 1,
+  "summary": "s",
+  "taskId": "s",
+  "turnRole": "s",
+  "type": "preference_learned",
+  "vuMsgId": "s"
+}

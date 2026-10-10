@@ -1,0 +1,251 @@
+"""Orchestrate generation, rubric gating, and insight persistence.
+
+This module is the workflow owner.  Focused siblings own context assembly,
+model synthesis, grounding, rendering, anchors, and rubric scoring.
+"""
+
+import time
+import uuid
+
+from lib.llm_errors import AbortedError
+from lib.log import get_logger
+
+from ._config import INSIGHT_GATE_THRESHOLD, insight_gate_fires, insight_lang_key
+from ._anchors import resolve_insight_anchors
+from ._context import _build_reader_context
+from ._grounding import _ground_insight, _self_identity
+from ._render import render_insight_markdown
+from ._rubric import score_report_rubric
+from ._synthesize import _research_and_synthesize
+
+logger = get_logger(__name__)
+
+
+def generate_insight(paper_text, report_md, ui_lang='en', *, phash='',
+                     model=None, project_path=None, abort=None, on_tool_event=None,
+                     self_arxiv_id=None, self_title=None,
+                     allow_personal_context=True, user_id: int):
+    """Produce a grounded insight section for a paper, given its report.
+
+    Args:
+        paper_text: full (or truncated) paper text — reference material.
+        report_md: the already-written fidelity report — the primary material.
+        ui_lang: 'en' | 'zh'.
+        phash: paper hash (used to exclude the current paper from the library
+            context and — by the caller — to persist).
+        model: optional model override.
+        project_path: optional project path for memory scoping.
+        abort: optional zero-arg predicate (trips the loop's abort checks).
+        on_tool_event: optional callback for research tool_start/tool_done.
+        self_arxiv_id, self_title: identity of the paper under analysis, used to
+            suppress self-referential connections (a foundational paper's own
+            descendants tempt the model to bridge it back to itself). Resolved
+            from phash/report when not given.
+        allow_personal_context: when False (fail-closed default on every
+            headless/BYO surface — see lib/agent_core/personal_scope), the
+            operator-personal "reader context" (their paper library + memory
+            store) is NOT injected, so one operator's reading history never
+            leaks into an unrelated caller's paper analysis. The pass still
+            runs; it just loses its personal transfer bridges.
+
+    Returns:
+        {
+          'insight': <grounded insight dict> | None,
+          'markdown': <rendered section str>,
+          'grounded': int, 'dropped': int, 'selfref': int,
+          'llmError': bool,
+        }
+    """
+    out = {'insight': None, 'markdown': '', 'grounded': 0, 'dropped': 0,
+           'selfref': 0, 'llmError': False, 'usage': None,
+           'agentUsageV1': None,
+           'anchors': {'nominated': 0, 'resolved': 0}}
+    if not (report_md or '').strip() and not (paper_text or '').strip():
+        logger.warning('[Paper:Insight] Nothing to synthesize (empty report + paper)')
+        return out
+
+    if allow_personal_context:
+        reader_context = _build_reader_context(
+            phash, report_md, paper_text, ui_lang,
+            user_id=user_id, project_path=project_path)
+    else:
+        # Headless / BYO surface: never splice the operator's library+memories
+        # into an unrelated caller's analysis (personal_scope fail-closed).
+        reader_context = ''
+        logger.info('[Paper:Insight] hash=%s — personal reader-context SUPPRESSED '
+                    '(headless / opt-out)', phash)
+
+    try:
+        insight = _research_and_synthesize(
+            paper_text, report_md, reader_context, ui_lang,
+            user_id=user_id, model=model, abort=abort,
+            on_tool_event=on_tool_event)
+    except AbortedError:
+        logger.info('[Paper:Insight] Synthesis aborted for hash=%s', phash)
+        return out
+    except Exception as e:
+        logger.error('[Paper:Insight] Synthesis failed for hash=%s: %s', phash, e, exc_info=True)
+        out['llmError'] = True
+        return out
+
+    if not isinstance(insight, dict):
+        logger.warning('[Paper:Insight] No usable insight JSON for hash=%s', phash)
+        return out
+
+    # Pop the private usage accumulator BEFORE grounding/render — it is cost
+    # plumbing (design §3.3), not insight content, and must never leak into
+    # the persisted items or the rendered markdown.
+    synthesis_usage = insight.pop('_usage', None)
+    out['usage'] = synthesis_usage
+    out['agentUsageV1'] = insight.pop('_agentUsageV1', None)
+
+    self_aid, self_ttl = _self_identity(
+        phash, report_md, self_arxiv_id, self_title, user_id=user_id)
+    grounded, dropped, selfref = _ground_insight(
+        insight, self_aid=self_aid, self_title=self_ttl)
+    # Deterministic anchor resolution (design §3.2): the model NOMINATED an
+    # `anchor` heading per connection/provocation; resolve each against the
+    # report's ACTUAL h2/h3 sequence. Runs AFTER grounding so dropped self-ref
+    # connections never get anchored. Resolved indices persist with the row.
+    anchor_stats = resolve_insight_anchors(insight, report_md)
+    out['anchors'] = anchor_stats
+    out['insight'] = insight
+    out['grounded'] = grounded
+    out['dropped'] = dropped
+    out['selfref'] = selfref
+    out['markdown'] = render_insight_markdown(insight, ui_lang)
+    logger.info('[Paper:Insight] hash=%s — %d grounded / %d dropped / %d self-ref dropped, '
+                'anchors %d/%d, %d chars',
+                phash, grounded, dropped, selfref,
+                anchor_stats['resolved'], anchor_stats['nominated'], len(out['markdown']))
+    return out
+
+
+def _persist_insight(phash, ui_lang, markdown, model, *, user_id: int,
+                     items=None, usage=None, baseline=None):
+    """Persist an insight section under the ``insight:<ui_lang>`` key.
+
+    Uses the Sidecar's versioned ``paper.report.upsert`` operation so the web
+    or worker process never owns a driver, connection, cursor, or transaction.
+    The composite lang key keeps it a SEPARATE row from the plain report, so it
+    never overwrites the fidelity report.
+
+    v2 meta (design §3.2/§3.3): when ``items`` (the grounded insight dict,
+    with resolved ``anchor_idx`` per item) is given, it rides the row's meta
+    alongside the baseline + synthesis usage — the read path then serves the
+    STRUCTURED payload so the reader can distribute anchored cards instead of
+    one end-of-report block. Legacy rows (``{'kind':'insight'}`` only) keep
+    the v1 read behaviour (markdown merged at the end) unchanged.
+    """
+    meta = {'kind': 'insight'}
+    if items is not None:
+        meta['v'] = 2
+        meta['items'] = items
+        if baseline is not None:
+            meta['baseline'] = baseline
+        if usage:
+            meta['usage'] = usage
+    try:
+        from lib.paper.artifact_repository import (
+            PaperArtifactRepository,
+            PaperReport,
+        )
+        PaperArtifactRepository(user_id).put_report(
+            PaperReport(
+                paper_hash=phash,
+                lang=insight_lang_key(ui_lang),
+                report=markdown,
+                model=model or '',
+                meta=meta,
+                created_at=int(time.time()),
+            ),
+            command_id=f'paper.insight.upsert:{uuid.uuid4().hex}',
+        )
+        logger.info('[Paper:Insight] Persisted insight — hash=%s key=%s %d chars (v%s)',
+                    phash, insight_lang_key(ui_lang), len(markdown),
+                    meta.get('v', 1))
+        return True
+    except Exception as e:
+        logger.warning('[Paper:Insight] Failed to persist insight hash=%s: %s', phash, e)
+        return False
+
+
+def run_report_insight(paper_text, report_md, ui_lang='en', *, phash='',
+                       model=None, project_path=None, abort=None, on_tool_event=None,
+                       self_arxiv_id=None, self_title=None, allow_personal_context=True,
+                       persist=True, user_id: int):
+    """Gated, persisted insight pass — the report-path entry point.
+
+    Pipeline (the production shape validated by the gated A/B):
+      1. Score the just-written report on the 4 insight axes (ONE no-tool rubric
+         call — the gate input).
+      2. HEADROOM GATE: only proceed when the report's own insight baseline is
+         at/below ``INSIGHT_GATE_THRESHOLD`` (the pass helps low-baseline
+         explainers, no-ops/hurts insight-saturated ones — proven at n=7 fired,
+         CI lower 1.00). A ``None`` baseline fails OPEN.
+      3. Generate the grounded insight (self-ref-suppressed, personal-context
+         gated by ``allow_personal_context``).
+      4. Persist under ``insight:<ui_lang>`` reusing the report write-path.
+
+    Returns:
+        {
+          'fired': bool,           # did the gate let it run?
+          'baseline': float|None,  # the report's own insight-rubric overall
+          'insight': dict|None, 'markdown': str,
+          'grounded': int, 'dropped': int, 'selfref': int,
+          'persisted': bool, 'llmError': bool,
+        }
+    """
+    out = {'fired': False, 'baseline': None, 'insight': None, 'markdown': '',
+           'grounded': 0, 'dropped': 0, 'selfref': 0, 'persisted': False,
+           'llmError': False, 'usage': None,
+           'agentUsageV1': None,
+           'anchors': {'nominated': 0, 'resolved': 0}}
+
+    baseline = None
+    rubric_usage = None
+    verdict = score_report_rubric(report_md, model=model, abort=abort)
+    if verdict:
+        baseline = verdict['overall']
+        rubric_usage = verdict.get('usage')
+    out['baseline'] = baseline
+
+    if not insight_gate_fires(baseline):
+        logger.info('[Paper:Insight] Gate WITHHELD — hash=%s baseline=%.2f > %.1f '
+                    '(report already insight-saturated)', phash, baseline or -1,
+                    INSIGHT_GATE_THRESHOLD)
+        return out
+
+    out['fired'] = True
+    logger.info('[Paper:Insight] Gate FIRED — hash=%s baseline=%s (<= %.1f)',
+                phash, f'{baseline:.2f}' if baseline is not None else 'None',
+                INSIGHT_GATE_THRESHOLD)
+
+    gen = generate_insight(
+        paper_text, report_md, ui_lang, phash=phash, model=model,
+        project_path=project_path, abort=abort, on_tool_event=on_tool_event,
+        self_arxiv_id=self_arxiv_id, self_title=self_title,
+        allow_personal_context=allow_personal_context, user_id=user_id)
+
+    out.update({k: gen[k] for k in ('insight', 'markdown', 'grounded', 'dropped',
+                                    'selfref', 'llmError', 'usage',
+                                    'agentUsageV1', 'anchors')})
+
+    # Fold the rubric scoring cost into the pass's total usage (design §3.3 —
+    # the reader should see EVERYTHING this pass billed, not just the
+    # synthesis). Token fields sum; absent sides count as zero.
+    def _sum_usage(a, b):
+        if not a and not b:
+            return None
+        keys = ('prompt_tokens', 'completion_tokens', 'cache_read_tokens',
+                'cache_write_tokens', 'reasoning_tokens')
+        return {k: int((a or {}).get(k, 0)) + int((b or {}).get(k, 0)) for k in keys}
+
+    out['usage'] = _sum_usage(rubric_usage, gen.get('usage'))
+
+    if persist and gen.get('markdown') and gen.get('insight'):
+        out['persisted'] = _persist_insight(
+            phash, ui_lang, gen['markdown'], model,
+            user_id=user_id, items=gen.get('insight'), usage=out['usage'],
+            baseline=baseline)
+    return out

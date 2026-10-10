@@ -1,0 +1,56 @@
+/* ── App dialogs: themed confirm/alert/prompt (static/js/core/dialog.js) ── */
+/* z-index must exceed the settings sub-overlay tier (.stg-v2-manager-overlay 12000,
+   .stg-v2-picker-overlay 12010): confirm prompts opened from settings (e.g. OAuth
+   disconnect) render below those tiers at 10050 and look like dead buttons. */
+.app-dialog-overlay{position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);z-index:13000;display:flex;align-items:center;justify-content:center;padding:var(--space-5);opacity:0;transition:opacity 0.16s ease}
+.app-dialog-overlay.open{opacity:1}
+.app-dialog-overlay.closing{opacity:0}
+.app-dialog{background:var(--bg-secondary);border:1px solid var(--border-light);border-radius:var(--radius);padding:22px var(--space-6) 18px;width:400px;max-width:calc(100vw - 40px);box-shadow:0 16px 48px rgba(0,0,0,0.55);transform:translateY(8px) scale(0.98);opacity:0;transition:transform 0.18s cubic-bezier(0.2,1,0.3,1),opacity 0.18s ease}
+.app-dialog-overlay.open .app-dialog{transform:translateY(0) scale(1);opacity:1}
+.app-dialog-title{font-size:15px;font-weight:700;color:var(--text-primary);margin-bottom:10px;letter-spacing:0.01em}
+.app-dialog-message{font-size:13.5px;line-height:1.6;color:var(--text-secondary);word-break:break-word}
+.app-dialog-input{width:100%;margin-top:14px;padding:9px var(--space-3);background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-xs);color:var(--text-primary);font-size:var(--font-size-lg);font-family:inherit;outline:none;transition:border-color var(--transition)}
+.app-dialog-input:focus{border-color:var(--accent)}
+.app-dialog-actions{display:flex;gap:var(--space-2);justify-content:flex-end;margin-top:var(--space-5)}
+.app-dialog-btn{padding:var(--space-2) 18px;border-radius:var(--radius-xs);font-size:var(--font-size-md);font-weight:600;font-family:inherit;cursor:pointer;border:1px solid transparent;transition:background var(--transition),border-color var(--transition),transform 0.1s}
+.app-dialog-btn:active{transform:translateY(1px)}
+.app-dialog-cancel{background:var(--bg-tertiary);color:var(--text-secondary);border-color:var(--border)}
+.app-dialog-cancel:hover{background:var(--bg-hover);color:var(--text-primary)}
+.app-dialog-cancel:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.app-dialog-ok{background:var(--accent);color:#fff}
+.app-dialog-ok:hover{background:var(--accent-hover)}
+.app-dialog-ok:focus-visible{outline:2px solid var(--accent-hover);outline-offset:2px}
+.app-dialog-ok.is-danger{background:var(--error-text)}
+.app-dialog-ok.is-danger:hover{background:#e05656}
+/* Tofu theme: square neo-brutalist block to match the rest of the tofu UI */
+[data-theme="tofu"] .app-dialog{background:#faf8f3;border:3px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .app-dialog-title{color:#1a1814;text-transform:uppercase;letter-spacing:0.04em}
+[data-theme="tofu"] .app-dialog-message{color:#3a342c}
+[data-theme="tofu"] .app-dialog-input{background:#fff;border:2px solid #1a1814;border-radius:var(--radius);color:#1a1814}
+[data-theme="tofu"] .app-dialog-btn{border-radius:var(--radius);border:2px solid #1a1814;box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .app-dialog-btn:active{box-shadow:var(--clay-pressed);transform:translate(2px,2px)}
+
+/* ═══ Multi-option chooser (showChoice) — used by the post-send inject-mode
+   prompt. Each option is a full-width stacked button with an icon, a bold
+   label and a muted subtitle. The accent option (steer) gets a teal edge. ═══ */
+.app-dialog-choice{width:440px}
+.app-dialog-choices{display:flex;flex-direction:column;gap:10px;margin-top:var(--space-4)}
+.app-choice-btn{display:flex;align-items:center;gap:13px;width:100%;text-align:left;padding:13px 15px;background:var(--bg-tertiary);border:1.5px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-family:inherit;color:var(--text-primary);transition:border-color .16s,background .16s,transform .1s}
+.app-choice-btn:hover{background:var(--bg-hover);border-color:var(--border-light)}
+.app-choice-btn:active{transform:translateY(1px)}
+.app-choice-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.app-choice-icon{flex-shrink:0;width:34px;height:34px;border-radius:var(--radius-xs);background:var(--bg-primary);color:var(--text-tertiary);border:1px solid var(--border)}
+.app-choice-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.app-choice-label{font-size:13.5px;font-weight:700;letter-spacing:.01em}
+.app-choice-sub{font-size:11.5px;line-height:1.45;color:var(--text-tertiary)}
+/* Accent option (steer) — teal edge + icon glow so the mid-turn injection is
+   visually distinct from the neutral queue default. */
+.app-choice-btn.is-accent{border-color:rgba(45,212,191,0.45)}
+.app-choice-btn.is-accent:hover{border-color:#2dd4bf;background:rgba(45,212,191,0.08)}
+.app-choice-btn.is-accent .app-choice-icon{color:#2dd4bf;border-color:rgba(45,212,191,0.4);background:rgba(45,212,191,0.1)}
+[data-theme="tofu"] .app-choice-btn{border:2px solid #1a1814;border-radius:var(--radius);box-shadow:var(--clay-sm)}
+[data-theme="tofu"] .app-choice-btn:active{box-shadow:var(--clay-pressed);transform:translate(2px,2px)}
+[data-theme="tofu"] .app-choice-icon{border:2px solid #1a1814;background:#fff}
+[data-theme="tofu"] .app-choice-btn.is-accent{border-color:#0f766e}
+[data-theme="tofu"] .app-choice-btn.is-accent .app-choice-icon{color:#0f766e;border-color:#0f766e}
+

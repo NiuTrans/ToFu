@@ -1,0 +1,118 @@
+"""Atomic publication contracts for concurrent Vite builds."""
+
+from __future__ import annotations
+
+import inspect
+import json
+import os
+from pathlib import Path
+import subprocess
+
+import pytest
+
+from lib.vite_assets import VITE_MANIFEST, validate_vite_artifact
+
+
+pytestmark = pytest.mark.unit
+ROOT = Path(__file__).resolve().parents[2]
+BUILD = ROOT / 'scripts/build_frontend.mjs'
+TEST_BUNDLER = ROOT / 'scripts/vite_test_bundle.mjs'
+
+
+def _source() -> str:
+    return BUILD.read_text(encoding='utf-8')
+
+
+def test_build_uses_a_private_staging_directory_and_always_cleans_it():
+    source = _source()
+    assert "mkdtemp(join(dirname(liveDir), '.vite-build-'))" in source
+    assert 'process.env.TOFU_VITE_OUT_DIR = temporaryDir' in source
+    assert 'await rm(temporaryDir, { recursive: true, force: true })' in source
+
+
+def test_each_content_hashed_asset_is_published_by_atomic_rename():
+    source = _source()
+    assert 'async function atomicCopy(source, destination)' in source
+    assert "const temporary = `${destination}.publish-${process.pid}-" in source
+    assert 'await copyFile(source, temporary)' in source
+    assert 'await rename(temporary, destination)' in source
+
+
+def test_existing_hash_short_circuits_without_overwrite():
+    source = _source()
+    start = source.index('async function atomicCopy(')
+    end = source.index('async function publishManifest(', start)
+    block = source[start:end]
+    assert "await open(destination, 'r')" in block
+    assert 'return;' in block
+    assert block.index("await open(destination, 'r')") < block.index('copyFile(')
+
+
+def test_manifest_is_the_commit_point_after_assets_and_previous_graph():
+    source = _source()
+    assets_at = source.index('for (const asset of nextAssets)')
+    previous_at = source.index("'previous-manifest.json'")
+    manifest_at = source.index("'manifest.json'), nextManifest")
+    cleanup_at = source.index('const retained = new Set(')
+    assert assets_at < previous_at < manifest_at < cleanup_at
+
+
+def test_live_and_previous_manifests_reference_present_files():
+    current = validate_vite_artifact()
+    assert current
+    previous_path = Path(VITE_MANIFEST).with_name('previous-manifest.json')
+    if previous_path.exists():
+        previous = json.loads(previous_path.read_text(encoding='utf-8'))
+        for row in previous.values():
+            for relative in (row.get('file'), *(row.get('css') or ()),
+                             *(row.get('assets') or ())):
+                assert (previous_path.parent / relative).is_file(), relative
+
+
+def test_cleanup_retains_the_current_and_previous_graphs():
+    source = _source()
+    assert 'new Set([...nextAssets, ...previousAssets]' in source
+    # Older dropped generations are retention-planner territory; see
+    # tests/test_frontend_vite_asset_retention.py for the bounded window.
+    assert 'if (retained.has(file)) continue;' in source
+
+
+def test_server_import_and_request_paths_never_build_frontend_code():
+    import server
+
+    source = inspect.getsource(server._check_frontend_artifact)
+    assert 'validate_published_vite_artifact' in source
+    assert 'subprocess' not in source
+    # The actionable validation error names ``npm run build:frontend``. Guard
+    # behavior rather than banning that user-facing word from the source.
+    assert 'scripts/build_frontend.mjs' not in source
+
+
+@pytest.mark.parametrize(
+    ('source', 'expected_success'),
+    [
+        ('export const answer: number = 42;', True),
+        ('export const = ;', False),
+    ],
+)
+def test_stdin_test_bundle_reclaims_its_virtual_entry(
+        tmp_path, source, expected_success):
+    temp_root = tmp_path / 'temp'
+    temp_root.mkdir()
+    output = tmp_path / 'bundle.mjs'
+    completed = subprocess.run(
+        [
+            'node', str(TEST_BUNDLER), '--bundle', '--format=esm',
+            '--platform=node', '--loader=ts', '--sourcefile=virtual.ts',
+            f'--outfile={output}',
+        ],
+        input=source,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, 'TMPDIR': str(temp_root)},
+    )
+
+    assert (completed.returncode == 0) is expected_success, completed.stderr
+    assert output.is_file() is expected_success
+    assert list(temp_root.iterdir()) == []

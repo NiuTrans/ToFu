@@ -1,0 +1,137 @@
+[
+  {
+    "theme": "dark",
+    "token": "--success-text",
+    "fg": "#34D399",
+    "bg": "#0a0a0c",
+    "ratio": 10.29,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "dark",
+    "token": "--warning-text",
+    "fg": "#CFB850",
+    "bg": "#0a0a0c",
+    "ratio": 10.01,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "dark",
+    "token": "--info-text",
+    "fg": "#60A5FA",
+    "bg": "#0a0a0c",
+    "ratio": 7.78,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "dark",
+    "token": "--error-text",
+    "fg": "#cf5050",
+    "bg": "#0a0a0c",
+    "ratio": 4.63,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "dark",
+    "token": "--text-on-accent:on --accent #6e56cf",
+    "fg": "#ffffff",
+    "bg": "#6e56cf",
+    "ratio": 5.39,
+    "pass_4_5": true,
+    "legacy": true
+  },
+  {
+    "theme": "light",
+    "token": "--success-text",
+    "fg": "#1F7A5C",
+    "bg": "#f4f2ed",
+    "ratio": 4.7,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "light",
+    "token": "--warning-text",
+    "fg": "#96620E",
+    "bg": "#f4f2ed",
+    "ratio": 4.63,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "light",
+    "token": "--info-text",
+    "fg": "#4068B8",
+    "bg": "#f4f2ed",
+    "ratio": 4.82,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "light",
+    "token": "--error-text",
+    "fg": "#b82020",
+    "bg": "#f4f2ed",
+    "ratio": 5.75,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "light",
+    "token": "--text-on-accent:on --accent #6366f1",
+    "fg": "#ffffff",
+    "bg": "#6366f1",
+    "ratio": 4.47,
+    "pass_4_5": false,
+    "legacy": true
+  },
+  {
+    "theme": "tofu",
+    "token": "--success-text",
+    "fg": "#3D7263",
+    "bg": "#F8FAFC",
+    "ratio": 5.3,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "tofu",
+    "token": "--warning-text",
+    "fg": "#8B560F",
+    "bg": "#F8FAFC",
+    "ratio": 5.84,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "tofu",
+    "token": "--info-text",
+    "fg": "#3F6E8C",
+    "bg": "#F8FAFC",
+    "ratio": 5.25,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "tofu",
+    "token": "--error-text",
+    "fg": "#B05B48",
+    "bg": "#F8FAFC",
+    "ratio": 4.52,
+    "pass_4_5": true,
+    "legacy": false
+  },
+  {
+    "theme": "tofu",
+    "token": "--text-on-accent:on --accent #C97A1D",
+    "fg": "#ffffff",
+    "bg": "#C97A1D",
+    "ratio": 3.34,
+    "pass_4_5": false,
+    "legacy": true
+  }
+]

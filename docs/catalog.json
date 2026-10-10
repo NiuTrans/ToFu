@@ -1,0 +1,519 @@
+{
+  "version": 1,
+  "policy": {
+    "history": "Git history is the archive; completed plans, incident reports, and point-in-time audits do not remain in docs/.",
+    "authority": "Authority documents describe the running system and are updated in the same change as their contracts.",
+    "reference": "Reference documents may explain one implemented domain but may not redefine a canonical contract.",
+    "generated": "Generated documents are never hand-edited and must name their generator.",
+    "maximum_lines_by_group": {
+      "authority": 1260,
+      "domain_maps": 220,
+      "developer_guides": 450,
+      "operator_guides": 700,
+      "compliance": 180,
+      "generated": 200
+    }
+  },
+  "contracts": [
+
+    {
+      "path": "contracts/db_performance_catalog_v1.json",
+      "guard": "tests/tofudb/test_db_performance_catalog.py"
+    },
+    {
+      "path": "contracts/native_runtime_artifact_v1.json",
+      "guard": "tests/release/test_native_runtime_archive.py"
+    },
+    {
+      "path": "contracts/native_agent_stdio_v1.schema.json",
+      "guard": "packages/tofu-runtime/tests/agent_stdio.rs"
+    },
+    {
+      "path": "contracts/workspace_delivery_retry_v1.schema.json",
+      "guard": "tests/project_mod/test_continuous_delivery.py"
+    },
+    {
+      "path": "contracts/workspace_delivery_repair_v1.schema.json",
+      "guard": "tests/project_mod/test_continuous_delivery.py"
+    },
+    {
+      "path": "contracts/desktop_bridge_v3.schema.json",
+      "guard": "tests/desktop/test_desktop_bridge_v3.py"
+    },
+    {
+      "path": "contracts/swarm_messages_v1.json",
+      "guard": "tests/swarm/test_run_messages.py"
+    },
+    {
+      "path": "contracts/conversation_execution_identity_v1.json",
+      "guard": "tests/conversation/test_execution_identity.py"
+    },
+    {
+      "path": "contracts/project_messages_v1.json",
+      "guard": "tests/project_mod/test_project_messages.py"
+    },
+    {
+      "path": "contracts/project_coordination_v1.schema.json",
+      "generator": "scripts/gen_project_coordination_contract.py",
+      "guard": "tests/project_mod/test_project_coordination.py"
+    },
+    {
+      "path": "contracts/research_model_budget_v1.schema.json",
+      "guard": "tests/research/test_research_budget_binding.py"
+    },
+    {
+      "path": "contracts/compaction_receipt_v1.schema.json",
+      "guard": "tests/compaction/test_compaction_receipt_contract.py"
+    },
+    {
+      "path": "contracts/compaction_handoff_v1.schema.json",
+      "guard": "tests/compaction/test_compaction_handoff.py"
+    },
+    {
+      "path": "contracts/tool_result_query_v1.json",
+      "guard": "tests/tools/test_tool_result_query_canonical.py",
+      "generator": "scripts/gen_tool_result_query_contract.py"
+    },
+    {
+      "path": "contracts/conversation_search_v2.json",
+      "guard": "tests/conversation/test_conversation_search_v2.py",
+      "generator": "scripts/gen_tofudb_ir_contract.py"
+    },
+    {
+      "path": "contracts/api_v4.yaml",
+      "guard": "tests/api/test_api_v4_contract.py",
+      "generator": "scripts/gen_api_v4_contract.py"
+    },
+    {
+      "path": "contracts/identity_v1.yaml",
+      "guard": "tests/identity/test_identity_contract.py"
+    },
+    {
+      "path": "contracts/storage_operations_v1.json",
+      "guard": "tests/tofudb/test_tofudb_pre_authority.py",
+      "generator": "scripts/gen_storage_operation_catalog.py"
+    },
+    {
+      "path": "contracts/storage_v2.json",
+      "guard": "tests/tofudb/test_tofudb_pre_authority.py",
+      "generator": "scripts/gen_storage_v2_contract.py"
+    },
+    {
+      "path": "contracts/tofudb_ir_v1.json",
+      "guard": "tests/tofudb/test_tofudb_pre_authority.py",
+      "generator": "scripts/gen_tofudb_ir_contract.py"
+    },
+    {
+      "path": "contracts/conversation_sync_v3.yaml",
+      "guard": "tests/conversation/test_conversation_sync_v3.py",
+      "generator": "scripts/gen_conversation_sync_contract.py"
+    },
+    {
+      "path": "contracts/api_v1_model_routing.yaml",
+      "guard": "tests/api/test_api_v1_model_routing_contract.py",
+      "generator": "scripts/gen_api_v1_model_routing_contract.py"
+    },
+    {
+      "path": "contracts/fixtures/",
+      "guard": "tests/conversation_sync/test_wire_fixtures.py",
+      "generator": "scripts/gen_wire_fixtures.py"
+    },
+    {
+      "path": "contracts/conversation_lifecycle_v1.yaml",
+      "guard": "tests/conversation/test_conversation_lifecycle_contract.py"
+    },
+    {
+      "path": "contracts/control_rpc_v1.yaml",
+      "guard": "tests/control_rpc/test_control_rpc.py"
+    },
+    {
+      "path": "contracts/frontend_conversation_architecture_v1.json",
+      "guard": "tests/frontend/test_frontend_budget.py"
+    },
+    {
+      "path": "contracts/experiments_v1.schema.json",
+      "guard": "tests/experiments/test_experiment_framework.py"
+    },
+    {
+      "path": "contracts/log_incident_v1.schema.json",
+      "guard": "tests/log/test_log_diagnostics_pipeline.py"
+    },
+    {
+      "path": "contracts/browser_site_observation_v1.schema.json",
+      "guard": "tests/browser/test_browser_site_observations.py"
+    },
+    {
+      "path": "contracts/model_routing_v2.schema.json",
+      "guard": "tests/model_routing/test_model_routing_contract.py"
+    },
+    {
+      "path": "contracts/provider_offering_recipe_v1.schema.json",
+      "guard": "tests/providers/test_provider_template_recipes.py"
+    },
+    {
+      "path": "contracts/project_brain_v1.schema.json",
+      "guard": "tests/project_mod/test_project_brain_signal_driven.py"
+    },
+    {
+      "path": "contracts/research_progress_v1.schema.json",
+      "guard": "tests/research/test_research_progress.py"
+    },
+    {
+      "path": "contracts/research_record_v1.schema.json",
+      "guard": "tests/research/test_research_records.py"
+    },
+    {
+      "path": "contracts/research_action_observation_v1.schema.json",
+      "guard": "tests/research/test_research_action_observations.py"
+    },
+    {
+      "path": "contracts/research_program_v1.schema.json",
+      "guard": "tests/research/test_research_program_v1.py"
+    },
+    {
+      "path": "contracts/paper_podcast_timeline_v1.schema.json",
+      "guard": "tests/paper/test_paper_podcast_timeline.py"
+    },
+    {
+      "path": "contracts/paper_build_v1.schema.json",
+      "guard": "tests/paper/test_paper_build_contract.py",
+      "generator": "scripts/generate_paper_build_contract.py"
+    },
+    {
+      "path": "contracts/project_file_receipts_v1.schema.json",
+      "guard": "tests/project_mod/test_project_file_receipts.py"
+    },
+    {
+      "path": "contracts/tofusql_catalog_v1.json",
+      "guard": "tests/tofudb/test_tofudb_differential.py",
+      "generator": "scripts/gen_tofusql_catalog.py"
+    },
+    {
+      "path": "contracts/evolution_anti_pattern_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_capability_gap_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_cost_priors_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_distillation_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_episode_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_gate_policy_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_goal_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_holdout_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_hypothesis_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_mutation_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_observation_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_observations.py"
+    },
+    {
+      "path": "contracts/evolution_plan_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_regression_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/evolution_run_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_runs.py"
+    },
+    {
+      "path": "contracts/evolution_skill_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_contracts.py"
+    },
+    {
+      "path": "contracts/strategy_template_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_strategies.py"
+    },
+    {
+      "path": "contracts/project_undo_postimage_v1.schema.json",
+      "guard": "tests/project_mod/test_project_undo_postimage.py"
+    },
+    {
+      "path": "contracts/model_context_v1.schema.json",
+      "guard": "tests/tofudb/test_context_semantic_revision.py",
+      "generator": "scripts/gen_model_context_projection.py"
+    },
+    {
+      "path": "contracts/storage_harness_certification_v1.json",
+      "guard": "tests/storage_sidecar/test_storage_certification_gate.py"
+    },
+    {
+      "path": "contracts/api_endpoint_index_v1.json",
+      "guard": "tests/api/test_api_endpoint_index.py",
+      "generator": "scripts/gen_api_endpoint_index.py"
+    },
+    {
+      "path": "contracts/config_knobs_v1.json",
+      "guard": "tests/meta/test_config_knobs.py",
+      "generator": "scripts/check_config_knobs.py"
+    },
+    {
+      "path": "contracts/ui_nav_targets_v1.json",
+      "guard": "tests/ui_nav/test_ui_nav_targets_contract.py",
+      "generator": "scripts/gen_ui_nav_targets.mjs"
+    },
+    {
+      "path": "contracts/site_pack_v1.schema.json",
+      "guard": "tests/site_packs/test_site_pack_contract.py"
+    },
+    {
+      "path": "contracts/project_write_intent_v1.schema.json",
+      "guard": "tests/project_mod/test_project_write_intents.py"
+    },
+    {
+      "path": "contracts/deliverable_proof_v1.schema.json",
+      "guard": "tests/proof/test_deliverable_proof_contract.py"
+    },
+    {
+      "path": "contracts/resource_policy_v1.json",
+      "guard": "tests/resource_control/test_catalog.py",
+      "generator": "scripts/gen_resource_policy.py"
+    },
+    {
+      "path": "contracts/evolution_program_v1.schema.json",
+      "guard": "tests/evolution/test_evolution_programs.py"
+    },
+    {
+      "path": "contracts/automation_v1.schema.json",
+      "guard": "tests/automations/test_definition_contract.py",
+      "generator": "scripts/gen_automation_contract.py"
+    },
+    {
+      "path": "contracts/automation_actions_v1.json",
+      "guard": "tests/automations/test_definition_contract.py",
+      "generator": "scripts/gen_automation_contract.py"
+    },
+    {
+      "path": "contracts/automation_storage_v1.schema.json",
+      "guard": "tests/automations/test_atomic_execution.py"
+    },
+    {
+      "path": "contracts/worker_job_lifecycle_v1.json",
+      "guard": "tests/storage/test_worker_job_suspension.py",
+      "generator": "scripts/gen_tofudb_ir_contract.py"
+    },
+    {
+      "path": "contracts/automation_management_v1.schema.json",
+      "guard": "tests/automations/test_management_contract.py",
+      "generator": "scripts/gen_automation_contract.py"
+    },
+    {
+      "path": "contracts/automation_runtime_v1.json",
+      "guard": "tests/automations/test_runtime_service.py"
+    },
+    {
+      "path": "contracts/automation_skill_sources_v1.json",
+      "guard": "tests/skills/test_automation_mtskills_cli.py"
+    },
+    {
+      "path": "contracts/tool_result_surfaces_v1.json",
+      "guard": "tests/tools/test_result_surfaces.py",
+      "generator": "scripts/gen_tool_result_surfaces.py"
+    },
+    {
+      "path": "contracts/project_undo_payload_ref_v1.schema.json",
+      "guard": "tests/project_mod/test_project_undo_payloads.py"
+    },
+    {
+      "path": "contracts/restart_preparation_v1.json",
+      "guard": "tests/server/test_restart_preparation_progress.py"
+    },
+    {
+      "path": "contracts/mcp_local_paths_v1.schema.json",
+      "guard": "tests/tasks_pkg/test_mcp_local_paths.py"
+    },
+    {
+      "path": "contracts/task_event_delivery_v1.json",
+      "guard": "tests/turn_lifecycle/test_task_event_delivery.py"
+    },
+    {
+      "path": "contracts/native_agent_checkpoint_v1.schema.json",
+      "guard": "packages/tofu-runtime/tests/agent.rs"
+    },
+    {
+      "path": "contracts/native_agent_journal_v1.schema.json",
+      "guard": "packages/tofu-runtime/tests/checkpoint_journal.rs"
+    },
+    {
+      "path": "contracts/native_checkpoint_outbox_v1.schema.json",
+      "guard": "packages/tofu-db/src/native_checkpoint_store_tests.rs"
+    },
+    {
+      "path": "contracts/native_checkpoint_control_v1.schema.json",
+      "guard": "packages/tofu-db/src/embedded_checkpoint_control_tests.rs"
+    }
+  ],
+  "authority": [
+    "docs/CONTINUOUS_DELIVERY.md",
+    "docs/DESKTOP_CLIENTS.md",
+    "docs/PROJECT_COORDINATION.md",
+    "docs/README.md",
+    "docs/DEVELOPER_RUNTIME.md",
+    "docs/DESIGN_SYSTEM.md",
+    "docs/ARCHITECTURE.md",
+    "docs/IDENTITY.md",
+    "docs/contracts/API_CONTRACT.md",
+    "docs/contracts/EVENTS.md",
+    "docs/runbooks/GIT_WORKSPACE_GUARD.md",
+    "docs/contracts/HEADLESS_API.md",
+    "docs/STORAGE.md",
+    "docs/STORAGE_TOFUDB.md",
+    "docs/TOFUDB_FASTPATH.md",
+    "docs/STORAGE_TURN_TEXT.md",
+    "docs/STORAGE_EVENT_REPLAY.md",
+    "docs/STORAGE_NATIVE_SESSIONS.md",
+    "docs/STORAGE_OPERATIONS.md",
+    "docs/contracts/CONVERSATION_SYNC_V3.md",
+    "docs/contracts/CONVERSATION_DIAGNOSTICS.md",
+    "docs/FRONTEND_ARCHITECTURE.md",
+    "docs/RENDER_CONTRACT.md",
+    "docs/RESEARCH_CYCLE.md",
+    "docs/contracts/TURN_SETTLEMENT.md",
+    "docs/TESTING_STRATEGY.md",
+    "docs/ENTERPRISE_EVOLUTION.md",
+    "docs/MODEL_REGISTRATION.md",
+    "docs/PROVIDER_TEMPLATE_RECIPES.md",
+    "docs/LOGGING.md",
+    "docs/PAPER_BUILDS.md",
+    "docs/PAPER_CITATIONS.md",
+    "docs/PAPER_QUALITY.md",
+    "docs/EVOLUTION_DESIGN.md",
+    "docs/STORAGE_PERFORMANCE_CHARTER.md",
+    "docs/TOFUDB_PUBLICATION_LATENCY.md",
+    "docs/SITE_PACKS.md",
+    "docs/RUN_CONTINUITY.md",
+    "docs/RESOURCE_CONTROL.md",
+    "docs/EXPLORATION_MEMORY.md",
+    "docs/STAGE_OUTCOMES.md",
+    "docs/TOFUDB_JSON_MATERIALIZATION.md",
+    "docs/TOFUDB_WAL_BARRIER_SCHEDULING.md",
+    "docs/TOFUDB_BLOCK_READ_PATH.md",
+    "docs/TOFUDB_ROTATION_WINDOW.md",
+    "docs/AUTOMATIONS.md",
+    "docs/AUTOMATION_SKILL_SOURCES.md",
+    "docs/TASK_EVENT_DELIVERY.md"
+  ],
+  "domain_maps": [
+    "docs/modules/auth_providers_billing.md",
+    "docs/modules/browser_automation.md",
+    "docs/modules/context_engineering.md",
+    "docs/modules/conversations_project_brain.md",
+    "docs/modules/data_tier.md",
+    "docs/modules/experiments.md",
+    "docs/modules/file_history.md",
+    "docs/modules/infra_runtime.md",
+    "docs/modules/ingest_media.md",
+    "docs/modules/integrations_api.md",
+    "docs/modules/llm_io.md",
+    "docs/modules/orchestration_dag.md",
+    "docs/modules/production.md",
+    "docs/modules/project_integration.md",
+    "docs/modules/remote_execution.md",
+    "docs/modules/scheduling_ops.md",
+    "docs/modules/skills.md",
+    "docs/modules/task_engine.md",
+    "docs/modules/tools_execution.md",
+    "docs/modules/evolution.md",
+    "docs/modules/proof.md"
+  ],
+  "developer_guides": [
+    "docs/ENVIRONMENT_PROVIDERS.md",
+    "docs/AGENTS.md",
+    "docs/conversation/TURN_BLOCK_DISCLOSURE.md",
+    "docs/AGENT_CAPABILITY_GUIDE.md",
+    "docs/api_client.md",
+    "docs/contracts/API_V4_MIGRATION.md",
+    "docs/runbooks/CODEX_ACCOUNT_USAGE.md",
+    "docs/CONTEXT_COMPACTION.md",
+    "docs/CONTEXT_BUDGET_POLICY.md",
+    "docs/CONTEXT_INJECTIONS.md",
+    "docs/CUSTOM_TOOLS.md",
+    "docs/DEFENSIVE_PATTERNS.md",
+    "docs/EVOLUTION_GAME_ART.md",
+    "docs/LLM_COST_OPTIMIZATION.md",
+    "docs/LLM_RUNTIME_PROFILES.md",
+    "docs/LOCAL_KNOWLEDGE.md",
+    "docs/contracts/OPENAI_RESPONSES_FEATURES.md",
+    "docs/ORCHESTRATION_PRODUCT_SURFACES.md",
+    "docs/MONOREPO.md",
+    "docs/TASK_EXECUTION_MODES.md",
+    "docs/TOFUDB_TOFUSQL_DESIGN_PROPOSAL.md",
+    "docs/contracts/TOOL_EXECUTION_POLICY.md",
+    "docs/contracts/TOOL_PLUGINS.md",
+    "docs/contracts/TOOL_SEARCH_EXECUTION_GATEWAY.md",
+    "docs/contracts/TURN_TRACE_CONTRACT.md",
+    "docs/contracts/VERSIONING.md",
+    "docs/PROJECT_FILE_UNDO.md",
+    "docs/RETAINED_AGENTS.md",
+    "docs/BROWSER_WORKFLOWS.md",
+    "docs/TOOL_DISPATCH_ISOLATION_DESIGN.md",
+    "docs/TOFUDB_WRITE_PATH_OVERLAY.md",
+    "docs/TOFUDB_PERFORMANCE_EXPERIMENTS.md",
+    "docs/TOFUDB_EMBEDDED_RESPONSE.md",
+    "docs/TOFUDB_WORKER_DELIVERY.md",
+    "docs/TOFUDB_RECENCY_DIRECTORY.md",
+    "docs/TOFUDB_TOMBSTONE_COMPACTION.md",
+    "docs/proposals/DURABLE_AGENT_LOOP_DESIGN_PROPOSAL.md",
+    "docs/PROOF_DELIVERABLES_DESIGN_PROPOSAL.md",
+    "docs/proposals/OUTCOME_ROUTING_DESIGN_PROPOSAL.md",
+    "docs/TOOL_CALL_SUCCESS_RENDERING_DESIGN_PROPOSAL.md"
+  ],
+  "operator_guides": [
+    "docs/INSTALL.md",
+    "docs/runbooks/RELIABILITY_RUNBOOK.md",
+    "docs/ROOTLESS_VM_SANDBOX.md",
+    "docs/PROXY_RUNTIME.md",
+    "docs/runbooks/EPIC_D_SCALE_ROLLOUT_RUNBOOK.md",
+    "docs/contracts/TRB-fastpath.md",
+    "docs/contracts/COMPAT_OPENAI.md",
+    "docs/contracts/COMPAT_ANTHROPIC.md"
+  ],
+  "compliance": [
+    "docs/chrome-web-store/README.md",
+    "docs/chrome-web-store/ASSETS_CHECKLIST.md",
+    "docs/chrome-web-store/EDGE_ADDONS.md",
+    "docs/chrome-web-store/LISTING.md",
+    "docs/chrome-web-store/PERMISSIONS_JUSTIFICATION.md",
+    "docs/chrome-web-store/PRIVACY.md",
+    "docs/chrome-web-store/REVIEW_RISKS.md",
+    "docs/chrome-web-store/SUBMISSION_CHECKLIST.md"
+  ],
+  "generated": [
+    {
+      "path": "docs/contracts/TOOL_INVENTORY.md",
+      "generator": "scripts/gen_tool_inventory.py"
+    },
+    {
+      "path": "docs/CONCEPT_INDEX.md",
+      "generator": "scripts/gen_concept_index.py"
+    }
+  ]
+}

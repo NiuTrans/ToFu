@@ -1,0 +1,1435 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.native-agent-stdio/v1",
+  "$defs": {
+    "tool_result": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "content"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "tool_result"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content": {
+          "type": [
+            "string",
+            "array"
+          ],
+          "minItems": 1,
+          "items": {
+            "type": "object"
+          }
+        },
+        "failed": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "cancel": {
+      "type": "object",
+      "required": [
+        "version",
+        "type"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "cancel"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "tool_request": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "name",
+        "arguments"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "tool_request"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "caller": {
+          "type": "object"
+        },
+        "model_round": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "configure": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "owner_user_id",
+        "task_id",
+        "epoch",
+        "endpoint",
+        "template",
+        "messages",
+        "tools",
+        "policy",
+        "event_bytes",
+        "output_bytes",
+        "tool_calls",
+        "request_bytes",
+        "rounds",
+        "retained_bytes",
+        "feedback_bytes",
+        "tool_frame_bytes",
+        "deadline_ms"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "configure"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "epoch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "endpoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "proxy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "template": {
+          "type": "object"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "tools": {
+          "type": "object"
+        },
+        "policy": {
+          "type": "object"
+        },
+        "identical_tool_limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "event_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "output_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retained_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "feedback_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tool_frame_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "round_control": {
+          "type": "boolean"
+        },
+        "token_admission": {
+          "type": "object",
+          "$ref": "#/$defs/token_admission"
+        },
+        "terminal_persistence": {
+          "type": "object",
+          "$ref": "#/$defs/terminal_persistence"
+        },
+        "text_progress": {
+          "type": "boolean"
+        },
+        "approval_control": {
+          "$ref": "#/$defs/approval_control",
+          "type": "object",
+          "required": [
+            "receipts",
+            "identity_bytes"
+          ],
+          "properties": {
+            "receipts": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "identity_bytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "tool_result_join": {
+          "type": "boolean"
+        },
+        "provider_protocol": {
+          "enum": [
+            "chat",
+            "anthropic",
+            "responses"
+          ]
+        },
+        "tool_feedback": {
+          "enum": [
+            "text",
+            "multimodal"
+          ]
+        },
+        "responses_reasoning_replay": {
+          "type": "boolean"
+        },
+        "round_preparation": {
+          "type": "boolean"
+        },
+        "round_preparation_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "progress_control": {
+          "type": "boolean"
+        },
+        "no_progress_rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nonretryable_failure_rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checkpoint_terminal_fence": {
+          "type": "boolean"
+        },
+        "checkpoint_control": {
+          "type": "boolean"
+        },
+        "checkpoint_binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checkpoint_frame_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "deadline_unix_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "model_control": {
+          "type": "object",
+          "$ref": "#/$defs/model_control"
+        },
+        "model_counter": {
+          "type": "object",
+          "$ref": "#/$defs/model_counter"
+        },
+        "checkpoint_shared_account": {
+          "type": "boolean"
+        },
+        "responses_profile": {
+          "enum": [
+            "compatible",
+            "openai",
+            "codex"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "round_request": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "round",
+        "history_messages"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "round_request"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "history_messages": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "deadline_monotonic_ns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
+    },
+    "round_decision": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "approved"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "round_decision"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "preparation_failed": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "round_settled": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "round",
+        "evidence"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "round_settled"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "evidence": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "round_ack": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "accepted"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "round_ack"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "usage_observation": {
+      "type": "object",
+      "required": [
+        "complete"
+      ],
+      "properties": {
+        "tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "error": {
+          "enum": [
+            null,
+            "counter_overflow",
+            "unsupported_numeric_text"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "token_admission": {
+      "type": "object",
+      "required": [
+        "encoding",
+        "output_field",
+        "input_bytes",
+        "text_bytes",
+        "tool_json_bytes",
+        "depth",
+        "actor_records",
+        "attempt_records",
+        "identity_bytes",
+        "worker_stack_bytes"
+      ],
+      "properties": {
+        "encoding": {
+          "enum": [
+            "cl100k_base",
+            "o200k_base"
+          ]
+        },
+        "output_field": {
+          "enum": [
+            "max_tokens",
+            "max_completion_tokens"
+          ]
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "text_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tool_json_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "actor_records": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "attempt_records": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "identity_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "worker_stack_bytes": {
+          "type": "integer",
+          "minimum": 262144
+        }
+      },
+      "additionalProperties": false
+    },
+    "terminal_persistence": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "ack_ms",
+        "attempts",
+        "frame_bytes"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ack_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "frame_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "terminal_request": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "attempt",
+        "event",
+        "receipt"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "terminal_request"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event": {
+          "type": "object"
+        },
+        "checkpoint_suspended": {
+          "type": "boolean"
+        },
+        "receipt": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "terminal_ack": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "attempt",
+        "accepted",
+        "retry"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "terminal_ack"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "retry": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "text_delta": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "owner_user_id",
+        "task_id",
+        "sequence",
+        "channel",
+        "text",
+        "request_id"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "text_delta"
+          ]
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "channel": {
+          "enum": [
+            "content",
+            "reasoning"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "text_ack": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "accepted"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "text_ack"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "approval_control": {
+      "type": "object",
+      "required": [
+        "receipts",
+        "identity_bytes"
+      ],
+      "properties": {
+        "receipts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "identity_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "approval_request": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "epoch",
+        "call_id",
+        "name",
+        "arguments",
+        "remaining_ms"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "approval_request"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "epoch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "caller": {
+          "type": "object"
+        },
+        "remaining_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "approval_decision": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "decision"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "approval_decision"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "human",
+            "auto_write_mode",
+            "agent_adjudicator",
+            "agent_git_guard_ack",
+            "agent_git_guard_solo",
+            "git_safe_write",
+            "denied",
+            "failed"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "tool_model_text": {
+      "type": "object",
+      "required": [
+        "type",
+        "text"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "text"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tool_model_image": {
+      "type": "object",
+      "required": [
+        "type",
+        "image_url"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "image_url"
+          ]
+        },
+        "image_url": {
+          "type": "object",
+          "required": [
+            "url"
+          ],
+          "properties": {
+            "url": {
+              "type": "string",
+              "minLength": 1
+            },
+            "detail": {
+              "enum": [
+                "auto",
+                "low",
+                "high"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "progress_request": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "round",
+        "tool_calls"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "progress_request"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "progress_decision": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "accepted",
+        "observation"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "progress_decision"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "observation": {
+          "type": "object",
+          "required": [
+            "worldVersion",
+            "evidenceIds",
+            "resultEvidenceComplete",
+            "verification",
+            "nonretryableFailureSignatures"
+          ],
+          "properties": {
+            "worldVersion": {
+              "type": "string"
+            },
+            "evidenceIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "resultEvidenceComplete": {
+              "type": "boolean"
+            },
+            "verification": {
+              "type": "string"
+            },
+            "nonretryableFailureSignatures": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "checkpoint_request": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "round",
+        "action",
+        "binding",
+        "epoch"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "checkpoint_request"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deadline_monotonic_ns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "action": {
+          "enum": [
+            "load",
+            "begin",
+            "complete"
+          ]
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "epoch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "checkpoint_decision": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "accepted",
+        "disposition"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "checkpoint_decision"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "disposition": {
+          "enum": [
+            "continue",
+            "suspend"
+          ]
+        },
+        "state": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "model_control": {
+      "type": "object",
+      "required": [
+        "ack_ms"
+      ],
+      "properties": {
+        "ack_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      },
+      "additionalProperties": false
+    },
+    "model_counter": {
+      "type": "object",
+      "required": [
+        "encoding",
+        "output_field",
+        "input_bytes",
+        "text_bytes",
+        "tool_json_bytes",
+        "depth",
+        "worker_stack_bytes"
+      ],
+      "properties": {
+        "encoding": {
+          "enum": [
+            "cl100k_base",
+            "o200k_base"
+          ]
+        },
+        "output_field": {
+          "enum": [
+            "max_tokens",
+            "max_completion_tokens"
+          ]
+        },
+        "input_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "text_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tool_json_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "worker_stack_bytes": {
+          "type": "integer",
+          "minimum": 262144
+        }
+      },
+      "additionalProperties": false
+    },
+    "model_request": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "owner_user_id",
+        "task_id",
+        "attempt_ordinal",
+        "action",
+        "input_tokens",
+        "max_output_tokens",
+        "minimum_output_tokens",
+        "expires_monotonic_ns"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "model_request"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt_ordinal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "action": {
+          "enum": [
+            "reserve",
+            "dispatch",
+            "settle"
+          ]
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "minimum_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "expires_monotonic_ns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "usage": {},
+        "unsent": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "model_decision": {
+      "type": "object",
+      "required": [
+        "version",
+        "type",
+        "request_id",
+        "accepted"
+      ],
+      "properties": {
+        "version": {
+          "enum": [
+            "tofu.native-agent-stdio/v1"
+          ]
+        },
+        "type": {
+          "enum": [
+            "model_decision"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "error": {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "headers": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "transport": {
+    "framing": "one UTF-8 JSON object per newline",
+    "stdin": "exclusive nonblocking pipe/socket; regular files rejected",
+    "order": "one outstanding tool request; tool_result must match an already atomically published request; unsolicited and duplicate replies fail closed",
+    "terminal": "one ordinary native task terminal event after resources settle and the input reader is joined",
+    "permissions": [
+      "read"
+    ],
+    "configuration": "configure frame schema; policy fields share the run-http-chat authority",
+    "failures": "EOF, oversize, invalid response/schema or wrong request_id terminate the task; cancel or deadline aborts before next model round",
+    "stdout": "exclusive pipe; tool requests fit PIPE_BUF and publish atomically with cancellation; regular files/sockets are not supported for requests",
+    "control": "one bounded reactor reader observes cancel during provider and tool waits; one response slot; EOF closes the control carrier, failing a pending tool wait but permitting tool-free completion",
+    "round_control": "Optional configure round_control=true requires a round_decision before each provider call and round_ack after raw settlement evidence; no implicit approval/refund; cancel keeps the input reader alive for settlement acknowledgments.",
+    "usage_observation": "Returned evidence retains raw usage plus usage_observation: canonical observed token lower bound, completeness and explicit unsupported-count error. This is not pricing, reservation or refund authority.",
+    "token_admission": "Optional explicitly selected local tiktoken tier with owned lazy encoder, bounds and native finite model account; omitted total_tokens is unbounded. Registered production routing/counter selection is not inferred.",
+    "terminal_persistence": "Optional acknowledged frozen terminal candidate after native resource settlement. Retry is explicitly requested by host within the configured attempt bound; never repeats provider/tool execution. No terminal event before persistence ACK."
+  },
+  "notes": {
+    "text_progress": "Optional configure text_progress=true emits sequenced content/reasoning text_delta frames and waits for text_ack from the explicit host consumer. Failed ACK stops provider execution. Published callbacks remain owned through ACK/EOF despite Stop; terminal persistence remains a separate required boundary.",
+    "approval_control": "Explicit non-read tool control: host decision mints an existing native owner/parent/epoch/call/argument receipt; host rechecks and consumes the matching decision before invoking its callback. Missing policy refuses before provider effects. Pending callback joins on cancellation; failed policy is distinct from ordinary denial.",
+    "round_preparation": "Explicit host preparation before each reservation. Enabled round requests carry bounded messages; approved decisions return prepared messages. Native byte/shape validation precedes dispatch and invalid admitted history settles NotDispatched. No route, credential, tool catalog or budget override.",
+    "preparation_deadline": "Optional deadline_monotonic_ns is the inherited local Linux CLOCK_MONOTONIC deadline, captured before serialization/publication. It never resets per round. Preparation timeout signals and joins the existing worker before terminal acknowledgment; expired decisions are not sent into the terminal input carrier.",
+    "progress_control": "Optional progress_control=true binds trusted post-tool observations after round settlement over the existing control slot; no history mirror, implicit evidence or detached callbacks.",
+    "checkpoint_control": "Optional trusted load/begin/complete checkpoint policy reuses one control slot. Completed state serializes borrowed history with settled native token account totals/ordinal/completeness/policy. Restore matches account policy and ordinal before one-time Account.restore; missing, removed or changed profiles fail before HTTP.",
+    "deadline_unix_ms": "Optional trusted application absolute UTC deadline. Native session clamps relative deadline_ms by remaining wall time observed once, subtracts observation-to-session delay, then uses its existing monotonic clock. Expired budget aborts without provider/tool effects. Checkpoint capture binds this original value; changed, added or removed recovery deadline refuses before another HTTP request.",
+    "model_control": "Explicit model_control/model_counter selects one host shared-account authority instead of a native mirror. Rust counts admitted history once; reserve freezes output cap, dispatch ACK precedes HTTP and joined settlement preserves actual/unknown usage. Callback replies after their monotonic ACK expiry are not sent. Process loss joins before host pending-lease cleanup. Mixed local token_admission or checkpoint recovery is refused before effects until external recovery accounting is composed.",
+    "shared_account_recovery": "Explicit checkpoint_shared_account with model_control captures one quiescent host invocation-root budget in the existing journal snapshot. SDK captures/restores before checkpoint completion/load acknowledgement; native checks owner/root and exact counter policy. Active children/pending attempts, changed policy and non-pristine restore refuse; unknown usage remains unknown. No native account mirror or automatic crash takeover.",
+    "model_dispatch_headers": "Accepted dispatch only may return full per-attempt HTTP headers from the trusted host. Replace configured headers after joined credential resolution and dispatch intent; never retain them in checkpoint state or account receipts. Existing control frame bytes/deadline apply; wrong-action, malformed or forbidden transport headers refuse before HTTP. No credential vault or automatic refresh authority is created."
+  },
+  "model_tool_projection": {
+    "type": "function",
+    "catalog_name_field": "name",
+    "description_field": "description",
+    "parameters_field": "arguments_schema",
+    "missing_description": "",
+    "order": "catalog"
+  },
+  "model_dispatch_header_policy": {
+    "forbidden": [
+      "host",
+      "content-length",
+      "transfer-encoding",
+      "connection",
+      "proxy-authorization"
+    ]
+  }
+}

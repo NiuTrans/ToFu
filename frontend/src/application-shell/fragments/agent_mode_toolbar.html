@@ -1,0 +1,39 @@
+<!-- One interaction-mode radio over the current planMode/autopilotEnabled flags. -->
+<div class="toolbar-submenu" id="submenuAgentMode">
+  <button type="button" class="submenu-trigger" id="agentModeToggle" data-tofu-action="toggleAgentModeMenu(event)" data-tofu-action-keydown="handleAgentModeMenuTriggerKey(event)" aria-haspopup="true" aria-controls="agentModeMenu" aria-expanded="false" data-mode="standard" data-i18n-title="toolbar.agentModeTooltip" title="选择助手处理下一轮的方式">
+    <span class="icon-box"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.6v-.08A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1H3v-4h.08A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.52V3h4v.08A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.52 1H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg></span>
+    <span class="submenu-label" id="agentModeLabel" data-i18n="toolbar.standardMode">常规</span>
+    <span class="submenu-arrow"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+  </button>
+  <div class="submenu-dropdown" id="agentModeMenu" role="radiogroup" data-i18n-aria-label="toolbar.agentMode">
+    <button type="button" class="flow-menu-item agent-mode-item selected active" id="agentModeStandard" data-mode="standard" role="radio" aria-checked="true" data-tofu-action="setAgentMode('standard')">
+      <span class="flow-menu-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+      <span class="flow-menu-text"><span class="flow-menu-name" data-i18n="toolbar.standardMode">常规</span><span class="flow-menu-desc" data-i18n="toolbar.standardModeDesc">普通的单轮对话方式</span></span>
+      <span class="flow-menu-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+    </button>
+    <button type="button" class="flow-menu-item agent-mode-item" id="planModeToggle" data-mode="plan" role="radio" aria-checked="false" data-tofu-action="setAgentMode('plan')" data-i18n-title="toolbar.planModeTooltip" title="计划模式 — 只读探索，先出方案再动手">
+      <span class="flow-menu-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><path d="m9 13 2 2 4-4"/></svg></span>
+      <span class="flow-menu-text"><span class="flow-menu-name" data-i18n="toolbar.planMode">计划模式</span><span class="flow-menu-desc" data-i18n="toolbar.planModeDesc">只读探索，可多轮讨论后再执行</span></span>
+      <span class="flow-menu-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+    </button>
+    <button type="button" class="flow-menu-item agent-mode-item" id="autopilotToggle" data-mode="autopilot" role="radio" aria-checked="false" data-tofu-action="setAgentMode('autopilot')" data-i18n-title="toolbar.autopilotDesc" title="虚拟用户自动回复，直到任务完成">
+      <span class="flow-menu-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 10v6m11-11h-6m-10 0H1m17.66-6.34-4.24 4.24m-5.66 5.66-4.24 4.24m12.14 0-4.24-4.24m-5.66-5.66L4.34 4.34"/></svg></span>
+      <span class="flow-menu-text"><span class="flow-menu-name" data-i18n="toolbar.autopilot">目标模式</span><span class="flow-menu-desc" data-i18n="toolbar.autopilotDesc">虚拟用户自动回复，直到任务完成</span></span>
+      <span class="flow-menu-check icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+      <span class="tool-badge" id="autopilotBadge" style="display:none"></span>
+    </button>
+    <!-- Saved workflows are one more next-turn execution choice, not a
+         second toolbar mode. The whole section remains Debug-only. Built-in
+         Goal/Autopilot graphs stay available as Studio templates, so they do
+         not appear here a second time. -->
+    <div class="agent-workflow-section" id="agentWorkflowSection" style="display:none">
+      <div class="submenu-divider" role="separator"></div>
+      <div class="agent-workflow-heading">
+        <span class="submenu-section-label" id="agentWorkflowLabel" data-i18n="toolbar.savedWorkflows">已保存工作流</span>
+        <button type="button" class="agent-workflow-manage" id="agentWorkflowManage" data-tofu-action="openOrchestrationFromAgentMode()" data-i18n="toolbar.manageWorkflows">管理</button>
+      </div>
+      <div class="flow-catalog-notice" id="flowMenuStatus" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+      <div class="agent-workflow-list" id="flowMenuList" aria-labelledby="agentWorkflowLabel"></div>
+    </div>
+  </div>
+</div>

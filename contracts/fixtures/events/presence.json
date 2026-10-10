@@ -1,0 +1,21 @@
+{
+  "attemptId": "s",
+  "autopilotRunId": "s",
+  "conflict": {},
+  "conversationId": "s",
+  "emits": "s",
+  "executionAtMs": 1,
+  "executionClockId": "s",
+  "executionOriginAtMs": 1,
+  "flowProjection": "s",
+  "kind": "s",
+  "peer": {},
+  "peers": [],
+  "requestId": "s",
+  "root": "s",
+  "seq": 1,
+  "taskId": "s",
+  "turnRole": "s",
+  "type": "presence",
+  "vuMsgId": "s"
+}

@@ -1,0 +1,457 @@
+"""Command-line entry point for the standalone Tofu agent runtime."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+from collections.abc import Mapping
+import json
+import os
+from pathlib import Path
+import sys
+from urllib.parse import urlparse
+
+from tofu_agent.models import (
+    AgentConfigurationError,
+    AgentTimeoutError,
+    ModelRoutingConfig,
+)
+from tofu_agent.provider_setup import ModelRoutingSetupService
+from lib.trajectory import AVAILABLE_FORMATS
+from tofu_agent.provider_store import (
+    ModelRoutingSettingsStore,
+    ModelRoutingStoreError,
+)
+from tofu_agent.runtime import AgentRuntime
+
+
+def _load_dotenv(path: str) -> None:
+    try:
+        from tofu_dotenv import load_dotenv_file
+    except ImportError:
+        return
+    load_dotenv_file(Path(path))
+
+
+def _model_routing_from_args(args) -> ModelRoutingConfig | None:
+    if args.model_routing_json and args.model_routing_file:
+        raise AgentConfigurationError(
+            'pass only one of --model-routing-json and --model-routing-file')
+    raw = str(args.model_routing_json or '').strip()
+    if args.model_routing_file:
+        try:
+            raw = Path(args.model_routing_file).read_text(encoding='utf-8')
+        except OSError as exc:
+            raise AgentConfigurationError(
+                'model-routing file could not be read') from exc
+    if not raw:
+        return ModelRoutingConfig.from_env()
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AgentConfigurationError(
+            'model-routing input must be valid JSON') from exc
+    return ModelRoutingConfig.from_mapping(decoded)
+
+
+def _add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
+
+    parser.add_argument(
+        '--harness-profile', choices=('auto', 'off', 'longcat_flash'), default='auto',
+        help='Harness compatibility policy (default auto). '
+             'longcat_flash exposes registry tools directly; no XML execution.')
+    parser.add_argument(
+        '--model-routing-json', default='',
+        help='Complete v2 access envelope JSON; prefer the environment variable.',
+    )
+    parser.add_argument(
+        '--model-routing-file', default=os.environ.get(
+            'TOFU_AGENT_MODEL_ROUTING_FILE', ''),
+        help='Read a complete v2 access envelope from this file.',
+    )
+    parser.add_argument('--max-inflight', type=int, default=None,
+                        help='Concurrent runs; omitted or 0 uses the hardware budget. '
+                             'TOFU_AGENT_MAX_INFLIGHT overrides the automatic default.')
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='tofu-agent',
+        description=(
+            'Embed or serve Tofu Agent without the database or full Tofu '
+            'application frontend.'),
+    )
+    parser.add_argument('--env-file', default=os.environ.get(
+        'TOFU_AGENT_ENV_FILE', '.env'))
+    subparsers = parser.add_subparsers(dest='command', required=True)
+
+    serve_parser = subparsers.add_parser('serve', help='Run the headless API.')
+    _add_runtime_arguments(serve_parser)
+    serve_parser.add_argument('--host', default=os.environ.get(
+        'TOFU_AGENT_HOST', '127.0.0.1'))
+    serve_parser.add_argument('--port', type=int, default=int(os.environ.get(
+        'TOFU_AGENT_PORT', '15001')))
+    serve_parser.add_argument('--token', default=os.environ.get(
+        'TOFU_AGENT_TOKEN', ''),
+        help='Bearer token; prefer TOFU_AGENT_TOKEN to avoid process-list leaks.')
+    serve_parser.add_argument(
+        '--allow-unauthenticated', action='store_true',
+        help='Explicitly allow remote requests without a token (unsafe).',
+    )
+    serve_parser.add_argument('--log-level', default=os.environ.get(
+        'TOFU_AGENT_LOG_LEVEL', 'info'))
+    setup_enabled = str(os.environ.get(
+        'TOFU_AGENT_SETUP_ENABLED', '1')).strip().lower() \
+        not in {'0', 'false', 'no', 'off'}
+    serve_parser.add_argument(
+        '--no-setup', action='store_false', dest='setup_enabled',
+        default=setup_enabled,
+        help='Disable the built-in /setup model-routing control panel.',
+    )
+
+    doctor_parser = subparsers.add_parser(
+        'doctor', help='Validate and print redacted runtime configuration.')
+    _add_runtime_arguments(doctor_parser)
+
+    run_parser = subparsers.add_parser(
+        'run',
+        help='Run one task to completion and print the JSON result.',
+        description=(
+            'Single-shot agent invocation: one process, one task, one JSON '
+            'result. Intended for harness/eval integrations that cannot or '
+            'should not manage a long-lived serve process. Exit codes: '
+            '0=done, 2=usage, 3=run timeout, 4=permanent error, '
+            '5=aborted, 6=retriable upstream error (the error envelope in '
+            'the JSON result carries kind/retryable for attribution).'),
+    )
+    _add_runtime_arguments(run_parser)
+    run_parser.add_argument(
+        '--task', default=os.environ.get('TOFU_AGENT_RUN_TASK', ''),
+        help='Task instruction text.')
+    run_parser.add_argument(
+        '--task-file', default=os.environ.get('TOFU_AGENT_RUN_TASK_FILE', ''),
+        help='Read the task instruction from this file (wins over --task).')
+    run_parser.add_argument(
+        '--cwd', default=os.environ.get('TOFU_AGENT_RUN_CWD', ''),
+        help='Project root exposed to the agent tools (run_command and file '
+             'tools resolve against it). Default: the process cwd.')
+    run_parser.add_argument(
+        '--timeout-s', type=float, default=float(os.environ.get(
+            'TOFU_AGENT_RUN_TIMEOUT', '600')),
+        help='Wall-clock budget for the whole run (default 600s).')
+    run_parser.add_argument(
+        '--tools', default=os.environ.get('TOFU_AGENT_RUN_TOOLS', '*'),
+        help="Comma-separated tool tags (see README) or '*'. Default '*' "
+             'exposes the full storage-free tool surface (dangerous execution '
+             'stays opt-in inside TOOLS_ALL). Keyword-routed exposure is '
+             'opt-in via TOFU_AGENT_RUN_NATIVE_EXPOSURE=routed.')
+    run_parser.add_argument(
+        '--trajectory', default=os.environ.get(
+            'TOFU_AGENT_RUN_TRAJECTORY', 'atif'),
+        choices=['', *AVAILABLE_FORMATS],
+        help="Embed a flattened trajectory of this run in the JSON result "
+             "(default 'atif'; pass '' to disable).")
+    run_parser.add_argument(
+        '--output', default=os.environ.get('TOFU_AGENT_RUN_OUTPUT', ''),
+        help='Write the JSON result to this path instead of stdout.')
+    return parser
+
+
+def _is_loopback_host(host: str) -> bool:
+    from tofu_agent.server import _is_loopback
+    return _is_loopback(host)
+
+
+_PROXY_ENV_KEYS = ('http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY')
+
+
+def _iter_base_urls(value):
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if str(key).lower() in {'base_url', 'baseurl'} \
+                    and isinstance(item, str):
+                yield item
+            else:
+                yield from _iter_base_urls(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_base_urls(item)
+
+
+def _no_proxy_entry_matches(entry: str, host: str) -> bool:
+    entry = entry.strip().lower()
+    if not entry:
+        return False
+    if entry == '*':
+        return True
+    host = host.lower()
+    if entry.startswith('.'):
+        return host.endswith(entry) or host == entry[1:]
+    return host == entry or host.endswith('.' + entry)
+
+
+def _self_heal_no_proxy(access) -> None:
+    """Bypass the configured proxy for the envelope's own base_url hosts.
+
+    Sandboxed eval containers commonly export a catch-all http_proxy that
+    intercepts the model serving IP too, turning every LLM call into a 403.
+    Tofu knows its base_url from the access envelope, so it can close that
+    hole itself instead of relying on the launcher to get no_proxy right.
+    """
+    if access is None or not any(os.environ.get(k) for k in _PROXY_ENV_KEYS):
+        return
+    hosts = set()
+    for url in _iter_base_urls(access.document):
+        host = urlparse(str(url)).hostname
+        if host:
+            hosts.add(host)
+    if not hosts:
+        return
+    existing = []
+    for key in ('no_proxy', 'NO_PROXY'):
+        existing.extend(
+            e.strip() for e in os.environ.get(key, '').split(',') if e.strip())
+    missing = [
+        host for host in sorted(hosts)
+        if not any(_no_proxy_entry_matches(e, host) for e in existing)
+    ]
+    if not missing:
+        return
+    suffix = ','.join(missing)
+    for key in ('no_proxy', 'NO_PROXY'):
+        current = os.environ.get(key, '').strip(',')
+        os.environ[key] = f'{current},{suffix}' if current else suffix
+    print(
+        '[no_proxy] auto-appended %s: proxy vars are set and would intercept '
+        'the model base_url' % suffix,
+        file=sys.stderr)
+
+def _runtime_and_setup(
+    args,
+) -> tuple[AgentRuntime, ModelRoutingSetupService]:
+    store = ModelRoutingSettingsStore()
+    access = _model_routing_from_args(args)
+    explicit = bool(args.model_routing_json or args.model_routing_file)
+    if explicit:
+        source = 'arguments'
+    elif access is not None:
+        source = 'environment'
+    else:
+        source = 'none'
+    load_error = ''
+    if access is None:
+        try:
+            access = store.load()
+        except ModelRoutingStoreError as exc:
+            load_error = str(exc)
+        if access is not None:
+            source = 'saved'
+    _self_heal_no_proxy(access)
+    runtime = AgentRuntime.local(
+        model_routing=access,
+        model_routing_source=source,
+        max_inflight=args.max_inflight,
+
+        harness_profile=getattr(args, 'harness_profile', 'auto'),
+    )
+    setup = ModelRoutingSetupService(
+        runtime,
+        store,
+        source=source,
+        editable=source in {'none', 'saved'},
+        load_error=load_error,
+    )
+    return runtime, setup
+
+
+def _runtime(args) -> AgentRuntime:
+    """Compatibility helper retained for focused CLI tests/importers."""
+    runtime, _setup = _runtime_and_setup(args)
+    return runtime
+
+
+def _run_task(args) -> int:
+    task_text = ''
+    if args.task_file:
+        task_text = Path(args.task_file).read_text(encoding='utf-8')
+    if not task_text.strip():
+        task_text = args.task
+    if not task_text.strip():
+        raise AgentConfigurationError(
+            'no task given; pass --task or --task-file')
+
+    # Headless benchmark semantics: the run only ever dispatches onto the
+    # request-scoped envelope, so the operator's configured slots add startup
+    # cost (and a key-leak surface) for nothing. Explicit env still wins.
+    os.environ.setdefault('TOFU_DISABLE_CONFIGURED_SLOTS', '1')
+
+    config: dict = {}
+    config['project'] = args.cwd or os.getcwd()
+    if args.tools:
+        tags = [tag.strip() for tag in args.tools.split(',') if tag.strip()]
+        config['tools'] = tags[0] if len(tags) == 1 else tags
+    # Eval determinism: expose the full native tool surface instead of the
+    # keyword-routed subset; routed exposure stays opt-in.
+    config['tools.nativeExposure'] = (
+        os.environ.get('TOFU_AGENT_RUN_NATIVE_EXPOSURE', 'full').strip()
+        or 'full')
+
+    runtime = _runtime(args)
+    try:
+        result = runtime.run(
+            [{'role': 'user', 'content': task_text}],
+            config=config,
+            trajectory=args.trajectory or None,
+            timeout_s=args.timeout_s,
+        )
+    except AgentTimeoutError:
+        runtime.close(abort=True)
+        _emit({
+            'ok': False,
+            'status': 'timeout',
+            'error': {'kind': 'timeout',
+                      'message': f'run exceeded {args.timeout_s}s'},
+        }, args.output)
+        print(f'run failed: kind=timeout message=run exceeded '
+              f'{args.timeout_s}s', file=sys.stderr)
+        return 3
+    finally:
+        runtime.close(abort=False)
+
+    document = {
+        'ok': result.ok,
+        'id': result.id,
+        'task_id': result.task_id,
+        'model': result.model,
+        'status': result.status,
+        'finish_reason': result.finish_reason,
+        'content': result.content,
+        'thinking': result.thinking,
+        'usage': dict(result.usage),
+        'n_tool_rounds': result.n_tool_rounds,
+        'error': result.error,
+        'provider_id': result.provider_id,
+    }
+    for field in ('stream_state', 'stream_diagnostics'):
+        if field in result.raw:
+            document[field] = result.raw[field]
+    if result.trajectory_format:
+        document['trajectory_format'] = result.trajectory_format
+        document['trajectory'] = result.trajectory
+
+    _emit(document, args.output)
+
+    if result.ok:
+        return 0
+    _report_failure(result)
+    if result.status == 'aborted':
+        return 5
+    if isinstance(result.error, Mapping) \
+            and result.error.get('retryable') is True:
+        # Transient upstream failure (ratelimit / upstream_error / network …)
+        # after the in-run retry budgets: the harness may rerun this trial
+        # and plausibly succeed, unlike a permanent payload/permission error.
+        return 6
+    return 4
+
+
+def _report_failure(result) -> None:
+    error = result.error if isinstance(result.error, Mapping) else {}
+    parts = [f'status={result.status}', f'finish_reason={result.finish_reason}']
+    for key in ('kind', 'message', 'detail', 'raw'):
+        value = str(error.get(key) or '').strip()
+        if value:
+            parts.append(f'{key}={value[:400]}')
+    print('run failed: ' + ' '.join(parts), file=sys.stderr)
+
+
+def _emit(document: dict, output: str) -> None:
+    payload = json.dumps(document, ensure_ascii=False, indent=2)
+    if output:
+        Path(output).write_text(payload + '\n', encoding='utf-8')
+    else:
+        print(payload)
+
+
+async def _serve(args) -> None:
+    if (not _is_loopback_host(args.host) and not args.token
+            and not args.allow_unauthenticated):
+        raise AgentConfigurationError(
+            'refusing a non-loopback bind without authentication; set '
+            'TOFU_AGENT_TOKEN or explicitly pass --allow-unauthenticated')
+    runtime, model_routing_setup = _runtime_and_setup(args)
+    # The server stack (quart/hypercorn) is only needed on the serve path;
+    # importing it lazily keeps `run`'s dependency closure minimal so the
+    # headless subcommand still starts in stripped-down eval containers.
+    from tofu_agent.server import HeadlessServerConfig, create_app
+    auth_mode = 'open' if args.allow_unauthenticated else 'auto'
+    config = HeadlessServerConfig(
+        bind_host=args.host,
+        token=args.token,
+        auth_mode=auth_mode,
+        setup_enabled=args.setup_enabled,
+    )
+    app = create_app(
+        runtime=runtime, config=config,
+        model_routing_setup=model_routing_setup)
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
+    hypercorn = Config()
+    hypercorn.bind = [f'{args.host}:{args.port}']
+    hypercorn.accesslog = '-'
+    hypercorn.errorlog = '-'
+    hypercorn.loglevel = args.log_level
+    if args.setup_enabled:
+        browser_host = args.host if _is_loopback_host(args.host) else '127.0.0.1'
+        print(
+            f'Model-routing setup: http://{browser_host}:{args.port}/setup',
+            flush=True,
+        )
+    try:
+        await serve(app, hypercorn)
+    finally:
+        await asyncio.to_thread(runtime.close)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _parser()
+    preliminary, _unknown = parser.parse_known_args(argv)
+    _load_dotenv(preliminary.env_file)
+    # Rebuild after dotenv loading so argparse defaults see the newly loaded
+    # environment. Explicit command-line values still win normally.
+    parser = _parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == 'doctor':
+            runtime, model_routing_setup = _runtime_and_setup(args)
+            try:
+                print(json.dumps({
+                    'ok': True,
+                    'ready': bool(runtime.default_model),
+                    'model': runtime.default_model,
+                    'model_routing': (runtime.model_routing.public_dict()
+                                      if runtime.model_routing else None),
+                    'capacity': runtime.capacity,
+                    'database': False,
+                    'frontend': False,
+                    'model_routing_setup_ui': True,
+                    'model_routing_setup': {
+                        'url_path': '/setup',
+                        'source': model_routing_setup.source,
+                        'editable': model_routing_setup.editable,
+                        'load_error': model_routing_setup.load_error,
+                    },
+                }, ensure_ascii=False, indent=2))
+            finally:
+                runtime.close(abort=False)
+            return 0
+        if args.command == 'run':
+            return _run_task(args)
+        asyncio.run(_serve(args))
+        return 0
+    except (AgentConfigurationError, ValueError) as exc:
+        parser.error(str(exc))
+    return 2
+
+
+__all__ = ['main']

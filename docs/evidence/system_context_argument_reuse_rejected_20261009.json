@@ -1,0 +1,45 @@
+{
+  "format": "tofu.argument-reuse-rejection/v1",
+  "scope": "Checked protocol argument reuse, cached standard decoder and inline builtin snapshot copy; warm conversion and separately measured first owner+adapter activation/use.",
+  "verdict": "rejected",
+  "production_promoted": false,
+  "whole_system_admission": false,
+  "reference_revision": "252876df0",
+  "source_snapshot": "/tmp/tofu-system-perf-snapshot/argument-reuse-inline-rejected-final",
+  "source_manifest": {
+    "benchmarks/context_compiler/AGENTS.md": "7958f64d4b4eb39e1978d0dd4747542f8452332d267e099ad1919baaa610fd6c",
+    "benchmarks/context_compiler/README.md": "ef8452ea6fd0f3d843c385508e0219f1fd785db9cfd265be9c5ea12196fa5edd",
+    "benchmarks/context_compiler/argument_reuse_measure.py": "d1d479f5a54937ec283846e43ea694566c03a17256d6054d62fedf308adb3817",
+    "docs/modules/llm_io.md": "8dd7463aeae8981fbab28864b3f9661eb5770a3663a557305b04283b231db7f3",
+    "lib/llm/anthropic_outbound/_to_anthropic.py": "a1d344d3287e6a66f78932ff7a6b7c3d36da5b0daa377ae6639590f0ab4cf6a0",
+    "lib/llm/conversion.py": "9ff978e804318803129eac41b6640ac8620215683f1cb4b51b5f1bffb21f6a50",
+    "lib/llm_sanitize/_fields.py": "c86f9bade69bac4843dd3e555f7a209bfd1c6a982982c1d39c18cc21db9230e5",
+    "lib/wire_copy.py": "2ba9a2500423f37d46ee8c68cd6c8a24c2957e9eca30de1c71824c16d35a2615",
+    "tests/llm/test_anthropic_argument_reuse.py": "8b306bdaa3b7367134163af30de09758c1a5b6cc56b48846a0279aaca392eef2"
+  },
+  "raw_artifacts": [
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/argument-reuse-lazy-float-full.json",
+      "sha256": "c0b3b447ff6cefb1ffe92349bcfdf4c858e2e61689f89d029002ca0b6edd2ce4"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/argument-reuse-inline-small.json",
+      "sha256": "98d5aff9714b1d58caf1f4a3a574d16f7f175858b4bbb39f8e0a6ad144e46b98"
+    },
+    {
+      "path": "/tmp/tofu-system-perf-snapshot/argument-reuse-inline-first-use-full.json",
+      "sha256": "bc53a39dfc59a452a0c7fa44b64fdfef0da1def214b7732418c195c474b5c047"
+    }
+  ],
+  "correctness": "381 final inline-copy focused/neighbor tests pass; earlier canonical copier neighbors passed.",
+  "warm_findings": [
+    "Before inline leaves: 43200 observations/216 independent workers; Responses unique-small pair1 P95/P99 regressions about18%.",
+    "After inline leaves: six cases/18 pairs/36000 observations; Anthropic unique-small pair0 P99 ratio1.1101638867691415."
+  ],
+  "cold_findings": "1200 distinct fresh-process first-use observations: Anthropic and Responses P95/CPU guards regress; first Anthropic P95 CPU ratio1.1115809261868363.",
+  "limits": [
+    "Cold activation scope excludes interpreter/source retrieval/compile; no whole application startup claim.",
+    "No complete end-to-end context/token/durable-history/inference admission.",
+    "Native JSON work is separate; these adverse samples are not discarded as noise."
+  ]
+}

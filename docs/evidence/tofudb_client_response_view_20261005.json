@@ -1,0 +1,3668 @@
+{
+  "contract": "tofudb.client-response-view/v1",
+  "decision": "accepted: synchronous decoding from thread-local output memoryview; no native engine changes",
+  "problem": "Every embedded result was copied from the already owned output into a new Python bytes allocation before JSON decoding, including multi-MiB responses.",
+  "implementation": {
+    "path": "tofu_db/embedded.py",
+    "fast_decoder": "orjson loads consumes buffer view synchronously; parsed strings/containers own data before buffer reuse",
+    "fallback": "stock json retains explicit UTF-8 bytes/decode admission; no broadened UTF-16/UTF-32 auto-detection",
+    "unchanged": [
+      "owner/tenant binding",
+      "watchdog worker",
+      "fresh reply ownership",
+      "deadlines",
+      "payload caps",
+      "reader admission",
+      "native JSON proof checks",
+      "command IDs/receipt replay",
+      "strict durability",
+      "native FFI caller-copy boundary"
+    ],
+    "alternatives": [
+      {
+        "choice": "direct caller dispatch",
+        "rejected": "changes watchdog and reader admission; previous rejected proofs retained"
+      },
+      {
+        "choice": "return views or native borrowed pointers to users",
+        "rejected": "buffer reuse, teardown or late results would change lifetime guarantees"
+      },
+      {
+        "choice": "change JSON decoder or numeric policy",
+        "rejected": "needlessly changes response parsing semantics"
+      },
+      {
+        "choice": "raise payload bound for benchmark",
+        "rejected": "8 MiB write correctly refused; use legal 2 MiB corpus"
+      }
+    ]
+  },
+  "observer_anchors": {
+    "positions": [
+      "EmbeddedRuntime._execute_json FFI return and bounded buffer-growth branch",
+      "_loads synchronous JSON decoder entry/exit",
+      "tracemalloc around decoder only",
+      "existing native queue, dispatch, response encode/copy/deliver stages"
+    ],
+    "runtime_timers_added": false,
+    "default_runtime_cost": "temporary memoryview replaces response-sized bytes on accelerated path; no new persistent counter/timer/cache/queue/thread/file",
+    "scope": "observer probes separate from default-off performance cohorts; wall spans overlap; Python traces are not process RSS/native allocation"
+  },
+  "correctness": {
+    "client_tests": 103,
+    "application_tests": 15,
+    "total_relevant_passed": 118,
+    "application_backends": [
+      "sqlite sidecar",
+      "native daemon",
+      "native embedded"
+    ],
+    "application_cases": [
+      "schema query",
+      "sidebar real application payload",
+      "large structural event",
+      "atomic snapshot replay/restart"
+    ],
+    "boundary_cases": [
+      "accelerator on/off",
+      "response buffer growth past 1 MiB",
+      "retained strings/nested containers after next-call overwrite",
+      "caller mutations remain independent",
+      "four concurrent callers each retain eight responses",
+      "malformed JSON and UTF-8 still fail",
+      "close drains concurrent calls and rejects new calls"
+    ],
+    "main_paired_exact_checks": 338880,
+    "memory_decoder_exact_checks": 96,
+    "native_rust_suite_rerun": false,
+    "scope": "native code unchanged; native source matches preceding certified build; finite targeted tests are not full-suite or universal SQLite proof"
+  },
+  "comparison_precise": {
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate"
+    ],
+    "exact_checks": 169440,
+    "metrics": {
+      "point": {
+        "mean_ms": {
+          "values": {
+            "baseline": [
+              0.0188343019,
+              0.0204928222,
+              0.020086513099999998,
+              0.01871773985
+            ],
+            "candidate": [
+              0.0196268405,
+              0.01933342155,
+              0.01870791825,
+              0.01924842755
+            ]
+          },
+          "means": {
+            "baseline": 0.0195328442625,
+            "candidate": 0.0192291519625
+          },
+          "candidate_reduction_percent": 1.5547776653451528
+        },
+        "p50_ms": {
+          "values": {
+            "baseline": [
+              0.018499,
+              0.019521,
+              0.018634,
+              0.01839
+            ],
+            "candidate": [
+              0.019345,
+              0.019095,
+              0.018358,
+              0.018973
+            ]
+          },
+          "means": {
+            "baseline": 0.018761,
+            "candidate": 0.01894275
+          },
+          "candidate_reduction_percent": -0.9687649912051732
+        },
+        "p99_ms": {
+          "values": {
+            "baseline": [
+              0.023829,
+              0.026358,
+              0.031071,
+              0.023658
+            ],
+            "candidate": [
+              0.024301,
+              0.023429,
+              0.023728,
+              0.024153
+            ]
+          },
+          "means": {
+            "baseline": 0.026229,
+            "candidate": 0.02390275
+          },
+          "candidate_reduction_percent": 8.868999961874257
+        },
+        "cpu_seconds": {
+          "values": {
+            "baseline": [
+              0.44070711600000007,
+              0.477954186,
+              0.46924980299999997,
+              0.437823927
+            ],
+            "candidate": [
+              0.45881518099999996,
+              0.452356378,
+              0.436486035,
+              0.45031536899999997
+            ]
+          },
+          "means": {
+            "baseline": 0.456433758,
+            "candidate": 0.44949324074999997
+          },
+          "candidate_reduction_percent": 1.5205968288612093
+        }
+      },
+      "64k": {
+        "mean_ms": {
+          "values": {
+            "baseline": [
+              0.09281433,
+              0.09485255399999999,
+              0.096812776,
+              0.093863692
+            ],
+            "candidate": [
+              0.08524894899999999,
+              0.087912808,
+              0.086388137,
+              0.091303639
+            ]
+          },
+          "means": {
+            "baseline": 0.094585838,
+            "candidate": 0.08771338325
+          },
+          "candidate_reduction_percent": 7.2658390466445955
+        },
+        "p50_ms": {
+          "values": {
+            "baseline": [
+              0.086927,
+              0.087601,
+              0.099897,
+              0.087321
+            ],
+            "candidate": [
+              0.085649,
+              0.085265,
+              0.084237,
+              0.085952
+            ]
+          },
+          "means": {
+            "baseline": 0.0904365,
+            "candidate": 0.08527575
+          },
+          "candidate_reduction_percent": 5.7064901892488145
+        },
+        "p99_ms": {
+          "values": {
+            "baseline": [
+              0.114443,
+              0.120352,
+              0.115264,
+              0.114025
+            ],
+            "candidate": [
+              0.096348,
+              0.116179,
+              0.109778,
+              0.114228
+            ]
+          },
+          "means": {
+            "baseline": 0.116021,
+            "candidate": 0.10913325
+          },
+          "candidate_reduction_percent": 5.936640780548352
+        },
+        "cpu_seconds": {
+          "values": {
+            "baseline": [
+              0.09892605199999993,
+              0.10092741299999997,
+              0.10280741000000004,
+              0.10013448299999994
+            ],
+            "candidate": [
+              0.092008376,
+              0.09461628199999994,
+              0.09294085900000004,
+              0.09783741199999996
+            ]
+          },
+          "means": {
+            "baseline": 0.10069883949999997,
+            "candidate": 0.09435073224999999
+          },
+          "candidate_reduction_percent": 6.304052044214458
+        }
+      },
+      "1m": {
+        "mean_ms": {
+          "values": {
+            "baseline": [
+              1.2930397583333333,
+              1.2471850083333333,
+              1.317138175,
+              1.4523878333333333
+            ],
+            "candidate": [
+              1.1648675,
+              1.2503343166666667,
+              1.2075476666666667,
+              1.4415808
+            ]
+          },
+          "means": {
+            "baseline": 1.3274376937499999,
+            "candidate": 1.2660825708333334
+          },
+          "candidate_reduction_percent": 4.622071770716318
+        },
+        "p50_ms": {
+          "values": {
+            "baseline": [
+              1.195453,
+              1.195807,
+              1.204173,
+              1.535697
+            ],
+            "candidate": [
+              1.134236,
+              1.135597,
+              1.125677,
+              1.480745
+            ]
+          },
+          "means": {
+            "baseline": 1.2827825000000002,
+            "candidate": 1.2190637500000001
+          },
+          "candidate_reduction_percent": 4.967229440688503
+        },
+        "p99_ms": {
+          "values": {
+            "baseline": [
+              2.040235,
+              1.997721,
+              2.104499,
+              1.980123
+            ],
+            "candidate": [
+              2.03362,
+              2.070095,
+              1.943165,
+              2.080041
+            ]
+          },
+          "means": {
+            "baseline": 2.0306445,
+            "candidate": 2.03173025
+          },
+          "candidate_reduction_percent": -0.05346824616518919
+        },
+        "cpu_seconds": {
+          "values": {
+            "baseline": [
+              0.1724686110000001,
+              0.16739144499999992,
+              0.17557444499999986,
+              0.19146729099999993
+            ],
+            "candidate": [
+              0.157902914,
+              0.1678082340000001,
+              0.16226875699999999,
+              0.19026342099999993
+            ]
+          },
+          "means": {
+            "baseline": 0.17672544799999995,
+            "candidate": 0.1695608315
+          },
+          "candidate_reduction_percent": 4.054094405238084
+        }
+      },
+      "2m": {
+        "mean_ms": {
+          "values": {
+            "baseline": [
+              2.8651425166666664,
+              2.645796433333333,
+              2.8671373333333334,
+              3.00054275
+            ],
+            "candidate": [
+              2.5295874166666668,
+              2.6189676,
+              2.63945355,
+              2.7732707333333333
+            ]
+          },
+          "means": {
+            "baseline": 2.8446547583333333,
+            "candidate": 2.6403198249999997
+          },
+          "candidate_reduction_percent": 7.183118891132234
+        },
+        "p50_ms": {
+          "values": {
+            "baseline": [
+              2.61828,
+              2.575648,
+              2.608752,
+              3.022542
+            ],
+            "candidate": [
+              2.445097,
+              2.431569,
+              2.426713,
+              2.442146
+            ]
+          },
+          "means": {
+            "baseline": 2.7063055,
+            "candidate": 2.43638125
+          },
+          "candidate_reduction_percent": 9.973901689960718
+        },
+        "p99_ms": {
+          "values": {
+            "baseline": [
+              4.18726,
+              3.960103,
+              4.308297,
+              4.106921
+            ],
+            "candidate": [
+              3.919316,
+              4.105733,
+              4.069165,
+              4.07002
+            ]
+          },
+          "means": {
+            "baseline": 4.14064525,
+            "candidate": 4.0410585
+          },
+          "candidate_reduction_percent": 2.405102199953024
+        },
+        "cpu_seconds": {
+          "values": {
+            "baseline": [
+              0.18932477599999986,
+              0.17589574600000013,
+              0.18936845599999996,
+              0.19679197999999998
+            ],
+            "candidate": [
+              0.16969053199999995,
+              0.17409213099999987,
+              0.17570926599999992,
+              0.18369530899999997
+            ]
+          },
+          "means": {
+            "baseline": 0.18784523949999998,
+            "candidate": 0.17579680949999993
+          },
+          "candidate_reduction_percent": 6.414019344898037
+        }
+      }
+    },
+    "scope": "same native strict pair; full-response checks; fresh process and authority per leg; shared host; no profiling; 2m P99 uses 60 samples only"
+  },
+  "comparison_initial_rounded": {
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline",
+      "candidate",
+      "baseline",
+      "baseline",
+      "candidate"
+    ],
+    "exact_checks": 169440,
+    "metrics": {
+      "point": {
+        "mean_ms": {
+          "values": {
+            "baseline": [
+              0.019,
+              0.019,
+              0.019,
+              0.019
+            ],
+            "candidate": [
+              0.019,
+              0.019,
+              0.019,
+              0.019
+            ]
+          },
+          "means": {
+            "baseline": 0.019,
+            "candidate": 0.019
+          },
+          "candidate_reduction_percent": 0.0
+        },
+        "p50_ms": {
+          "values": {
+            "baseline": [
+              0.019,
+              0.019,
+              0.019,
+              0.019
+            ],
+            "candidate": [
+              0.018,
+              0.019,
+              0.019,
+              0.019
+            ]
+          },
+          "means": {
+            "baseline": 0.019,
+            "candidate": 0.01875
+          },
+          "candidate_reduction_percent": 1.3157894736842146
+        },
+        "p99_ms": {
+          "values": {
+            "baseline": [
+              0.025,
+              0.024,
+              0.024,
+              0.024
+            ],
+            "candidate": [
+              0.023,
+              0.024,
+              0.024,
+              0.024
+            ]
+          },
+          "means": {
+            "baseline": 0.02425,
+            "candidate": 0.02375
+          },
+          "candidate_reduction_percent": 2.0618556701030966
+        },
+        "cpu_seconds": {
+          "values": {
+            "baseline": [
+              0.446435182,
+              0.438020187,
+              0.43571042800000004,
+              0.437394425
+            ],
+            "candidate": [
+              0.43505604899999994,
+              0.44144277200000004,
+              0.435476255,
+              0.446112552
+            ]
+          },
+          "means": {
+            "baseline": 0.4393900555,
+            "candidate": 0.439521907
+          },
+          "candidate_reduction_percent": -0.030007848004198756
+        }
+      },
+      "64k": {
+        "mean_ms": {
+          "values": {
+            "baseline": [
+              0.095,
+              0.094,
+              0.092,
+              0.1
+            ],
+            "candidate": [
+              0.087,
+              0.088,
+              0.092,
+              0.092
+            ]
+          },
+          "means": {
+            "baseline": 0.09525,
+            "candidate": 0.08975
+          },
+          "candidate_reduction_percent": 5.774278215223106
+        },
+        "p50_ms": {
+          "values": {
+            "baseline": [
+              0.089,
+              0.088,
+              0.087,
+              0.105
+            ],
+            "candidate": [
+              0.084,
+              0.085,
+              0.086,
+              0.086
+            ]
+          },
+          "means": {
+            "baseline": 0.09225,
+            "candidate": 0.08524999999999999
+          },
+          "candidate_reduction_percent": 7.588075880758815
+        },
+        "p99_ms": {
+          "values": {
+            "baseline": [
+              0.116,
+              0.114,
+              0.114,
+              0.118
+            ],
+            "candidate": [
+              0.111,
+              0.112,
+              0.113,
+              0.11
+            ]
+          },
+          "means": {
+            "baseline": 0.1155,
+            "candidate": 0.1115
+          },
+          "candidate_reduction_percent": 3.463203463203468
+        },
+        "cpu_seconds": {
+          "values": {
+            "baseline": [
+              0.10109900599999999,
+              0.0999930670000001,
+              0.09781023999999994,
+              0.10592808500000006
+            ],
+            "candidate": [
+              0.09319152899999994,
+              0.09418928000000004,
+              0.098320136,
+              0.09849040200000003
+            ]
+          },
+          "means": {
+            "baseline": 0.10120759950000002,
+            "candidate": 0.09604783675
+          },
+          "candidate_reduction_percent": 5.098196949133271
+        }
+      },
+      "1m": {
+        "mean_ms": {
+          "values": {
+            "baseline": [
+              1.423,
+              1.357,
+              1.273,
+              1.451
+            ],
+            "candidate": [
+              1.242,
+              1.282,
+              1.349,
+              1.207
+            ]
+          },
+          "means": {
+            "baseline": 1.376,
+            "candidate": 1.27
+          },
+          "candidate_reduction_percent": 7.703488372093014
+        },
+        "p50_ms": {
+          "values": {
+            "baseline": [
+              1.512,
+              1.246,
+              1.198,
+              1.536
+            ],
+            "candidate": [
+              1.139,
+              1.15,
+              1.461,
+              1.135
+            ]
+          },
+          "means": {
+            "baseline": 1.373,
+            "candidate": 1.22125
+          },
+          "candidate_reduction_percent": 11.052439912600153
+        },
+        "p99_ms": {
+          "values": {
+            "baseline": [
+              1.771,
+              1.938,
+              2.025,
+              1.983
+            ],
+            "candidate": [
+              1.907,
+              1.916,
+              1.817,
+              1.908
+            ]
+          },
+          "means": {
+            "baseline": 1.92925,
+            "candidate": 1.887
+          },
+          "candidate_reduction_percent": 2.1899701956718864
+        },
+        "cpu_seconds": {
+          "values": {
+            "baseline": [
+              0.18814509600000007,
+              0.18008769000000002,
+              0.17062107999999998,
+              0.19174353499999985
+            ],
+            "candidate": [
+              0.16667473499999996,
+              0.1717957739999999,
+              0.179621036,
+              0.16302068699999994
+            ]
+          },
+          "means": {
+            "baseline": 0.18264935024999998,
+            "candidate": 0.17027805799999995
+          },
+          "candidate_reduction_percent": 6.773247335983901
+        }
+      },
+      "2m": {
+        "mean_ms": {
+          "values": {
+            "baseline": [
+              3.199,
+              2.718,
+              2.78,
+              3.159
+            ],
+            "candidate": [
+              2.651,
+              2.7,
+              2.594,
+              2.627
+            ]
+          },
+          "means": {
+            "baseline": 2.964,
+            "candidate": 2.643
+          },
+          "candidate_reduction_percent": 10.829959514170051
+        },
+        "p50_ms": {
+          "values": {
+            "baseline": [
+              3.286,
+              2.576,
+              2.597,
+              3.27
+            ],
+            "candidate": [
+              2.444,
+              2.484,
+              2.432,
+              2.445
+            ]
+          },
+          "means": {
+            "baseline": 2.93225,
+            "candidate": 2.45125
+          },
+          "candidate_reduction_percent": 16.403785488958988
+        },
+        "p99_ms": {
+          "values": {
+            "baseline": [
+              4.124,
+              4.151,
+              4.099,
+              3.972
+            ],
+            "candidate": [
+              3.632,
+              3.977,
+              3.946,
+              4.161
+            ]
+          },
+          "means": {
+            "baseline": 4.0865,
+            "candidate": 3.929
+          },
+          "candidate_reduction_percent": 3.8541539214486775
+        },
+        "cpu_seconds": {
+          "values": {
+            "baseline": [
+              0.2091322419999999,
+              0.18030677800000006,
+              0.18447526799999991,
+              0.20692125100000003
+            ],
+            "candidate": [
+              0.17633484600000005,
+              0.17905539000000004,
+              0.1737407580000001,
+              0.17545844700000002
+            ]
+          },
+          "means": {
+            "baseline": 0.19520888474999998,
+            "candidate": 0.17614736025000005
+          },
+          "candidate_reduction_percent": 9.764680805595315
+        }
+      }
+    },
+    "scope": "same native strict pair; full-response checks; fresh process and authority per leg; shared host; no profiling; 2m P99 uses 60 samples only"
+  },
+  "rounding_control": "Initial driver summary rounded ms to three decimals, too coarse to resolve point-read changes. Second balanced cohort retains unrounded mean/P50/P99 with the same percentile rank rule; do not invent precision for first cohort.",
+  "regressions_retained": "Precise cohort point P50 is about 0.97% worse and 1 MiB P99 about 0.05% worse; initial point CPU about 0.03% worse. Individual legs/noise/short-tail data retained. Gains vary across cohorts; no confidence interval or universal tail guarantee.",
+  "performance_limits": [
+    "shared host",
+    "warm finite local /tmp xfs authorities",
+    "same strict native binary/DSO, fresh process/authority per leg",
+    "accelerated decoder timed; fallback performance not credited",
+    "checks and native worker CPU included in process CPU",
+    "only 120/60 samples per large leg: sparse P99 estimates",
+    "no active streams/FUSE/multi-owner saturation/cold-read certification",
+    "no post-change full SQLite matrix; preceding raw point gap remains unclosed"
+  ],
+  "memory": {
+    "scope": "Python traced allocations only; buffers/input prepared before tracing; five separate traces; not RSS/allocator/native-memory proof",
+    "rows": [
+      {
+        "role": "baseline",
+        "accelerated": true,
+        "payload_characters": 64,
+        "encoded_bytes": 148,
+        "peak_traced_bytes": [
+          5121,
+          5121,
+          5121,
+          5121,
+          5121
+        ]
+      },
+      {
+        "role": "baseline",
+        "accelerated": true,
+        "payload_characters": 65536,
+        "encoded_bytes": 65620,
+        "peak_traced_bytes": [
+          987969,
+          987969,
+          987969,
+          987969,
+          987969
+        ]
+      },
+      {
+        "role": "baseline",
+        "accelerated": true,
+        "payload_characters": 1048576,
+        "encoded_bytes": 1048660,
+        "peak_traced_bytes": [
+          15733569,
+          15733569,
+          15733569,
+          15733569,
+          15733569
+        ]
+      },
+      {
+        "role": "baseline",
+        "accelerated": true,
+        "payload_characters": 2097152,
+        "encoded_bytes": 2097236,
+        "peak_traced_bytes": [
+          31462209,
+          31462209,
+          31462209,
+          31462209,
+          31462209
+        ]
+      },
+      {
+        "role": "baseline",
+        "accelerated": false,
+        "payload_characters": 64,
+        "encoded_bytes": 148,
+        "peak_traced_bytes": [
+          3012,
+          3012,
+          3012,
+          3012,
+          3012
+        ]
+      },
+      {
+        "role": "baseline",
+        "accelerated": false,
+        "payload_characters": 65536,
+        "encoded_bytes": 65620,
+        "peak_traced_bytes": [
+          361593,
+          361593,
+          361593,
+          361593,
+          361593
+        ]
+      },
+      {
+        "role": "baseline",
+        "accelerated": false,
+        "payload_characters": 1048576,
+        "encoded_bytes": 1048660,
+        "peak_traced_bytes": [
+          5768313,
+          5768313,
+          5768313,
+          5768313,
+          5768313
+        ]
+      },
+      {
+        "role": "baseline",
+        "accelerated": false,
+        "payload_characters": 2097152,
+        "encoded_bytes": 2097236,
+        "peak_traced_bytes": [
+          11535481,
+          11535481,
+          11535481,
+          11535481,
+          11535481
+        ]
+      },
+      {
+        "role": "candidate",
+        "accelerated": true,
+        "payload_characters": 64,
+        "encoded_bytes": 148,
+        "peak_traced_bytes": [
+          5252,
+          5252,
+          5252,
+          5252,
+          5252
+        ]
+      },
+      {
+        "role": "candidate",
+        "accelerated": true,
+        "payload_characters": 65536,
+        "encoded_bytes": 65620,
+        "peak_traced_bytes": [
+          922628,
+          922628,
+          922628,
+          922628,
+          922628
+        ]
+      },
+      {
+        "role": "candidate",
+        "accelerated": true,
+        "payload_characters": 1048576,
+        "encoded_bytes": 1048660,
+        "peak_traced_bytes": [
+          14685188,
+          14685188,
+          14685188,
+          14685188,
+          14685188
+        ]
+      },
+      {
+        "role": "candidate",
+        "accelerated": true,
+        "payload_characters": 2097152,
+        "encoded_bytes": 2097236,
+        "peak_traced_bytes": [
+          29365252,
+          29365252,
+          29365252,
+          29365252,
+          29365252
+        ]
+      },
+      {
+        "role": "candidate",
+        "accelerated": false,
+        "payload_characters": 64,
+        "encoded_bytes": 148,
+        "peak_traced_bytes": [
+          3143,
+          3143,
+          3143,
+          3143,
+          3143
+        ]
+      },
+      {
+        "role": "candidate",
+        "accelerated": false,
+        "payload_characters": 65536,
+        "encoded_bytes": 65620,
+        "peak_traced_bytes": [
+          296252,
+          296252,
+          296252,
+          296252,
+          296252
+        ]
+      },
+      {
+        "role": "candidate",
+        "accelerated": false,
+        "payload_characters": 1048576,
+        "encoded_bytes": 1048660,
+        "peak_traced_bytes": [
+          4719932,
+          4719932,
+          4719932,
+          4719932,
+          4719932
+        ]
+      },
+      {
+        "role": "candidate",
+        "accelerated": false,
+        "payload_characters": 2097152,
+        "encoded_bytes": 2097236,
+        "peak_traced_bytes": [
+          9438524,
+          9438524,
+          9438524,
+          9438524,
+          9438524
+        ]
+      }
+    ],
+    "exact_checks": 96
+  },
+  "memory_interpretation": "At 2 MiB text, both accelerator and fallback Python trace peaks decrease by 2096957 bytes (~2 MiB); orjson removes intermediate response bytes, fallback lets its temporary bytes retire before tree decoding. No process RSS/allocator-residency claim. CFFI output retention bounds unchanged; exception traceback can retain safely owned buffer/view references.",
+  "failures": [
+    {
+      "artifact": "controller.log.payload-bound-failure",
+      "reason": "8 MiB record.put exceeded existing storage.v2 payload bound; failed cohort excluded and bound preserved"
+    },
+    {
+      "artifact": "client-tests-mock-failure.log",
+      "reason": "fake Python library receives bytes request, unlike real C argument coercion; test initially assumed CData; corrected mock and all 103 passed"
+    },
+    {
+      "artifact": "application-tests-incomplete-snapshot-failure.log",
+      "reason": "private tracked snapshot omitted 23 required untracked peer source inputs; missing worker clock module and native source mismatch correctly rejected setup; copied reviewed baseline inputs only, certified source hash matched, all 15 passed"
+    }
+  ],
+  "remaining_root_work": [
+    "point read worker handoff/semantic+replica processing still exceeds raw SQLite floor",
+    "large hydration must be measured as full application workload after copy reduction",
+    "receipt compression/durable response construction and long-write tails still require root work"
+  ],
+  "baseline": {
+    "worktree": "/path/to/your/project",
+    "snapshot_commit": "2a45fd368e6141bdaffa40b7bbd8fcfeeb31cd43",
+    "paths": {
+      "tofu_db/embedded.py": "1fb7a0b97d097916803a145b00f315f374a34101eec88be45e2536698d7e0fdb",
+      "tests/tofudb/test_embedded_runtime_lifecycle.py": "9f788743056a40c7049863995022284516f02833a76284f22def1d64e5773d5a"
+    }
+  },
+  "imported_private_baseline": [
+    {
+      "path": "contracts/automation_management_v1.schema.json",
+      "sha256": "26779f34a80241c82050a326d49862cdf6da92f7c9b180340ef9033277dac7d1"
+    },
+    {
+      "path": "contracts/automation_runtime_v1.json",
+      "sha256": "4e6f35d55b9553aa86fdaa62e2537984c7304eb993d601a3b03ff9db03f9592e"
+    },
+    {
+      "path": "contracts/fixtures/events/program_progress.json",
+      "sha256": "62ec8d8a660e3b638d168a37aeb57410021acd593acc615618ff9e8d1a287d89"
+    },
+    {
+      "path": "lib/automations/approval.py",
+      "sha256": "ff6a8af20d87dbcf341ef41b157ebfa4676800238ff5a17ab8cf065e37f5b5be"
+    },
+    {
+      "path": "lib/automations/event_delivery.py",
+      "sha256": "5101cd1bdc118acda27b78c4cffd9110316a8ed4d712e4551f1209e2a3f5c48e"
+    },
+    {
+      "path": "lib/automations/execution.py",
+      "sha256": "9de2ba9b81f98c39a2c009baaeb80374ebb669b89d6cdad238f769175d55d922"
+    },
+    {
+      "path": "lib/automations/management.py",
+      "sha256": "365ae887b46084df2a21c96c49e5c78b29a4da689f0759210e459a57a91f458b"
+    },
+    {
+      "path": "lib/automations/management_contract.py",
+      "sha256": "70f126be93fa5cb268b5ca0554e7b159247d52d14f8716c897b4a990dde90c28"
+    },
+    {
+      "path": "lib/automations/presentation_index.py",
+      "sha256": "48bd1bc5d06d231a87b4cb4aa37fe3aa004c05365d4ac6cf8ed90a06c1d29580"
+    },
+    {
+      "path": "lib/automations/presentation_query.py",
+      "sha256": "03f0c9a0375459bb05a581b3a44750b2ea6727e10553731abb0c67920efd4d77"
+    },
+    {
+      "path": "lib/automations/projects.py",
+      "sha256": "3cd163d3978a2750320bc0459cfda2e0adda0f9eca687a4a9ad46303e10cb8ae"
+    },
+    {
+      "path": "lib/automations/runtime.py",
+      "sha256": "300467378352c5f1b1076899080a23aba3264ce388370d6d76ad203c96b979fe"
+    },
+    {
+      "path": "lib/automations/runtime_policy.py",
+      "sha256": "4da9063a86ac26e7e302461a5312ac461c58d3a90e77f355332ef5207fe2a155"
+    },
+    {
+      "path": "lib/automations/worker_service.py",
+      "sha256": "a22579ff7c0cc96fb2a64ea0fd2a0ba769ca2f37368b5f621f59287f36d4b184"
+    },
+    {
+      "path": "lib/storage_sidecar/operations_pkg/_automation_approval.py",
+      "sha256": "d6acada9f117057b02b25a499842da21bb80b6730d877aa329e77f5e173a94ef"
+    },
+    {
+      "path": "lib/storage_sidecar/operations_pkg/_automation_events.py",
+      "sha256": "27178cf6b75416418360e9c500de588f057c80e4963d76184eea4d4532717ee9"
+    },
+    {
+      "path": "lib/storage_sidecar/operations_pkg/_automation_presentations.py",
+      "sha256": "cd42b9a85d2df3c2f00fe856c81af790ccb9a4b2e8c92e849a3c501ef9026578"
+    },
+    {
+      "path": "lib/storage_sidecar/operations_pkg/_automation_projects.py",
+      "sha256": "e7d7fc3ee3095669fe694c386bca8bbe090cfb3362735da34688b648b026406b"
+    },
+    {
+      "path": "lib/storage_sidecar/worker_lease_clock.py",
+      "sha256": "0aeed8b7a888657df8ace7a6bad8aeb7cbea4ef7374e541bede5cadfa2f13405"
+    },
+    {
+      "path": "packages/tofu-db/src/automation_approval.rs",
+      "sha256": "b96b764e2c2f432ce7de1f884420f738fedc32e40245f703795308bb999a89a1"
+    },
+    {
+      "path": "packages/tofu-db/src/automation_presentation.rs",
+      "sha256": "9edd14e4dc0fb8366b1381b07305c73c0cdcf1a98595d3b2a2c6f016f13e64fb"
+    },
+    {
+      "path": "packages/tofu-db/src/automation_project.rs",
+      "sha256": "eda37b71fced5eac58d5111fa33c17c988ed69061530ddc9cb7e1bf34c153ec3"
+    },
+    {
+      "path": "packages/tofu-db/src/worker_lease_clock.rs",
+      "sha256": "d3e81a4e7c059c05485a80856b4c6acafa871609e81c6a8ac7cf777d659677c7"
+    }
+  ],
+  "native_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+  "python": "3.12.13",
+  "orjson": "3.11.9",
+  "source_hashes": {
+    "baseline-embedded.py": "1fb7a0b97d097916803a145b00f315f374a34101eec88be45e2536698d7e0fdb",
+    "candidate-embedded.py": "7c4026e7de9efb7f3fa238cf333d8e1b4232735429fd9eb58c9d7229cb66ed41",
+    "paired_probe.py": "424f45d5295e91bd9ae6bc253e6628e1095660fb8134abb5477da2658f6cead4",
+    "memory_probe.py": "c4958e4b9df77fd96d3748603bcbb161686bce92b789576e6c6829aa37b14d7d"
+  },
+  "probe_sources": {
+    "paired_probe.py": "\"\"\"Fresh-process balanced comparison; unchanged strict native pair; full responses checked.\"\"\"\nfrom pathlib import Path\nimport argparse,hashlib,importlib.util,json,os,subprocess,sys,time\nR=Path(__file__).resolve().parents[2];N=Path(__file__).resolve().parent\nsys.path.insert(0,str(R))\ndef load(name,path):\n spec=importlib.util.spec_from_file_location(name,path);m=importlib.util.module_from_spec(spec);sys.modules[name]=m;spec.loader.exec_module(m);return m\ndef run(role,out):\n import tofu_db\n tofu_db.embedded=load('tofu_db.embedded',N/f'{role}-embedded.py')\n perf=load('response_perf',R/'scripts/tofudb_perf_compare.py')\n engine=perf.TofuDbEngine(N/'pinned-build/tofu-db',client_mode='embedded',authority_dir_parent=Path('/tmp'))\n engine.start();rows={}\n try:\n  for name,size,count in [('point',17,20000),('64k',65536,1000),('1m',1048576,120),('2m',2097152,60)]:\n   payload={'namespace':'response-view','key':name}\n   value={'text':('汉字\\\\\\\"\\n' if name!='point' else '')+'x'*size,'array':[1,2,3,None,True,1.25]}\n   engine.execute('record.put',dict(payload,value=value),True)\n   reference=engine.execute('record.get',payload,False);assert reference['value']==value and reference['version']==1\n   samples=[];cpu=time.process_time();began=time.perf_counter_ns()\n   for _ in range(count):\n    start=time.perf_counter_ns();result=engine.execute('record.get',payload,False)\n    samples.append((time.perf_counter_ns()-start)/1e6);assert result==reference\n   rows[name]={'latency':perf._latency_summary(samples),'precise_latency':{'mean_ms':sum(samples)/len(samples),'p50_ms':perf._percentile(sorted(samples),0.50),'p99_ms':perf._percentile(sorted(samples),0.99)},'cpu_seconds':time.process_time()-cpu,'elapsed_seconds':(time.perf_counter_ns()-began)/1e9,'exact_checks':count,'value_sha256':hashlib.sha256(json.dumps(value,ensure_ascii=False).encode()).hexdigest()}\n  meta=perf._measurement_metadata({'tofudb':engine})\n finally:engine.stop()\n out.write_text(json.dumps({'role':role,'rows':rows,'metadata':meta,'authority_closed':True},indent=2)+'\\n')\ndef control():\n records=[];order=['baseline','candidate','candidate','baseline','candidate','baseline','baseline','candidate']\n for i,role in enumerate(order,1):\n  out=N/f'leg-{i}-{role}.json'\n  with (N/f'leg-{i}-{role}.log').open('w') as log:subprocess.run([sys.executable,__file__,'--role',role,'--out',str(out)],env=dict(os.environ,TOFU_DB_REQUEST_PROFILE_EVERY='0'),stdout=log,stderr=subprocess.STDOUT,check=True)\n  records.append(json.loads(out.read_text()));print('leg',i,role,'complete',flush=True)\n comparisons={}\n for shape in records[0]['rows']:\n  assert len({r['rows'][shape]['value_sha256'] for r in records})==1\n  rows={}\n  for metric in ['mean_ms','p50_ms','p99_ms','cpu_seconds']:\n   values={role:[r['rows'][shape]['cpu_seconds'] if metric=='cpu_seconds' else r['rows'][shape]['precise_latency'][metric] for r in records if r['role']==role] for role in ['baseline','candidate']}\n   means={k:sum(v)/len(v) for k,v in values.items()};rows[metric]={'values':values,'means':means,'candidate_reduction_percent':100*(1-means['candidate']/means['baseline'])}\n  comparisons[shape]=rows\n (N/'comparison.json').write_text(json.dumps({'order':order,'exact_checks':sum(v['exact_checks'] for r in records for v in r['rows'].values()),'metrics':comparisons,'scope':'same native strict pair; full-response checks; fresh process and authority per leg; shared host; no profiling; 2m P99 uses 60 samples only'},indent=2)+'\\n')\nif __name__=='__main__':\n p=argparse.ArgumentParser();p.add_argument('--role');p.add_argument('--out',type=Path);a=p.parse_args();run(a.role,a.out) if a.role else control()\n",
+    "memory_probe.py": "\"\"\"Python-only peak traced allocations; not RSS or end-to-end timing.\"\"\"\nfrom pathlib import Path\nimport gc,importlib.util,json,sys,tracemalloc\nN=Path(__file__).resolve().parent\nrows=[]\nfor role in ['baseline','candidate']:\n spec=importlib.util.spec_from_file_location('memory_embedded',N/f'{role}-embedded.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\n for accelerated in [True,False]:\n  if not accelerated:m._fast_json=None\n  for size in [64,65536,1048576,2097152]:\n   expected={'status':0,'payload':{'text':'汉字\\\\\\\"\\n'+'x'*size,'nested':[1,False,None,1.25]}}\n   encoded=json.dumps(expected,ensure_ascii=False).encode();out=m._ffi.new('uint8_t[]',encoded)\n   def decode():\n    view=m._ffi.buffer(out,len(encoded))\n    return m._loads(memoryview(view) if role=='candidate' else bytes(view))\n   assert decode()==expected;peaks=[]\n   for _ in range(5):\n    gc.collect();tracemalloc.start();actual=decode();current,peak=tracemalloc.get_traced_memory();tracemalloc.stop();assert actual==expected;del actual;peaks.append(peak)\n   rows.append({'role':role,'accelerated':accelerated,'payload_characters':size,'encoded_bytes':len(encoded),'peak_traced_bytes':peaks})\n(N/'memory.json').write_text(json.dumps({'scope':'Python traced allocations only; buffers/input prepared before tracing; five separate traces; not RSS/allocator/native-memory proof','rows':rows,'exact_checks':96},indent=2)+'\\n')\nprint([(r['role'],r['accelerated'],r['payload_characters'],min(r['peak_traced_bytes'])) for r in rows if r['payload_characters']==2097152])\n"
+  },
+  "paired_legs": {
+    "leg-1-baseline-rounded.json": {
+      "role": "baseline",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.021,
+            "p99_ms": 0.025,
+            "mean_ms": 0.019,
+            "min_ms": 0.018,
+            "max_ms": 0.964,
+            "ops_per_sec": 51536.0
+          },
+          "cpu_seconds": 0.446435182,
+          "elapsed_seconds": 0.398036932,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.089,
+            "p95_ms": 0.112,
+            "p99_ms": 0.116,
+            "mean_ms": 0.095,
+            "min_ms": 0.082,
+            "max_ms": 0.179,
+            "ops_per_sec": 10516.0
+          },
+          "cpu_seconds": 0.10109900599999999,
+          "elapsed_seconds": 0.098435106,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.512,
+            "p95_ms": 1.627,
+            "p99_ms": 1.771,
+            "mean_ms": 1.423,
+            "min_ms": 1.186,
+            "max_ms": 2.071,
+            "ops_per_sec": 702.5
+          },
+          "cpu_seconds": 0.18814509600000007,
+          "elapsed_seconds": 0.187791228,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 3.286,
+            "p95_ms": 3.503,
+            "p99_ms": 4.124,
+            "mean_ms": 3.199,
+            "min_ms": 2.586,
+            "max_ms": 4.358,
+            "ops_per_sec": 312.5
+          },
+          "cpu_seconds": 0.2091322419999999,
+          "elapsed_seconds": 0.209314931,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-5iu1hqbr/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-1-baseline.json": {
+      "role": "baseline",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.018,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.018,
+            "max_ms": 0.08,
+            "ops_per_sec": 53094.6
+          },
+          "precise_latency": {
+            "mean_ms": 0.0188343019,
+            "p50_ms": 0.018499,
+            "p99_ms": 0.023829
+          },
+          "cpu_seconds": 0.44070711600000007,
+          "elapsed_seconds": 0.39149321,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.087,
+            "p95_ms": 0.11,
+            "p99_ms": 0.114,
+            "mean_ms": 0.093,
+            "min_ms": 0.082,
+            "max_ms": 0.152,
+            "ops_per_sec": 10774.2
+          },
+          "precise_latency": {
+            "mean_ms": 0.09281433,
+            "p50_ms": 0.086927,
+            "p99_ms": 0.114443
+          },
+          "cpu_seconds": 0.09892605199999993,
+          "elapsed_seconds": 0.096333432,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.195,
+            "p95_ms": 1.545,
+            "p99_ms": 2.04,
+            "mean_ms": 1.293,
+            "min_ms": 1.185,
+            "max_ms": 2.071,
+            "ops_per_sec": 773.4
+          },
+          "precise_latency": {
+            "mean_ms": 1.2930397583333333,
+            "p50_ms": 1.195453,
+            "p99_ms": 2.040235
+          },
+          "cpu_seconds": 0.1724686110000001,
+          "elapsed_seconds": 0.172280982,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.618,
+            "p95_ms": 3.274,
+            "p99_ms": 4.187,
+            "mean_ms": 2.865,
+            "min_ms": 2.561,
+            "max_ms": 4.195,
+            "ops_per_sec": 349.0
+          },
+          "precise_latency": {
+            "mean_ms": 2.8651425166666664,
+            "p50_ms": 2.61828,
+            "p99_ms": 4.18726
+          },
+          "cpu_seconds": 0.18932477599999986,
+          "elapsed_seconds": 0.189379394,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-bm843igw/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-2-candidate-rounded.json": {
+      "role": "candidate",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.018,
+            "p95_ms": 0.02,
+            "p99_ms": 0.023,
+            "mean_ms": 0.019,
+            "min_ms": 0.017,
+            "max_ms": 0.064,
+            "ops_per_sec": 53451.6
+          },
+          "cpu_seconds": 0.43505604899999994,
+          "elapsed_seconds": 0.38418022,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.084,
+            "p95_ms": 0.107,
+            "p99_ms": 0.111,
+            "mean_ms": 0.087,
+            "min_ms": 0.08,
+            "max_ms": 0.148,
+            "ops_per_sec": 11534.3
+          },
+          "cpu_seconds": 0.09319152899999994,
+          "elapsed_seconds": 0.090440961,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.139,
+            "p95_ms": 1.495,
+            "p99_ms": 1.907,
+            "mean_ms": 1.242,
+            "min_ms": 1.125,
+            "max_ms": 2.125,
+            "ops_per_sec": 805.3
+          },
+          "cpu_seconds": 0.16667473499999996,
+          "elapsed_seconds": 0.16629882,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.444,
+            "p95_ms": 3.367,
+            "p99_ms": 3.632,
+            "mean_ms": 2.651,
+            "min_ms": 2.419,
+            "max_ms": 4.277,
+            "ops_per_sec": 377.2
+          },
+          "cpu_seconds": 0.17633484600000005,
+          "elapsed_seconds": 0.176469347,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-zk__ta3s/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-2-candidate.json": {
+      "role": "candidate",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.02,
+            "min_ms": 0.018,
+            "max_ms": 0.07,
+            "ops_per_sec": 50950.6
+          },
+          "precise_latency": {
+            "mean_ms": 0.0196268405,
+            "p50_ms": 0.019345,
+            "p99_ms": 0.024301
+          },
+          "cpu_seconds": 0.45881518099999996,
+          "elapsed_seconds": 0.407933143,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.086,
+            "p95_ms": 0.09,
+            "p99_ms": 0.096,
+            "mean_ms": 0.085,
+            "min_ms": 0.081,
+            "max_ms": 0.144,
+            "ops_per_sec": 11730.3
+          },
+          "precise_latency": {
+            "mean_ms": 0.08524894899999999,
+            "p50_ms": 0.085649,
+            "p99_ms": 0.096348
+          },
+          "cpu_seconds": 0.092008376,
+          "elapsed_seconds": 0.089112046,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.134,
+            "p95_ms": 1.312,
+            "p99_ms": 2.034,
+            "mean_ms": 1.165,
+            "min_ms": 1.125,
+            "max_ms": 2.038,
+            "ops_per_sec": 858.5
+          },
+          "precise_latency": {
+            "mean_ms": 1.1648675,
+            "p50_ms": 1.134236,
+            "p99_ms": 2.03362
+          },
+          "cpu_seconds": 0.157902914,
+          "elapsed_seconds": 0.157689336,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.445,
+            "p95_ms": 3.138,
+            "p99_ms": 3.919,
+            "mean_ms": 2.53,
+            "min_ms": 2.431,
+            "max_ms": 4.394,
+            "ops_per_sec": 395.3
+          },
+          "precise_latency": {
+            "mean_ms": 2.5295874166666668,
+            "p50_ms": 2.445097,
+            "p99_ms": 3.919316
+          },
+          "cpu_seconds": 0.16969053199999995,
+          "elapsed_seconds": 0.169714779,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-68dkkexo/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-3-candidate-rounded.json": {
+      "role": "candidate",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.018,
+            "max_ms": 0.069,
+            "ops_per_sec": 52366.6
+          },
+          "cpu_seconds": 0.44144277200000004,
+          "elapsed_seconds": 0.391584149,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.085,
+            "p95_ms": 0.107,
+            "p99_ms": 0.112,
+            "mean_ms": 0.088,
+            "min_ms": 0.08,
+            "max_ms": 0.135,
+            "ops_per_sec": 11397.6
+          },
+          "cpu_seconds": 0.09418928000000004,
+          "elapsed_seconds": 0.091403485,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.15,
+            "p95_ms": 1.487,
+            "p99_ms": 1.916,
+            "mean_ms": 1.282,
+            "min_ms": 1.127,
+            "max_ms": 1.965,
+            "ops_per_sec": 779.9
+          },
+          "cpu_seconds": 0.1717957739999999,
+          "elapsed_seconds": 0.171371224,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.484,
+            "p95_ms": 3.131,
+            "p99_ms": 3.977,
+            "mean_ms": 2.7,
+            "min_ms": 2.421,
+            "max_ms": 4.786,
+            "ops_per_sec": 370.4
+          },
+          "cpu_seconds": 0.17905539000000004,
+          "elapsed_seconds": 0.179328481,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-gt8ka0yv/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-3-candidate.json": {
+      "role": "candidate",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.021,
+            "p99_ms": 0.023,
+            "mean_ms": 0.019,
+            "min_ms": 0.018,
+            "max_ms": 0.069,
+            "ops_per_sec": 51723.9
+          },
+          "precise_latency": {
+            "mean_ms": 0.01933342155,
+            "p50_ms": 0.019095,
+            "p99_ms": 0.023429
+          },
+          "cpu_seconds": 0.452356378,
+          "elapsed_seconds": 0.40180058,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.085,
+            "p95_ms": 0.108,
+            "p99_ms": 0.116,
+            "mean_ms": 0.088,
+            "min_ms": 0.081,
+            "max_ms": 0.413,
+            "ops_per_sec": 11374.9
+          },
+          "precise_latency": {
+            "mean_ms": 0.087912808,
+            "p50_ms": 0.085265,
+            "p99_ms": 0.116179
+          },
+          "cpu_seconds": 0.09461628199999994,
+          "elapsed_seconds": 0.091870924,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.136,
+            "p95_ms": 1.485,
+            "p99_ms": 2.07,
+            "mean_ms": 1.25,
+            "min_ms": 1.124,
+            "max_ms": 2.12,
+            "ops_per_sec": 799.8
+          },
+          "precise_latency": {
+            "mean_ms": 1.2503343166666667,
+            "p50_ms": 1.135597,
+            "p99_ms": 2.070095
+          },
+          "cpu_seconds": 0.1678082340000001,
+          "elapsed_seconds": 0.167385069,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.432,
+            "p95_ms": 3.13,
+            "p99_ms": 4.106,
+            "mean_ms": 2.619,
+            "min_ms": 2.416,
+            "max_ms": 4.528,
+            "ops_per_sec": 381.8
+          },
+          "precise_latency": {
+            "mean_ms": 2.6189676,
+            "p50_ms": 2.431569,
+            "p99_ms": 4.105733
+          },
+          "cpu_seconds": 0.17409213099999987,
+          "elapsed_seconds": 0.174254217,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-dc_sl316/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-4-baseline-rounded.json": {
+      "role": "baseline",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.018,
+            "max_ms": 0.069,
+            "ops_per_sec": 52797.0
+          },
+          "cpu_seconds": 0.438020187,
+          "elapsed_seconds": 0.388565797,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.088,
+            "p95_ms": 0.11,
+            "p99_ms": 0.114,
+            "mean_ms": 0.094,
+            "min_ms": 0.082,
+            "max_ms": 0.156,
+            "ops_per_sec": 10620.1
+          },
+          "cpu_seconds": 0.0999930670000001,
+          "elapsed_seconds": 0.097470028,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.246,
+            "p95_ms": 1.553,
+            "p99_ms": 1.938,
+            "mean_ms": 1.357,
+            "min_ms": 1.184,
+            "max_ms": 1.941,
+            "ops_per_sec": 736.7
+          },
+          "cpu_seconds": 0.18008769000000002,
+          "elapsed_seconds": 0.179899976,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.576,
+            "p95_ms": 3.258,
+            "p99_ms": 4.151,
+            "mean_ms": 2.718,
+            "min_ms": 2.556,
+            "max_ms": 4.168,
+            "ops_per_sec": 367.9
+          },
+          "cpu_seconds": 0.18030677800000006,
+          "elapsed_seconds": 0.180268369,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-2mtb9759/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-4-baseline.json": {
+      "role": "baseline",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.02,
+            "p95_ms": 0.024,
+            "p99_ms": 0.026,
+            "mean_ms": 0.02,
+            "min_ms": 0.018,
+            "max_ms": 0.097,
+            "ops_per_sec": 48797.6
+          },
+          "precise_latency": {
+            "mean_ms": 0.0204928222,
+            "p50_ms": 0.019521,
+            "p99_ms": 0.026358
+          },
+          "cpu_seconds": 0.477954186,
+          "elapsed_seconds": 0.425941678,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.088,
+            "p95_ms": 0.112,
+            "p99_ms": 0.12,
+            "mean_ms": 0.095,
+            "min_ms": 0.082,
+            "max_ms": 0.148,
+            "ops_per_sec": 10542.7
+          },
+          "precise_latency": {
+            "mean_ms": 0.09485255399999999,
+            "p50_ms": 0.087601,
+            "p99_ms": 0.120352
+          },
+          "cpu_seconds": 0.10092741299999997,
+          "elapsed_seconds": 0.098319272,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.196,
+            "p95_ms": 1.42,
+            "p99_ms": 1.998,
+            "mean_ms": 1.247,
+            "min_ms": 1.184,
+            "max_ms": 2.214,
+            "ops_per_sec": 801.8
+          },
+          "precise_latency": {
+            "mean_ms": 1.2471850083333333,
+            "p50_ms": 1.195807,
+            "p99_ms": 1.997721
+          },
+          "cpu_seconds": 0.16739144499999992,
+          "elapsed_seconds": 0.166964457,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.576,
+            "p95_ms": 2.926,
+            "p99_ms": 3.96,
+            "mean_ms": 2.646,
+            "min_ms": 2.561,
+            "max_ms": 3.977,
+            "ops_per_sec": 378.0
+          },
+          "precise_latency": {
+            "mean_ms": 2.645796433333333,
+            "p50_ms": 2.575648,
+            "p99_ms": 3.960103
+          },
+          "cpu_seconds": 0.17589574600000013,
+          "elapsed_seconds": 0.17602132,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-1d9_h6x1/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-5-candidate-rounded.json": {
+      "role": "candidate",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.02,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.018,
+            "max_ms": 0.067,
+            "ops_per_sec": 52886.2
+          },
+          "cpu_seconds": 0.435476255,
+          "elapsed_seconds": 0.388024562,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.086,
+            "p95_ms": 0.108,
+            "p99_ms": 0.113,
+            "mean_ms": 0.092,
+            "min_ms": 0.081,
+            "max_ms": 0.14,
+            "ops_per_sec": 10876.9
+          },
+          "cpu_seconds": 0.098320136,
+          "elapsed_seconds": 0.09559459,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.461,
+            "p95_ms": 1.601,
+            "p99_ms": 1.817,
+            "mean_ms": 1.349,
+            "min_ms": 1.124,
+            "max_ms": 2.16,
+            "ops_per_sec": 741.5
+          },
+          "cpu_seconds": 0.179621036,
+          "elapsed_seconds": 0.179159901,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.432,
+            "p95_ms": 3.114,
+            "p99_ms": 3.946,
+            "mean_ms": 2.594,
+            "min_ms": 2.406,
+            "max_ms": 4.693,
+            "ops_per_sec": 385.5
+          },
+          "cpu_seconds": 0.1737407580000001,
+          "elapsed_seconds": 0.173880094,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-ftawqdzf/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-5-candidate.json": {
+      "role": "candidate",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.018,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.017,
+            "max_ms": 0.062,
+            "ops_per_sec": 53453.3
+          },
+          "precise_latency": {
+            "mean_ms": 0.01870791825,
+            "p50_ms": 0.018358,
+            "p99_ms": 0.023728
+          },
+          "cpu_seconds": 0.436486035,
+          "elapsed_seconds": 0.389086225,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.084,
+            "p95_ms": 0.107,
+            "p99_ms": 0.11,
+            "mean_ms": 0.086,
+            "min_ms": 0.08,
+            "max_ms": 0.138,
+            "ops_per_sec": 11575.7
+          },
+          "precise_latency": {
+            "mean_ms": 0.086388137,
+            "p50_ms": 0.084237,
+            "p99_ms": 0.109778
+          },
+          "cpu_seconds": 0.09294085900000004,
+          "elapsed_seconds": 0.090220277,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.126,
+            "p95_ms": 1.478,
+            "p99_ms": 1.943,
+            "mean_ms": 1.208,
+            "min_ms": 1.117,
+            "max_ms": 2.092,
+            "ops_per_sec": 828.1
+          },
+          "precise_latency": {
+            "mean_ms": 1.2075476666666667,
+            "p50_ms": 1.125677,
+            "p99_ms": 1.943165
+          },
+          "cpu_seconds": 0.16226875699999999,
+          "elapsed_seconds": 0.162107741,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.427,
+            "p95_ms": 3.116,
+            "p99_ms": 4.069,
+            "mean_ms": 2.639,
+            "min_ms": 2.41,
+            "max_ms": 4.81,
+            "ops_per_sec": 378.9
+          },
+          "precise_latency": {
+            "mean_ms": 2.63945355,
+            "p50_ms": 2.426713,
+            "p99_ms": 4.069165
+          },
+          "cpu_seconds": 0.17570926599999992,
+          "elapsed_seconds": 0.175883841,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-cuehph7n/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-6-baseline-rounded.json": {
+      "role": "baseline",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.018,
+            "max_ms": 0.068,
+            "ops_per_sec": 52932.7
+          },
+          "cpu_seconds": 0.43571042800000004,
+          "elapsed_seconds": 0.387586772,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.087,
+            "p95_ms": 0.11,
+            "p99_ms": 0.114,
+            "mean_ms": 0.092,
+            "min_ms": 0.082,
+            "max_ms": 0.39,
+            "ops_per_sec": 10866.2
+          },
+          "cpu_seconds": 0.09781023999999994,
+          "elapsed_seconds": 0.095328095,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.198,
+            "p95_ms": 1.544,
+            "p99_ms": 2.025,
+            "mean_ms": 1.273,
+            "min_ms": 1.187,
+            "max_ms": 2.056,
+            "ops_per_sec": 785.3
+          },
+          "cpu_seconds": 0.17062107999999998,
+          "elapsed_seconds": 0.17025164,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.597,
+            "p95_ms": 3.283,
+            "p99_ms": 4.099,
+            "mean_ms": 2.78,
+            "min_ms": 2.571,
+            "max_ms": 4.196,
+            "ops_per_sec": 359.7
+          },
+          "cpu_seconds": 0.18447526799999991,
+          "elapsed_seconds": 0.184675424,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-p5pytbys/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-6-baseline.json": {
+      "role": "baseline",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.026,
+            "p99_ms": 0.031,
+            "mean_ms": 0.02,
+            "min_ms": 0.017,
+            "max_ms": 0.065,
+            "ops_per_sec": 49784.6
+          },
+          "precise_latency": {
+            "mean_ms": 0.020086513099999998,
+            "p50_ms": 0.018634,
+            "p99_ms": 0.031071
+          },
+          "cpu_seconds": 0.46924980299999997,
+          "elapsed_seconds": 0.417510181,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.1,
+            "p95_ms": 0.111,
+            "p99_ms": 0.115,
+            "mean_ms": 0.097,
+            "min_ms": 0.081,
+            "max_ms": 0.159,
+            "ops_per_sec": 10329.2
+          },
+          "precise_latency": {
+            "mean_ms": 0.096812776,
+            "p50_ms": 0.099897,
+            "p99_ms": 0.115264
+          },
+          "cpu_seconds": 0.10280741000000004,
+          "elapsed_seconds": 0.10031052,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.204,
+            "p95_ms": 1.55,
+            "p99_ms": 2.104,
+            "mean_ms": 1.317,
+            "min_ms": 1.187,
+            "max_ms": 2.105,
+            "ops_per_sec": 759.2
+          },
+          "precise_latency": {
+            "mean_ms": 1.317138175,
+            "p50_ms": 1.204173,
+            "p99_ms": 2.104499
+          },
+          "cpu_seconds": 0.17557444499999986,
+          "elapsed_seconds": 0.175477085,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.609,
+            "p95_ms": 3.295,
+            "p99_ms": 4.308,
+            "mean_ms": 2.867,
+            "min_ms": 2.568,
+            "max_ms": 4.372,
+            "ops_per_sec": 348.8
+          },
+          "precise_latency": {
+            "mean_ms": 2.8671373333333334,
+            "p50_ms": 2.608752,
+            "p99_ms": 4.308297
+          },
+          "cpu_seconds": 0.18936845599999996,
+          "elapsed_seconds": 0.189477254,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-31gmy715/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-7-baseline-rounded.json": {
+      "role": "baseline",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.017,
+            "max_ms": 0.164,
+            "ops_per_sec": 52911.1
+          },
+          "cpu_seconds": 0.437394425,
+          "elapsed_seconds": 0.387834188,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.105,
+            "p95_ms": 0.114,
+            "p99_ms": 0.118,
+            "mean_ms": 0.1,
+            "min_ms": 0.082,
+            "max_ms": 0.158,
+            "ops_per_sec": 10005.2
+          },
+          "cpu_seconds": 0.10592808500000006,
+          "elapsed_seconds": 0.103287243,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.536,
+            "p95_ms": 1.648,
+            "p99_ms": 1.983,
+            "mean_ms": 1.451,
+            "min_ms": 1.191,
+            "max_ms": 2.184,
+            "ops_per_sec": 689.3
+          },
+          "cpu_seconds": 0.19174353499999985,
+          "elapsed_seconds": 0.191521198,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 3.27,
+            "p95_ms": 3.496,
+            "p99_ms": 3.972,
+            "mean_ms": 3.159,
+            "min_ms": 2.575,
+            "max_ms": 4.204,
+            "ops_per_sec": 316.5
+          },
+          "cpu_seconds": 0.20692125100000003,
+          "elapsed_seconds": 0.206999703,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-y_6xvfle/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-7-baseline.json": {
+      "role": "baseline",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.018,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.017,
+            "max_ms": 0.125,
+            "ops_per_sec": 53425.3
+          },
+          "precise_latency": {
+            "mean_ms": 0.01871773985,
+            "p50_ms": 0.01839,
+            "p99_ms": 0.023658
+          },
+          "cpu_seconds": 0.437823927,
+          "elapsed_seconds": 0.389112461,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.087,
+            "p95_ms": 0.111,
+            "p99_ms": 0.114,
+            "mean_ms": 0.094,
+            "min_ms": 0.082,
+            "max_ms": 0.153,
+            "ops_per_sec": 10653.7
+          },
+          "precise_latency": {
+            "mean_ms": 0.093863692,
+            "p50_ms": 0.087321,
+            "p99_ms": 0.114025
+          },
+          "cpu_seconds": 0.10013448299999994,
+          "elapsed_seconds": 0.097313853,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.536,
+            "p95_ms": 1.654,
+            "p99_ms": 1.98,
+            "mean_ms": 1.452,
+            "min_ms": 1.19,
+            "max_ms": 2.095,
+            "ops_per_sec": 688.5
+          },
+          "precise_latency": {
+            "mean_ms": 1.4523878333333333,
+            "p50_ms": 1.535697,
+            "p99_ms": 1.980123
+          },
+          "cpu_seconds": 0.19146729099999993,
+          "elapsed_seconds": 0.191401749,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 3.023,
+            "p95_ms": 3.476,
+            "p99_ms": 4.107,
+            "mean_ms": 3.001,
+            "min_ms": 2.562,
+            "max_ms": 4.303,
+            "ops_per_sec": 333.3
+          },
+          "precise_latency": {
+            "mean_ms": 3.00054275,
+            "p50_ms": 3.022542,
+            "p99_ms": 4.106921
+          },
+          "cpu_seconds": 0.19679197999999998,
+          "elapsed_seconds": 0.197068887,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-_h4hmyoq/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-8-candidate-rounded.json": {
+      "role": "candidate",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.018,
+            "max_ms": 0.07,
+            "ops_per_sec": 51766.2
+          },
+          "cpu_seconds": 0.446112552,
+          "elapsed_seconds": 0.395943036,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.086,
+            "p95_ms": 0.108,
+            "p99_ms": 0.11,
+            "mean_ms": 0.092,
+            "min_ms": 0.081,
+            "max_ms": 0.136,
+            "ops_per_sec": 10872.7
+          },
+          "cpu_seconds": 0.09849040200000003,
+          "elapsed_seconds": 0.095642408,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.135,
+            "p95_ms": 1.498,
+            "p99_ms": 1.908,
+            "mean_ms": 1.207,
+            "min_ms": 1.125,
+            "max_ms": 2.102,
+            "ops_per_sec": 828.7
+          },
+          "cpu_seconds": 0.16302068699999994,
+          "elapsed_seconds": 0.162658965,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.445,
+            "p95_ms": 3.136,
+            "p99_ms": 4.161,
+            "mean_ms": 2.627,
+            "min_ms": 2.428,
+            "max_ms": 4.775,
+            "ops_per_sec": 380.7
+          },
+          "cpu_seconds": 0.17545844700000002,
+          "elapsed_seconds": 0.17574056,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-mfwmmiwg/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    },
+    "leg-8-candidate.json": {
+      "role": "candidate",
+      "rows": {
+        "point": {
+          "latency": {
+            "iterations": 20000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.019,
+            "p95_ms": 0.021,
+            "p99_ms": 0.024,
+            "mean_ms": 0.019,
+            "min_ms": 0.018,
+            "max_ms": 0.067,
+            "ops_per_sec": 51952.3
+          },
+          "precise_latency": {
+            "mean_ms": 0.01924842755,
+            "p50_ms": 0.018973,
+            "p99_ms": 0.024153
+          },
+          "cpu_seconds": 0.45031536899999997,
+          "elapsed_seconds": 0.400174032,
+          "exact_checks": 20000,
+          "value_sha256": "0da30bdc19c7a89484c4320f0acf12f1c9369ce0e14157cd33ed875107c7e1eb"
+        },
+        "64k": {
+          "latency": {
+            "iterations": 1000,
+            "p99_sample_count_sufficient": true,
+            "p50_ms": 0.086,
+            "p95_ms": 0.11,
+            "p99_ms": 0.114,
+            "mean_ms": 0.091,
+            "min_ms": 0.081,
+            "max_ms": 0.15,
+            "ops_per_sec": 10952.5
+          },
+          "precise_latency": {
+            "mean_ms": 0.091303639,
+            "p50_ms": 0.085952,
+            "p99_ms": 0.114228
+          },
+          "cpu_seconds": 0.09783741199999996,
+          "elapsed_seconds": 0.095150287,
+          "exact_checks": 1000,
+          "value_sha256": "4cbabf9bad0846f294fb30047f5bd7c600442a62a9986fc57d65e57e7ca9abf0"
+        },
+        "1m": {
+          "latency": {
+            "iterations": 120,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 1.481,
+            "p95_ms": 1.586,
+            "p99_ms": 2.08,
+            "mean_ms": 1.442,
+            "min_ms": 1.129,
+            "max_ms": 2.085,
+            "ops_per_sec": 693.7
+          },
+          "precise_latency": {
+            "mean_ms": 1.4415808,
+            "p50_ms": 1.480745,
+            "p99_ms": 2.080041
+          },
+          "cpu_seconds": 0.19026342099999993,
+          "elapsed_seconds": 0.190169821,
+          "exact_checks": 120,
+          "value_sha256": "6cdc9b76a7d6d7fb5ce6dae70bc2c43296d985ee4ae5292bec219492941b4cc6"
+        },
+        "2m": {
+          "latency": {
+            "iterations": 60,
+            "p99_sample_count_sufficient": false,
+            "p50_ms": 2.442,
+            "p95_ms": 3.331,
+            "p99_ms": 4.07,
+            "mean_ms": 2.773,
+            "min_ms": 2.415,
+            "max_ms": 4.832,
+            "ops_per_sec": 360.6
+          },
+          "precise_latency": {
+            "mean_ms": 2.7732707333333333,
+            "p50_ms": 2.442146,
+            "p99_ms": 4.07002
+          },
+          "cpu_seconds": 0.18369530899999997,
+          "elapsed_seconds": 0.183725537,
+          "exact_checks": 60,
+          "value_sha256": "17370752c439982bd038a3a13333068dad5915f7b477bc1248217e50e5697b16"
+        }
+      },
+      "metadata": {
+        "scope": "storage-operations-not-active-conversations",
+        "performance_verdict": "not_assessed",
+        "uncovered": [
+          "active-conversation-streaming",
+          "1000-running-attempts",
+          "scheduled-arrival-latency",
+          "browser-send-feedback"
+        ],
+        "benchmark_source_sha256": "fad21b7caf21cfa3991df1dfef07afce9c61fac35a0e7cd7684036f6bf47954c",
+        "engine_order": [
+          "tofudb"
+        ],
+        "python_version": "3.12.13",
+        "platform": "linux",
+        "temporary_directory": "/tmp",
+        "authority_dir_parent": null,
+        "latency_clock": "perf_counter_ns",
+        "throughput_basis": "summed-request-latency",
+        "tofudb_binary": {
+          "path": "/tmp/tofudb-perf-binary-30qmngi9/tofu-db",
+          "sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+          "bytes": 19291352
+        },
+        "tofudb_binary_source": "/path/to/your/project",
+        "tofudb_build_identity": {
+          "embedded_allocator": "mimalloc",
+          "format": "tofu-db-build.v1",
+          "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+          "version": "0.2.0"
+        },
+        "checkout_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+        "source_matches_checkout": true,
+        "tofudb_client_mode": "embedded",
+        "tofudb_shared_library": {
+          "sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+          "bytes": 17395032,
+          "build_identity": {
+            "source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032"
+          }
+        },
+        "embedded_source_matches_checkout": true,
+        "benchmark_added_retries": 0,
+        "equivalent_durability": true,
+        "tofudb_durability": "strict",
+        "tofudb_wal_flush_ms": 10,
+        "tofudb_wire_client": {
+          "source_sha256": "f507c0acd21a271f7a29ea9680450f2f0a04a2a8a956f3dfa712e10ee465a56e",
+          "crc32c": "python",
+          "large_text_json": "orjson-compatible-subset",
+          "json_accelerator_version": "3.11.9"
+        }
+      },
+      "authority_closed": true
+    }
+  },
+  "raw_artifacts": [
+    {
+      "path": ".tmp/tofudb-response-view-20261005/application-tests-incomplete-snapshot-failure.log",
+      "bytes": 23891,
+      "sha256": "881989c50df2e3548cdb87c1e3c103c594b243192261288ac4990f4082392bb0"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/application-tests.log",
+      "bytes": 730,
+      "sha256": "1109e9894bcd44022a18f0c0b49dd73ea4b9dac684f83916fd3d33456562a800"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/baseline-embedded.py",
+      "bytes": 9094,
+      "sha256": "1fb7a0b97d097916803a145b00f315f374a34101eec88be45e2536698d7e0fdb"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/baseline.json",
+      "bytes": 428,
+      "sha256": "6a2584ddb16d2f401a8b3375aa7ec658beedd723a35680b88c2dc1667413623f"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/candidate-embedded.py",
+      "bytes": 9353,
+      "sha256": "7c4026e7de9efb7f3fa238cf333d8e1b4232735429fd9eb58c9d7229cb66ed41"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/client-tests-mock-failure.log",
+      "bytes": 3858,
+      "sha256": "3c31548a2194f198c72f9ef7ee9da688d33b60a3ed9e5dea6e0e9cc4360d0578"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/client-tests.log",
+      "bytes": 941,
+      "sha256": "ff40b5162fd1d2dd96133ab6e1e4f0c16075d58c61eb43b4fcd4356003bd9999"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/comparison-rounded.json",
+      "bytes": 7786,
+      "sha256": "194c60d015b28b6d899544dcd98a886db1eba3c5e38b1bfdbefefc97cbc1cce2"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/comparison.json",
+      "bytes": 8433,
+      "sha256": "210b86f5aada740019f9e0992545d45f556292232f34b389604779b574f1f856"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/controller-rounded.log",
+      "bytes": 196,
+      "sha256": "de749bc93ace5340288818e53aff39508666161947a39bf6a30ff17137762306"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/controller.log",
+      "bytes": 196,
+      "sha256": "de749bc93ace5340288818e53aff39508666161947a39bf6a30ff17137762306"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/docs-before.log",
+      "bytes": 821,
+      "sha256": "e353d69b15545b43fb753693419d7856f7657dd0ae89e33e43ea3a9b1195060f"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/imported-baseline.json",
+      "bytes": 3368,
+      "sha256": "f91965293c817e76fd9b83cbb19e36e89ef7f279c52f1f712fcd07f25bfe5cdc"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-1-baseline-rounded.json",
+      "bytes": 4158,
+      "sha256": "0428a608b74c7d5849b3af0a6c92a3b89a327df50f7b9363d31ca8231bd8c74e"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-1-baseline-rounded.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-1-baseline.json",
+      "bytes": 4666,
+      "sha256": "4888cc56c4b1df63122b997c363127f7c11073edd97c7976802d8f41d8a1d923"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-1-baseline.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-2-candidate-rounded.json",
+      "bytes": 4164,
+      "sha256": "49da3cf30a8532bf5b1fa9eef6ce9dfcf612bce25e93b071d7a7d666f086a489"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-2-candidate-rounded.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-2-candidate.json",
+      "bytes": 4653,
+      "sha256": "0a643ab5298debec702efaf9e72d34e8216d1f249825994a2775edc583e24412"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-2-candidate.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-3-candidate-rounded.json",
+      "bytes": 4163,
+      "sha256": "03b5dfe7108086c28d99c572929002623abeded1e07b259a9d979bbe7c1dc03a"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-3-candidate-rounded.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-3-candidate.json",
+      "bytes": 4653,
+      "sha256": "8e813280fd58464294477a509f89450ac0a3fdf3c26b7d8c85c4766fe27f66e8"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-3-candidate.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-4-baseline-rounded.json",
+      "bytes": 4157,
+      "sha256": "2bc667a61807adf7539dee9e45e21a330359de407d4a795910698e5aefc9f083"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-4-baseline-rounded.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-4-baseline.json",
+      "bytes": 4667,
+      "sha256": "e3b691a6ea05cd6011be9425a9f44e08e2d4840189fd54d3f20de461404570cc"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-4-baseline.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-5-candidate-rounded.json",
+      "bytes": 4139,
+      "sha256": "8fb269080b78262473ecd0fd6d94d7abe029fb388fa2d6084e9384435446f5d4"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-5-candidate-rounded.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-5-candidate.json",
+      "bytes": 4656,
+      "sha256": "db5d85c1fd52a8f05da9874296fbbe09ccede3a37beb2029693281f4ee21437f"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-5-candidate.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-6-baseline-rounded.json",
+      "bytes": 4163,
+      "sha256": "01bf1d5872347654417827d503f8685ef948703561f2842d254ce54c09c59637"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-6-baseline-rounded.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-6-baseline.json",
+      "bytes": 4670,
+      "sha256": "08a7a911d024c25ccc96c60791f200fe378db970d64935c1ccbd386c70573f56"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-6-baseline.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-7-baseline-rounded.json",
+      "bytes": 4156,
+      "sha256": "76a1e011cf74227cc4684e65fe6bed72351669479857c0ad1ddcf7a8c9f55971"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-7-baseline-rounded.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-7-baseline.json",
+      "bytes": 4656,
+      "sha256": "60b0f0f8684a75977600602c09c36a14ae0a151e436ab097bc038b24bdbbdfe9"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-7-baseline.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-8-candidate-rounded.json",
+      "bytes": 4157,
+      "sha256": "cf65b69043894416df5ccbbb83d1b794536360dc79b7a3e0b064a0331f0fc84f"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-8-candidate-rounded.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-8-candidate.json",
+      "bytes": 4662,
+      "sha256": "3ee2368378c220e6d36f1c95344cfac4c2751200be2804af8f0bbad3d52336c5"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/leg-8-candidate.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/lifecycle.log",
+      "bytes": 700,
+      "sha256": "3204d2a670982518290cb452873f9a7be67b17d4c604db4cf09bbc3efde604ad"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/memory.json",
+      "bytes": 4191,
+      "sha256": "feea2300647444881fa78638754258c1f44f39c9e30fd9915575c1ecac39161f"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/memory.log",
+      "bytes": 160,
+      "sha256": "db97f3edebc630b3890901cef7ffd255d98a2b9a84030434a9289ca8ea3f4f5d"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/memory_probe.py",
+      "bytes": 1558,
+      "sha256": "c4958e4b9df77fd96d3748603bcbb161686bce92b789576e6c6829aa37b14d7d"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/paired_probe.py",
+      "bytes": 3645,
+      "sha256": "424f45d5295e91bd9ae6bc253e6628e1095660fb8134abb5477da2658f6cead4"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/prepare_evidence.py",
+      "bytes": 6941,
+      "sha256": "74a76a5b17838e1c6c0752611e4b7f034fc2e4456058517c1fabf36da822a0e4"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/integration.json",
+      "bytes": 1650,
+      "sha256": "77febd5f8b267039ca0ed9fb3d335d57eeec0cf6ef417273d20695b29f30fdd1"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/docs-before.log",
+      "bytes": 821,
+      "sha256": "e353d69b15545b43fb753693419d7856f7657dd0ae89e33e43ea3a9b1195060f"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/docs-after.log",
+      "bytes": 821,
+      "sha256": "e353d69b15545b43fb753693419d7856f7657dd0ae89e33e43ea3a9b1195060f"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/session-audit.log",
+      "bytes": 399,
+      "sha256": "509d4118b43cae15e2c3efb1dc03be497c8ac45794e2e876702aa19cc1adbd62"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/client-tests.log",
+      "bytes": 941,
+      "sha256": "ff40b5162fd1d2dd96133ab6e1e4f0c16075d58c61eb43b4fcd4356003bd9999"
+    },
+    {
+      "path": ".tmp/tofudb-response-view-20261005/application-tests.log",
+      "bytes": 730,
+      "sha256": "1109e9894bcd44022a18f0c0b49dd73ea4b9dac684f83916fd3d33456562a800"
+    }
+  ],
+  "publication": {
+    "native_pair": "unchanged",
+    "restart_requested": false,
+    "live_activation": "not asserted",
+    "native_cli_sha256": "4814e164fb049d85a392322aed768f90a0ba7ad6fd4ee90d466be84831dba905",
+    "verified_source_sha256": "71cd7be2854e2e126ad161f9886aa8e57de0432ba7f6c07286e1c859b15d9032",
+    "native_library_sha256": "e56f91324794f445231f07f67f232438eee3d93cf11722dec762c225600ea17f",
+    "application_source": "integrated; live activation not asserted"
+  },
+  "integration": {
+    "status": "reviewed own paths integrated and verified",
+    "backup": "/home/your-user/.codex-local/backups/tmux-recovery-20261004-150600/tofudb-response-view-20261005-preintegration",
+    "private_implementation_commit": "91bf15c52",
+    "peer_snapshot_changes": "not integrated",
+    "strategy": "reviewed paths plus append-only owning-document references under recovery lock"
+  },
+  "documentation": {
+    "no_new_findings": true,
+    "baseline_findings_unchanged": true,
+    "gate_exit_code": 1,
+    "reason": "pre-existing documentation findings retained; before/after outputs identical"
+  },
+  "session_audit": {
+    "exit_code": 0,
+    "path": ".tmp/tofudb-response-view-20261005/session-audit.log"
+  }
+}

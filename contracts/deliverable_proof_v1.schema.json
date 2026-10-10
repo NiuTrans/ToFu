@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tofu.local/contracts/deliverable_proof_v1.schema.json",
+  "title": "DeliverableProofV1",
+  "description": "Proof-carrying deliverable bundle: content-addressed evidence assembled read-only from existing authorities (terminal task snapshot, per-attempt Turn Trace, Request Inspector request rounds, project file receipts). The bundle proves the existence, consistency, and integrity of an execution trail — never the correctness of the deliverable. Assembly and verification semantics: docs/PROOF_DELIVERABLES_DESIGN_PROPOSAL.md.",
+  "x-resource-limits": {
+    "maxEvidenceItems": 40,
+    "maxRounds": 32,
+    "maxReasons": 16,
+    "maxBundleBytes": 1048576
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "bundleId",
+    "owner",
+    "assembledAt",
+    "subject",
+    "evidence",
+    "verdicts",
+    "coverage",
+    "coverageReasons",
+    "contentIncluded"
+  ],
+  "properties": {
+    "version": {"const": 1},
+    "bundleId": {"$ref": "#/$defs/DigestV1"},
+    "owner": {"type": "integer", "minimum": 1},
+    "assembledAt": {"type": "integer", "minimum": 0},
+    "subject": {"$ref": "#/$defs/SubjectV1"},
+    "evidence": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {"$ref": "#/$defs/EvidenceItemV1"}
+    },
+    "verdicts": {"$ref": "#/$defs/VerdictsV1"},
+    "coverage": {"enum": ["full", "partial"]},
+    "coverageReasons": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/CoverageReasonV1"}
+    },
+    "contentIncluded": {"type": "boolean"}
+  },
+  "$defs": {
+    "DigestV1": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "TaskIdV1": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "SubjectV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "identity", "contentDigest"],
+      "properties": {
+        "kind": {"const": "turn"},
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["taskId"],
+          "properties": {
+            "taskId": {"$ref": "#/$defs/TaskIdV1"},
+            "turnId": {"type": ["string", "null"], "maxLength": 128},
+            "attemptId": {"type": ["string", "null"], "maxLength": 128}
+          }
+        },
+        "contentDigest": {"$ref": "#/$defs/DigestV1"}
+      }
+    },
+    "TaskVerdictV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "finishReason", "errorKind", "model", "usage"],
+      "properties": {
+        "status": {"type": "string", "maxLength": 32},
+        "finishReason": {"type": ["string", "null"], "maxLength": 64},
+        "errorKind": {"type": ["string", "null"], "maxLength": 64},
+        "model": {"type": ["string", "null"], "maxLength": 256},
+        "usage": {"type": ["object", "null"]}
+      }
+    },
+    "VerdictsV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task"],
+      "properties": {
+        "task": {"$ref": "#/$defs/TaskVerdictV1"}
+      }
+    },
+    "CoverageReasonV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence", "reason"],
+      "properties": {
+        "evidence": {"enum": ["turn_trace", "request_round", "file_receipt"]},
+        "reason": {"enum": ["expired", "unavailable", "read-error", "round-cap"]}
+      }
+    },
+    "EvidenceItemV1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ref", "digest"],
+          "properties": {
+            "kind": {"const": "turn_trace"},
+            "ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["taskId"],
+              "properties": {
+                "taskId": {"$ref": "#/$defs/TaskIdV1"},
+                "attemptId": {"type": ["string", "null"], "maxLength": 128}
+              }
+            },
+            "digest": {"$ref": "#/$defs/DigestV1"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ref", "digest"],
+          "properties": {
+            "kind": {"const": "request_round"},
+            "ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["taskId", "roundNum", "turn"],
+              "properties": {
+                "taskId": {"$ref": "#/$defs/TaskIdV1"},
+                "roundNum": {"type": "integer", "minimum": 1},
+                "turn": {"type": "string", "maxLength": 96}
+              }
+            },
+            "digest": {"$ref": "#/$defs/DigestV1"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ref", "digest"],
+          "properties": {
+            "kind": {"const": "file_receipt"},
+            "ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["taskId"],
+              "properties": {
+                "taskId": {"$ref": "#/$defs/TaskIdV1"}
+              }
+            },
+            "digest": {"$ref": "#/$defs/DigestV1"}
+          }
+        }
+      ]
+    }
+  }
+}

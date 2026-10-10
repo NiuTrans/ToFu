@@ -1,0 +1,14 @@
+        <div class="settings-tab-panel" id="settingsTab_devices">
+          <!-- Devices: online agents + automatically managed connection grants.
+               数据全部由 settings/devices.js 经 Api.desktop 拉取渲染。 -->
+          <div class="stg-section">
+            <h3 data-i18n="devices.agentsTitle">在线代理</h3>
+            <p class="stg-desc" data-i18n="devices.agentsDesc">运行了 desktop agent 的机器会出现在这里;项目面板可把远程共享根挂为工作树。</p>
+            <div id="devicesAgentsList"></div>
+          </div>
+          <div class="stg-section">
+            <h3 data-i18n="devices.tokensTitle">连接授权</h3>
+            <p class="stg-desc" data-i18n="devices.tokensDesc">受控端安装包会自动配置连接；这里仅用于查看或撤销旧设备授权。</p>
+            <div id="devicesTokensList" style="margin-top:8px"></div>
+          </div>
+        </div>

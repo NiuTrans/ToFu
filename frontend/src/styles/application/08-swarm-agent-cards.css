@@ -1,0 +1,62 @@
+/* ── Agent grid ── */
+.sw-agent-grid{display:flex;flex-direction:column;gap:var(--space-1);padding:var(--space-1) 14px var(--space-3)}
+.sw-empty{padding:6px 2px;font-size:var(--font-size-sm);color:var(--text-tertiary)}
+/* ── Agent card ── */
+.sw-agent{border-radius:8px;border:1px solid var(--border);background:var(--bg-tertiary);transition:border-color .3s,background .3s;overflow:hidden}
+.sw-agent.sw-a-running{border-color:rgba(96,165,250,0.45);background:linear-gradient(135deg,rgba(96,165,250,0.10),rgba(96,165,250,0.04)),var(--bg-tertiary)}
+.sw-agent.sw-a-done,.sw-agent.sw-a-completed{border-color:rgba(74,222,128,0.40);background:var(--bg-tertiary)}
+.sw-agent.sw-a-failed,.sw-agent.sw-a-error{border-color:rgba(248,113,113,0.45);background:linear-gradient(135deg,rgba(248,113,113,0.08),rgba(248,113,113,0.03)),var(--bg-tertiary)}
+/* Stalled: judged silent by the liveness beacon — amber (distinct from
+   failed-red: the agent may still come back, and did in the smoke test). */
+.sw-agent.sw-a-stalled{border-color:rgba(251,191,36,0.45);background:linear-gradient(135deg,rgba(251,191,36,0.08),rgba(251,191,36,0.03)),var(--bg-tertiary)}
+.sw-a-stalled .sw-a-status-icon{color:#fbbf24}
+.sw-a-stalled .sw-a-role-tag{background:rgba(251,191,36,0.10);border-color:rgba(251,191,36,0.25);color:#fcd34d}
+/* Waiting is a status, not disabled content: instructions and results stay readable. */
+.sw-agent.sw-a-pending{border-style:dashed}
+/* Agent card header (always visible) */
+.sw-a-header{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2);padding:10px var(--space-3);cursor:pointer;user-select:none}
+.sw-a-status-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:16px;height:16px}
+.sw-a-running .sw-a-status-icon{animation:agentPulse 1.5s ease-in-out infinite}
+.sw-a-pending .sw-a-status-icon{color:var(--text-tertiary)}
+.sw-a-running .sw-a-status-icon{color:#60a5fa}
+.sw-a-done .sw-a-status-icon,.sw-a-completed .sw-a-status-icon{color:#4ade80}
+.sw-a-failed .sw-a-status-icon,.sw-a-error .sw-a-status-icon{color:#f87171}
+.sw-a-role{font-size:var(--font-size-sm);font-weight:600;color:var(--text-primary);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sw-a-num{font-size:var(--font-size-xs);font-weight:600;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;flex-shrink:0;min-width:22px;text-align:right}
+.sw-a-role-tag{font-size:10px;padding:1px 7px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--text-primary);background:rgba(251,191,36,0.10);border:1px solid rgba(251,191,36,0.20);text-transform:lowercase;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+.sw-a-header .sw-a-phase-pill{margin-left:auto}
+/* ── File-modification flag: pill on agents that wrote/edited files ── */
+.sw-a-edited{display:inline-flex;align-items:center;gap:3px;flex-shrink:0;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;padding:1px 6px;border-radius:8px;color:#fbbf24;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.3)}
+.sw-a-edited svg{display:block}
+/* subtle amber left-accent on the card itself so edited agents stand out */
+.sw-agent.sw-a-has-edits{box-shadow:inset 2px 0 0 rgba(251,191,36,0.45)}
+.sw-a-running .sw-a-role-tag{background:rgba(96,165,250,0.10);border-color:rgba(96,165,250,0.25);color:#93c5fd}
+.sw-a-done .sw-a-role-tag,.sw-a-completed .sw-a-role-tag{background:rgba(74,222,128,0.08);border-color:rgba(74,222,128,0.20);color:#86efac}
+.sw-a-failed .sw-a-role-tag,.sw-a-error .sw-a-role-tag{background:rgba(248,113,113,0.08);border-color:rgba(248,113,113,0.20);color:#fca5a5}
+.sw-a-id{font-size:10px;padding:1px 6px;border-radius:6px;font-family:'JetBrains Mono',monospace;color:var(--text-tertiary);background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);cursor:copy;min-width:0;max-width:100%;overflow-wrap:anywhere;text-align:left;letter-spacing:0.02em;transition:background .15s,color .15s}
+.sw-a-id:hover{color:var(--text-secondary);background:rgba(255,255,255,0.07);border-color:rgba(255,255,255,0.12)}
+.sw-a-id-copied{color:#4ade80 !important;background:rgba(74,222,128,0.10) !important;border-color:rgba(74,222,128,0.25) !important}
+.sw-a-id-copied::after{content:" copied";font-size:9px;margin-left:2px}
+.sw-a-model{font-size:10px;padding:1px 7px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-weight:500;color:var(--text-secondary);background:rgba(167,139,250,0.10);border:1px solid rgba(167,139,250,0.22);flex-shrink:0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+[data-theme="tofu"] .sw-a-model{color:#5b4a8a;background:rgba(124,92,184,0.12);border-color:rgba(124,92,184,0.32)}
+.sw-a-phase-pill{font-size:10px;padding:1px 7px;border-radius:8px;font-family:'JetBrains Mono',monospace;font-weight:500;flex-shrink:0}
+.sw-a-pending .sw-a-phase-pill{color:var(--text-tertiary);background:rgba(255,255,255,0.04)}
+.sw-a-running .sw-a-phase-pill{color:#60a5fa;background:rgba(96,165,250,0.1)}
+.sw-a-done .sw-a-phase-pill,.sw-a-completed .sw-a-phase-pill{color:#4ade80;background:rgba(74,222,128,0.08)}
+.sw-a-failed .sw-a-phase-pill,.sw-a-error .sw-a-phase-pill{color:#f87171;background:rgba(248,113,113,0.08)}
+.sw-a-timer{font-size:10px;color:var(--text-tertiary);font-family:'JetBrains Mono',monospace;flex-shrink:0}
+.sw-a-chevron{font-size:10px;color:var(--text-tertiary);transition:transform .15s;flex-shrink:0}
+/* Agent card body (collapsible) */
+.sw-a-body{padding:0 var(--space-3) 10px;display:none;animation:fadeIn .2s ease}
+.sw-a-id:focus-visible,.sw-a-task>summary:focus-visible,.sw-a-tool-history>summary:focus-visible,.sw-tl-line:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.sw-a-task{margin:2px 0 var(--space-2)}
+.sw-a-task>summary,.sw-a-tool-history>summary{cursor:pointer;font-size:var(--font-size-xs);color:var(--text-secondary);padding:var(--space-1) 0}
+.sw-a-task .sw-a-objective{max-height:240px;overflow:auto;overscroll-behavior:contain}
+.sw-a-activity-label,.sw-a-activity-empty{font-size:var(--font-size-xs);color:var(--text-secondary);padding:var(--space-1) 0}
+.sw-a-activity-label{font-weight:600}
+.sw-status-pill.sw-pill-queued{color:var(--text-secondary);background:var(--bg-tertiary)}
+.sw-agent.sw-a-open .sw-a-body{display:block}
+.sw-agent.sw-a-open .sw-a-chevron{transform:rotate(180deg)}
+.sw-a-objective{font-size:var(--font-size-xs);color:var(--text-secondary);line-height:1.5;margin-bottom:6px;padding:6px var(--space-2);background:rgba(255,255,255,0.02);border-radius:6px;border-left:2px solid rgba(251,191,36,0.3);white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+.sw-a-done .sw-a-objective,.sw-a-completed .sw-a-objective{border-left-color:rgba(74,222,128,0.3)}
+.sw-a-failed .sw-a-objective,.sw-a-error .sw-a-objective{border-left-color:rgba(248,113,113,0.3)}

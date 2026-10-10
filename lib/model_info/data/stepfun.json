@@ -1,0 +1,15 @@
+{
+  "brand": "stepfun",
+  "recipe_version": "tofu.provider-offering-recipe/v1",
+  "key": "stepfun",
+  "category": "official",
+  "name": "StepFun",
+  "base_url": "https://api.stepfun.com/v1",
+  "catalog_mode": "curated",
+  "catalog_source": {"url": "https://platform.stepfun.com/docs", "checked_at": "2026-09-09"},
+  "offering_recipes": [
+    {"model_id": "step-3.7-flash", "capabilities": ["text", "vision", "thinking"], "rpm": 30},
+    {"model_id": "step-3.5-flash", "capabilities": ["text", "vision", "thinking", "cheap"], "rpm": 60},
+    {"model_id": "step-3", "capabilities": ["text", "vision", "thinking"], "rpm": 30}
+  ]
+}

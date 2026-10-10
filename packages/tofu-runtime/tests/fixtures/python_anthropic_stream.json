@@ -1,0 +1,1548 @@
+[
+  {
+    "name": "text",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": "你好"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "😀"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "content": "你好"
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "content": "😀"
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "signed_thinking",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "thinking",
+          "thinking": "plan",
+          "signature": "s"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": " more"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "ig"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "reasoning_content": "plan",
+              "thinking_signature": "s"
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "reasoning_content": " more"
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "thinking_signature": "ig"
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "tool_fragments",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call",
+          "name": "WriteFile",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{\"path\":"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "\"file\"}"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {
+      "WriteFile": "write_file"
+    },
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "id": "call",
+                  "type": "function",
+                  "function": {
+                    "name": "write_file",
+                    "arguments": ""
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "function": {
+                    "arguments": "{\"path\":"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "function": {
+                    "arguments": "\"file\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "tool_calls"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "tool_initial",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call",
+          "name": "write_file",
+          "input": {
+            "path": "file",
+            "content": "中文"
+          }
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "call",
+                  "type": "function",
+                  "function": {
+                    "name": "write_file",
+                    "arguments": "{\"path\": \"file\", \"content\": \"中文\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "tool_calls"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "duplicate_start",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call",
+          "name": "WriteFile",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call",
+          "name": "WriteFile",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{}"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "id": "call",
+                  "type": "function",
+                  "function": {
+                    "name": "WriteFile",
+                    "arguments": ""
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "function": {
+                    "arguments": "{}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "tool_calls"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 1
+  },
+  {
+    "name": "distinct_same_id",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call",
+          "name": "WriteFile",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 2,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call",
+          "name": "WriteFile",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "content_block_stop",
+        "index": 2
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "id": "call",
+                  "type": "function",
+                  "function": {
+                    "name": "WriteFile",
+                    "arguments": ""
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 2,
+                  "id": "call",
+                  "type": "function",
+                  "function": {
+                    "name": "WriteFile",
+                    "arguments": ""
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "tool_calls"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "server_replay",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "server_tool_use",
+          "id": "host",
+          "name": "search",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{\"q\":\"source\"}"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_search_tool_result",
+          "tool_use_id": "host",
+          "content": [
+            {
+              "type": "tool_reference",
+              "tool_name": "write_file"
+            }
+          ]
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      },
+      {
+        "type": "content_block_start",
+        "index": 2,
+        "content_block": {
+          "type": "text",
+          "text": "answer"
+        }
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "content": "answer"
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [
+      {
+        "type": "server_tool_use",
+        "id": "host",
+        "name": "search",
+        "input": {
+          "q": "source"
+        }
+      },
+      {
+        "type": "tool_search_tool_result",
+        "tool_use_id": "host",
+        "content": [
+          {
+            "type": "tool_reference",
+            "tool_name": "write_file"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "text": "answer"
+      }
+    ],
+    "replayed": 0
+  },
+  {
+    "name": "compaction",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "compaction",
+          "content": null
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "compaction_delta",
+          "content": "summary"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "text",
+          "text": "answer"
+        }
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "pause_turn"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "content": "answer"
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [
+      {
+        "type": "compaction",
+        "content": "summary"
+      },
+      {
+        "type": "text",
+        "text": "answer"
+      }
+    ],
+    "replayed": 0
+  },
+  {
+    "name": "null_compaction",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "compaction",
+          "content": null
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "redacted",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "redacted_thinking",
+          "data": "opaque"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "thinking",
+          "thinking": null,
+          "signature": null
+        }
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [
+      {
+        "type": "redacted_thinking",
+        "data": "opaque"
+      },
+      {
+        "type": "thinking",
+        "thinking": "",
+        "signature": ""
+      }
+    ],
+    "replayed": 0
+  },
+  {
+    "name": "missing_text_start",
+    "events": [
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "text"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "signature_delta",
+          "signature": "sig"
+        }
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "content": "text"
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "thinking_signature": "sig"
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "usage_cache",
+    "events": [
+      {
+        "type": "message_start",
+        "message": {
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 1,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 20
+          }
+        }
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "max_tokens"
+        },
+        "usage": {
+          "output_tokens": 8,
+          "cache_read_input_tokens": 0
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {}
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 130,
+          "completion_tokens": 1,
+          "total_tokens": 131,
+          "input_tokens": 10,
+          "output_tokens": 1,
+          "cache_creation_input_tokens": 20,
+          "cache_read_input_tokens": 100,
+          "effective_prompt_tokens": 130,
+          "effective_output_tokens": 1
+        }
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 130,
+          "completion_tokens": 8,
+          "total_tokens": 138,
+          "input_tokens": 10,
+          "output_tokens": 8,
+          "cache_creation_input_tokens": 20,
+          "cache_read_input_tokens": 100,
+          "effective_prompt_tokens": 130,
+          "effective_output_tokens": 8
+        }
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "usage_iterations",
+    "events": [
+      {
+        "type": "message_start",
+        "message": {
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": 3,
+            "cache_read_input_tokens": 100,
+            "thinking_tokens": 2,
+            "iterations": [
+              {
+                "type": "compaction",
+                "input_tokens": 40,
+                "output_tokens": 4
+              },
+              {
+                "type": "message",
+                "input_tokens": 50,
+                "output_tokens": 6
+              }
+            ]
+          }
+        }
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {}
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 190,
+          "completion_tokens": 10,
+          "total_tokens": 200,
+          "input_tokens": 90,
+          "output_tokens": 10,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 100,
+          "effective_prompt_tokens": 110,
+          "effective_output_tokens": 3,
+          "thinking_tokens": 2,
+          "reasoning_tokens": 2,
+          "compaction_iterations": 1,
+          "compaction_input_tokens": 40,
+          "compaction_output_tokens": 4
+        }
+      },
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "unknown_finish",
+    "events": [
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "future_reason"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "future_reason"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "ping",
+    "events": [
+      {
+        "type": "ping"
+      },
+      {
+        "type": "future_event"
+      },
+      {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn"
+        },
+        "usage": null
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": "stop"
+          }
+        ]
+      },
+      "[DONE]"
+    ],
+    "failed": false,
+    "blocks": [],
+    "replayed": 0
+  },
+  {
+    "name": "negative_index",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": -1,
+        "content_block": {
+          "type": "text"
+        }
+      }
+    ],
+    "reverse": {},
+    "outputs": [],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "bool_index",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": true,
+        "content_block": {
+          "type": "text"
+        }
+      }
+    ],
+    "reverse": {},
+    "outputs": [],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "large_index",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 4096,
+        "content_block": {
+          "type": "text"
+        }
+      }
+    ],
+    "reverse": {},
+    "outputs": [],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "bad_block",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": 5
+        }
+      }
+    ],
+    "reverse": {},
+    "outputs": [],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "bad_type",
+    "events": [
+      {
+        "type": 5
+      }
+    ],
+    "reverse": {},
+    "outputs": [],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "nonobject",
+    "events": [
+      []
+    ],
+    "reverse": {},
+    "outputs": [],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "tool_no_start",
+    "events": [
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{}"
+        }
+      }
+    ],
+    "reverse": {},
+    "outputs": [],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "bad_stop",
+    "events": [
+      {
+        "type": "content_block_stop",
+        "index": 0
+      }
+    ],
+    "reverse": {},
+    "outputs": [],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "bad_usage",
+    "events": [
+      {
+        "type": "message_delta",
+        "delta": {},
+        "usage": []
+      }
+    ],
+    "reverse": {},
+    "outputs": [],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "changed_start",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call",
+          "name": "WriteFile",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "other",
+          "name": "WriteFile",
+          "input": {}
+        }
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "id": "call",
+                  "type": "function",
+                  "function": {
+                    "name": "WriteFile",
+                    "arguments": ""
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "late_delta",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": "你好"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 0
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "late"
+        }
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "content": "你好"
+            }
+          }
+        ]
+      }
+    ],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "wrong_delta",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": "你好"
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "thinking_delta",
+          "thinking": "wrong"
+        }
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "content": "你好"
+            }
+          }
+        ]
+      }
+    ],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "incomplete_input",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call",
+          "name": "WriteFile",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{\"path\":"
+        }
+      },
+      {
+        "type": "message_stop"
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "id": "call",
+                  "type": "function",
+                  "function": {
+                    "name": "WriteFile",
+                    "arguments": ""
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "function": {
+                    "arguments": "{\"path\":"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "scalar_input",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {
+          "type": "tool_use",
+          "id": "call",
+          "name": "WriteFile",
+          "input": {}
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "[]"
+        }
+      },
+      {
+        "type": "content_block_stop",
+        "index": 1
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "id": "call",
+                  "type": "function",
+                  "function": {
+                    "name": "WriteFile",
+                    "arguments": ""
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 1,
+                  "function": {
+                    "arguments": "[]"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  },
+  {
+    "name": "initial_then_delta",
+    "events": [
+      {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "tool_use",
+          "id": "id",
+          "name": "name",
+          "input": {
+            "x": 1
+          }
+        }
+      },
+      {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{}"
+        }
+      }
+    ],
+    "reverse": {},
+    "outputs": [
+      {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "index": 0,
+                  "id": "id",
+                  "type": "function",
+                  "function": {
+                    "name": "name",
+                    "arguments": "{\"x\": 1}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "failed": true,
+    "blocks": null,
+    "replayed": 0
+  }
+]

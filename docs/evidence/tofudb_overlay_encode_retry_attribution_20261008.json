@@ -1,0 +1,160 @@
+{
+  "scope": "Diagnostic-only native observera8b095 and complete frozen014bb Python callers. Original1000x4x8192 uncoalesced one-second scheduled strict harness. Attempts timed until bound check, excludes subsequent payload capture and exceptions before bound check. Global post-running-restart snapshots include background work, counters non-atomic; both observed count residuals0. Reasons overlap. Not default-off timing or speedup claim.",
+  "rows": [
+    {
+      "label": "overlay-retry-embedded-0",
+      "summary": {
+        "label": "overlay-retry-embedded-0",
+        "stages": {
+          "overlay_encode_attempt": {
+            "calls": 492,
+            "components": [
+              {
+                "calls": 492,
+                "component": "maintenance",
+                "totalNanos": 3720037135
+              }
+            ],
+            "stage": "overlay_encode_attempt",
+            "totalNanos": 3720037135
+          },
+          "overlay_encode_accepted": {
+            "calls": 329,
+            "components": [
+              {
+                "calls": 329,
+                "component": "maintenance",
+                "totalNanos": 1904871323
+              }
+            ],
+            "stage": "overlay_encode_accepted",
+            "totalNanos": 1904871323
+          },
+          "overlay_encode_rejected": {
+            "calls": 163,
+            "components": [
+              {
+                "calls": 163,
+                "component": "maintenance",
+                "totalNanos": 1815165812
+              }
+            ],
+            "stage": "overlay_encode_rejected",
+            "totalNanos": 1815165812
+          },
+          "overlay_encode_byte_limit": {
+            "calls": 163,
+            "components": [
+              {
+                "calls": 163,
+                "component": "maintenance",
+                "totalNanos": 0
+              }
+            ],
+            "stage": "overlay_encode_byte_limit",
+            "totalNanos": 0
+          },
+          "overlay_encode_block_limit": {
+            "stage": "overlay_encode_block_limit",
+            "calls": 0,
+            "totalNanos": 0,
+            "components": []
+          }
+        },
+        "rejected_time_fraction": 0.4879429280213355,
+        "count_residual": 0,
+        "scope": "Non-atomic live global counters; reason counters overlap; attempt timing ends before payload capture; no default-off latency gain inferred."
+      },
+      "correctness": true,
+      "errors": 0,
+      "raw_report": {
+        "path": ".tmp/tofudb-current-refresh-20261008/overlay-retry-embedded-0.json",
+        "sha256": "8c08a8d31a8ddca178d945ddd001d687b13636ca4eb3b736b8634733179a0638"
+      },
+      "source_scope": {
+        "native_source": "a8b095a6407434e5f1734e0bffa741e66e466e3138364c3706f88aad7b6fa8b4",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      }
+    },
+    {
+      "label": "overlay-retry-application-0",
+      "summary": {
+        "label": "overlay-retry-application-0",
+        "stages": {
+          "overlay_encode_attempt": {
+            "calls": 394,
+            "components": [
+              {
+                "calls": 394,
+                "component": "maintenance",
+                "totalNanos": 2997714263
+              }
+            ],
+            "stage": "overlay_encode_attempt",
+            "totalNanos": 2997714263
+          },
+          "overlay_encode_accepted": {
+            "calls": 251,
+            "components": [
+              {
+                "calls": 251,
+                "component": "maintenance",
+                "totalNanos": 1485196901
+              }
+            ],
+            "stage": "overlay_encode_accepted",
+            "totalNanos": 1485196901
+          },
+          "overlay_encode_rejected": {
+            "calls": 143,
+            "components": [
+              {
+                "calls": 143,
+                "component": "maintenance",
+                "totalNanos": 1512517362
+              }
+            ],
+            "stage": "overlay_encode_rejected",
+            "totalNanos": 1512517362
+          },
+          "overlay_encode_byte_limit": {
+            "calls": 143,
+            "components": [
+              {
+                "calls": 143,
+                "component": "maintenance",
+                "totalNanos": 0
+              }
+            ],
+            "stage": "overlay_encode_byte_limit",
+            "totalNanos": 0
+          },
+          "overlay_encode_block_limit": {
+            "stage": "overlay_encode_block_limit",
+            "calls": 0,
+            "totalNanos": 0,
+            "components": []
+          }
+        },
+        "rejected_time_fraction": 0.5045568821113489,
+        "count_residual": 0,
+        "scope": "Non-atomic live global counters; reason counters overlap; attempt timing ends before payload capture; no default-off latency gain inferred."
+      },
+      "correctness": true,
+      "errors": 0,
+      "raw_report": {
+        "path": ".tmp/tofudb-current-refresh-20261008/overlay-retry-application-0.json",
+        "sha256": "d72aa75435636c7c907460884e6c96940a5011a227f90837380552a5abd1954e"
+      },
+      "source_scope": {
+        "native_source": "a8b095a6407434e5f1734e0bffa741e66e466e3138364c3706f88aad7b6fa8b4",
+        "shared_project_imports": [],
+        "frozen_manifest_sha256": "6c25960f9261c628e4d06221f7ddd764c709b4b3ea1073470922ccc5ae9a10ec"
+      }
+    }
+  ],
+  "observer_source_commit": "e255f34c8",
+  "tests": "7 profiling +35overlay tests passed",
+  "decision": "Both paths show about half measured attempt time spent on byte-limit-rejected encoding. Proceed to bounded byte-feedback candidate, keeping exact prefix,2MiB/2048blocks hard checks, retry cleanup, snapshot and durability semantics. Diagnostic source not admitted to runtime."
+}

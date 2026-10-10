@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tofu.native-agent-journal/v1",
+  "type": "object",
+  "required": [
+    "format",
+    "owner_user_id",
+    "task_id",
+    "epoch",
+    "binding",
+    "next_round",
+    "phase",
+    "lease",
+    "lease_generation"
+  ],
+  "properties": {
+    "format": {
+      "enum": [
+        "tofu.native-agent-journal/v1"
+      ]
+    },
+    "owner_user_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "epoch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "binding": {
+      "type": "string",
+      "minLength": 1
+    },
+    "next_round": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "phase": {
+      "enum": [
+        "new",
+        "completed",
+        "inflight",
+        "terminal"
+      ]
+    },
+    "lease": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "lease_generation": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false
+}

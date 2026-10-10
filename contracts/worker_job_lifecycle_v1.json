@@ -1,0 +1,95 @@
+{
+  "format": "tofu.worker-job-lifecycle/v1",
+  "states": [
+    "queued",
+    "running",
+    "suspended",
+    "succeeded",
+    "failed",
+    "cancelled"
+  ],
+  "terminalStates": [
+    "succeeded",
+    "failed",
+    "cancelled"
+  ],
+  "claimableStates": [
+    "queued",
+    "suspended"
+  ],
+  "operations": {
+    "worker_job.defer": {
+      "kind": "command",
+      "receiptRequired": false,
+      "input": {
+        "task_id": "string:1..256",
+        "worker_id": "string:1..256",
+        "fencing_token": "positive-integer",
+        "now_ms": "nonnegative-clock",
+        "available_at_ms": "clock:not-before-now",
+        "replay_cursor": "nonnegative-integer",
+        "observed_cancel_sequence": "nonnegative-integer: acknowledged by domain settlement handler",
+        "observed_wake_sequence": "optional nonnegative-integer: fixed claim observation, legacy default zero"
+      },
+      "atomic": [
+        "live claim proof",
+        "running -> suspended",
+        "release lease and claim authority; retain last holder identity as diagnostic evidence",
+        "queue at available time",
+        "monotonic replay cursor",
+        "an unseen cancellation forces immediate availability; acknowledged cancellation may back off while effects settle",
+        "an unseen domain wake forces immediate availability; heartbeat observations never acknowledge a domain wake"
+      ],
+      "replay": "same suspended fencing token, available time, and cursor; no lease or schedule extension"
+    },
+    "worker_job.request_cancel": {
+      "suspended": "request cancellation, retain suspended state, wake immediately for domain settlement; never mark an active external effect terminal"
+    },
+    "worker_job.claim_next": {
+      "suspended": "same priority/availability order as queued jobs; new claim advances fencing token and attempt number"
+    }
+  },
+  "invariants": [
+    "Only a running claim with the matching owner/token and unexpired lease can emit progress or external effects.",
+    "Suspension is durable nonterminal waiting. It holds no executor or heartbeat thread.",
+    "Cancellation of a suspended job wakes domain settlement instead of completing unknown external effects.",
+    "The canonical runner invokes a registered cancellation handler before terminal settlement when a domain requires cleanup.",
+    "Terminal domain accounting settles before terminal worker-job accounting.",
+    "Claim, defer, cancel and complete update every affected index in the same transaction.",
+    "SQLite serializes the writer; PostgreSQL cancel, defer and automation progress hold the current worker row through commit; native OCC validates its current-job dependency.",
+    "Only the current backend epoch and backend-owned advancing clock prove or extend a live lease; delayed or forged caller clocks cannot revive one."
+  ],
+  "leaseAuthority": {
+    "clock": "backend-owned UTC-offset high-water plus monotonic elapsed time",
+    "lifetime": "native/SQLite: existing shared store epoch; PostgreSQL: random named server-shared clock epoch scoped by database OID; never a Sidecar-local UUID",
+    "callerTime": "now_ms is observation/evidence only; never a live-lease proof or lease extension",
+    "restart": "previous-epoch claims fail closed and indexed recovery advances the existing fencing token",
+    "legacy": "empty epoch is non-live; indexed recovery adopts a new epoch without rewriting user state",
+    "leaseIndexMarker": 255,
+    "epochCharacters": 32,
+    "maximumLeaseProbesPerKind": 4,
+    "maximumLeaseMilliseconds": 300000,
+    "serverClock": {
+      "format": "tofu.worker-lease-clock/v1",
+      "minimumPostgresMajor": 17,
+      "maximumStateBytes": 128,
+      "fields": [
+        "format",
+        "epoch",
+        "nowMs",
+        "utcMs",
+        "stateBytes"
+      ]
+    },
+    "eligibilityClock": "backend-owned current UTC; absolute queue availability never uses the advancing lease high-water"
+  },
+  "wakeAuthority": {
+    "field": "wake_sequence",
+    "legacyDefault": 0,
+    "sqlSchemaVersion": 65,
+    "lifetime": "bounded canonical job field; no wake ledger or resident waiter",
+    "authority": "only an owner/tenant-proved domain transition advances the counter and availability atomically",
+    "claimObservation": "captured at claim; never advanced by heartbeat or cached run reads",
+    "deferral": "unseen wake wins over an older requested availability"
+  }
+}

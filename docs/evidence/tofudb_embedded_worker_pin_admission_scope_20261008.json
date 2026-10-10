@@ -1,0 +1,27 @@
+{
+  "scope": "Frozen014bb source and earlier observer-enabled original1000 harness. Source worker formula and pin ceiling, not measured instantaneous worker occupancy.",
+  "source_hashes": {
+    "packages/tofu-db/src/embed_ffi.rs": "2ec7839b36f4960872411f219fc56236d558996d4f107248d1642eb36af1d75a",
+    "packages/tofu-db/src/embed_job_queue.rs": "1e19f2a80df3eb543499ccd6884f84982285d427a3694aef95ef518c67a56517",
+    "packages/tofu-db/src/server.rs": "324175c3ff665b979ff07d1c39bc239c178e4137c4fb4f8f58c53b7ab8fe6e10",
+    "packages/tofu-db/src/entity.rs": "fc2a46698e9d4acc684681e7a0cc786ba602d6e840557f7907955461682de147"
+  },
+  "resource_snapshot": {
+    "logical_cpus": 63,
+    "maximum_connections": 512,
+    "worker_formula": "max(1,min(2*logical_cpus,maximum_connections))",
+    "derived_worker_count": 126,
+    "reader_pin_ceiling": 56,
+    "total_pin_ceiling": 64,
+    "writer_reserved_handles": 8
+  },
+  "finding": "Embedded worker dispatch calls server preparation and may block in reserve_until while owning worker execution. Current FIFO reader admission is already outside authority and retains fair/cancellable checks. Source worker count exceeds reader preparation ceiling; this alone is not proof of harmful oversubscription or current health starvation.",
+  "decision": "Investigate whether blocked preparation can await capacity before consuming a worker while retaining request bytes/deadline/watchdog ownership and allowing query/control work. Do not cap hardware utilization to56, duplicate admission authority, drop pins early or repeat naive pin ceiling increase.",
+  "unmeasured": [
+    "Actual active and blocked worker occupancy",
+    "Operation-class head-of-line interference",
+    "Query/control tail latency during a write burst",
+    "Macro effect of pre-worker admission"
+  ],
+  "runtime_changes": false
+}

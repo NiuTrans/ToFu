@@ -1,0 +1,74 @@
+/* Interactive outline gate (A6): the workUnit card doubles as the review
+ * surface while the deck parks before authoring. Bounded page list; the
+ * answer posts to the shared human-response endpoint. */
+.ptool-wu-gate {
+  margin: 2px var(--space-2) var(--space-2) var(--space-6);
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent, #3b82f6) 5%, transparent);
+}
+.ptool-wu-gate-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  color: var(--accent, #3b82f6);
+}
+.ptool-wu-gate-deck {
+  margin-top: 4px;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.ptool-wu-gate-pages {
+  margin: 6px 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.ptool-wu-gate-page {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.ptool-wu-gate-page-n {
+  flex: none;
+  min-width: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ptool-wu-gate-page-type {
+  flex: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  opacity: 0.75;
+}
+.ptool-wu-gate-page-msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ptool-wu-gate-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid var(--border-color, rgba(128,128,128,0.3));
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary, transparent);
+  color: var(--text-primary);
+  font-size: var(--font-size-xs);
+  padding: 6px 8px;
+}
+.ptool-wu-gate-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: 6px;
+}
+.ptool-wu-gate-done {
+  opacity: 0.6;
+}

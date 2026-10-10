@@ -1,0 +1,5230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Goal-only evolution run and durable stage receipts",
+  "$defs": {
+    "review_format_normalization": {
+      "type": "object",
+      "required": [
+        "source",
+        "json_offset",
+        "json_end",
+        "wrapped_json",
+        "field_paths"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source_ref"
+        },
+        "json_offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "json_end": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "wrapped_json": {
+          "type": "boolean"
+        },
+        "field_paths": {
+          "type": "array",
+          "maxItems": 56,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^/(criterion_results/[0-2]/evidence_ref|requirement_results/([0-9]|[12][0-9]|3[01])/evidence_ref|evidence_audit/objections/[0-7]/(claim|evidence_ref)|consumer_assessment/note|hypothesis_assessment/(problem|feasibility|novelty|net_value)/evidence_ref)$",
+            "maxLength": 64
+          }
+        }
+      },
+      "description": "Server-owned lossless projection of a unique complete archived reviewer JSON object. Original verdicts are unchanged; field_paths identify full strings represented by digest-bound pointers. Source offset/end bound the exact JSON within the preserved original response."
+    },
+    "source_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "source_sha256",
+        "total_chars"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "total_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_kind": {
+          "enum": [
+            "deliverable",
+            "tool_evidence",
+            "artifact_evidence",
+            "background_evidence"
+          ]
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "source_read_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "read"
+          ]
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6000
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "after": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "program_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_kind": {
+          "enum": [
+            "deliverable",
+            "tool_evidence",
+            "artifact_evidence",
+            "background_evidence"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "read"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "run_id",
+              "task_id",
+              "source_sha256"
+            ]
+          }
+        }
+      ]
+    },
+    "source_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "ranges"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source_ref"
+        },
+        "ranges": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "historical_target": {
+          "$ref": "#/$defs/historical_source_target"
+        }
+      }
+    },
+    "review_read_progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "sources",
+        "all_sources_delivered",
+        "next_action",
+        "evidence_status"
+      ],
+      "properties": {
+        "basis": {
+          "const": "successful_final_provider_inputs_before_this_response"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "delivered_chars",
+              "fully_delivered",
+              "next_unread_offset"
+            ],
+            "properties": {
+              "source": {
+                "$ref": "#/$defs/source_ref"
+              },
+              "delivered_chars": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "fully_delivered": {
+                "type": "boolean"
+              },
+              "next_unread_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "all_sources_delivered": {
+          "type": "boolean"
+        },
+        "next_action": {
+          "enum": [
+            "read_missing_sources",
+            "submit_independent_review"
+          ]
+        },
+        "evidence_status": {
+          "const": "source_access_only; no correctness or value verdict"
+        }
+      }
+    },
+    "process_owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "boot",
+        "pid_namespace",
+        "pid",
+        "started"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "boot": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "pid_namespace": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "maxLength": 32
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "started": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "maxLength": 32
+        }
+      }
+    },
+    "stage_loss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "stage",
+        "episode_id",
+        "intent_id",
+        "created_at",
+        "admitted_recovery",
+        "owner"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "stage": {
+          "enum": [
+            "executing",
+            "reviewing"
+          ]
+        },
+        "episode_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "intent_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "admitted_recovery": {
+          "type": "boolean"
+        },
+        "owner": {
+          "$ref": "#/$defs/process_owner"
+        }
+      }
+    },
+    "stage_launch_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "intent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "stage": {
+          "enum": [
+            "executing",
+            "reviewing"
+          ]
+        },
+        "task_config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "intent_id",
+        "stage"
+      ]
+    },
+    "stage_launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "stage": {
+          "enum": [
+            "executing",
+            "reviewing"
+          ]
+        },
+        "source_task_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200000
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "task_config": {
+          "$ref": "#/$defs/stage_task_config"
+        },
+        "task_config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "launch_epoch_id": {
+          "type": "string",
+          "pattern": "^stage-[0-9a-f]{32}$"
+        },
+        "supersedes": {
+          "$ref": "#/$defs/stage_launch_ref"
+        },
+        "model_change_request": {
+          "$ref": "#/$defs/role_model_update"
+        }
+      },
+      "required": [
+        "schema_version",
+        "run_id",
+        "stage",
+        "source_task_id",
+        "prompt",
+        "created_at"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {
+                "required": [
+                  "task_config"
+                ]
+              },
+              {
+                "required": [
+                  "task_config_sha256"
+                ]
+              },
+              {
+                "required": [
+                  "launch_epoch_id"
+                ]
+              },
+              {
+                "required": [
+                  "supersedes"
+                ]
+              },
+              {
+                "required": [
+                  "model_change_request"
+                ]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "task_config_sha256",
+              "launch_epoch_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "supersedes"
+            ]
+          },
+          "then": {
+            "required": [
+              "task_config",
+              "model_change_request"
+            ]
+          }
+        }
+      ]
+    },
+    "acceptance_requirements": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 600,
+        "pattern": "\\S"
+      }
+    },
+    "requested_budget": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "description": "Optional cumulative limits; omitted, null or 0 dimensions are unlimited. Positive integers impose limits.",
+      "properties": {
+        "max_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_wall_clock_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_tool_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "required": [
+        "objective"
+      ],
+      "properties": {
+        "max_review_recoveries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "max_review_format_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "project_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "budget": {
+          "$ref": "#/$defs/requested_budget"
+        },
+        "acceptance_requirements": {
+          "$ref": "#/$defs/acceptance_requirements"
+        },
+        "max_attempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Inclusive execution attempts; omitted, null or 0 is unlimited, 1 disables automatic repair."
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "model": {
+          "$ref": "#/$defs/model_ref"
+        },
+        "role_models": {
+          "$ref": "#/$defs/role_models"
+        },
+        "domain": {
+          "type": "string",
+          "enum": [
+            "general",
+            "research"
+          ],
+          "default": "general"
+        },
+        "research": {
+          "type": "object",
+          "properties": {
+            "lang": {
+              "type": "string",
+              "enum": [
+                "zh",
+                "en"
+              ]
+            },
+            "n_ideas": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 12
+            },
+            "seed_arxiv_ids": {
+              "type": "array",
+              "maxItems": 20,
+              "items": {
+                "type": "string",
+                "maxLength": 40
+              }
+            },
+            "harvest_n": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 200
+            },
+            "model": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "additionalProperties": false
+        },
+        "review_reserve": {
+          "$ref": "#/$defs/review_reserve"
+        },
+        "require_command_execution": {
+          "type": "boolean",
+          "description": "Current executor must retain correlated successful run_command output before review."
+        },
+        "scientific_protocol": {
+          "$ref": "#/$defs/scientific_protocol"
+        },
+        "scientific_required_outcome": {
+          "$ref": "#/$defs/scientific_required_outcome"
+        },
+        "validation_preregistration_target": {
+          "$ref": "#/$defs/validation_preregistration_target"
+        },
+        "require_requirement_originals": {
+          "const": true,
+          "description": "Frozen requirement-original gate: every passing requirement needs complete delivered original references."
+        }
+      },
+      "additionalProperties": false,
+      "dependentRequired": {
+        "scientific_required_outcome": [
+          "scientific_protocol"
+        ]
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": [
+        "criterion_results"
+      ],
+      "properties": {
+        "criterion_results": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": [
+              "criterion_id",
+              "outcome",
+              "evidence_ref"
+            ],
+            "properties": {
+              "criterion_id": {
+                "enum": [
+                  "objective",
+                  "evidence",
+                  "delivery"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "pass",
+                  "fail",
+                  "unknown"
+                ]
+              },
+              "evidence_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "requirement_results": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requirement_id",
+              "outcome",
+              "evidence_ref"
+            ],
+            "properties": {
+              "requirement_id": {
+                "type": "string",
+                "pattern": "^requirement-[1-9][0-9]?$"
+              },
+              "outcome": {
+                "enum": [
+                  "pass",
+                  "fail",
+                  "unknown"
+                ]
+              },
+              "evidence_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "original_sources": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/source_ref"
+                },
+                "description": "Exact current executor originals or v3 originals with successful, scoped frozen-program history delivery; native acceptance checks owned identity and complete reviewer input delivery."
+              }
+            }
+          }
+        },
+        "consumer_assessment": {
+          "type": "object",
+          "required": [
+            "meaningful_to_consumer"
+          ],
+          "properties": {
+            "meaningful_to_consumer": {
+              "enum": [
+                "yes",
+                "no",
+                "unclear"
+              ]
+            },
+            "note": {
+              "type": "string",
+              "maxLength": 300
+            }
+          },
+          "additionalProperties": false,
+          "description": "Advisory only, never part of the verdict: is the deliverable/interface meaningful to its consumer (model or human)? Persistent 'no' clusters signal a rubric that measures the wrong thing."
+        },
+        "hypothesis_assessment": {
+          "$ref": "#/$defs/hypothesis_assessment"
+        },
+        "evidence_audit": {
+          "$ref": "#/$defs/evidence_audit"
+        }
+      },
+      "additionalProperties": false
+    },
+    "answer": {
+      "type": "object",
+      "required": [
+        "guidance_id",
+        "response"
+      ],
+      "properties": {
+        "guidance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "response": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        }
+      },
+      "additionalProperties": false
+    },
+    "pending_question": {
+      "type": "object",
+      "required": [
+        "guidance_id",
+        "question",
+        "response_type",
+        "options",
+        "questions"
+      ],
+      "properties": {
+        "guidance_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "question": {
+          "type": "string"
+        },
+        "response_type": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "questions": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "required": [
+              "question",
+              "response_type"
+            ],
+            "properties": {
+              "question": {
+                "type": "string"
+              },
+              "response_type": {
+                "type": "string"
+              },
+              "options": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "model_options": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "required": [
+          "model",
+          "label"
+        ],
+        "properties": {
+          "model": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "creator_id",
+                  "model_id"
+                ],
+                "properties": {
+                  "creator_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "provider_id",
+                  "offering_id"
+                ],
+                "properties": {
+                  "provider_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "offering_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "run_summary": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "objective",
+        "status",
+        "task_id",
+        "attempt",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,160}$"
+        },
+        "objective": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "status": {
+          "enum": [
+            "preparing",
+            "executing",
+            "reviewing",
+            "settling",
+            "completed",
+            "needs_attention",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "material_request": {
+      "type": "object",
+      "required": [
+        "kind",
+        "title",
+        "url"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "paper",
+            "repository",
+            "web",
+            "dataset",
+            "other"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "url": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 2000,
+          "pattern": "^https?://"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        }
+      },
+      "additionalProperties": false
+    },
+    "material": {
+      "type": "object",
+      "required": [
+        "kind",
+        "title",
+        "url",
+        "note",
+        "material_id",
+        "run_id",
+        "origin",
+        "task_id",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "paper",
+            "repository",
+            "web",
+            "dataset",
+            "other"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "url": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 2000,
+          "pattern": "^https?://"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "material_id": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 64
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "origin": {
+          "enum": [
+            "user",
+            "agent"
+          ]
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "created_at": {
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "library": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "materials"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "materials": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/material"
+          }
+        },
+        "coordination": {
+          "$ref": "#/$defs/goal_coordination"
+        }
+      },
+      "additionalProperties": false
+    },
+    "workspace": {
+      "type": "object",
+      "required": [
+        "materials",
+        "stages",
+        "criteria"
+      ],
+      "properties": {
+        "materials": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/material"
+          }
+        },
+        "stages": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 80
+              },
+              "detail": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 1000
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "criteria": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "required": [
+              "criterion_id",
+              "requirement"
+            ],
+            "properties": {
+              "criterion_id": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 96
+              },
+              "requirement": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 1000
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "material_tool_request": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "paper",
+            "repository",
+            "web",
+            "dataset",
+            "other"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240
+        },
+        "url": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 2000,
+          "pattern": "^https?://"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "action": {
+          "enum": [
+            "save",
+            "list"
+          ],
+          "default": "save"
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        }
+      },
+      "additionalProperties": false
+    },
+    "goal_update_request": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "message",
+            "guidance",
+            "experiment"
+          ]
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 4000,
+          "minLength": 1
+        },
+        "references": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "goal_update": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "event_id": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "kind": {
+          "enum": [
+            "message",
+            "guidance",
+            "experiment",
+            "assignment",
+            "material_saved",
+            "material_removed",
+            "reply",
+            "run_result"
+          ]
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 8000
+        },
+        "references": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "origin": {
+          "enum": [
+            "user",
+            "agent",
+            "system"
+          ]
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "target": {
+          "enum": [
+            "all",
+            "coordinator",
+            "executing",
+            "reviewing"
+          ]
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "description": "Presented owner update that motivated this assignment; required for assign."
+        }
+      },
+      "required": [
+        "seq",
+        "event_id",
+        "kind",
+        "content",
+        "references",
+        "origin",
+        "task_id",
+        "target",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "goal_ack": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "role": {
+          "enum": [
+            "all",
+            "coordinator",
+            "executing",
+            "reviewing"
+          ]
+        },
+        "through_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "decision": {
+          "enum": [
+            "accepted",
+            "not_applicable",
+            "conflict"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "task_id",
+        "role",
+        "through_seq",
+        "decision",
+        "note"
+      ],
+      "additionalProperties": false
+    },
+    "goal_manager": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "status": {
+          "enum": [
+            "idle",
+            "running",
+            "needs_attention"
+          ]
+        },
+        "through_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "last_response": {
+          "type": "string",
+          "maxLength": 8000
+        }
+      },
+      "required": [
+        "enabled",
+        "task_id",
+        "status",
+        "through_seq",
+        "turns",
+        "tokens",
+        "tool_calls",
+        "error",
+        "last_response"
+      ],
+      "additionalProperties": false
+    },
+    "goal_coordination": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "updates": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/goal_update"
+          }
+        },
+        "acks": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/goal_ack"
+          }
+        },
+        "manager": {
+          "$ref": "#/$defs/goal_manager"
+        },
+        "followup": {
+          "type": "object",
+          "required": [
+            "request_id",
+            "content",
+            "context_seed",
+            "source_revision",
+            "status",
+            "run_id"
+          ],
+          "properties": {
+            "request_id": {
+              "type": "string",
+              "maxLength": 160
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 4000
+            },
+            "context_seed": {
+              "type": "string",
+              "maxLength": 24000
+            },
+            "source_revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "submitted"
+              ]
+            },
+            "run_id": {
+              "type": "string",
+              "maxLength": 160
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "revision",
+        "updates",
+        "acks",
+        "manager"
+      ],
+      "additionalProperties": false
+    },
+    "goal_coordination_tool": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "enum": [
+            "read",
+            "ack",
+            "assign",
+            "report",
+            "detail",
+            "delivery",
+            "submit_result"
+          ]
+        },
+        "after": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "through_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "decision": {
+          "enum": [
+            "accepted",
+            "not_applicable",
+            "conflict"
+          ]
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "references": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "source_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "description": "Presented owner update that motivated this assignment; required for assign."
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "assign"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "source_seq": {}
+            },
+            "required": [
+              "source_seq"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "submit_result"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "content"
+            ],
+            "properties": {
+              "content": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "coordination_page": {
+      "type": "object",
+      "properties": {
+        "updates": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object"
+          }
+        },
+        "through_seq": {
+          "type": "integer"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "has_earlier": {
+          "type": "boolean"
+        },
+        "before_seq": {
+          "type": "integer"
+        },
+        "delivery": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "saved",
+                  "considered",
+                  "assigned",
+                  "accepted",
+                  "not_applicable",
+                  "conflict"
+                ]
+              },
+              "note": {
+                "type": "string"
+              },
+              "assignment_seq": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "status",
+              "note"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "acknowledgements": {
+          "type": "array"
+        },
+        "coordinator": {
+          "$ref": "#/$defs/goal_manager"
+        },
+        "followup": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "updates",
+        "revision",
+        "delivery",
+        "coordinator",
+        "has_earlier",
+        "before_seq"
+      ],
+      "additionalProperties": false
+    },
+    "role_models": {
+      "type": "object",
+      "properties": {
+        "executor": {
+          "$ref": "#/$defs/model_ref"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/model_ref"
+        },
+        "coordinator": {
+          "$ref": "#/$defs/model_ref"
+        }
+      },
+      "additionalProperties": false
+    },
+    "role_model_update": {
+      "type": "object",
+      "required": [
+        "role",
+        "model"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "executor",
+            "reviewer",
+            "coordinator"
+          ]
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/model_ref"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "model_ref": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "creator_id",
+            "model_id"
+          ],
+          "properties": {
+            "creator_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "model_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "provider_id",
+            "offering_id"
+          ],
+          "properties": {
+            "provider_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "offering_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "stage_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_coverage": {
+          "$ref": "#/$defs/source_coverage"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "revision": {
+          "type": "integer",
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "archive_state": {
+          "enum": [
+            "collecting",
+            "sealed"
+          ]
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "episode_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "intent_id": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "stage": {
+          "enum": [
+            "executing",
+            "reviewing"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "done",
+            "error",
+            "aborted",
+            "interrupted"
+          ]
+        },
+        "finish_reason": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "stream_state": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "execution_limit_reason": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "actuals": {
+          "$ref": "#/$defs/actuals"
+        },
+        "actuals_complete": {
+          "type": "boolean"
+        },
+        "content_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_parts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "review_prompt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200000
+        },
+        "created_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "model": {
+          "$ref": "#/$defs/model_ref"
+        },
+        "terminal_verdict": {
+          "$ref": "#/$defs/terminal_verdict"
+        },
+        "tool_evidence": {
+          "$ref": "#/$defs/tool_evidence_descriptor"
+        },
+        "tool_evidence_coverage": {
+          "$ref": "#/$defs/source_coverage"
+        },
+        "artifact_evidence": {
+          "$ref": "#/$defs/artifact_evidence_descriptor"
+        },
+        "artifact_evidence_coverage": {
+          "$ref": "#/$defs/source_coverage"
+        },
+        "command_execution_observed": {
+          "type": "boolean",
+          "description": "Server-derived current task command observation at immutable terminal capture; not experiment correctness."
+        },
+        "pending_background_commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "command_id",
+              "source_tool_call_id"
+            ],
+            "properties": {
+              "command_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_tool_call_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "minItems": 1
+        },
+        "background_evidence": {
+          "$ref": "#/$defs/background_evidence"
+        },
+        "background_command_execution_observed": {
+          "type": "boolean"
+        },
+        "background_evidence_coverage": {
+          "$ref": "#/$defs/source_coverage"
+        },
+        "scientific_audit": {
+          "$ref": "#/$defs/scientific_audit"
+        },
+        "scientific_protocol": {
+          "$ref": "#/$defs/scientific_protocol"
+        },
+        "scientific_required_outcome": {
+          "$ref": "#/$defs/scientific_required_outcome"
+        },
+        "validation_preregistration_target": {
+          "$ref": "#/$defs/validation_preregistration_target"
+        },
+        "validation_preregistration_observed": {
+          "type": "boolean"
+        },
+        "historical_source_coverage": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/source_coverage"
+          },
+          "description": "Successful reviewer provider-input receipts for owned historical originals; v1/v2 remain direct-parent scoped, v3 admits frozen program history. Distinct from current submission coverage."
+        },
+        "require_requirement_originals": {
+          "const": true,
+          "description": "Frozen requirement-original gate: every passing requirement needs complete delivered original references."
+        }
+      },
+      "required": [
+        "schema_version",
+        "revision",
+        "archive_state",
+        "run_id",
+        "task_id",
+        "episode_id",
+        "intent_id",
+        "stage",
+        "attempt",
+        "status",
+        "finish_reason",
+        "stream_state",
+        "error",
+        "execution_limit_reason",
+        "actuals",
+        "actuals_complete",
+        "content_chars",
+        "content_parts",
+        "content_sha256",
+        "review_prompt",
+        "created_at",
+        "terminal_verdict"
+      ],
+      "dependentRequired": {
+        "scientific_protocol": [
+          "scientific_audit"
+        ],
+        "scientific_audit": [
+          "scientific_protocol"
+        ],
+        "scientific_required_outcome": [
+          "scientific_protocol"
+        ],
+        "validation_preregistration_target": [
+          "validation_preregistration_observed"
+        ]
+      }
+    },
+    "stage_outcome_part": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 30000
+        },
+        "part_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_kind": {
+          "enum": [
+            "deliverable",
+            "tool_evidence",
+            "artifact_evidence",
+            "background_evidence"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "run_id",
+        "task_id",
+        "ordinal",
+        "offset",
+        "source_sha256",
+        "text",
+        "part_sha256"
+      ]
+    },
+    "stage_outcome_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "stage": {
+          "enum": [
+            "executing",
+            "reviewing"
+          ]
+        },
+        "status": {
+          "enum": [
+            "done",
+            "error",
+            "aborted",
+            "interrupted"
+          ]
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 6000
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next_offset": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "archive_state": {
+          "enum": [
+            "collecting",
+            "sealed"
+          ]
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "actuals": {
+          "$ref": "#/$defs/actuals"
+        },
+        "actuals_complete": {
+          "type": "boolean"
+        },
+        "terminal_verdict": {
+          "$ref": "#/$defs/terminal_verdict"
+        },
+        "source_kind": {
+          "enum": [
+            "deliverable",
+            "tool_evidence",
+            "artifact_evidence",
+            "background_evidence"
+          ]
+        },
+        "tool_evidence_available": {
+          "type": "boolean"
+        },
+        "tool_evidence_scope": {
+          "enum": [
+            "terminal_retained_tool_messages",
+            "terminal_retained_tool_messages_and_background_completions",
+            "terminal_retained_tool_messages_and_scientific_command_originals",
+            "terminal_retained_tool_messages_and_background_completions_and_scientific_command_originals"
+          ]
+        },
+        "artifact_evidence_available": {
+          "type": "boolean"
+        },
+        "artifact_evidence_scope": {
+          "$ref": "#/$defs/artifact_evidence_scope"
+        },
+        "artifact_evidence_complete": {
+          "type": "boolean"
+        },
+        "background_evidence_available": {
+          "type": "boolean"
+        },
+        "background_evidence_scope": {
+          "const": "owned_background_command_completions"
+        }
+      },
+      "required": [
+        "task_id",
+        "stage",
+        "status",
+        "content",
+        "offset",
+        "total_chars",
+        "next_offset",
+        "archive_state",
+        "source_sha256",
+        "actuals",
+        "actuals_complete",
+        "terminal_verdict"
+      ]
+    },
+    "actuals": {
+      "type": "object",
+      "required": [
+        "tokens",
+        "wall_clock_seconds",
+        "tool_calls"
+      ],
+      "properties": {
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_clock_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "terminal_verdict": {
+      "enum": [
+        "completed",
+        "interrupted",
+        "truncated",
+        "failed"
+      ]
+    },
+    "tool_evidence_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_parts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "message_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scope": {
+          "enum": [
+            "terminal_retained_tool_messages",
+            "terminal_retained_tool_messages_and_background_completions",
+            "terminal_retained_tool_messages_and_scientific_command_originals",
+            "terminal_retained_tool_messages_and_background_completions_and_scientific_command_originals"
+          ]
+        },
+        "preview_truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content_chars",
+        "content_parts",
+        "content_sha256",
+        "message_count",
+        "scope",
+        "preview_truncated"
+      ]
+    },
+    "prepared_input_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "sha256"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "prepared_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "intent_id",
+        "task_id",
+        "user_id",
+        "stage",
+        "created_at",
+        "messages",
+        "config",
+        "attended"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "intent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stage": {
+          "enum": [
+            "executing",
+            "reviewing"
+          ]
+        },
+        "created_at": {
+          "type": "number",
+          "minimum": 0
+        },
+        "messages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": {
+            "type": "object"
+          }
+        },
+        "config": {
+          "type": "object"
+        },
+        "attended": {
+          "type": "boolean"
+        }
+      }
+    },
+    "terminal_checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "owner_user_id",
+        "content_epoch",
+        "dispatch",
+        "outcome"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "owner_user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dispatch": {
+          "$ref": "#/$defs/stage_dispatch"
+        },
+        "outcome": {
+          "$ref": "#/$defs/stage_outcome"
+        }
+      },
+      "description": "Server-owned terminal metadata committed atomically in the owned task result after all immutable source parts are acknowledged. Parts alone authorize no progression."
+    },
+    "stage_dispatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "intent_id",
+        "birth_version",
+        "state"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "intent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "birth_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "enum": [
+            "bound",
+            "admitted",
+            "refused"
+          ]
+        },
+        "prepared_input": {
+          "$ref": "#/$defs/prepared_input_ref"
+        },
+        "replaces_task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        }
+      },
+      "description": "Server-owned CAS fence between binding and submission. Bound resident carriers resume in their recorded process. One cold restoration per frozen stage requires exact prepared input, proven process death and an unchanged administrator-interrupted birth. Admitted never authorizes replay."
+    },
+    "exploration_hypothesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "problem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S"
+        },
+        "audience": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S"
+        },
+        "baseline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S"
+        },
+        "scenario": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S"
+        },
+        "mechanism": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S"
+        },
+        "expected_value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S"
+        },
+        "falsifier": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "\\S"
+        },
+        "assumptions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600,
+            "pattern": "\\S"
+          }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600,
+            "pattern": "\\S"
+          }
+        }
+      },
+      "required": [
+        "problem",
+        "audience",
+        "baseline",
+        "scenario",
+        "mechanism",
+        "expected_value",
+        "falsifier",
+        "assumptions",
+        "evidence_refs"
+      ]
+    },
+    "hypothesis_assessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hypothesis_sha256",
+        "problem",
+        "feasibility",
+        "novelty",
+        "net_value"
+      ],
+      "properties": {
+        "hypothesis_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "problem": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "evidence_ref"
+          ],
+          "properties": {
+            "outcome": {
+              "enum": [
+                "pass",
+                "fail",
+                "unknown"
+              ]
+            },
+            "evidence_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
+            }
+          }
+        },
+        "feasibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "evidence_ref"
+          ],
+          "properties": {
+            "outcome": {
+              "enum": [
+                "pass",
+                "fail",
+                "unknown"
+              ]
+            },
+            "evidence_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
+            }
+          }
+        },
+        "novelty": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "evidence_ref"
+          ],
+          "properties": {
+            "outcome": {
+              "enum": [
+                "pass",
+                "fail",
+                "unknown"
+              ]
+            },
+            "evidence_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
+            }
+          }
+        },
+        "net_value": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "evidence_ref"
+          ],
+          "properties": {
+            "outcome": {
+              "enum": [
+                "pass",
+                "fail",
+                "unknown"
+              ]
+            },
+            "evidence_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
+            }
+          }
+        }
+      },
+      "description": "Independent reviewer judgments tied to the exact frozen hypothesis. Separate evidence axes; technical success never establishes demand or net value. Does not replace acceptance or grant learning rights."
+    },
+    "artifact_declare_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "delivery": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24000,
+          "pattern": "\\S",
+          "description": "Explicit final reply. Only as the sole tool call of the final executor round after verification; requests frozen artifacts plus normal terminal delivery, never acceptance."
+        },
+        "delivery_source": {
+          "$ref": "#/$defs/artifact_delivery_source"
+        },
+        "fingerprint_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Read-only streaming SHA-256 of a stable project file; no contents retained or execution proof."
+        },
+        "fingerprint_scope_field": {
+          "enum": [
+            "dataset_digest",
+            "split_digest",
+            "candidate_digest",
+            "baseline_digest"
+          ],
+          "description": "Compare raw-file SHA-256 with this field in the current run frozen measurement_scope; caller cannot substitute an expected digest. Does not prove execution or input use."
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "path"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "paths"
+                ]
+              },
+              {
+                "required": [
+                  "delivery_source"
+                ]
+              },
+              {
+                "required": [
+                  "fingerprint_path"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "paths"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "path"
+                ]
+              },
+              {
+                "required": [
+                  "delivery_source"
+                ]
+              },
+              {
+                "required": [
+                  "fingerprint_path"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "delivery_source"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "path"
+                ]
+              },
+              {
+                "required": [
+                  "paths"
+                ]
+              },
+              {
+                "required": [
+                  "delivery"
+                ]
+              },
+              {
+                "required": [
+                  "fingerprint_path"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "fingerprint_path"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "path"
+                ]
+              },
+              {
+                "required": [
+                  "paths"
+                ]
+              },
+              {
+                "required": [
+                  "delivery"
+                ]
+              },
+              {
+                "required": [
+                  "delivery_source"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "description": "Capture one path or up to16 unique paths, optionally with an authored delivery. Alternatively select delivery_source only to deliver the exact already sealed UTF-8 body via the live terminal port. Batch captures are independent, not atomic.",
+      "dependentRequired": {
+        "fingerprint_scope_field": [
+          "fingerprint_path"
+        ]
+      }
+    },
+    "artifact_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "captured_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99999999999
+        },
+        "encoding": {
+          "enum": [
+            "utf-8",
+            "base64"
+          ]
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2097152
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "encoded_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "content_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 12582912
+        },
+        "content_parts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 420
+        },
+        "entry_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        },
+        "state": {
+          "enum": [
+            "collecting",
+            "sealed",
+            "unavailable"
+          ]
+        }
+      },
+      "required": [
+        "artifact_id",
+        "run_id",
+        "task_id",
+        "relative_path",
+        "captured_at",
+        "encoding",
+        "bytes",
+        "content_sha256",
+        "encoded_sha256",
+        "content_chars",
+        "content_parts",
+        "entry_bytes",
+        "state"
+      ]
+    },
+    "artifact_snapshot_part": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 419
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 30000
+        },
+        "part_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "run_id",
+        "task_id",
+        "ordinal",
+        "text",
+        "part_sha256"
+      ]
+    },
+    "artifact_evidence_descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_parts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifact_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "raw_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8388608
+        },
+        "scope": {
+          "$ref": "#/$defs/artifact_evidence_scope"
+        },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content_chars",
+        "content_parts",
+        "content_sha256",
+        "artifact_count",
+        "raw_bytes",
+        "scope",
+        "manifest_sha256",
+        "complete"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "declared_project_artifact_snapshots"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "content_chars": {
+                "maximum": 16777216
+              },
+              "content_parts": {
+                "maximum": 560
+              },
+              "artifact_count": {
+                "maximum": 16
+              }
+            }
+          }
+        }
+      ]
+    },
+    "artifact_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "project_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "snapshots": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/artifact_snapshot"
+          }
+        },
+        "delivery_intent": {
+          "$ref": "#/$defs/artifact_delivery_intent"
+        },
+        "fingerprint_log": {
+          "$ref": "#/$defs/artifact_fingerprint_log"
+        }
+      },
+      "required": [
+        "schema_version",
+        "run_id",
+        "task_id",
+        "project_path",
+        "closed",
+        "snapshots"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "delivery_intent"
+            ]
+          },
+          "then": {
+            "properties": {
+              "closed": {
+                "const": true
+              },
+              "snapshots": {
+                "minItems": 1,
+                "items": {
+                  "properties": {
+                    "state": {
+                      "const": "sealed"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "artifact_declare_batch_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "atomic": {
+          "const": false
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "results": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/artifact_declare_request/properties/path"
+              },
+              "snapshot": {
+                "$ref": "#/$defs/artifact_snapshot"
+              },
+              "error": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 400
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "oneOf": [
+              {
+                "required": [
+                  "snapshot"
+                ]
+              },
+              {
+                "required": [
+                  "error"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "run_id",
+        "task_id",
+        "atomic",
+        "complete",
+        "results"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "results": {
+                "items": {
+                  "required": [
+                    "snapshot"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Independent per-file declaration acknowledgements only; complete means every requested snapshot was sealed, not cross-file consistency, semantic correctness or review acceptance."
+    },
+    "review_reserve": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional amounts withheld from every executing attempt for independent review within the original cumulative budget. Zero/omitted means no reserve. Positive amounts require a strictly larger finite corresponding budget; estimates and provider overrun may still prevent review.",
+      "properties": {
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wall_clock_seconds": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "artifact_delivery_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tool_call_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "round_num": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "arguments_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24000,
+          "pattern": "\\S"
+        },
+        "delivery_source": {
+          "$ref": "#/$defs/artifact_delivery_source"
+        }
+      },
+      "required": [
+        "tool_call_id",
+        "round_num",
+        "arguments_sha256"
+      ],
+      "description": "Owner/run/task/project inherited from the manifest. Text delivery stores bounded authored content; source delivery stores only an immutable UTF-8 generation reference, its body remains in sealed parts. Neither intent authorizes cold completion or replay.",
+      "oneOf": [
+        {
+          "required": [
+            "content"
+          ],
+          "not": {
+            "required": [
+              "delivery_source"
+            ]
+          }
+        },
+        {
+          "required": [
+            "delivery_source"
+          ],
+          "not": {
+            "required": [
+              "content"
+            ]
+          }
+        }
+      ]
+    },
+    "artifact_delivery_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "content_sha256"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "description": "Exact already sealed UTF-8 generation owned by this executor, not a live file or an inferred claim."
+    },
+    "evidence_audit": {
+      "type": "object",
+      "required": [
+        "complete",
+        "objections"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "objections": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "criterion_id",
+              "classification",
+              "claim",
+              "evidence_ref"
+            ],
+            "properties": {
+              "criterion_id": {
+                "enum": [
+                  "objective",
+                  "evidence",
+                  "delivery"
+                ]
+              },
+              "requirement_id": {
+                "type": "string",
+                "pattern": "^requirement-[1-9][0-9]?$"
+              },
+              "classification": {
+                "enum": [
+                  "contradicted",
+                  "unverified"
+                ]
+              },
+              "claim": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "evidence_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            }
+          }
+        }
+      },
+      "description": "Unresolved material acceptance objections from independent review. Contradictions refuse pass, unsupported evidence remains unknown; an empty complete audit is a model judgment, not scientific proof."
+    },
+    "review_submit_request": {
+      "type": "object",
+      "required": [
+        "review"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "review": {
+          "$ref": "#/$defs/review"
+        }
+      }
+    },
+    "stage_task_config": {
+      "type": "object",
+      "required": [
+        "evolution",
+        "executionLimits"
+      ],
+      "properties": {
+        "evolution": {
+          "type": "object",
+          "required": [
+            "run_id",
+            "goal_id",
+            "plan_id",
+            "stage"
+          ],
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "goal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "plan_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "stage": {
+              "enum": [
+                "executing",
+                "reviewing"
+              ]
+            },
+            "project_path": {
+              "type": "string"
+            }
+          }
+        },
+        "executionLimits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_tokens",
+            "max_tool_calls",
+            "deadline"
+          ],
+          "properties": {
+            "max_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "max_tool_calls": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "deadline": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        }
+      },
+      "description": "Immutable pre-hook task settings. Submission may only tighten limits; explicit owner model changes create a linked successor.",
+      "x-frozenPermissionFields": [
+        "evolution",
+        "projectPath",
+        "projectPaths",
+        "projectEnabled",
+        "codeExecEnabled",
+        "fetchEnabled",
+        "searchMode",
+        "browserEnabled",
+        "desktopEnabled",
+        "imageGenEnabled",
+        "schedulerEnabled",
+        "humanGuidanceEnabled",
+        "memoryEnabled",
+        "preferencesEnabled",
+        "langCorrectionEnabled",
+        "humanFeedbackEnabled",
+        "toolSpecAllowlist",
+        "toolSpecDenylist",
+        "modelRef",
+        "model",
+        "responseFormat",
+        "compaction"
+      ]
+    },
+    "background_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_parts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "message_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scope": {
+          "const": "owned_background_command_completions"
+        },
+        "preview_truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content_chars",
+        "content_parts",
+        "content_sha256",
+        "message_count",
+        "scope",
+        "preview_truncated"
+      ]
+    },
+    "background_join": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "task_id",
+        "parent_sha256",
+        "background_evidence",
+        "command_execution_observed"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "parent_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "background_evidence": {
+          "$ref": "#/$defs/background_evidence"
+        },
+        "command_execution_observed": {
+          "type": "boolean"
+        },
+        "scientific_audit": {
+          "$ref": "#/$defs/scientific_audit"
+        }
+      }
+    },
+    "scientific_protocol": {
+      "allOf": [
+        {
+          "$ref": "https://tofu.local/contracts/research_program_v1.schema.json#/$defs/protocol"
+        },
+        {
+          "required": [
+            "decision_rule"
+          ],
+          "properties": {
+            "random_seeds": {
+              "minItems": 2,
+              "uniqueItems": true
+            },
+            "dataset": {
+              "minLength": 1
+            },
+            "baseline": {
+              "minLength": 1
+            },
+            "primary_metric": {
+              "minLength": 1
+            }
+          }
+        }
+      ],
+      "description": "Precommitted reported-observation consistency policy; canonical Research protocol, never inferred from terminal output. Implies current command evidence."
+    },
+    "scientific_audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_version",
+        "protocol_sha256",
+        "observation_count",
+        "failure_count",
+        "evidence_sum",
+        "outcomes"
+      ],
+      "properties": {
+        "audit_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "protocol_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "observation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failure_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "evidence_sum": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "outcomes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "supported",
+            "refuted",
+            "inconclusive"
+          ],
+          "properties": {
+            "supported": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "refuted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "inconclusive": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "capture_policy_version": {
+          "const": 1,
+          "description": "Current captured-output completeness policy. Optional in legacy archives; absence cannot establish current-policy validity."
+        }
+      },
+      "description": "Server recomputation over retained correlated command observations, not authenticity, full attempt completeness, formal significance or goal completion."
+    },
+    "scientific_required_outcome": {
+      "enum": [
+        "supported",
+        "refuted",
+        "inconclusive"
+      ],
+      "description": "Optional frozen numeric acceptance target. A review cannot override a valid measurement that misses this outcome."
+    },
+    "validation_preregistration_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "program_id",
+        "target_step_sha256"
+      ],
+      "properties": {
+        "program_id": {
+          "type": "string",
+          "pattern": "^program-[0-9a-f]{32}$"
+        },
+        "target_step_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "execution_checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "task_id",
+        "goal_id",
+        "plan_id",
+        "intent_id",
+        "schema_version",
+        "user_id",
+        "stage",
+        "birth_version",
+        "actuals"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "goal_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "plan_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "intent_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stage": {
+          "enum": [
+            "executing",
+            "reviewing"
+          ]
+        },
+        "birth_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "actuals": {
+          "$ref": "#/$defs/actuals"
+        }
+      },
+      "description": "Observed consumption lower bound from a running task checkpoint; no terminal outcome, completeness or replay authority."
+    },
+    "working_checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "input_sha256",
+        "phase",
+        "round",
+        "bank",
+        "part_count",
+        "byte_count",
+        "sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/execution_checkpoint"
+        },
+        "input_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "phase": {
+          "oneOf": [
+            {
+              "const": "ready",
+              "x-progress-order": 0
+            },
+            {
+              "const": "model_in_flight",
+              "x-progress-order": 1
+            },
+            {
+              "const": "tools_in_flight",
+              "x-progress-order": 2
+            },
+            {
+              "const": "terminal_delivery",
+              "x-progress-order": 3
+            }
+          ],
+          "description": "Progress order within one round; settlement advances the round. Terminal delivery cannot return to execution."
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bank": {
+          "enum": [
+            0,
+            1
+          ]
+        },
+        "part_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "byte_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "description": "Replaceable model working context; phase and binding are observations, never autonomous replay authority."
+    },
+    "working_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "messages",
+        "task_state",
+        "usage"
+      ],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "task_state": {
+          "type": "object",
+          "properties": {
+            "_todoState": {},
+            "_todos": {}
+          },
+          "additionalProperties": false
+        },
+        "usage": {
+          "type": "object"
+        },
+        "effects": {
+          "$ref": "#/$defs/continuity_effects"
+        }
+      }
+    },
+    "working_checkpoint_part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "index",
+        "data"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data": {
+          "type": "string",
+          "maxLength": 349528
+        },
+        "schema_version": {
+          "const": 2
+        }
+      },
+      "description": "Legacy unversioned sha256 binds the full body; v2 sha256 binds decoded frame bytes. The header always binds the complete body."
+    },
+    "working_checkpoint_bank": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "highwater"
+      ],
+      "properties": {
+        "highwater": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "continuity_account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_task_id",
+        "active_child_task_ids",
+        "pending_model_requests",
+        "unknown_usage"
+      ],
+      "properties": {
+        "root_task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "active_child_task_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "pending_model_requests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown_usage": {
+          "type": "boolean"
+        },
+        "model_attempts": {
+          "description": "Optional for older contexts; new producers retain every unfinished lease in account ordinal order. Absence means details were not recorded.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/continuity_model_attempt"
+          }
+        },
+        "pending_tool_attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pending_tool_attempt"
+          }
+        }
+      }
+    },
+    "continuity_effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "background"
+      ],
+      "properties": {
+        "account": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/continuity_account"
+            }
+          ]
+        },
+        "background": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "recovery_pending",
+            "commands"
+          ],
+          "properties": {
+            "recovery_pending": {
+              "type": "boolean"
+            },
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "command_id",
+                  "status"
+                ],
+                "properties": {
+                  "command_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
+                  "status": {
+                    "enum": [
+                      "running",
+                      "completed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "description": "Observed unfinished work; absent account, empty commands or ready phase grant no executor replay authority."
+    },
+    "prepared_input_manifest": {
+      "description": "Immutable multipart post-hook input; published only after all frames are acknowledged. The existing prepared_input_ref binds the complete canonical body digest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "task_id",
+        "user_id",
+        "sha256",
+        "byte_count",
+        "part_count"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "byte_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "part_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "prepared_input_part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "index",
+        "sha256",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "data": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 349528
+        }
+      }
+    },
+    "continuity_model_attempt": {
+      "description": "Unfinished account-local model admission, observed under the account lock. Reserved tokens are authorization holds, not measured consumption or a provider usage upper bound.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_ordinal",
+        "task_id",
+        "dispatched",
+        "reserved_tokens"
+      ],
+      "properties": {
+        "attempt_ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "dispatched": {
+          "type": "boolean"
+        },
+        "reserved_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "model_attempt_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "task_id",
+        "goal_id",
+        "plan_id",
+        "intent_id",
+        "schema_version",
+        "user_id",
+        "stage",
+        "birth_version"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/run_id"
+        },
+        "task_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/task_id"
+        },
+        "goal_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/goal_id"
+        },
+        "plan_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/plan_id"
+        },
+        "intent_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/intent_id"
+        },
+        "schema_version": {
+          "$ref": "#/$defs/execution_checkpoint/properties/schema_version"
+        },
+        "user_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/user_id"
+        },
+        "stage": {
+          "$ref": "#/$defs/execution_checkpoint/properties/stage"
+        },
+        "birth_version": {
+          "$ref": "#/$defs/execution_checkpoint/properties/birth_version"
+        }
+      }
+    },
+    "model_attempt_event": {
+      "description": "Immutable send intent or terminal observation for one account-local provider attempt. Intent acknowledgement precedes dispatch; intent alone does not establish provider acceptance.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "attempt_ordinal",
+        "attempt_task_id",
+        "reserved_tokens",
+        "phase",
+        "reported_tokens",
+        "usage_complete"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/model_attempt_binding"
+        },
+        "attempt_ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "attempt_task_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/task_id"
+        },
+        "reserved_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "phase": {
+          "enum": [
+            "dispatch_intent",
+            "settled",
+            "voided"
+          ]
+        },
+        "reported_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "usage_complete": {
+          "type": "boolean"
+        },
+        "account_observed_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Observed shared-account token consumption under its lock; excludes reservation holds and never asserts completeness. Optional in earlier witnesses."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "dispatch_intent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reported_tokens": {
+                "const": 0
+              },
+              "usage_complete": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "voided"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reported_tokens": {
+                "const": 0
+              },
+              "usage_complete": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "child_lifecycle_event": {
+      "description": "Shared-account attachment intent, voided attachment or detachment. Detachment is not task/effect quiescence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "child_ordinal",
+        "parent_task_id",
+        "child_task_id",
+        "phase",
+        "pending_model_requests"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/model_attempt_binding"
+        },
+        "child_ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "parent_task_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/task_id"
+        },
+        "child_task_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/task_id"
+        },
+        "phase": {
+          "enum": [
+            "attach_intent",
+            "attachment_voided",
+            "detached"
+          ]
+        },
+        "pending_model_requests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_tool_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Executor observations still pending for this original control identity, including detached carrier aliases. Absence in old records means unrecorded, not zero."
+        }
+      }
+    },
+    "pending_tool_attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool_ordinal",
+        "task_id",
+        "tool_call_id",
+        "tool_name",
+        "round"
+      ],
+      "properties": {
+        "tool_ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/task_id"
+        },
+        "tool_call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "control_task_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/task_id"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "executor",
+            "pre_hooks",
+            "post_hooks"
+          ],
+          "description": "Optional in legacy executor-only observations; hook batches do not charge a tool slot."
+        }
+      }
+    },
+    "tool_attempt_event": {
+      "description": "Executor intent and return/exception observation. A returned background handle is not completed external work. No handler success or replay authority.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "tool_ordinal",
+        "task_id",
+        "tool_call_id",
+        "tool_name",
+        "round",
+        "phase"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/model_attempt_binding"
+        },
+        "tool_ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/task_id"
+        },
+        "tool_call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "phase": {
+          "enum": [
+            "intent",
+            "not_entered",
+            "executor_returned",
+            "executor_exception"
+          ]
+        },
+        "result_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "control_task_id": {
+          "$ref": "#/$defs/execution_checkpoint/properties/task_id"
+        },
+        "account_tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Observed charged shared-account tool slots, not completed effects; optional in earlier witnesses."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "executor",
+            "pre_hooks",
+            "post_hooks"
+          ],
+          "description": "Optional in legacy executor-only observations; hook batches do not charge a tool slot."
+        },
+        "hook_errors": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Caught callback exceptions in a hook batch; absent legacy values are unknown, and batch return does not imply callback success."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "hook_errors"
+            ]
+          },
+          "then": {
+            "required": [
+              "scope"
+            ],
+            "properties": {
+              "scope": {
+                "enum": [
+                  "pre_hooks",
+                  "post_hooks"
+                ]
+              },
+              "phase": {
+                "enum": [
+                  "executor_returned",
+                  "executor_exception"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "scientific_command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "observation_id",
+        "tool_call_id",
+        "content_sha256",
+        "content_chars",
+        "content_parts",
+        "status"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/model_attempt_binding"
+        },
+        "observation_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "tool_call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "content_chars": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_parts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "status": {
+          "enum": [
+            "done",
+            "error"
+          ]
+        }
+      }
+    },
+    "scientific_command_part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "binding",
+        "observation_id",
+        "ordinal",
+        "content"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "binding": {
+          "$ref": "#/$defs/model_attempt_binding"
+        },
+        "observation_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30000
+        },
+        "encoding": {
+          "const": "zlib-base64",
+          "description": "Optional bounded lossless UTF-8 compression; absent means original text."
+        }
+      }
+    },
+    "stage_receipt": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "stage",
+        "actuals"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "stage": {
+          "enum": [
+            "executing",
+            "reviewing"
+          ]
+        },
+        "actuals_complete": {
+          "type": "boolean"
+        },
+        "actuals": {
+          "type": "object"
+        },
+        "model": {
+          "$ref": "#/$defs/model_ref"
+        },
+        "outcome_available": {
+          "type": "boolean"
+        },
+        "restored_from_outcome": {
+          "type": "boolean"
+        },
+        "terminal_verdict": {
+          "$ref": "#/$defs/terminal_verdict"
+        },
+        "review_format_normalization": {
+          "$ref": "#/$defs/review_format_normalization"
+        },
+        "review_format_retry": {
+          "type": "object",
+          "required": [
+            "error",
+            "admitted",
+            "intent_id",
+            "refusal"
+          ],
+          "properties": {
+            "error": {
+              "enum": [
+                "invalid_json",
+                "text_limit",
+                "originals_uninspected"
+              ]
+            },
+            "admitted": {
+              "type": "boolean"
+            },
+            "intent_id": {
+              "type": "string",
+              "maxLength": 100
+            },
+            "refusal": {
+              "enum": [
+                "",
+                "retry_budget",
+                "execution_budget",
+                "frozen_evidence_unavailable"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "admitted": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "refusal": {
+                    "const": ""
+                  },
+                  "intent_id": {
+                    "minLength": 1
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "refusal": {
+                    "enum": [
+                      "retry_budget",
+                      "execution_budget",
+                      "frozen_evidence_unavailable"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "submission_voided": {
+          "const": true,
+          "description": "Run CAS proves no task-engine submission; zero tokens/tools and observed pre-submission wall time, no outcome or verdict."
+        },
+        "checkpoint_lower_bound": {
+          "const": true
+        },
+        "checkpoint_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "checkpoint_source": {
+          "enum": [
+            "working_context",
+            "task_result_and_working_context",
+            "model_attempts",
+            "tool_attempts"
+          ]
+        },
+        "working_checkpoint_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "model_attempts_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "model_attempt_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sum of distinct acknowledged terminal model observations; combined with checkpoints by maximum, never duplicate addition."
+        },
+        "model_account_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_attempts_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tool_account_calls": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "review_format_retry"
+            ]
+          },
+          "then": {
+            "properties": {
+              "stage": {
+                "const": "reviewing"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "submission_voided"
+            ],
+            "properties": {
+              "submission_voided": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "actuals_complete"
+            ],
+            "properties": {
+              "actuals_complete": {
+                "const": true
+              },
+              "outcome_available": {
+                "const": false
+              },
+              "restored_from_outcome": {
+                "const": false
+              },
+              "actuals": {
+                "type": "object",
+                "required": [
+                  "tokens",
+                  "tool_calls",
+                  "wall_clock_seconds"
+                ],
+                "properties": {
+                  "tokens": {
+                    "const": 0
+                  },
+                  "tool_calls": {
+                    "const": 0
+                  },
+                  "wall_clock_seconds": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "not": {
+              "required": [
+                "terminal_verdict"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "checkpoint_lower_bound"
+            ]
+          },
+          "then": {
+            "required": [
+              "actuals_complete"
+            ],
+            "properties": {
+              "actuals_complete": {
+                "const": false
+              },
+              "outcome_available": {
+                "const": false
+              },
+              "restored_from_outcome": {
+                "const": false
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "terminal_verdict"
+                  ]
+                },
+                {
+                  "required": [
+                    "submission_voided"
+                  ]
+                }
+              ]
+            },
+            "anyOf": [
+              {
+                "required": [
+                  "checkpoint_version"
+                ]
+              },
+              {
+                "required": [
+                  "model_attempts_count",
+                  "model_attempt_tokens"
+                ]
+              },
+              {
+                "required": [
+                  "tool_attempts_count",
+                  "tool_account_calls"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "checkpoint_source"
+            ],
+            "properties": {
+              "checkpoint_source": {
+                "const": "task_result_and_working_context"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "working_checkpoint_version"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "checkpoint_source"
+            ],
+            "properties": {
+              "checkpoint_source": {
+                "const": "model_attempts"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "model_attempts_count",
+              "model_attempt_tokens"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "checkpoint_source"
+            ],
+            "properties": {
+              "checkpoint_source": {
+                "const": "tool_attempts"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tool_attempts_count",
+              "tool_account_calls"
+            ]
+          }
+        }
+      ],
+      "dependentRequired": {
+        "checkpoint_source": [
+          "checkpoint_lower_bound"
+        ],
+        "working_checkpoint_version": [
+          "checkpoint_source"
+        ],
+        "model_attempts_count": [
+          "model_attempt_tokens",
+          "checkpoint_lower_bound"
+        ],
+        "model_attempt_tokens": [
+          "model_attempts_count",
+          "checkpoint_lower_bound"
+        ],
+        "model_account_tokens": [
+          "model_attempts_count",
+          "checkpoint_lower_bound"
+        ],
+        "tool_attempts_count": [
+          "tool_account_calls",
+          "checkpoint_lower_bound"
+        ],
+        "tool_account_calls": [
+          "tool_attempts_count",
+          "checkpoint_lower_bound"
+        ]
+      }
+    },
+    "receipt_archive_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "count",
+        "prefix_sha256"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "prefix_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 32,
+          "multipleOf": 32
+        }
+      }
+    },
+    "receipt_archive_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "user_id",
+        "previous",
+        "receipts"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "run_id": {
+          "$ref": "#/$defs/run_identifier"
+        },
+        "user_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "previous": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/receipt_archive_ref"
+            }
+          ]
+        },
+        "receipts": {
+          "type": "array",
+          "minItems": 32,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/stage_receipt"
+          }
+        }
+      }
+    },
+    "run_identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]{1,160}$"
+    },
+    "artifact_fingerprint_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "task_id",
+        "path",
+        "algorithm",
+        "sha256",
+        "bytes",
+        "evidence_status"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "algorithm": {
+          "const": "sha256"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "evidence_status": {
+          "const": "Observed file bytes at read time; no content snapshot, execution or reproduction proof."
+        },
+        "scope_field": {
+          "enum": [
+            "dataset_digest",
+            "split_digest",
+            "candidate_digest",
+            "baseline_digest"
+          ]
+        },
+        "expected_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "matches_precommit": {
+          "type": "boolean",
+          "description": "Observed raw-file SHA-256 equals the selected frozen scope digest; no execution or scientific approval."
+        }
+      },
+      "dependentRequired": {
+        "scope_field": [
+          "expected_sha256",
+          "matches_precommit"
+        ],
+        "expected_sha256": [
+          "scope_field",
+          "matches_precommit"
+        ],
+        "matches_precommit": [
+          "scope_field",
+          "expected_sha256"
+        ]
+      }
+    },
+    "artifact_fingerprint_log": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "head",
+        "count"
+      ],
+      "properties": {
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "artifact_fingerprint_node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "run_id",
+        "task_id",
+        "project_path",
+        "sequence",
+        "previous",
+        "observed_at_ns",
+        "fingerprint"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "project_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "previous": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64})?$"
+        },
+        "observed_at_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/artifact_fingerprint_result"
+        }
+      }
+    },
+    "artifact_evidence_scope": {
+      "enum": [
+        "declared_project_artifact_snapshots",
+        "declared_project_artifact_snapshots_and_fingerprints"
+      ]
+    },
+    "review_next_action": {
+      "enum": [
+        "read_current_sources",
+        "read_historical_sources",
+        "submit_unknown_review",
+        "submit_independent_review"
+      ],
+      "description": "Advisory next step from combined current/direct-parent delivery state; never scientific validity or acceptance authority."
+    },
+    "historical_source_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "program_id",
+        "sequence",
+        "run_id"
+      ],
+      "properties": {
+        "program_id": {
+          "$ref": "#/$defs/source_read_request/properties/program_id"
+        },
+        "sequence": {
+          "$ref": "#/$defs/source_read_request/properties/sequence"
+        },
+        "run_id": {
+          "$ref": "#/$defs/source_read_request/properties/run_id"
+        }
+      }
+    },
+    "required_original_requirement_rule": {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "pass"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "original_sources"
+        ]
+      }
+    }
+  },
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "objective",
+    "status",
+    "goal_id",
+    "plan_id",
+    "episode_id",
+    "task_id",
+    "attempt",
+    "budget",
+    "actuals",
+    "receipts",
+    "result",
+    "review",
+    "error",
+    "learning",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "result_source": {
+      "$ref": "#/$defs/source_ref"
+    },
+    "stage_owner": {
+      "$ref": "#/$defs/process_owner"
+    },
+    "stage_losses": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/stage_loss"
+      }
+    },
+    "actuals_complete": {
+      "type": "boolean",
+      "description": "False means observed counters are a lower bound; consumption was lost with a worker."
+    },
+    "max_review_recoveries": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "max_review_format_retries": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "project_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "acceptance_requirements": {
+      "$ref": "#/$defs/acceptance_requirements"
+    },
+    "stage_launch": {
+      "$ref": "#/$defs/stage_launch_ref"
+    },
+    "stage_dispatch": {
+      "$ref": "#/$defs/stage_dispatch"
+    },
+    "absolute_deadline_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Internal launch-stamped absolute program deadline; waiting or pause never extends it."
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "$ref": "#/$defs/run_identifier"
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "status": {
+      "enum": [
+        "preparing",
+        "executing",
+        "reviewing",
+        "settling",
+        "completed",
+        "needs_attention",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "goal_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "plan_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "episode_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "task_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "max_attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Inclusive execution attempt limit; 0 is unlimited. Legacy records without this field retain their two-attempt policy."
+    },
+    "snapshot_pending_reconciliation": {
+      "type": "boolean",
+      "description": "Read-only terminal task overlay: status/actuals reflect observed task truth, while durable receipt settlement awaits callback or reconciliation. Reading never launches work."
+    },
+    "budget_source": {
+      "enum": [
+        "default",
+        "explicit"
+      ],
+      "description": "Provenance of the new-run budget. Missing provenance is legacy and must not silently authorize more spending."
+    },
+    "budget": {
+      "type": "object",
+      "required": [
+        "max_tokens",
+        "max_wall_clock_seconds",
+        "max_tool_calls"
+      ],
+      "additionalProperties": false,
+      "description": "Cumulative goal limits; 0 is unlimited per dimension. Legacy records retain stored limits.",
+      "properties": {
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_wall_clock_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "actuals": {
+      "$ref": "#/$defs/actuals"
+    },
+    "receipts": {
+      "type": "array",
+      "description": "Observed per-stage usage receipts. Durable headers keep a recent suffix plus receipt_archive; public projections reconstruct complete repair history.",
+      "items": {
+        "$ref": "#/$defs/stage_receipt"
+      }
+    },
+    "result": {
+      "type": "string",
+      "maxLength": 24000
+    },
+    "review": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "learning": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "created_at": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "updated_at": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "model": {
+      "$ref": "#/$defs/model_ref"
+    },
+    "requested_model": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/model_ref"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "context_seed": {
+      "type": "string",
+      "maxLength": 24000
+    },
+    "parent_run_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "role_models": {
+      "$ref": "#/$defs/role_models"
+    },
+    "requested_role_models": {
+      "$ref": "#/$defs/role_models"
+    },
+    "domain": {
+      "type": "string",
+      "enum": [
+        "general",
+        "research"
+      ]
+    },
+    "research": {
+      "type": "object",
+      "properties": {
+        "lang": {
+          "type": "string",
+          "enum": [
+            "zh",
+            "en"
+          ]
+        },
+        "n_ideas": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 12
+        },
+        "seed_arxiv_ids": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "maxLength": 40
+          }
+        },
+        "harvest_n": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 200
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": false
+    },
+    "tool_evidence_source": {
+      "$ref": "#/$defs/source_ref"
+    },
+    "exploration_hypothesis": {
+      "$ref": "#/$defs/exploration_hypothesis"
+    },
+    "artifact_evidence_source": {
+      "$ref": "#/$defs/source_ref"
+    },
+    "review_reserve": {
+      "$ref": "#/$defs/review_reserve"
+    },
+    "evidence_review_version": {
+      "enum": [
+        1,
+        2,
+        3
+      ],
+      "description": "Server-frozen evidence policy: v1 objection audit; v2 requires direct-parent delivery for validation successors; v3 also records owner-scoped frozen program history delivery separately. Saved runs retain their version."
+    },
+    "research_review_version": {
+      "const": 1,
+      "description": "Server-frozen acceptance policy for new research runs. Pipeline delivery leaves falsification unknown with exploratory learning rights; absent legacy runs retain their original verdict mapping."
+    },
+    "require_command_execution": {
+      "type": "boolean",
+      "description": "Current executor must retain correlated successful run_command output before review."
+    },
+    "background_wait": {
+      "type": "boolean"
+    },
+    "background_evidence_source": {
+      "$ref": "#/$defs/source_ref"
+    },
+    "scientific_protocol": {
+      "$ref": "#/$defs/scientific_protocol"
+    },
+    "scientific_required_outcome": {
+      "$ref": "#/$defs/scientific_required_outcome"
+    },
+    "validation_preregistration_target": {
+      "$ref": "#/$defs/validation_preregistration_target"
+    },
+    "receipt_archive": {
+      "$ref": "#/$defs/receipt_archive_ref",
+      "description": "Owner-bound immutable historical prefix, published only through the run CAS. Public run projections already expand this prefix into receipts."
+    },
+    "require_requirement_originals": {
+      "const": true,
+      "description": "Frozen requirement-original gate: every passing requirement needs complete delivered original references."
+    }
+  },
+  "additionalProperties": false,
+  "dependentRequired": {
+    "scientific_required_outcome": [
+      "scientific_protocol"
+    ]
+  }
+}

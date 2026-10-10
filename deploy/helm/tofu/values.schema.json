@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["images", "secrets", "roles"],
+  "properties": {
+    "images": {
+      "type": "object",
+      "required": ["api", "worker"],
+      "properties": {
+        "api": {"$ref": "#/definitions/image"},
+        "worker": {"$ref": "#/definitions/image"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]},
+        "pullSecrets": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "required": ["existingSecret", "postgresDsnKey", "redisUrlKey"],
+      "properties": {
+        "existingSecret": {"type": "string", "minLength": 1},
+        "postgresDsnKey": {"type": "string", "minLength": 1},
+        "redisUrlKey": {"type": "string", "minLength": 1}
+      }
+    },
+    "roles": {
+      "type": "object",
+      "required": ["api", "worker", "scheduler"],
+      "properties": {
+        "api": {"$ref": "#/definitions/previewRole"},
+        "worker": {"$ref": "#/definitions/previewRole"},
+        "scheduler": {"$ref": "#/definitions/previewRole"}
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "api": {"$ref": "#/definitions/previewAutoscaling"},
+        "worker": {"$ref": "#/definitions/previewAutoscaling"}
+      }
+    },
+    "extraEnv": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/extraEnvVar"}
+    }
+  },
+  "definitions": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "digest"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "digest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "previewRole": {
+      "type": "object",
+      "required": ["enabled", "replicas"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "replicas": {"type": "integer", "minimum": 1, "maximum": 1}
+      }
+    },
+    "previewAutoscaling": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"const": false}
+      }
+    },
+    "extraEnvVar": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "not": {
+            "enum": [
+              "MALLOC_ARENA_MAX",
+              "TOFU_AUTH_MODE",
+              "TOFU_DB_BACKEND",
+              "TOFU_DEPLOYMENT_MODE",
+              "TOFU_DISTRIBUTED_PREVIEW_MODE",
+              "TOFU_POSTGRES_DSN",
+              "TOFU_POSTGRES_DSN_FILE",
+              "TOFU_PROCESS_ROLE",
+              "TOFU_REDIS_URL",
+              "TOFU_REDIS_URL_FILE",
+              "TOFU_REPLICA_ID",
+              "TOFU_REPLICA_RING",
+              "TOFU_REQUIRE_PG",
+              "TOFU_STORAGE_ALLOW_PROJECT_OVERRIDE",
+              "TOFU_STORAGE_CONNECTION_FILE",
+              "TOFU_STORAGE_MODE",
+              "TOFU_STORAGE_PARENT_PID",
+              "TOFU_STORAGE_PROJECT_ROOT",
+              "TOFU_STORAGE_TEST_BACKEND",
+              "TOFU_STORAGE_TEST_POSTGRES_DSN_FILE",
+              "TOFU_STORAGE_TOKEN"
+            ]
+          }
+        },
+        "value": {"type": "string"},
+        "valueFrom": {"type": "object", "minProperties": 1}
+      },
+      "oneOf": [
+        {
+          "required": ["value"],
+          "not": {"required": ["valueFrom"]}
+        },
+        {
+          "required": ["valueFrom"],
+          "not": {"required": ["value"]}
+        }
+      ]
+    }
+  }
+}

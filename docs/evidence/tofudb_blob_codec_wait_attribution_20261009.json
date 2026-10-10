@@ -1,0 +1,176 @@
+{
+  "scope": "Private default-off observer4d58 on admitted55180 engine behavior, complete frozen3081caller files with admitted FIFO client. Original1000x4x8192 carry-stream-events/restart, embedded and application sequential. Opt-in timers change overhead, not acceptance timing.",
+  "source": {
+    "baseline_native": "55180dba6fbc4a94171e3f271a38f59cd8ca605195b9138a2565cf3ba4af4be2",
+    "observer_native": "4d58b11cb3fbbc84c16a104c08b13fc5acf94fc19368adcc8278385842b17098",
+    "status": "observation complete;10blobtests and2original1000workloads correct0errors; no observer runtime admission",
+    "scope": "TOFU_DB_BLOB_CODEC_PROFILE=1 splits shared mutex wait, compress+lazyinit, final header/hash/copy; preserves original lock lifetime including finalize. No lock release optimization or codec pool yet.",
+    "ongoing_sessions": {},
+    "existing_evidence": "Admitted55180 repeat2embeddedC1 foreground blob_encode10001calls5791.94ms includes shared mutex wait; not exclusive CPU.",
+    "blob_tests": "10passed0failed withprofile1",
+    "blob_test_log_sha256": "393d31297f347469829c0515c3cc65198a9268afb37a4a97a2ddc35591f65a8a",
+    "observer_archive": "/path/to/your/project",
+    "runner_sha256": "8858f3fb16c2a741bc9d3a48f5d82d20a9eaef8bd6bd6bbc6839a17ace4503b8",
+    "pair": {
+      "source_sha256": "4d58b11cb3fbbc84c16a104c08b13fc5acf94fc19368adcc8278385842b17098",
+      "library_sha256": "502bc3be561db0bff661fcbdd71b3a95539923d0ea5e262ffe57d77a0637336c",
+      "binary_sha256": "5634146b30ffbdd089f1275ec57749d8a5ab622390934a8eb35544e10d236d73",
+      "scope": "Diagnostic-only codec phase observer, no deployment"
+    },
+    "source_checkpoint": "1e0f8a442d4ab064855fda84ecbd13d016758786"
+  },
+  "rows": [
+    {
+      "label": "codec-phase-embedded-0",
+      "correctness": true,
+      "errors": 0,
+      "stages": {
+        "blob_encode": {
+          "calls": 10002,
+          "components": [
+            {
+              "calls": 10002,
+              "component": "foreground",
+              "totalNanos": 2193583759
+            }
+          ],
+          "stage": "blob_encode",
+          "totalNanos": 2193583759
+        },
+        "blob_codec_wait": {
+          "calls": 10002,
+          "components": [
+            {
+              "calls": 10002,
+              "component": "foreground",
+              "totalNanos": 1402311189
+            }
+          ],
+          "stage": "blob_codec_wait",
+          "totalNanos": 1402311189
+        },
+        "blob_codec_compress": {
+          "calls": 10002,
+          "components": [
+            {
+              "calls": 10002,
+              "component": "foreground",
+              "totalNanos": 675387598
+            }
+          ],
+          "stage": "blob_codec_compress",
+          "totalNanos": 675387598
+        },
+        "blob_codec_finalize": {
+          "calls": 10002,
+          "components": [
+            {
+              "calls": 10002,
+              "component": "foreground",
+              "totalNanos": 95797977
+            }
+          ],
+          "stage": "blob_codec_finalize",
+          "totalNanos": 95797977
+        }
+      },
+      "fractions": {
+        "blob_codec_wait": 0.6392786157567463,
+        "blob_codec_compress": 0.3078923224285232,
+        "blob_codec_finalize": 0.04367190293370512
+      },
+      "report_sha256": "9788fda12061acd80cce8e52fc89a5d3c53e5e53509f5a1f4d85094062ba222c",
+      "scope_sha256": "d855dc05009eb5029bf05866a5d4c5e1d7251e31c2df06aa92693bff943ca8c7"
+    },
+    {
+      "label": "codec-phase-application-0",
+      "correctness": true,
+      "errors": 0,
+      "stages": {
+        "blob_encode": {
+          "calls": 10005,
+          "components": [
+            {
+              "calls": 10004,
+              "component": "foreground",
+              "totalNanos": 4422609349
+            },
+            {
+              "calls": 1,
+              "component": "maintenance",
+              "totalNanos": 335577
+            }
+          ],
+          "stage": "blob_encode",
+          "totalNanos": 4422944926
+        },
+        "blob_codec_wait": {
+          "calls": 10005,
+          "components": [
+            {
+              "calls": 10004,
+              "component": "foreground",
+              "totalNanos": 3621716229
+            },
+            {
+              "calls": 1,
+              "component": "maintenance",
+              "totalNanos": 69
+            }
+          ],
+          "stage": "blob_codec_wait",
+          "totalNanos": 3621716298
+        },
+        "blob_codec_compress": {
+          "calls": 10005,
+          "components": [
+            {
+              "calls": 10004,
+              "component": "foreground",
+              "totalNanos": 679188655
+            },
+            {
+              "calls": 1,
+              "component": "maintenance",
+              "totalNanos": 310215
+            }
+          ],
+          "stage": "blob_codec_compress",
+          "totalNanos": 679498870
+        },
+        "blob_codec_finalize": {
+          "calls": 10005,
+          "components": [
+            {
+              "calls": 10004,
+              "component": "foreground",
+              "totalNanos": 97314140
+            },
+            {
+              "calls": 1,
+              "component": "maintenance",
+              "totalNanos": 24521
+            }
+          ],
+          "stage": "blob_codec_finalize",
+          "totalNanos": 97338661
+        }
+      },
+      "fractions": {
+        "blob_codec_wait": 0.8188472519090101,
+        "blob_codec_compress": 0.15363041624271856,
+        "blob_codec_finalize": 0.022007658387921784
+      },
+      "report_sha256": "81194822b096c19df1203a91f842324e0bf83fa673fecd0783be9360f2c41ca1",
+      "scope_sha256": "e773674550372b9452d55449915a60bdfd529ff4b9a14c6b1dd13bf166b2aa35"
+    }
+  ],
+  "finding": "Shared codec wait dominates measured inclusive blobencode totals, about64%embedded and82%application. Finalization remains under original lock and contributesabout4%/2%.",
+  "limitations": [
+    "Cumulative concurrent durations are not wall time, exclusive CPU or per-request causality.",
+    "Compress phase includes lazy initialization. Stage partition excludes small timer/entry overhead.",
+    "No pool or early unlock optimization measured; no claim that1s streamgate is fixed.",
+    "Default-off observer not admitted; code checkpoint may include frozen baseline differences and must never whole-merge."
+  ],
+  "next_action": "Prototype bounded lazily-created codec pool using launch-probed concurrency/memory capacity and explicit teardown; retain identical level3 encoded bytes and all poison/error/deadline behavior."
+}
