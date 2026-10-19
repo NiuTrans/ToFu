@@ -259,6 +259,33 @@ build artifacts and application compatibility gates in the same change.
 
 ## Releases
 
+
+Release identity — Problem: SDK runtime constants and lockfile root metadata can
+lag their package versions, producing misleading user agents and CLI diagnostics.
+Decision: release preparation aligns root `VERSION`, application metadata, both
+SDK package versions, runtime version constants and lockfiles before exporting an
+explicit immutable commit. SDK tests exercise runtime identity against package
+metadata. Alternatives rejected: changing only tags or package metadata leaves
+installed clients reporting another release; `export.py --bump` alone updates
+only `VERSION` and cannot prepare a complete release.
+
+Shared-export privacy — Problem: the maintainer export package contains private
+sanitization markers, including personal credential patterns. Decision: neither
+internal nor public distributions contain `export.py` or `export_pkg/`; cleanup
+also removes a stale package from a previous destination before copying and
+refuses the export if mandatory removal fails. Personal
+backups retain the source toolchain. Company bundles and explicitly shared
+internal configuration retain their separate internal-tier policy. Alternatives
+rejected: preserving the package for colleagues also distributes personal
+markers; public-only exclusion leaves the internal sharing boundary unsafe.
+
+
+Public build/test closure — the restored helper set is explicit and includes
+transitive generator and receipt-assessment imports required by shipped tests.
+Each added helper passes the public secret scan. The privacy drift gate also
+runs in linked Git worktrees (`.git` is a pointer file); a failed Git inventory
+read is an error, not an empty clean snapshot. Broadly publishing `scripts/` or
+silently skipping worktree verification would defeat the private/public boundary.
 Desktop controlled-computer assets use **Tofu Remote** (`TofuRemote-*`);
 `tofu-agent` retains its AI runtime SDK identity. OS registration, configuration
 and pairing identifiers stay stable through upgrades. Native release jobs cover

@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from tests.project_mod.test_coordinator_workers import runtime, base_runtime, context
+from tests.project_mod.test_coordinator_workers import runtime as runtime, base_runtime, context
 from lib.project_dispatch import admission, continuation
 from lib.project_dispatch.delegation import capture_worker_policy
 from lib.project_dispatch.repository import CONTRACT, ProjectDispatchError

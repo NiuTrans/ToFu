@@ -1023,6 +1023,15 @@
         },
         "usage": {},
         "usageComplete": true,
+        "usageRecovery": {
+          "budget": {
+            "durationSeconds": 1,
+            "maxTokens": 1,
+            "maxToolCalls": 1
+          },
+          "sourceProjectionRevision": 1,
+          "sourceTurnId": "s"
+        },
         "videos": [
           {
             "avg_frame_bytes": 1.5,

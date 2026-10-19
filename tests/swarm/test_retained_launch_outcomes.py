@@ -8,7 +8,7 @@ import pytest
 
 from lib.swarm.retained import execute_manage_agents
 from lib.swarm.run_messages import RunMessageError
-from tests.swarm.test_retained_messages import PROJECT, context, read, send
+from tests.swarm.test_retained_messages import PROJECT, context as context, read, send
 
 pytestmark = pytest.mark.unit
 

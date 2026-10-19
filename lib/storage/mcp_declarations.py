@@ -14,7 +14,11 @@ import uuid
 
 from lib.conversation_sync.settings_policy import MCP_WIRE_DECLARATIONS_SETTING_KEY as SETTING_KEY
 
-from lib.mcp.declarations import MAX_DECLARATION_BYTES, MAX_DECLARATIONS, validate_definitions
+from lib.mcp.declarations import (
+    MAX_DECLARATION_BYTES,
+    MAX_DECLARATIONS as MAX_DECLARATIONS,
+    validate_definitions,
+)
 from lib.agent_core.tool_errors import MCPDeclarationError
 
 _MAX_CAS_ATTEMPTS = 8

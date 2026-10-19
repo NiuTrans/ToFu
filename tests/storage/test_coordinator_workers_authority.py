@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from tests.storage.test_native_project_dispatch import native_dispatch_authority, _git
+from tests.storage.test_native_project_dispatch import native_dispatch_authority as native_dispatch_authority, _git
 
 pytest_plugins = ('tests.support.semantic_authorities',)
 pytestmark = [pytest.mark.api,

@@ -3,7 +3,7 @@ from copy import deepcopy
 
 import pytest
 
-from tests.storage_authority_sql.test_native_checkpoint_storage import backend, opened, rows, call
+from tests.storage_authority_sql.test_native_checkpoint_storage import backend as backend, opened as opened, rows, call
 from tests.support.native_sql_goal import GoalCase, goal_call, writer
 
 pytestmark = pytest.mark.unit

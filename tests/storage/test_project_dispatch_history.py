@@ -3,7 +3,7 @@ import pytest
 
 from lib.project_dispatch.repository import ProjectDispatchError
 from tests.project_mod.test_project_dispatch_repository import context
-from tests.storage.test_project_dispatch_repository_segments import owned, authorize
+from tests.storage.test_project_dispatch_repository_segments import owned as owned, authorize
 
 pytest_plugins = ('tests.support.semantic_authorities',)
 pytestmark = pytest.mark.api

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tofu-agent"
-version = "0.18.1"
+version = "0.18.2"
 description = "Embeddable and headless Tofu agent runtime with network and tool capabilities"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -136,6 +136,7 @@ test = [
     "uv>=0.4",
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "requests-mock>=1.12",
     # The external mock LLM process in tests/mock_llm_server.py intentionally
     # remains a tiny Flask fixture; Flask is not part of the application
     # runtime anymore.
@@ -188,6 +189,7 @@ dev = [
     # cannot depend on its own optional extra in a portable uv lock.
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "requests-mock>=1.12",
     "flask>=3.0",
     "pytest-xdist>=3.8",
     "pytest-timeout>=2.1",
@@ -302,7 +304,7 @@ python_functions = "test_*"
 # the independence contract: tests may be assigned in any order to any worker.
 # Bare pytest remains serial because this config intentionally supplies no
 # ``-n``; Make/CI/affected-test entry points opt into bounded worker counts.
-addopts = "-v --tb=short --strict-markers -p no:napari -p no:timeout -p pytest_timeout -p no:xdist -p xdist.plugin -p no:anyio -p anyio.pytest_plugin --dist worksteal"
+addopts = "-v --tb=short --strict-markers -p no:napari -p no:timeout -p pytest_timeout -p no:xdist -p xdist.plugin -p no:anyio -p anyio.pytest_plugin -p no:requests_mock -p requests_mock.contrib._pytest_plugin --dist worksteal"
 # Per-test hang guard. pytest-timeout has been an installed, DECLARED dep for
 # a while, but with no default configured it never fired — measured
 # 2026-07-27: a sleep(600) test ran until an EXTERNAL kill stopped the shell,

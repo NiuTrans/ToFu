@@ -49,7 +49,7 @@ from .api_v4_generated import (
 )
 
 
-__version__ = '0.17.0'
+__version__ = '0.18.2'
 
 
 #: The SDK speaks API v4: product calls are rewritten onto ``/api/v4`` and the

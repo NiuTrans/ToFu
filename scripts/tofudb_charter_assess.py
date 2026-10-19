@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import hashlib
-import json
 import math
 from pathlib import Path
 import sys

@@ -275,6 +275,14 @@ Rejected: arbitrary splits retaining ambient dependencies; repeated suffix scans
   remains observable to callers, and cannot trigger pinned-folder migration.
   Reading-library folders use the same required-list decoder and never turn an
   outage into authoritative empty data.
+
+  Reload selection keeps the exact session/last-active ID even when the first
+  metadata catalog omits a newly durable conversation. The retained boot adapter
+  delegates that ID to ordinary `loadConversation` and its generation-fenced
+  `project-conversation-navigation.ts` resolver. A deleted/denied target or a
+  transient lookup failure remains an observable open failure, never permission
+  to substitute another chat; recency is only a no-saved-ID fallback. A second
+  restore store or waiting for catalog freshness would duplicate identity ownership.
 - A folder can bind DEFAULT project roots (`folder.projectPaths[]`, each ≤512 chars, ≤32 roots, schema-validated by `routes/api_v1/folders.py` create/update; the legacy scalar `projectPath` is kept mirroring the primary root for back-compat). The create and rename dialogs use a multi-root picker (`_buildFolderPathsPicker` in `main_folders_mobile.js`): a removable-chip list (first = primary) fed by the server-persisted recent-projects list plus a manual add-row — no forced absolute-path typing. The retained `folderDefaultProjectPaths(folderId)` resolver in `core/folders.js` returns the ordered, de-duplicated roots. A brand-new conversation created inside a folder inherits every root (first = primary, rest = extra roots): `newChat` pre-attaches them to the empty draft via `_conversationProjectController.chooseDraft` (so the project bar shows them immediately and the user can still change or clear them), and the send pipeline in `main_send_pipeline.js` stamps them onto the new conversation's empty workspace before the first submission binds roots. An explicit composer/project-modal attachment always wins — the folder default only fills an empty workspace, and existing conversations already in the folder keep their current binding. Clearing all roots removes the binding. Specs: `tests/frontend/test_frontend_folder_project_path.py` (resolver) and `tests/frontend/test_frontend_folder_paths_picker.py` (picker interactions); round-trip covered by `test_api_v1_integration.py::test_folders_crud_full_lifecycle`.
 - Composer Option+Enter (macOS) and Alt+Enter (Windows/Linux) insert a newline
   at the caret, replacing selected text and emitting the normal input event,

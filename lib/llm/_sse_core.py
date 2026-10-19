@@ -51,7 +51,7 @@ from typing import Any, Optional
 import lib as _lib
 from lib.llm._sse_framer import SSEEvent
 from lib.llm.tool_call_flood import ToolCallFloodGuard
-from lib.llm.llm_errors import ProviderToolCallFloodError
+from lib.llm.llm_errors import ProviderToolCallFloodError as ProviderToolCallFloodError
 from lib.llm._transport import StreamProgress, chat_url, headers
 from lib.llm.cache import add_cache_breakpoints
 from lib.llm.diagnostics import RawSSEDumper

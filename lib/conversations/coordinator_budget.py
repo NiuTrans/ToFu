@@ -53,7 +53,8 @@ class CoordinatorBudgetSettings:
                 return current
             raise ValueError('Coordinator budget settings changed; refresh before saving')
         value = {'projectPath': self.project, 'owner': self.owner, 'settings': deepcopy(request['settings'])}
-        import hashlib, json
+        import hashlib
+        import json
         identity = hashlib.sha256(json.dumps([self.owner, self.project, request], sort_keys=True).encode()).hexdigest()
         self.client(write=True).command('record.put', {'namespace': POLICY['namespace'], 'key': self.key,
             'value': value, 'expected_version': current['revision']}, 'coordinator-budget:' + identity)

@@ -11,6 +11,9 @@ from lib.conversations import coordinator_workers
 from lib.project_dispatch.delegation import capture_worker_policy
 from lib.project_dispatch.service import ProjectDispatchService
 
+# Keep the imported fixture's registered alias visible to static tooling.
+__all__ = ('base_runtime',)
+
 pytestmark = pytest.mark.unit
 
 

@@ -241,7 +241,7 @@ test-visual: ## Run Playwright visual E2E tests (needs chromium)
 	$(PYTEST) $(PYTEST_BASE) -m visual --tb=short -q
 
 test-e2e: ## Run hermetic E2E journeys — real app + real browser + stub LLM (P0-3 主干道巡检)
-	$(PYTEST) $(PYTEST_BASE) tests/e2e/test_e2e_smoke.py tests/e2e/test_e2e_journeys.py tests/e2e/test_e2e_pending_narration.py -m visual -ra --tb=short -q
+	$(PYTEST) $(PYTEST_BASE) tests/e2e/test_e2e_smoke.py tests/e2e/test_e2e_journeys.py tests/e2e/test_e2e_pending_narration.py tests/e2e/test_e2e_reload_selection.py -m visual -ra --tb=short -q
 
 test-frontend: frontend-build ## Run Vite ESM source, artifact and serving contracts
 	@if [ ! -d node_modules/jsdom ]; then echo '⚠️  Run `npm install` first (installs jsdom + typescript dev-deps)'; exit 1; fi

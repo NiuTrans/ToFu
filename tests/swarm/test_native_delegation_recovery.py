@@ -8,8 +8,8 @@ import pytest
 from lib.swarm.integration import _config, _rehydrate
 from lib.tasks_pkg.requirement_source import requirement_source, snapshot_requirement_source
 from tests.swarm.test_swarm_restart_continue import authority  # noqa: F401
-from tests.swarm.test_swarm_recovery_activation_fence import activation  # noqa: F401
-from tests.tasks_pkg.test_native_parent import native_parent  # noqa: F401
+from tests.swarm.test_swarm_recovery_activation_fence import activation as activation
+from tests.tasks_pkg.test_native_parent import native_parent as native_parent
 
 pytestmark = pytest.mark.unit
 

@@ -244,6 +244,45 @@ def _select_stub_model(page):
     page.locator(selector).first.click()
 
 
+@pytest.fixture
+def _programmatic_calling_enabled(page):
+    """Opt this JavaScript scenario in through Settings, not task internals.
+
+    ``auto`` intentionally admits JSON batches, not ``execute_program``.
+    Keep that default for the other journeys and restore this page's setting
+    even when a rendering or reload assertion fails.
+    """
+    _wait_app_ready(page)
+
+    def open_control():
+        page.evaluate("""async () => {
+            const jump = window.TofuModules.resolveAction('jumpToSetting');
+            await jump('programmatic-calling');
+        }""")
+        control = page.locator('#settingProgrammaticCalling')
+        control.wait_for(state='visible', timeout=15000)
+        # Opening Settings loads and populates the controls asynchronously.
+        page.locator('#stgPresetTable .stg-loading').wait_for(state='detached')
+        return control
+
+    def save_mode(control, mode):
+        control.select_option(mode)
+        page.locator('#settingsSaveBtn').click()
+        page.locator('#settingsModal.open').wait_for(state='hidden', timeout=15000)
+        assert page.evaluate("""expected =>
+            JSON.parse(localStorage.getItem('claude_client_config'))
+                .tools.programmaticCalling === expected
+        """, mode), 'Settings did not persist the requested programmatic mode'
+
+    control = open_control()
+    previous_mode = control.input_value()
+    try:
+        save_mode(control, 'on')
+        yield
+    finally:
+        save_mode(open_control(), previous_mode)
+
+
 def test_bundle_loaded_in_browser(page, assert_no_js_errors):
     """The served Vite entry reaches app-ready with the two allowed bridges."""
     _wait_app_ready(page)
@@ -334,7 +373,7 @@ def test_tool_round_renders(page, assert_no_js_errors):
 
 @pytest.mark.parametrize('width', [1280, 390])
 def test_program_observation_and_measurements_render_and_restore(
-        page, width, tmp_path, assert_no_js_errors):
+        page, width, tmp_path, assert_no_js_errors, _programmatic_calling_enabled):
     """Real gateway → sync projection → rich card; include narrow and reload."""
     page.set_viewport_size({'width': width, 'height': 900})
     _wait_app_ready(page)

@@ -1044,9 +1044,8 @@ function _startBuildWatch() {
    *   server responds.  This eliminates all localStorage desync bugs.
    *   On failure we fall back to the IndexedDB cache + a backoff retry
    *   (see _bootReconnectWithBackoff below). */
-  /* Restore last active conversation from sessionStorage (if any).
-   *   If the conv exists on the server, we'll navigate to it after loading.
-   *   Otherwise, fall back to the most recent conversation. */
+  /* Restore the exact saved identity through ordinary conversation navigation.
+   *   Without a saved identity, fall back to the most recent conversation. */
   /* sessionStorage is PER-TAB and dies on a browser close/reopen — it only
    *   survives an in-tab reload. Fall back to the localStorage mirror (written
    *   on every leave via _persistLastActiveConv below) so a genuine COLD open
@@ -1269,8 +1268,8 @@ function _startBuildWatch() {
    *   they're still on the welcome screen (activeConvId still null). */
   function _bootRestoreActiveConv(restoredId) {
     if (activeConvId) return;  // user already navigated during the load — leave them be
-    const restoredConv = restoredId && conversations.find(c => c.id === restoredId);
-    if (restoredConv) {
+    // Catalog omission is not deletion; navigation resolves and fences the exact ID.
+    if (restoredId) {
       loadConversation(restoredId);
       return;
     }

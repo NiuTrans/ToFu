@@ -11,7 +11,7 @@ from lib.identity import PrincipalContext
 from lib.storage.errors import StorageError
 from lib.project_dispatch.repository import ProjectDispatchRepository, NAMESPACE
 from lib.project_dispatch.segmented import SegmentedDispatch, FORMAT, key
-from tests.project_mod.test_project_dispatch_repository import context, model_attempt
+from tests.project_mod.test_project_dispatch_repository import context as context, model_attempt
 
 pytest_plugins = ('tests.support.semantic_authorities',)
 pytestmark = pytest.mark.api

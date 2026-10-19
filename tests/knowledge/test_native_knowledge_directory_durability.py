@@ -9,7 +9,7 @@ from tests.knowledge.test_knowledge_directory_durability import (
     test_directory_entries_are_synced_before_metadata_entry as check_order,
     test_directory_sync_failure_cleans_candidates_before_storage_entry as check_failure,
 )
-from tests.knowledge.test_native_knowledge_publication import native_publication_store
+from tests.knowledge.test_native_knowledge_publication import native_publication_store as native_publication_store
 from tests.knowledge.test_knowledge_publication import ASSET, RAW, prepare_operation
 
 pytestmark = [pytest.mark.unit, pytest.mark.skipif(

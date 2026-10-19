@@ -7,7 +7,7 @@ import pytest
 
 from lib.swarm.master import bind_assignment_context, bind_assignment_contexts
 from lib.swarm.protocol import SubTaskSpec
-from tests.swarm.test_retained_assignment_authority import authority, tool
+from tests.swarm.test_retained_assignment_authority import authority as authority, tool
 
 pytestmark = pytest.mark.unit
 

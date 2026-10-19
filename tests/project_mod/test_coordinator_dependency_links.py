@@ -1,7 +1,7 @@
 """Automatic Worker tools preserve existing result and rework graph admission."""
 import pytest
 
-from tests.project_mod.test_coordinator_continuation import run, runtime, base_runtime, context, delegate, end
+from tests.project_mod.test_coordinator_continuation import run as run, runtime, base_runtime, context, delegate, end
 
 pytestmark = pytest.mark.unit
 

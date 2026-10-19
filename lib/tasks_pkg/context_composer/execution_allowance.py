@@ -5,6 +5,11 @@ injection watermark, never a parallel budget, dispatch grant or acceptance.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ._models import ComposeRequest
+
 from lib.agent_core.execution_budget import ModelBudgetExceeded, execution_allowance_snapshot
 
 
@@ -259,7 +264,7 @@ def _rerender_allowance_block(messages: list[dict], text: str, *,
         blocks = message.get('_contextBlocks') if isinstance(message, dict) else None
         if not (blocks and any(b.get('id') == 'execution_allowance' for b in blocks)):
             continue
-        block = next(b for b in blocks if b.get('id') == 'execution_allowance')
+        _block = next(b for b in blocks if b.get('id') == 'execution_allowance')
         # Rebuild the canonical envelope so the carrier's on-wire bytes match
         # what the renderer would emit for this exact notice text.
         from ._models import ContextBlock

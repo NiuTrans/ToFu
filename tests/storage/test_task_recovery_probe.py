@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.storage.test_storage_authority_sql_contract import storage  # noqa: F401
+from tests.storage.test_storage_authority_sql_contract import storage as storage
 
 
 pytestmark = pytest.mark.unit

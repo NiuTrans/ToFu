@@ -1,5 +1,37 @@
 # Changelog
 
+
+## [0.18.2] - 2026-10-19
+
+### Changed
+- Prepare the current committed source for internal and Open distributions,
+  with aligned application, SDK and lockfile release metadata.
+- Retain the latest native runtime, storage, task lifecycle and dependency
+  boundary improvements without including unfinished workspace changes.
+
+- Regenerate browser runtime, stylesheet and wire fixtures from their retained
+  authorities, and complete test dependencies and environment-knob registration.
+
+- Retain the public generator and verification-helper dependency closure so a
+  clean open-source checkout can run its shipped contract and test gates.
+
+### Fixed
+- Align Python and TypeScript runtime versions and default client user agents
+  with the actual SDK package release, and verify lockfile identity.
+- Exclude the private maintainer export toolchain from internal distributions
+  as well as public ones, including stale copies in export destinations.
+
+- Fail closed when mandatory cleanup cannot remove a stale export package or
+  facade, rather than proceeding to copy or publication.
+
+- Run export privacy drift checks in linked Git worktrees and reject failed
+  Git inventory reads instead of silently skipping release verification.
+- Keep valid remote-workspace chats out of optional local automation scope
+  resolution without weakening explicit owned automation project bindings.
+
+- Restore the exact selected conversation through authorized navigation even
+  when its newly persisted row is absent from the first metadata catalog.
+
 ## [0.18.1] - 2026-10-15
 
 ### Changed

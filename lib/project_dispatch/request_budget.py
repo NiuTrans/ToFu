@@ -14,7 +14,7 @@ import json
 import uuid
 
 from lib.llm.llm_errors import AbortedError
-from .repository import CONTRACT, ProjectDispatchError
+from .repository import ProjectDispatchError
 from .accounting import model_consumption, record_model_event
 
 

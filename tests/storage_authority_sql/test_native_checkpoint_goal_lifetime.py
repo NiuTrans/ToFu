@@ -10,7 +10,7 @@ import pytest
 from lib.storage.errors import StorageError
 from lib.storage_authority_sql.native_checkpoint import NativeSqlCheckpointError
 from lib.storage_authority_sql.native_checkpoint_goal import GoalTransaction
-from tests.storage_authority_sql.test_native_checkpoint_storage import backend, opened, rows
+from tests.storage_authority_sql.test_native_checkpoint_storage import backend as backend, opened as opened, rows
 from tests.storage_authority_sql.test_native_checkpoint_goal import durable
 from tests.support.native_sql_goal import GoalCase, goal_call, writer, EVIDENCE
 

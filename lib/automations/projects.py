@@ -179,8 +179,14 @@ def resolve_task_project(principal,config,*,project=None,client_factory=None):
     """Freeze one explicitly registered root; caller config cannot assert an ID."""
     if not isinstance(principal,PrincipalContext):
         raise TypeError('Task project resolution requires PrincipalContext')
-    bindings=AutomationProjects(principal,client_factory=client_factory)
     root=config.get('projectPath')
+    if project is None and isinstance(root,str) and not Path(root).is_absolute():
+        # Remote locators route existing chat tools; they are not local roots
+        # and confer no implicit automation binding. Keep local validation strict.
+        from lib.desktop.remote import parse_remote_path
+        if parse_remote_path(root) is not None:
+            return None
+    bindings=AutomationProjects(principal,client_factory=client_factory)
     resolved=canonical_root(root) if root else None
     identity=project_id(resolved) if resolved else None
     if project is not None:

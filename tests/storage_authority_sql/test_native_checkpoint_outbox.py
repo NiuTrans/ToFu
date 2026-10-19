@@ -16,8 +16,8 @@ from lib.storage.errors import StorageError
 from lib.storage_authority_sql.native_checkpoint import NativeSqlCheckpoint
 from lib.storage_authority_sql.logical_outbox import decode_logical_payload
 from lib.storage_authority_sql.logical_replay import BackendReplayTarget, replay_records
-from tests.storage_authority_sql.test_native_checkpoint_storage import backend, acquire, binding, call, rows, snapshot
-from tests.storage_authority_sql.test_logical_session_contract import pipeline, target_backend, published
+from tests.storage_authority_sql.test_native_checkpoint_storage import backend as backend, acquire, binding, call, rows, snapshot
+from tests.storage_authority_sql.test_logical_session_contract import pipeline as pipeline, target_backend as target_backend, published
 
 pytestmark = pytest.mark.unit
 

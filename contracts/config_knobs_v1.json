@@ -3659,6 +3659,46 @@
       "status": "documented",
       "owner": "tests/storage/test_direct_request_settlement_sigkill.py",
       "description": "Test-only path to the private source-matched tofu-db executable; never selects the application service."
+    },
+    "TOFU_MAX_SSE_PER_PRINCIPAL": {
+      "status": "documented",
+      "owner": "lib/agent_core/sse_limit.py",
+      "description": "Optional per-principal resident SSE connection cap, resolved from the launch-time resource probe when omitted; environment overrides are bounded to 1..128. Connection ownership and release remain with the authenticated stream lifecycle."
+    },
+    "TOFU_WORKSPACE_MODE": {
+      "status": "documented",
+      "owner": "lib/project_mod/workspace_policy.py",
+      "description": "Explicit direct or isolated workspace execution policy; overrides repository-local tofu.workspaceMode. Absence defaults to direct execution. Invalid values fail closed; this setting never enables automatic commits or changes publication refs."
+    },
+    "TOFU_REPO_GRAMMAR_BUNDLE": {
+      "status": "documented",
+      "owner": "packages/tofu-repo-kernel/setup.py",
+      "description": "Build-only path to an explicit optional native grammar bundle with grammars.json and NOTICES.txt. Must be supplied together with TOFU_REPO_GRAMMAR_MANIFEST_SHA256; packaging verifies declared library sizes and hashes rather than discovering a user cache."
+    },
+    "TOFU_REPO_GRAMMAR_MANIFEST_SHA256": {
+      "status": "documented",
+      "owner": "packages/tofu-repo-kernel/setup.py",
+      "description": "Build-only SHA-256 pin for the manifest in TOFU_REPO_GRAMMAR_BUNDLE. Both settings are required together before the optional installed grammar libraries can enter a wheel."
+    },
+    "TOFU_REQUIRE_INSTALLED_GRAMMARS": {
+      "status": "documented",
+      "owner": "tests/repo_map/test_native_installed_grammar_package.py",
+      "description": "Test-only qualification flag. Value 1 requires the explicitly installed native repository package to contain its pinned grammar bundle and fails instead of skipping when it is absent; it never selects a production parser."
+    },
+    "TOFU_CHECKPOINT_SQL_TEST_LIBRARY": {
+      "status": "documented",
+      "owner": "tests/support/native_sql_goal.py",
+      "description": "Test-only native SQL checkpoint library path propagated into owned recovery subprocesses; paired with TOFU_CHECKPOINT_SQL_TEST_SHA256 for exact image verification, without selecting the application storage backend."
+    },
+    "TOFU_CHECKPOINT_SQL_TEST_SHA256": {
+      "status": "documented",
+      "owner": "tests/support/native_sql_goal.py",
+      "description": "Test-only SHA-256 pin for TOFU_CHECKPOINT_SQL_TEST_LIBRARY, checked before native SQL checkpoint recovery subprocesses acquire their private test authority."
+    },
+    "TOFU_HARNESS_GRAPH_BINARY": {
+      "status": "documented",
+      "owner": "tests/tofudb/test_harness_graph_controls.py",
+      "description": "Opt-in test-only path to the native graph prototype executable for cross-backend and process-crash contract verification; absence skips the external prototype check and does not change application authority."
     }
   },
   "legacy_count": 626

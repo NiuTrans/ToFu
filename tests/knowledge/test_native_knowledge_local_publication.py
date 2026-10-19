@@ -8,7 +8,7 @@ from tests.knowledge.test_knowledge_local_publication import (
     test_metadata_failure_rolls_back_only_unpublished_candidates as check_failure,
 )
 from tests.knowledge.test_knowledge_publication import RAW
-from tests.knowledge.test_native_knowledge_publication import native_publication_store
+from tests.knowledge.test_native_knowledge_publication import native_publication_store as native_publication_store
 
 pytestmark = pytest.mark.unit
 

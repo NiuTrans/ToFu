@@ -13,7 +13,7 @@ from lib.storage.client import StorageClient
 from lib.storage.errors import StorageError
 from lib.storage_authority_sql.native_checkpoint_config import NativeCheckpointConfiguration
 from lib.storage_authority_sql.server import create_server
-from tests.storage_authority_sql.test_native_checkpoint_storage import backend, acquire, binding, call, rows, snapshot
+from tests.storage_authority_sql.test_native_checkpoint_storage import backend as backend, acquire, binding, call, rows, snapshot
 
 pytestmark = pytest.mark.api
 TOKEN = 'native-checkpoint-selected-sql-'*2
