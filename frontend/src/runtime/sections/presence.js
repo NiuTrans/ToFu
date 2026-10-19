@@ -39,7 +39,9 @@
             return conversations.filter(function (item) {
               return !item._localOnly && !item.archived && !item.readOnly
                 && norm(typeof _getConvProjectPath === 'function' ? _getConvProjectPath(item) : item.projectPath) === root;
-            }).map(function (item) { return { id: item.id, title: item.title || item.id }; });
+            }).map(function (item) { return { id: item.id, title: item.title || item.id,
+              turnCount: item._serverTurnCount ?? runtimeScope.ConversationTurnRead?.ordered?.(item)?.length ?? null,
+              coordinatorId: item._coordinatorSource || null }; });
           },
           subscribe: function (refresh) {
             pushSubscribe('project', '*', refresh);
@@ -47,6 +49,7 @@
           },
           binding: function (path) { return api.coordination(path); },
 
+          workerConversations: function (path, cursor) { return api.workerConversations(path, cursor); },
           dispatch: {
             recipients: function () {
               return conversations.filter(function (item) {
@@ -110,6 +113,21 @@
             return api.createCoordinator(path, folderId, revision);
           },
           navigate: function (id) { if (typeof loadConversation === 'function') loadConversation(id); },
+
+          diagnose: function (id) {
+            var prepared = _projectConversationNavigation.prepareDraft(
+              t('projectCoordination.diagnosePrompt', { id: id, path: root }), {
+                hasDraft: _hasProjectComposerDraft,
+                startDraft: function () { newChat(); _saveConvProjectPath(root, [], [root]); },
+                writeText: function (text) {
+                  var input = document.getElementById('userInput');
+                  input.value = text;
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                  input.focus();
+                },
+              });
+            if (!prepared) showToast(t('projectCoordination.diagnoseDraftConflict'), 'warning');
+          },
           openEvidence: function () { runtimeScope.openProjectBrain?.({ tab: 'integration' }); },
 
     };

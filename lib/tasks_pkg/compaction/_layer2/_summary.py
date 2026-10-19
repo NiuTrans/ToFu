@@ -292,11 +292,8 @@ def _generate_query_aware_summary(messages: list, current_query: str,
     the receipt's Objective itself (see ``_ensure_summary_objective``), so
     the receipt can track goal replacement across a long conversation.
     """
-    if isinstance(task, dict):
-        from lib.project_dispatch.admission import is_dispatch_task
-        if is_dispatch_task(task):
-            from lib.llm.llm_errors import AbortedError
-            raise AbortedError('Project consultation cannot purchase auxiliary compaction summaries')
+    from lib.tasks_pkg.compaction._summary_accounting import summary_model_admission
+    model_admission = summary_model_admission(task)
     from lib.llm_dispatch import dispatch_chat, dispatch_stream
     from lib.llm.llm_errors import AbortedError, LocalRequestPreparationError
     dispatch_output_tokens = _SUMMARY_DISPATCH_MAX_TOKENS
@@ -488,6 +485,9 @@ def _generate_query_aware_summary(messages: list, current_query: str,
         if model:
             dispatch_options = dict(prefer_model=model, strict_model=True,
                                     max_429_attempts=2, thinking_enabled=False)
+
+    if model_admission is not None:
+        dispatch_options['model_budget_admit'] = model_admission
 
     call_rows = []
     transport_completed = False

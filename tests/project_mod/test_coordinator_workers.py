@@ -267,3 +267,23 @@ def test_coordinator_review_is_exact_and_not_human_acceptance(runtime):
     r.c.binding.value['revision'] = 2
     with pytest.raises(ValueError):
         r.service.review_for_coordinator(r.task, scope, arguments)
+
+
+@pytest.mark.parametrize('violation', ['readonly', 'synthetic', 'unattended', 'source'])
+def test_role_visible_delegation_keeps_request_authority_gates(runtime, violation):
+    from tests.tasks_pkg.test_coordinator_tool_surface import assemble, names, wire
+
+    r = runtime
+    if violation == 'readonly':
+        r.task['config']['readOnlyPaths'] = ['/project']
+    elif violation == 'synthetic':
+        r.task['_principalContext']['kind'] = 'system'
+    elif violation == 'unattended':
+        r.task['_attended'] = False
+    else:
+        r.c.turn['actor'] = 'virtual_user'
+    tools = assemble(r.task)
+    assert 'delegate_project_work' in names(wire(r.task, tools)['tools'])
+    result = r.call('delegate_project_work', **r.args)
+    assert 'error' in result
+    assert not r.created and not r.calls and not r.c.repo.list()

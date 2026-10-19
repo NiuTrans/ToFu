@@ -3,6 +3,53 @@ This guide owns the detailed compaction policy referenced by the
 [context-engineering domain map](modules/context_engineering.md).
 Automatic compaction bounds the request view without rewriting durable Turns. Working-state summaries retain known repository/root attribution for paths as rootname-relative or original absolute paths. A new task worktree is not evidence that every historical path moved. Unknown attribution stays unresolved; fresh environment mappings govern execution.
 Manual compaction writes a persistent summary boundary through the conversation command service, guarded against intervening Turns. Both share summarization and token-budget primitives, never persistence semantics.
+
+
+### Coordinator context lifecycle
+
+**Problem:** manual `turn.compact` deletes old canonical Turns and folds their
+projections. Dispatch grants refer to the exact original human Turn and assistant
+Turn/Attempt; report attention refers to canonical report Turns. Rebinding a new
+conversation or rewriting these rows is not a working-context reset.
+
+**Decision:** the common manual service refuses protected coordinator transcripts
+before archival/summary work, and `DefaultConversationStore.compact_turn_transcript`
+rechecks before issuing the destructive command. `POST /api/v4/conversations/{id}/compact`
+returns 409 with problem detail `coordinator_context_compaction_unsupported` for
+owned coordinator creation identities, current bindings (including unavailable
+targets), and canonical report provenance. A nonzero binding epoch conservatively
+protects every conversation still in that owned project, returning
+`project_context_compaction_unsupported`; no partial history page is treated as
+proof of absent source references. Ordinary never-coordinated conversations keep
+the existing manual command. Ownership failures and unknown storage/binding reads
+never authorize a rewrite. Existing active-work rejection remains in force.
+
+There is **no same-conversation fresh/reset API**: durable model-continuation
+publication is monotonic at the settled Turn frontier and rejects a different
+projection at the same frontier. An atomic, idle-only working-view epoch/replace
+port is required before fresh context can be offered. Deleting then replacing a
+checkpoint, fabricating a summary Turn, replacing the coordinator binding, and
+adding a parallel transcript store are rejected alternatives. Current creation
+IDs stay protected across unbinding/project moves. A legacy arbitrary coordinator
+ID moved out of its original project without report provenance has no complete
+reverse-reference index; this is an unresolved identification gap, not supported
+reset behavior.
+
+Automatic L2 remains a request-view operation. A validated automatic coordinator
+continuation may summarize only with its **existing exact physical ExecutionBudget**
+passed through the ordinary `model_budget_admit` transport port. Its observers
+charge the same dispatch grant and original request allowance; no new source
+account, tokens, model requests, or deadline are issued. Original human-task
+summaries reuse their already attached account too. Swapped/missing accounts,
+withdrawn grants, expired requests and unknown paid usage fail closed; other
+consultation/worker profiles retain the auxiliary-summary prohibition. Summary
+receipts/cost telemetry remain separate from authorization accounting.
+
+Executable specifications: `tests/tasks_pkg/test_coordinator_context_lifecycle.py`
+(real isolated semantic storage, exact source/Attempt/report/grant/budget snapshots)
+and `tests/tasks_pkg/test_coordinator_summary_accounting.py` (real grant/account
+observers with simulated provider transport, exhaustion and unknown usage).
+
 L1 receives an API-form working projection and replaces only cold tool/image bulk; it performs no conversation read, projection update or change notification.
 Completed ordinary chat turns publish this bounded view through the owner-scoped durable continuation repository. The next turn validates it and transforms only uncovered Turns; restarts/cache eviction do not resurrect summarized history. Missing/invalid checkpoints rebuild unchanged Turns and pass fresh admission.
 **Continuation boundary:** display updates previously invalidated summaries, while shared eligibility wrongly blocked completed Continue publication. Decision: semantic proof v2 preserves typed content/tool/Attempt/policy/media fences; Continue proves its input baseline, retains fresh suffixes, and publishes only verified complete model content. Rejected: weaker witnesses, history deletion or higher thresholds. Old proofs rebuild once with explicit reasons. Details: `contracts/model_context_v1.schema.json` and [storage operations](STORAGE_OPERATIONS.md#model-context-semantic-version).

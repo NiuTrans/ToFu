@@ -34,3 +34,22 @@ it('reports denied/removed metadata without manufacturing a local conversation',
   expect(ports.error).toHaveBeenCalledOnce();
   expect(ports.merge).not.toHaveBeenCalled(); expect(ports.navigate).not.toHaveBeenCalled();
 });
+
+it('prepares a diagnostic draft without sending and fences delayed navigation', async () => {
+  const owner = createProjectConversationNavigation(), ports = fixture();
+  let resolve!: (row: { id: string }) => void;
+  ports.fetch.mockImplementation(() => new Promise(done => { resolve = done; }));
+  const flight = owner.resolveMissing('old', ports);
+  const startDraft = vi.fn(), writeText = vi.fn();
+  expect(owner.prepareDraft('Diagnose worker-only', { hasDraft: () => false, startDraft, writeText })).toBe(true);
+  expect(startDraft).toHaveBeenCalledOnce();
+  expect(writeText).toHaveBeenCalledWith('Diagnose worker-only');
+  resolve({ id: 'old' }); await flight;
+  expect(ports.navigate).not.toHaveBeenCalled();
+});
+it('never overwrites text or attachment drafts', () => {
+  const owner = createProjectConversationNavigation();
+  const startDraft = vi.fn(), writeText = vi.fn();
+  expect(owner.prepareDraft('diagnose', { hasDraft: () => true, startDraft, writeText })).toBe(false);
+  expect(startDraft).not.toHaveBeenCalled(); expect(writeText).not.toHaveBeenCalled();
+});

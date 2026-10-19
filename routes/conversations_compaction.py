@@ -145,6 +145,8 @@ _MANUAL_COMPACT_STATUS = {
     "stale": 409,
     "summary_failed": 503,
     "turn_protocol_unsupported": 409,
+    "coordinator_context_compaction_unsupported": 409,
+    "project_context_compaction_unsupported": 409,
 }
 
 

@@ -391,7 +391,7 @@ def _assemble_tool_list(cfg, project_path, project_enabled, task_id,
     # executable catalog so the model is neither tempted nor charged the
     # tokens. Dispatch still repeats the exact-call check as the final
     # authority for late-discovered or malformed calls.
-    if _plan_mode and tool_list:
+    if _plan_mode and (tool_list or ctx.executable_tool_catalog):
         from lib.tasks_pkg.tool_dispatch._flags import _registry_tool_flags
         _write_names = _registry_tool_flags()[0]
         _kept, _dropped = plan_mode_filter_tool_schemas(

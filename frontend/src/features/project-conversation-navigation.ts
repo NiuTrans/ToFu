@@ -7,6 +7,18 @@ export function createProjectConversationNavigation() {
     invalidate() { generation++; },
 
     checkpoint() { const own = generation; return () => own === generation; },
+
+    prepareDraft(text: string, ports: {
+      hasDraft(): boolean;
+      startDraft(): void;
+      writeText(text: string): void;
+    }): boolean {
+      if (ports.hasDraft()) return false;
+      generation++;
+      ports.startDraft();
+      ports.writeText(text);
+      return true;
+    },
     resolveMissing<Row extends { id: string }>(id: string, ports: {
       contains(id: string): boolean;
       fetch(id: string): Promise<Row | null>;

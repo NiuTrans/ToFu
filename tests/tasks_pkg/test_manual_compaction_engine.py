@@ -127,6 +127,10 @@ def _install(monkeypatch, store, summary='COMPRESSED SUMMARY'):
     """Wire the fake store + a hermetic summary stub into _manual."""
     import lib.tasks_pkg.compaction._manual as man
     monkeypatch.setattr(man, 'get_conversation_store', lambda: store)
+
+    # This planner fake represents an ordinary, never-coordinated conversation.
+    # Real owned admission/storage coverage lives in test_coordinator_context_lifecycle.
+    monkeypatch.setattr(man, 'manual_compaction_rejection', lambda *a, **kw: None)
     # _archive_transcript imported into _manual — redirect it at the store so
     # we don't touch the DB, but STILL exercise _manual's own ordering.
     def _fake_archive(conv_id, messages, summary='', *, user_id,
@@ -957,3 +961,24 @@ def test_stop_during_post_summary_reload_prevents_persistent_adoption(monkeypatc
     assert store.cas_calls == []
     assert store.saved is None
     assert store.messages == original
+
+
+@pytest.mark.unit
+def test_new_coordinator_protection_at_commit_retains_source_and_settles_archive(monkeypatch):
+    from copy import deepcopy
+    from lib.tasks_pkg.compaction._context_lifecycle import ManualCompactionRefused
+
+    store = _FakeStore(_long_conv())
+    man = _install(monkeypatch, store)
+    original = deepcopy(store.messages)
+
+    def refuse(*args, **kwargs):
+        raise ManualCompactionRefused('coordinator_context_compaction_unsupported')
+
+    monkeypatch.setattr(store, 'compact_turn_transcript', refuse)
+    result = man.compact_conversation_now('c', user_id=1, config={})
+    assert result['ok'] is False
+    assert result['error'] == 'coordinator_context_compaction_unsupported'
+    assert result['receipt']['status'] == 'aborted'
+    assert result['receipt']['outcomeReason'] == result['error']
+    assert store.saved is None and store.messages == original

@@ -1,7 +1,8 @@
 /** Project execution graph and decision cards. The graph helper owns bounded
  * evidence projection/layout; this view adds accessible navigation, not execution.
  */
-import { createButton, createEmptyState } from '../ui';
+import { createButton } from '../ui';
+import { createCoordinationWorkList, type CoordinationConversation } from './project-coordination-work-list';
 import { projectCoordinationGraph,
   type CoordinationGraphEdge, type CoordinationGraphNode, type CoordinationGraphOptions, type CoordinationGraphStatus } from './project-coordination-graph';
 import { t } from '../i18n';
@@ -19,6 +20,10 @@ export interface CoordinationRenderHooks {
   heading?: boolean;
   /** View-only preferences owned by the mounted project surface. */
   viewState?: CoordinationCanvasState;
+
+  conversations?: readonly CoordinationConversation[];
+  inspect?(id: string): void;
+  manage?(): void;
 }
 
 interface CoordinationDecision { id: string; title: string; kind: 'dependency' | 'review' | 'delivery'; }
@@ -38,9 +43,10 @@ export function coordinationDecisions(assignments: readonly ProjectDispatchView[
 }
 
 export function createCoordinationDecisions(decisions: readonly CoordinationDecision[], manage: () => void): HTMLElement {
-  const section = document.createElement('section'); section.className = 'ui-stack';
-  if (!decisions.length) return section;
-  section.append(coordinationText(t('projectCoordination.decisions'), 'h3'));
+  const section = document.createElement('details'); section.className = 'coordination-decision-list';
+  section.dataset.coordinationDisclosure = 'decisions';
+  if (!decisions.length) { section.hidden = true; return section; }
+  section.append(coordinationText(`${t('projectCoordination.decisions')} · ${decisions.length}`, 'summary'));
   for (const item of decisions) {
     const card = document.createElement('article'); card.className = 'ui-card ui-stack ui-stack--tight';
     card.append(coordinationText(item.title, 'strong'), coordinationText(t(`projectCoordination.decisionAction.${item.kind}`)));
@@ -58,8 +64,8 @@ export const coordinationText = (content: string, tag = 'p'): HTMLElement => {
 
 export function projectCoordinationWorkGroups(active: readonly CoordinationWork[], recent: readonly CoordinationWork[]) {
   return {
-    active: active.filter(item => item.status === 'active').slice(0, 100),
-    recent: recent.filter(item => ['completed', 'failed', 'cancelled'].includes(item.status)).slice(0, 100),
+    active: active.filter(item => item.status === 'active'),
+    recent: recent.filter(item => ['completed', 'failed', 'cancelled'].includes(item.status)),
   };
 }
 
@@ -95,8 +101,8 @@ export function coordinationTaskDigest(node: CoordinationGraphNode): string {
   return envelopeMessage(node.summary).replace(/\s+/g, ' ').trim();
 }
 
-/** Nodes are the primary workspace. Counts and data coverage stay in an opt-in
- * disclosure; they never replace the task topology with a status dashboard. */
+/** Normal chat stays primary. A bounded work list provides direct actions;
+ * topology is built only when its native disclosure is opened. */
 export function createCoordinationBoard(
   groups: ReturnType<typeof projectCoordinationWorkGroups>, navigate: (id: string) => void, pendingDecisions: number | null = 0,
   options: CoordinationGraphOptions = {}, hooks: CoordinationRenderHooks = { pendingDecisions },
@@ -104,13 +110,27 @@ export function createCoordinationBoard(
   const graph = projectCoordinationGraph(groups, options);
   const root = document.createElement('section'); root.className = 'coordination-task-graph';
   root.setAttribute('aria-label', graphText('title')); root.dataset.graphSource = graph.source;
-  if (hooks.heading !== false) root.append(coordinationText(graphText('title'), 'h3'));
+  const state = hooks.viewState ?? {};
+  if (hooks.heading !== false) root.append(coordinationText(t('projectCoordination.workList'), 'h3'));
   if (graph.assignmentsUnavailable) root.append(coordinationText(graphText('assignmentsUnavailable'), 'small'));
   if (graph.truncated) root.append(coordinationText(graphText('bounded'), 'small'));
-  if (graph.total === null) root.append(createEmptyState({ title: graphText('progressUnknown') }));
-  else root.append(createCoordinationCanvas(graph, navigate, {
-    state: hooks.viewState ?? {}, digest: hooks.summarizeTask || coordinationTaskDigest,
-  }));
+  root.append(createCoordinationWorkList(graph, navigate, { state, conversations: hooks.conversations,
+    digest: hooks.summarizeTask || coordinationTaskDigest, inspect: hooks.inspect, manage: hooks.manage }));
+  const topology = document.createElement('details'); topology.className = 'coordination-topology';
+  topology.dataset.coordinationDisclosure = 'topology'; topology.open = !!state.graphOpen;
+  const summary = coordinationText(t('projectCoordination.dependencyGraph'), 'summary');
+  summary.dataset.coordinationFocus = 'topology'; topology.append(summary);
+  let mounted = false;
+  const mount = () => {
+    state.graphOpen = topology.open;
+    if (!topology.open || mounted) return;
+    mounted = true;
+    topology.append(createCoordinationCanvas(graph, navigate, {
+      state, digest: hooks.summarizeTask || coordinationTaskDigest,
+    }));
+  };
+  topology.addEventListener('toggle', mount); mount();
+  root.append(topology);
   const coverage = document.createElement('details'); coverage.className = 'coordination-graph-coverage';
   const title = document.createElement('summary'); title.textContent = t('projectCoordination.graph.coverage');
   coverage.append(title, coordinationText(graphText(graph.source === 'assignments' ? 'assignmentCoverage' : 'workCoverage'), 'small'));

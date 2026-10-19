@@ -51,6 +51,8 @@ def _node_available() -> bool:
 _HARNESS = r"""
 const fs = require('fs');
 global.window = global;
+
+global.runtimeScope = {};
 global.addEventListener = () => {};
 
 // ── Minimal DOM: a list element that records appended children. ──

@@ -23,6 +23,11 @@ function fixture() {
     conversation: (id: string) => { current = id; }, path: (value: string) => { path = value; } };
 }
 
+function expandGraph(canvas: HTMLElement) {
+  const topology = canvas.querySelector<HTMLDetailsElement>('.coordination-topology')!;
+  topology.open = true; topology.dispatchEvent(new Event('toggle'));
+}
+
 function reportState(turnId = 'report-A', unread = true): CoordinatorReportState {
   return { projectPath: '/project', conversationId: 'leader', bindingRevision: 4, unread,
     latest: { turnId, ordinal: turnId === 'report-A' ? 1 : 2, createdAt: 1,
@@ -65,10 +70,14 @@ it('refreshes after an exact read and preserves a newer unread report arriving m
   await vi.waitFor(() => expect(f.sidebar.querySelector('[data-unread="true"]')).toBeNull());
   f.surface.destroy();
 });
-it('opens the bound chat directly, shows its graph, and does not mark ordinary chats as workers', async () => {
+it('opens the bound chat directly, defaults to a compact list, and does not mark ordinary chats as workers', async () => {
   const f = fixture(); await f.surface.refresh();
   expect(f.sidebar.querySelector('[data-coordinator-id]')?.getAttribute('data-coordinator-id')).toBe('leader');
   expect(f.canvas.querySelector('details')?.open).toBe(true);
+  expect(f.canvas.querySelector('.coordination-work-list')).not.toBeNull();
+  expect(f.canvas.querySelector('.coordination-graph-viewport')).toBeNull();
+  expect(f.canvas.querySelector<HTMLDetailsElement>('.coordination-topology')?.open).toBe(false);
+  expandGraph(f.canvas);
   expect(f.canvas.querySelector('[data-node-kind="coordinator"]')).not.toBeNull();
   expect(f.canvas.textContent).not.toContain('projectCoordination.deliveryCaveat');
   expect(f.sidebar.textContent).not.toContain('projectCoordination.attention');
@@ -116,8 +125,27 @@ it('fences a previous project response and refreshes the new scope once', async 
   expect(f.ports.binding).toHaveBeenLastCalledWith('/other'); f.surface.destroy();
 });
 
+it('never caches a late roster from a previous project when the new roster read fails', async () => {
+  const f = fixture();
+  let resolve!: (page: { conversations: { conversationId: string; title: string; turnCount: number; coordinatorId: null }[]; nextCursor: null; coverage: 'complete' }) => void;
+  f.ports.workerConversations = vi.fn()
+    .mockImplementationOnce(() => new Promise(done => { resolve = done; }))
+    .mockRejectedValueOnce(new Error('new project roster unavailable'));
+  const flight = f.surface.refresh();
+  await vi.waitFor(() => expect(f.ports.workerConversations).toHaveBeenCalledOnce());
+  f.path('/other'); void f.surface.refresh();
+  resolve({ conversations: [{ conversationId: 'old-worker', title: 'Old project private shell', turnCount: 0, coordinatorId: null }], nextCursor: null, coverage: 'complete' });
+  await flight;
+  await vi.waitFor(() => expect(f.canvas.textContent).toContain('projectCoordination.roster.unavailable'));
+  expect(f.ports.workerConversations).toHaveBeenLastCalledWith('/other');
+  expect(f.canvas.textContent).not.toContain('Old project private shell');
+  expect(f.canvas.querySelector('[data-work-id="conversation:old-worker"]')).toBeNull();
+  f.surface.destroy();
+});
+
 it('retains unchanged DOM/focus and expanded summary on changed push facts', async () => {
   const f = fixture(); await f.surface.refresh();
+  expandGraph(f.canvas);
   f.canvas.querySelector<HTMLButtonElement>('[data-coordination-focus="graph-history"]')!.click();
   const fold = f.canvas.querySelector('details')!; fold.open = true;
   const button = f.canvas.querySelector('button')!; button.focus();
@@ -205,7 +233,8 @@ it('refreshes graph execution facts even when board and review decisions are unc
   const list = vi.fn(async () => ({ olderCursor: null, newerCursor: null, assignments: [assignment('queued')] }));
   f.ports.dispatch = { list } as unknown as NonNullable<ProjectCoordinationPorts['dispatch']>;
   await f.surface.refresh();
-  expect(f.canvas.querySelector('[data-node-kind="task"]')?.getAttribute('data-status')).toBe('queued');
+  expect(f.canvas.querySelector('[data-work-id="assignment:assignment-a"]')?.getAttribute('data-status')).toBe('queued');
+  expandGraph(f.canvas);
 
   const viewport = f.canvas.querySelector<HTMLElement>('.coordination-graph-viewport')!;
   viewport.scrollLeft = 80; viewport.scrollTop = 120;
@@ -225,6 +254,7 @@ it('keeps assignment graph evidence when the observed-work endpoint is unavailab
   f.ports.dispatch = { list: vi.fn(async () => ({ olderCursor: null, newerCursor: null, assignments: [assignment('completed')] })) } as unknown as NonNullable<ProjectCoordinationPorts['dispatch']>;
   await f.surface.refresh();
   expect(f.canvas.textContent).toContain('projectCoordination.boardUnavailable');
+  expandGraph(f.canvas);
   f.canvas.querySelector<HTMLButtonElement>('[data-coordination-focus="graph-history"]')!.click();
   expect(f.canvas.textContent).toContain('Build the worker task');
   expect(f.canvas.querySelector('[data-node-kind="coordinator"]')).not.toBeNull();
@@ -260,6 +290,7 @@ it('reaches history beyond 128 tasks while keeping only one page of graph nodes'
   });
   f.ports.dispatch = { list } as unknown as NonNullable<ProjectCoordinationPorts['dispatch']>;
   await f.surface.refresh();
+  expandGraph(f.canvas);
   for (let page = 0; page < 5; page++) {
     expect(f.canvas.querySelectorAll('[data-node-kind="task"]')).toHaveLength(32);
     expect(f.canvas.querySelector(`[data-node-id="assignment:${160 - page * 32}"]`)).not.toBeNull();
@@ -290,4 +321,30 @@ it('discards an old page response and resets history when the project changes', 
   await vi.waitFor(() => expect(list).toHaveBeenLastCalledWith('/other', undefined, undefined));
   expect(f.canvas.querySelector('[data-node-id="assignment:stale"]')).toBeNull();
   f.surface.destroy();
+});
+
+it('shows a known empty worker shell and provides the same return route before work begins', async () => {
+  const f = fixture();
+  f.ports.conversations = () => [{ id: 'shell', title: 'New worker', turnCount: 0, coordinatorId: 'leader' }];
+  f.ports.workerConversations = vi.fn(async () => ({ conversations: [{ conversationId: 'shell', title: 'New worker', turnCount: 0, coordinatorId: 'leader' }], nextCursor: null, coverage: 'complete' as const }));
+  await f.surface.refresh();
+  expect(f.canvas.querySelector('[data-work-id="conversation:shell"]')?.getAttribute('data-status')).toBe('not_started');
+  f.conversation('shell'); await f.surface.refresh();
+  expect(f.canvas.textContent).toContain('projectCoordination.returnCoordinator');
+  f.canvas.querySelector('button')!.click(); expect(f.ports.navigate).toHaveBeenCalledWith('leader');
+  expect(f.ports.workerConversations).toHaveBeenCalledTimes(1); f.surface.destroy();
+});
+
+it('retains usable work and reference disclosure on binding failure; retry only reads status', async () => {
+  const f = fixture(); await f.surface.refresh();
+  const list = f.canvas.querySelector('.coordination-work-list');
+  const reference = f.canvas.querySelector<HTMLDetailsElement>('.coordination-reference details')!;
+  reference.open = true;
+  vi.mocked(f.ports.binding).mockRejectedValueOnce(new Error('offline'));
+  await f.surface.refresh(true);
+  expect(f.canvas.querySelector('.coordination-work-list')).toBe(list); expect(reference.open).toBe(true);
+  expect(f.canvas.querySelector('.coordination-read-error[role=status]')?.textContent).toContain('projectCoordination.error');
+  f.canvas.querySelector<HTMLButtonElement>('.coordination-read-error button')!.click();
+  await vi.waitFor(() => expect(f.canvas.querySelector('.coordination-read-error')).toBeNull());
+  expect(f.ports.bind).not.toHaveBeenCalled(); expect(f.create).not.toHaveBeenCalled(); f.surface.destroy();
 });

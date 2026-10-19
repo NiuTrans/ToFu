@@ -243,3 +243,14 @@ def test_pinned_coordinator_turn_cannot_create_after_binding_epoch_changes(runti
     r.c.binding.value['revision'] += 1
     assert 'error' in r.call('create_conversation', title='another', idempotency_key='new')
     assert len(r.created) == 1
+
+
+def test_create_only_receipt_points_to_current_request_delegation(runtime):
+    r = runtime
+    result = r.call('create_conversation', title='Empty workspace discussion', idempotency_key='create-only')
+    assert result['created_only'] and result['execution_started'] is False
+    assert 'delegate_project_work' in result['next_step']
+    assert 'creates and starts its own Worker' in result['next_step']
+    assert 'without a separate per-worker authorization' in result['next_step']
+    assert 'grants no execution rights' in result['next_step']
+    assert not r.calls and not r.c.repo.list()

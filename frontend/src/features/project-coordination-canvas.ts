@@ -4,10 +4,12 @@
  */
 import { createButton } from '../ui';
 import { t } from '../i18n';
+
+import { createCoordinationReference } from './project-coordination-reference';
 import { layoutCoordinationGraph, COORDINATION_GRAPH_GEOMETRY,
   type CoordinationGraph, type CoordinationGraphNode } from './project-coordination-graph';
 
-export interface CoordinationCanvasState { selectedId?: string; showHistory?: boolean; zoom?: number; }
+export interface CoordinationCanvasState { selectedId?: string; showHistory?: boolean; zoom?: number; graphOpen?: boolean; workPage?: number; }
 const archived = (node: CoordinationGraphNode) => node.status === 'completed' || node.status === 'cancelled';
 const text = (value: string, tag = 'span', className = '') => {
   const el = document.createElement(tag); el.textContent = value; el.className = className; return el;
@@ -65,6 +67,8 @@ export function createCoordinationCanvas(graph: CoordinationGraph, navigate: (id
   const viewport = document.createElement('div'); viewport.className = 'coordination-graph-viewport';
   viewport.tabIndex = 0; viewport.setAttribute('role', 'region'); viewport.setAttribute('aria-label', t('projectCoordination.graph.viewport'));
   viewport.dataset.coordinationFocus = 'graph-viewport';
+
+  viewport.dataset.coordinationScroll = 'graph-viewport';
   const inspector = document.createElement('section'); inspector.className = 'coordination-node-inspector'; inspector.hidden = true;
   inspector.setAttribute('aria-label', t('projectCoordination.graph.details')); inspector.setAttribute('aria-live', 'polite');
   const legend = document.createElement('div'); legend.className = 'coordination-edge-legend';
@@ -99,6 +103,7 @@ export function createCoordinationCanvas(graph: CoordinationGraph, navigate: (id
         { task: source ? titleOf(source) : edge.reference?.assignmentId || '' });
       inspector.append(text(label + (edge.status ? ` · ${t(`projectCoordination.graph.dependency.${edge.status}`)}` : ''), 'small'));
     }
+    inspector.append(createCoordinationReference(node.reference || { conversationId: node.conversationId }, `graph:${node.id}`));
     if (node.conversationId) {
       const open = createButton({ label: t('projectCoordination.graph.openConversation', { task: titleOf(node) }),
         size: 'sm', wrap: true, onClick: () => navigate(node.conversationId!) });

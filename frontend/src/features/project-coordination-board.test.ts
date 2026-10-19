@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 import { expect, it, vi } from 'vitest';
 vi.mock('../i18n', () => ({ t: (key: string, values?: Record<string, unknown>) => key + (values ? JSON.stringify(values) : '') }));
-import { coordinationDecisions, coordinationTaskDigest, createCoordinationBoard, projectCoordinationWorkGroups } from './project-coordination-board';
+import { coordinationDecisions, coordinationTaskDigest, createCoordinationBoard as createBoard, projectCoordinationWorkGroups } from './project-coordination-board';
+// Graph specifications explicitly request topology; the default-list behavior is
+// asserted separately, including that no graph DOM exists before demand.
+const createCoordinationBoard: typeof createBoard = (...args) => {
+  const board = createBoard(...args);
+  const fold = board.querySelector<HTMLDetailsElement>('.coordination-topology')!;
+  fold.open = true; fold.dispatchEvent(new Event('toggle')); return board;
+};
 import type { ProjectDispatchView } from '../api/project-dispatch.generated';
 
 function assignment(overrides: Partial<ProjectDispatchView> = {}): ProjectDispatchView {
@@ -83,7 +90,7 @@ it('selects a node to inspect its outcome and open the ordinary worker conversat
   const inspector = board.querySelector<HTMLElement>('.coordination-node-inspector')!;
   expect(inspector.hidden).toBe(false);
   expect(inspector.textContent).toContain('projectCoordination.graph.deliveryUnconfirmed');
-  inspector.querySelector('button')!.click(); expect(navigate).toHaveBeenCalledWith('w');
+  inspector.querySelector<HTMLButtonElement>('[data-coordination-focus="graph-open:assignment:a"]')!.click(); expect(navigate).toHaveBeenCalledWith('w');
   const refreshed = createCoordinationBoard({ active: [], recent: [] }, navigate, 0, { assignments: [item] }, { viewState: state });
   expect(refreshed.querySelector('[data-node-kind="task"] button')?.getAttribute('aria-pressed')).toBe('true');
 });

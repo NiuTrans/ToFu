@@ -267,6 +267,21 @@ class DefaultConversationStore:
         user_id,
     ):
         """Atomically apply a semantic compaction to normalized turns."""
+
+        from lib.tasks_pkg.compaction._context_lifecycle import (
+            ManualCompactionRefused, manual_compaction_rejection,
+        )
+        from lib.conversations.repository import ConversationRepository
+        from lib.conversations.project_coordination import ProjectCoordinationRepository
+
+        conversations = ConversationRepository(_storage_client)
+        rejection = manual_compaction_rejection(
+            conv_id, user_id=user_id, messages=current_messages,
+            conversations=conversations,
+            bindings=ProjectCoordinationRepository(
+                user_id, client=_storage_client, conversations=conversations))
+        if rejection:
+            raise ManualCompactionRefused(rejection)
         payload = _build_turn_compaction_payload(
             conv_id,
             current_messages,

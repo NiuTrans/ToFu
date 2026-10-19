@@ -25,7 +25,7 @@ function _purgeEmptyConvs() {
      *   showed the user re-attaching via mpApplyFolders 4× in 7 minutes). */
     const turnCount = runtimeScope.ConversationTurnRead?.ordered?.(c)?.length || 0;
     const keep = turnCount > 0 || c.id === activeConvId || (c._serverTurnCount || 0) > 0 || c._turnSnapshotRequired
-      || !!c.projectPath;
+      || !!c.projectPath || Number.isInteger(c._serverRev);
     if (!keep) purged.push(`${c.id.slice(0,8)}(turns=${turnCount},srv=${c._serverTurnCount||0},snapshotRequired=${!!c._turnSnapshotRequired})`);
     return keep;
   });

@@ -177,3 +177,37 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+/* Lists are primary; topology and exact references are independent disclosures.
+ * Cap the in-chat attachment so the ordinary conversation keeps its reading space. */
+.coordination-work-list { min-width: 0; color: var(--text-primary); }
+.coordination-work-rows { max-height: min(26vh, 18rem); overflow: auto; overscroll-behavior: contain; }
+.coordination-workspace .coordination-work-rows { max-height: min(42vh, 28rem); }
+.coordination-work-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2); padding-block: var(--space-2); border-block-end: 1px solid var(--border); min-width: 0; }
+.coordination-work-body { flex: 1 1 14rem; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.coordination-work-body strong { font-size: var(--font-size-sm); font-weight: var(--weight-semibold); line-height: var(--leading-tight); overflow-wrap: anywhere; }
+.coordination-work-body small { font-size: var(--font-size-xs); color: var(--text-secondary); }
+.coordination-work-digest { font-size: var(--font-size-xs); color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.coordination-work-row[data-status="failed"] .coordination-work-status { color: var(--error-text); }
+.coordination-work-row[data-status="blocked"] .coordination-work-status,
+.coordination-work-row[data-status="waiting"] .coordination-work-status { color: var(--warning-text); }
+.coordination-work-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-1); min-width: 0; max-width: 100%; }
+.coordination-list-paging { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding-block-start: var(--space-2); }
+.coordination-list-paging small { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-topology { min-width: 0; padding-block-start: var(--space-2); }
+.coordination-topology > summary { font-size: var(--font-size-sm); cursor: pointer; }
+.coordination-reference { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; }
+.coordination-reference details { min-width: 0; max-width: 100%; }
+.coordination-reference summary { font-size: var(--font-size-xs); font-weight: var(--weight-regular); cursor: pointer; }
+.coordination-reference pre { margin: var(--space-1) var(--space-0); padding: var(--space-2); background: var(--bg-primary); color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--font-size-xs); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12rem; overflow: auto; }
+.coordination-reference small { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-management { display: grid; gap: var(--space-4); }
+.coordination-management-section { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2); padding-block: var(--space-3); border-block-end: 1px solid var(--border); min-width: 0; }
+.coordination-management-section > h3,
+.coordination-management-section > p,
+.coordination-management-section > small { flex-basis: 100%; }
+.coordination-management-section p { font-size: var(--font-size-sm); overflow-wrap: anywhere; }
+.coordination-management-section small { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-topology > summary:focus-visible,
+.coordination-reference summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+.coordination-refresh-feedback:empty { display: none; }

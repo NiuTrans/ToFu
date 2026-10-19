@@ -82,6 +82,9 @@ from lib.tasks_pkg.compaction._tokens import (
     _usable_context,
 )
 from lib.tasks_pkg.compaction._receipt import build_compaction_receipt
+from lib.tasks_pkg.compaction._context_lifecycle import (
+    ManualCompactionRefused, manual_compaction_rejection,
+)
 
 logger = get_logger(__name__)
 
@@ -611,6 +614,11 @@ def compact_conversation_now(
         logger.warning('[ManualCompact] conv=%s not found', log_id)
         return {'ok': False, 'error': 'not_found'}
     raw_messages, updated_at, _load_rev = loaded
+
+    rejection = manual_compaction_rejection(
+        conv_id, user_id=user_id, messages=raw_messages)
+    if rejection:
+        return {'ok': False, 'error': rejection}
     turn_native = bool(raw_messages) and all(
         isinstance(message, dict) and bool(message.get('_turnId'))
         for message in raw_messages)
@@ -916,11 +924,16 @@ def compact_conversation_now(
             receipt = _settle_aborted_archive('aborted', attempts)
             return {'ok': False, 'error': 'aborted', 'archiveId': archive_id,
                     'receipt': receipt}
-        affected = store.compact_turn_transcript(
-            conv_id, cur_messages, new_messages, cur_rev,
-            command_id=(f'manual-compact:{conv_id}:'
-                        f'{compact_command_root}:{cur_rev}'),
-            user_id=user_id)
+        try:
+            affected = store.compact_turn_transcript(
+                conv_id, cur_messages, new_messages, cur_rev,
+                command_id=(f'manual-compact:{conv_id}:'
+                            f'{compact_command_root}:{cur_rev}'),
+                user_id=user_id)
+        except ManualCompactionRefused as exc:
+            receipt = _settle_aborted_archive(exc.reason, attempts)
+            return {'ok': False, 'error': exc.reason, 'archiveId': archive_id,
+                    'receipt': receipt}
         if affected:
             break
         # Lost the reload→CAS race to a fresh tail write. Retry against the

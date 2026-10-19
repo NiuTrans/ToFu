@@ -99,3 +99,39 @@ def filter_coordinator_tools(task: dict, tools: list[dict] | None,
         return tools
     return [tool for tool in tools
             if (tool.get('function') or {}).get('name') in COORDINATOR_TOOLS]
+
+
+def prepare_coordinator_tool_surface(task: dict, cfg: dict, tools: list[dict] | None,
+                                     project_path: str | None = None) -> list[dict] | None:
+    """Keep this role's admitted tools direct, independent of intent/discovery.
+
+    Call after ordinary registry, owner, explicit selection and Plan filters.
+    The existing executable catalog is the ceiling: this never builds schemas
+    or restores a denied capability. Continuation grant filtering still runs
+    afterward and every tool call retains its ordinary execution gates.
+    """
+    if not coordinator_scope(task, project_path):
+        return tools
+    catalog = cfg.get('_executableToolCatalog')
+    if not isinstance(catalog, list):
+        catalog = tools or []
+    admitted = [tool for tool in catalog
+                if (tool.get('function') or {}).get('name') in COORDINATOR_TOOLS]
+    allowed = {tool['function']['name'] for tool in admitted}
+    cfg['_executableToolCatalog'] = admitted
+    for key in ('_toolContractDocumentsByName', '_executableToolNamespaceByName',
+                '_toolScriptSafeByName', '_executableToolSearchTextByName'):
+        cfg[key] = {name: value for name, value in (cfg.get(key) or {}).items()
+                    if name in allowed}
+    cfg['_toolNamespaceByName'] = dict(cfg['_executableToolNamespaceByName'])
+    cfg['_frontendSelectedToolNames'] = sorted(
+        set(cfg.get('_frontendSelectedToolNames') or ()) & allowed)
+    # Shared direct-wire projection protects these exact live schemas across
+    # local/native discovery, schema budgets and replayed initial visibility.
+    # Do not mark entire ToolSpec families eager: project_integration also owns
+    # workspace mutation tools that the Coordinator must never acquire.
+    cfg['_requiredDirectToolNames'] = sorted(allowed)
+    cfg['_toolDiscoveryPolicyByName'] = {name: 'eager' for name in allowed}
+    cfg['_toolSearchCatalogSize'] = len(admitted)
+    cfg['_toolSearchableCount'] = 0
+    return list(admitted)

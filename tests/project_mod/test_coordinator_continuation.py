@@ -360,3 +360,30 @@ def test_idle_callbacks_create_no_execution_threads_or_durable_growth(run):
     assert before == after and len(r.calls) == births and r.c.client.puts == writes
     assert {thread.ident for thread in threading.enumerate()} <= threads
     print(f'Coordinator idle recovery: 50 callbacks, {elapsed:.3f}s, {len(after)} retained bytes, 0 births/writes/new threads')
+
+
+@pytest.mark.parametrize('narrowed', [False, True])
+def test_issued_continuation_core_is_direct_with_exact_grant_ceiling(run, narrowed):
+    from tests.tasks_pkg.test_coordinator_tool_surface import assemble, names, wire
+    from lib.tasks_pkg.coordinator_policy import COORDINATOR_TOOLS
+
+    r = run
+    if narrowed:
+        # Freeze a narrower ORIGINAL request policy, not an edited continuation
+        # flag: promotion must not invent a missing messaging grant later.
+        controls = set(CONTRACT['continuationTools']) - {'send_project_message', 'consider_project_message'}
+        capture_worker_policy(r.task, r.task['config'], [
+            {'function': {'name': name}} for name in controls | {'run_command', 'read_files'}], 'model-a')
+    ready(r)
+    row = activate(r)
+    tools = assemble(r.task)
+    expected = set(row['request']['profile']['tools']) - {'search_tools', 'execute_tools'}
+    assert expected <= COORDINATOR_TOOLS
+    assert names(r.task['_executable_tool_catalog']) == names(tools) == expected
+    assert set(r.task['_requiredDirectToolNames']) == expected
+    for round_num in (1, 2):
+        body = wire(r.task, tools, round_num=round_num)
+        assert expected <= names(body['tools'])
+        assert not names(body['tools']) - set(row['request']['profile']['tools'])
+        assert body['_programmatic_tool_calling'] == 'off'
+    assert r.task['_principalContext']['kind'] == 'system' and not r.task['_attended']

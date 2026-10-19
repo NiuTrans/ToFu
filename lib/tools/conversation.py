@@ -10,9 +10,12 @@ CONV_REF_LIST_TOOL = {
     'function': {
         'name': 'list_conversations',
         'description': (
-            'Search other conversations only when the user explicitly asks '
-            'for past-conversation information. Project mode scopes to sibling '
-            'conversations unless scope=all.'
+            'Search other conversations when the user explicitly asks for '
+            'past-conversation information. A bound project Coordinator may also '
+            'inspect same-owner, same-project worker evidence needed to delegate, '
+            'review or follow the current authorized request. Otherwise do not '
+            'browse history proactively. Project mode scopes to siblings; '
+            'scope=all requires an explicit user request beyond that project.'
         ),
         'parameters': {
             'type': 'object',
@@ -33,9 +36,12 @@ CONV_REF_GET_TOOL = {
     'function': {
         'name': 'get_conversation',
         'description': (
-            'Retrieve by ID only when the user explicitly requests '
-            'past-conversation information; never call proactively. Find its ID '
-            'with list_conversations.\n\n'
+            'Retrieve a conversation by ID when the user explicitly requests '
+            'past-conversation information. A bound project Coordinator may also '
+            'inspect same-owner, same-project worker evidence needed to delegate, '
+            'review or follow the current authorized request. Otherwise do not '
+            'browse history proactively. Use an ID from list_conversations or '
+            'the current assignment/result evidence.\n\n'
             '`raw` defaults to true: a structured, unsummarized DB record with '
             'row metadata/settings and every field of each delivered message, '
             'including full tool rounds. Set `raw=false` only for a readable '

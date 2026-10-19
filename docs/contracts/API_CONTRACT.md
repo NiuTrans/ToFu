@@ -459,6 +459,16 @@ Compaction archive inspection is owner-scoped; metadata stays cheap and the draw
 | Download post-compaction result | `GET /api/v4/conversations/{id}/compactions/{archiveId}?view=post&download=true` | unwrapped JSON attachment `{archive,view:"post",postMessages,postSnapshot}`; no pre-compaction body |
 | Run idle manual compaction | `POST /api/v4/conversations/{id}/compact` | `{ok, archiveId, tokensBefore, tokensAfter, tokenCountKind:"estimated", msgsBefore, msgsAfter, reductionPct, summaryPreview, receipt}` |
 
+Manual compaction is not coordinator replacement or a harmless fresh working
+view. Protected Coordinator contexts return HTTP 409 with
+`coordinator_context_compaction_unsupported`; other conversations in a project
+with a coordinator binding history may conservatively return
+`project_context_compaction_unsupported`. The live-task 409 remains unchanged.
+These refusals preserve canonical source/report Turns, Attempts, binding and
+budget references; no summary purchase or partial archive/Turn mutation follows.
+The common persistence adapter repeats the protection before canonical
+compaction. No idle fresh-context endpoint or implicit rebind is provided.
+
 Archive metadata uses `schemaVersion=tofu.compaction-archive/v3`, millisecond
 `createdAt` and `tokenCountKind=estimated`; `payloadSize` measures stored-document bytes.
 Default/pre reads return unchanged input; `view=post` returns the saved compactor result,

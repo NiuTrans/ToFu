@@ -182,21 +182,11 @@ def assemble_round_tools(cfg, task, mcfg):
         if coordinator:
             from lib.project_dispatch.delegation import capture_worker_policy
             capture_worker_policy(task, cfg, cfg.get('_executableToolCatalog') or tool_list, mcfg['model'])
-            from lib.tasks_pkg.coordinator_policy import filter_coordinator_tools
+            from lib.tasks_pkg.coordinator_policy import prepare_coordinator_tool_surface
             from lib.context_experiment_flags import normalize_context_experiment_flags
             cfg['tools'] = {**normalize_context_experiment_flags(cfg)['tools'],
                             'programmaticCalling': 'off'}
-            tool_list = filter_coordinator_tools(task, tool_list)
-            cfg['_executableToolCatalog'] = filter_coordinator_tools(
-                task, cfg.get('_executableToolCatalog') or [])
-            allowed = {tool['function']['name'] for tool in cfg['_executableToolCatalog']}
-            for key in ('_toolContractDocumentsByName', '_toolNamespaceByName',
-                        '_executableToolNamespaceByName', '_toolDiscoveryPolicyByName',
-                        '_toolScriptSafeByName', '_executableToolSearchTextByName'):
-                cfg[key] = {name: value for name, value in (cfg.get(key) or {}).items()
-                            if name in allowed}
-            cfg['_requiredDirectToolNames'] = [name for name in cfg.get('_requiredDirectToolNames', [])
-                                               if name in allowed]
+            tool_list = prepare_coordinator_tool_surface(task, cfg, tool_list, mcfg['project_path'])
             has_real_tools = bool(tool_list)
     except Exception as error:
         from lib.agent_core.tool_errors import MCPDeclarationError

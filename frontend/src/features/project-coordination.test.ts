@@ -199,8 +199,109 @@ it('creates an empty replacement explicitly instead of offering historical conve
   expect(p.create).not.toHaveBeenCalled();
   expect(document.querySelector('.coordination-entry')?.textContent).not.toContain('Old worker conversation');
   const create = [...document.querySelectorAll('button')].find(button => button.textContent === 'projectCoordination.replace')!;
+  document.querySelectorAll<HTMLButtonElement>('[role=tab]')[4].click();
   create.click();
+  expect(p.create).not.toHaveBeenCalled();
+  const confirmation = document.querySelectorAll('dialog')[1];
+  expect(confirmation.textContent).toContain('projectCoordination.replacement.impact');
+  [...confirmation.querySelectorAll('button')].find(button => button.textContent === 'projectCoordination.replacement.confirm')!.click();
   await vi.waitFor(() => expect(p.create).toHaveBeenCalledWith('/project', 1));
   expect(p.bind).not.toHaveBeenCalled();
   document.querySelector('dialog')!.close(); await run;
+});
+
+const buttonNamed = (label: string, root: ParentNode = document) => [...root.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === label)!;
+
+it('keeps replacement in Manage, cancels safely, and fences a binding changed during confirmation', async () => {
+  const p = ports(); p.create = vi.fn();
+  const run = openProjectCoordination(p); await rendered();
+  expect(document.querySelector('[role=tabpanel]:not([hidden])')?.textContent).not.toContain('projectCoordination.replace');
+  document.querySelectorAll<HTMLButtonElement>('[role=tab]')[4].click();
+  buttonNamed('projectCoordination.replace').click();
+  buttonNamed('projectCoordination.replacement.cancel').click();
+  await vi.waitFor(() => expect(document.querySelectorAll('dialog')).toHaveLength(1));
+  expect(p.create).not.toHaveBeenCalled();
+  buttonNamed('projectCoordination.replace').click();
+  const old = await p.binding('/project');
+  vi.mocked(p.binding).mockResolvedValue({ ...old, revision: 2, conversationId: 'someone-else' });
+  buttonNamed('projectCoordination.replacement.confirm').click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain('projectCoordination.replacement.changed'));
+  expect(p.create).not.toHaveBeenCalled();
+  expect(buttonNamed('projectCoordination.replace').disabled).toBe(true);
+  document.querySelector('dialog')!.close(); await run;
+});
+
+it('reads replacement status after an uncertain response instead of repeating the write', async () => {
+  const p = ports(); p.create = vi.fn(async () => { throw new Error('response lost'); });
+  const run = openProjectCoordination(p); await rendered();
+  document.querySelectorAll<HTMLButtonElement>('[role=tab]')[4].click();
+  buttonNamed('projectCoordination.replace').click(); buttonNamed('projectCoordination.replacement.confirm').click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain('response lost'));
+  expect(p.create).toHaveBeenCalledTimes(1);
+  buttonNamed('projectCoordination.retry').click();
+  await vi.waitFor(() => expect(buttonNamed('projectCoordination.replace').disabled).toBe(false));
+  expect(p.create).toHaveBeenCalledTimes(1); expect(p.bind).not.toHaveBeenCalled();
+  expect(document.body.textContent).toContain('projectCoordination.context.unavailable');
+  document.querySelector('dialog')!.close(); await run;
+});
+
+it('keeps authorization form drafts, disclosures and focus mounted during manual refresh', async () => {
+  const p = ports(); p.currentConversationId = 'coord';
+  p.dispatch = { recipients: () => [], humanTurns: () => [], commandId: () => 'command',
+    list: vi.fn(async () => ({ assignments: [], olderCursor: null, newerCursor: null })) } as unknown as NonNullable<ProjectCoordinationPorts['dispatch']>;
+  const run = openProjectCoordination(p); await rendered();
+  document.querySelectorAll<HTMLButtonElement>('[role=tab]')[4].click();
+  const field = document.querySelector<HTMLInputElement>('input[name="brief"]')!;
+  field.value = 'Keep this human draft'; field.focus();
+  const disclosure = field.closest('details')!; disclosure.open = true;
+  const tabs = document.querySelector('[role=tablist]');
+  buttonNamed('projectCoordination.refresh').click();
+  await vi.waitFor(() => expect(p.board).toHaveBeenCalledTimes(2));
+  expect(document.querySelector('[role=tablist]')).toBe(tabs);
+  expect(document.querySelector('input[name="brief"]')).toBe(field);
+  expect(field.value).toBe('Keep this human draft'); expect(disclosure.open).toBe(true);
+  expect(document.activeElement).toBe(field);
+  document.querySelector('dialog')!.close(); await run;
+});
+
+it('pages an empty matching roster page without hiding its next-page action and includes assignment recipients', async () => {
+  const p = ports();
+  p.workerConversations = vi.fn(async (_path, cursor) => cursor
+    ? { conversations: [{ conversationId: 'new-shell', title: 'Not yet started', turnCount: 0, coordinatorId: 'coord' }], nextCursor: null, coverage: 'complete' as const }
+    : { conversations: [], nextCursor: 'next-page', coverage: 'page' as const });
+  const run = openProjectCoordination(p); await rendered();
+  document.querySelectorAll<HTMLButtonElement>('[role=tab]')[1].click();
+  const panel = document.querySelector<HTMLElement>('[role=tabpanel]:not([hidden])')!;
+  expect(panel.textContent).toContain('<unsafe>'); // Board-only conversation remains reachable.
+  buttonNamed('projectCoordination.roster.more', panel).click();
+  await vi.waitFor(() => expect(p.workerConversations).toHaveBeenLastCalledWith('/project', 'next-page'));
+  await vi.waitFor(() => expect(panel.textContent).toContain('Not yet started'));
+  expect(panel.textContent).toContain('projectCoordination.shell.not_started');
+  expect(panel.textContent).not.toContain('projectCoordination.graph.status.queued');
+  document.querySelector('dialog')!.close(); await run;
+});
+
+it('keeps Overview and hidden Team reference disclosure and focus independent after refresh', async () => {
+  vi.useFakeTimers();
+  try {
+    const p = ports(); let refresh!: () => void;
+    p.conversations = () => [{ id: 'worker', title: 'Worker conversation' }];
+    p.subscribe = callback => { refresh = callback; return vi.fn(); };
+    const run = openProjectCoordination(p); await vi.advanceTimersByTimeAsync(0);
+    const panels = document.querySelectorAll<HTMLElement>('[role=tabpanel]');
+    const overview = panels[0], team = panels[1];
+    const reference = overview.querySelector<HTMLDetailsElement>('article details')!;
+    const teamReference = team.querySelector<HTMLDetailsElement>('article details')!;
+    reference.open = true;
+    reference.querySelector('summary')!.focus();
+    const focus = (document.activeElement as HTMLElement).dataset.coordinationFocus;
+    expect(teamReference.open).toBe(false);
+    vi.mocked(p.board).mockResolvedValue({ active: [{ id: 'work', conversationId: 'worker', title: 'Updated work', status: 'active' }], recentOutcomes: [] });
+    refresh(); await vi.advanceTimersByTimeAsync(300);
+    expect(overview.querySelector<HTMLDetailsElement>('article details')!.open).toBe(true);
+    expect(team.querySelector<HTMLDetailsElement>('article details')!.open).toBe(false);
+    expect((document.activeElement as HTMLElement).dataset.coordinationFocus).toBe(focus);
+    expect(overview.contains(document.activeElement)).toBe(true);
+    document.querySelector('dialog')!.close(); await run;
+  } finally { vi.useRealTimers(); }
 });

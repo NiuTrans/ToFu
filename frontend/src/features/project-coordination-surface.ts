@@ -3,6 +3,9 @@
  */
 import type { CoordinationCanvasState } from './project-coordination-canvas';
 import { createButton } from '../ui';
+
+import { captureCoordinationView, createCoordinationReference } from './project-coordination-reference';
+import type { CoordinatorConversationPage } from '../api/project-coordination.generated';
 import { createCoordinatorBudget } from './coordinator-budget';
 import { createAssignmentHistoryNavigation } from './project-assignment-history';
 import { t } from '../i18n';
@@ -57,6 +60,8 @@ export function createProjectCoordinationSurface(ports: {
   let creating = false, reportExpanded = false;
   let historyCursor: string | undefined;
   let lastReport: CoordinatorReportState | undefined;
+
+  let workerPage: CoordinatorConversationPage | null = null;
   // Preserve graph selection, zoom and history within the mounted project.
   const graphState: CoordinationCanvasState = {};
   let unsubscribe: (() => void) | undefined;
@@ -81,6 +86,8 @@ export function createProjectCoordinationSurface(ports: {
         ports.sidebar.replaceChildren(); ports.canvas.replaceChildren(); expanded = true; rendered = '';
         delete graphState.selectedId; delete graphState.showHistory; delete graphState.zoom;
         lastReport = undefined; reportExpanded = false;
+
+        workerPage = null; delete graphState.graphOpen; delete graphState.workPage;
         historyCursor = undefined;
       } else {
         // The previous conversation's graph must not remain in the new canvas
@@ -108,11 +115,34 @@ export function createProjectCoordinationSurface(ports: {
         ports.mode !== 'sidebar' && scope.budget ? scope.budget.read(scope.path) : Promise.resolve(null),
       ]);
       if (!valid()) return;
+      if (bindingRead.status === 'rejected' && (ports.canvas.childElementCount || ports.mode === 'sidebar' && ports.sidebar.childElementCount)) {
+        const host = ports.mode === 'sidebar' ? ports.sidebar : ports.canvas;
+        host.querySelector('.coordination-read-error')?.remove();
+        const warning = document.createElement('div'); warning.className = 'coordination-read-error'; warning.setAttribute('role', 'status');
+        warning.append(coordinationText(t('projectCoordination.error'), 'small'),
+          createButton({ label: t('projectCoordination.retry'), size: 'sm', variant: 'ghost', onClick: invalidate }));
+        host.append(warning); return;
+      }
+      ports.canvas.querySelector('.coordination-read-error')?.remove();
+      ports.sidebar.querySelector('.coordination-read-error')?.remove();
       const binding: CoordinationBinding | null = bindingRead.status === 'fulfilled' ? bindingRead.value : null;
       const board = boardRead.status === 'fulfilled' ? boardRead.value : null;
       const assignmentPage = assignmentsRead.status === 'fulfilled' ? assignmentsRead.value : null;
       const assignments = assignmentPage?.assignments ?? null;
       const budget = budgetRead.status === 'fulfilled' ? budgetRead.value : null;
+
+      let rosterUnavailable = false;
+      if (ports.mode !== 'sidebar' && binding?.availability === 'available'
+        && binding.conversationId === scope.currentConversationId && scope.workerConversations) {
+        try {
+          const page = await scope.workerConversations(scope.path);
+          if (!valid()) return;
+          workerPage = page;
+        } catch { rosterUnavailable = true; }
+        if (!valid()) return;
+      }
+      const conversations = workerPage?.conversations.map(item => ({ id: item.conversationId, title: item.title, turnCount: item.turnCount }))
+        || scope.conversations?.() || [];
 
       const reportUnavailable = reportRead.status === 'rejected';
       if (reportRead.status === 'fulfilled') lastReport = reportRead.value;
@@ -121,12 +151,14 @@ export function createProjectCoordinationSurface(ports: {
       const groups = projectCoordinationWorkGroups(board?.active || [], board?.recentOutcomes || []);
       const graphOptions = { assignments, coordinatorId: binding?.conversationId, activeConversationId: scope.currentConversationId };
       const graph = projectCoordinationGraph(groups, graphOptions);
-      const facts = JSON.stringify([key, binding, board, graph, report, reportUnavailable, budget,
+      const facts = JSON.stringify([key, binding, board, graph, report, reportUnavailable, budget, conversations, rosterUnavailable, workerPage?.nextCursor,
         historyCursor, assignmentPage?.olderCursor, assignmentPage?.newerCursor,
         assignments && coordinationDecisions(assignments),
         assignments?.some(item => !item.revoked && item.request.recipientId === scope.currentConversationId)]);
       if (facts === rendered) return;
       rendered = facts;
+
+      const restoreCanvas = captureCoordinationView(ports.canvas);
       expanded = ports.canvas.querySelector<HTMLDetailsElement>('.coordination-summary')?.open ?? expanded;
       const focused = document.activeElement;
       const focusHost = focused && ports.sidebar.contains(focused) ? ports.sidebar
@@ -165,7 +197,7 @@ export function createProjectCoordinationSurface(ports: {
         leader.textContent = t('projectCoordination.coordinator'); body.append(leader);
         const meta = document.createElement('span'); meta.className = 'coordination-leader-meta';
         if (available) {
-          const active = graph.counts.running + graph.counts.queued + graph.counts.blocked;
+          const active = graph.counts.running + graph.counts.queued + graph.counts.blocked + graph.counts.waiting;
           const total = graph.total ?? 0;
           meta.textContent = total > 0
             ? t(assignmentPage?.olderCursor || assignmentPage?.newerCursor ? 'projectCoordination.history.sidebar' : 'projectCoordination.sidebarMeta', { active, total })
@@ -215,7 +247,7 @@ export function createProjectCoordinationSurface(ports: {
         fold.addEventListener('toggle', () => { expanded = fold.open; });
         const heading = document.createElement('summary');
         const summaryText = document.createElement('span'); summaryText.className = 'coordination-summary-title';
-        summaryText.textContent = t('projectCoordination.taskGraph');
+        summaryText.textContent = t('projectCoordination.workList');
         heading.append(summaryText);
         if (graph.total !== null && graph.total > 0) {
           const tally = document.createElement('span'); tally.className = 'coordination-summary-tally';
@@ -233,11 +265,14 @@ export function createProjectCoordinationSurface(ports: {
           historyCursor = cursor; graphState.showHistory = Boolean(cursor); delete graphState.selectedId;
           generation++; invalidate();
         }));
-        if (!assignmentPage) fold.append(createButton({ label: t('projectCoordination.retry'), size: 'sm',
+        if (!assignmentPage || !board || rosterUnavailable) fold.append(createButton({ label: t('projectCoordination.retry'), size: 'sm',
           variant: 'ghost', onClick: invalidate }));
-        if (board || assignments?.length) fold.append(createCoordinationBoard(groups, navigate, 0, graphOptions,
-          { pendingDecisions: decisions?.length ?? null, heading: false,
-            viewState: graphState }));
+        if (rosterUnavailable) fold.append(coordinationText(t('projectCoordination.roster.unavailable'), 'small'));
+        fold.append(createCoordinationBoard(groups, navigate, 0, graphOptions,
+          { pendingDecisions: decisions?.length ?? null, heading: false, conversations,
+            viewState: graphState, inspect: scope.inspect, manage: details }));
+        if (workerPage?.nextCursor) fold.append(createButton({ label: t('projectCoordination.roster.more'), size: 'sm', variant: 'ghost', onClick: details }));
+        fold.append(createCoordinationReference({ conversationId: binding.conversationId }, 'coordinator', scope.inspect));
         if (scope.budget) {
           const budgetView = createCoordinatorBudget(scope.budget, { path: scope.path, binding, valid });
           budgetView.update(budget); fold.append(budgetView.summary);
@@ -256,7 +291,8 @@ export function createProjectCoordinationSurface(ports: {
         ports.canvas.append(fold);
       } else {
         const related = [...(board?.active || []), ...(board?.recentOutcomes || [])].some(work => work.conversationId === scope.currentConversationId)
-          || assignments?.some(item => !item.revoked && item.request.recipientId === scope.currentConversationId);
+          || assignments?.some(item => !item.revoked && item.request.recipientId === scope.currentConversationId)
+          || scope.conversations?.().some(item => item.id === scope.currentConversationId && item.coordinatorId === binding?.conversationId);
         if (related && binding?.availability === 'available') ports.canvas.append(createButton({
           label: t('projectCoordination.returnCoordinator'), size: 'sm', variant: 'ghost', onClick: () => navigate(binding.conversationId),
         }));
@@ -273,6 +309,7 @@ export function createProjectCoordinationSurface(ports: {
           .find(node => focusKey ? node.dataset.coordinationFocus === focusKey : node.textContent === focusLabel);
         replacement?.focus({ preventScroll: true });
       }
+      restoreCanvas();
       ports.changed?.();
     } finally {
       flight = false;

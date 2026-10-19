@@ -58,6 +58,8 @@ _SIDEBAR_SETTING_KEYS = frozenset({
     "lastMsgError",
     "lastMsgHasOutput",
     "activeTaskId",
+
+    "_coordinatorSource",
     "projectPath",
     "projectPaths",
     "readOnlyPaths",

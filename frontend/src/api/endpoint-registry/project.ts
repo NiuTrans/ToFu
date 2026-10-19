@@ -4,7 +4,7 @@ import { createProjectPathWrite } from './project-path-singleflight';
 
 import { buildProjectContinuityEndpoints } from './project-continuity';
 
-import type { CoordinatorReportState, CoordinatorReportReadRequest, CoordinationBinding, ProjectMessagePage } from '../project-coordination.generated';
+import type { CoordinatorConversationPage, CoordinatorReportState, CoordinatorReportReadRequest, CoordinationBinding, ProjectMessagePage } from '../project-coordination.generated';
 
 import type { ProjectDispatchRequest, ProjectDispatchRetry, ProjectDispatchRevoke,
   ProjectDispatchReviewRequest, ProjectDispatchPublishRequest, ProjectDispatchView,
@@ -90,6 +90,9 @@ export function createProjectEndpoints(ports: EndpointPorts) {
       get('/api/v4/project/board', { query: { path }, onError: 'null' }),
     coordination: (path: string) =>
       get<CoordinationBinding>('/api/v4/project/coordination', { query: { path }, onError: 'throw' }),
+    workerConversations: (path: string, cursor?: string) =>
+      get<CoordinatorConversationPage>('/api/v4/project/coordination/conversations',
+        { query: { path, ...(cursor ? { cursor } : {}) }, onError: 'throw' }),
     coordinatorReports: (path: string) =>
       get<CoordinatorReportState>('/api/v4/project/coordination/reports', { query: { path }, onError: 'throw' }),
     coordinatorBudget: (path: string) =>
