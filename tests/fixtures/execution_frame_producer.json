@@ -1,0 +1,117 @@
+{
+  "projection": {
+    "content": "before",
+    "thinking": "",
+    "toolRounds": [],
+    "segments": [
+      {
+        "type": "text",
+        "blockId": "text:terminal",
+        "text": "before",
+        "deliverable": true,
+        "terminal": true
+      }
+    ],
+    "model": "gpt-4o",
+    "routeSnapshot": {
+      "contract_version": "tofu.route-snapshot/v2",
+      "legacy": true,
+      "selected_model": null,
+      "provider_scoped_selection": null,
+      "preferred_provider_id": "",
+      "actual_model": {
+        "creator_id": "legacy",
+        "model_id": "gpt-4o"
+      },
+      "provider_id": "",
+      "offering_id": "",
+      "deployment_id": "",
+      "connection_id": "",
+      "credential": null,
+      "wire_model_id": "gpt-4o",
+      "transitions": [],
+      "degradation_reasons": [
+        "legacy_turn_projection"
+      ],
+      "recorded_at": 0.0
+    }
+  },
+  "calls": [
+    {
+      "operation": "turn.event.record",
+      "payload": {
+        "attempt_id": "execution-frame-attempt",
+        "user_id": 11,
+        "task_id": "execution-frame-task",
+        "terminal": false,
+        "status": "running",
+        "settlement": {},
+        "error": {},
+        "event_type": "projection_updated",
+        "event_payload": {
+          "phase": null,
+          "updateKind": "phase"
+        },
+        "now": 2000,
+        "projection_patch": {
+          "version": 1,
+          "baseRevision": 3,
+          "targetRevision": 4,
+          "operations": []
+        },
+        "projection_segments_stable": true,
+        "task_event": {
+          "task_id": "execution-frame-task",
+          "sequence": 0,
+          "event": {
+            "type": "phase",
+            "phase": "working"
+          }
+        }
+      },
+      "command_id": "turn-event:execution-frame-attempt:2000:phase"
+    },
+    {
+      "operation": "turn.event.record",
+      "payload": {
+        "attempt_id": "execution-frame-attempt",
+        "user_id": 11,
+        "task_id": "execution-frame-task",
+        "terminal": false,
+        "status": "running",
+        "settlement": {},
+        "error": {},
+        "event_type": "projection_updated",
+        "event_payload": {
+          "phase": null,
+          "updateKind": "phase"
+        },
+        "now": 2001,
+        "projection_patch": {
+          "version": 1,
+          "baseRevision": 4,
+          "targetRevision": 5,
+          "operations": [
+            {
+              "op": "set",
+              "path": [
+                "fallbackModel"
+              ],
+              "value": "alternate-model"
+            }
+          ]
+        },
+        "projection_segments_stable": true,
+        "task_event": {
+          "task_id": "execution-frame-task",
+          "sequence": 1,
+          "event": {
+            "type": "phase",
+            "phase": "working"
+          }
+        }
+      },
+      "command_id": "turn-event:execution-frame-attempt:2001:phase"
+    }
+  ]
+}

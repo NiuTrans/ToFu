@@ -42,7 +42,7 @@ impl EncodedResponse {
 /// Walk only the already-materialized structure. Reserved first map keys retain
 /// Value's parser compatibility path. Early depth refusal bounds this walk even
 /// when a caller constructs a deeper in-memory tree than the parser accepts.
-fn canonical_value_depth(value: &serde_json::Value, enclosing: usize) -> Option<usize> {
+pub(crate) fn canonical_value_depth(value: &serde_json::Value, enclosing: usize) -> Option<usize> {
     use serde_json::Value;
     match value {
         Value::Array(values) => {

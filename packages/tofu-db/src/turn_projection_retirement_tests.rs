@@ -8,7 +8,7 @@ use crate::vfs::{DeterministicVfs, FaultAction, FaultRule, Operation, Vfs};
 fn head() -> ProjectionHeadDescriptor {
     ProjectionHeadDescriptor { head_id: "head".into(), attempt_id: "attempt".into(),
         base_revision: 0, patch_count: MAX_TURN_PROJECTION_HEAD_PATCHES, patch_bytes: 64,
-        text_tail: None }
+        text_tail: None, frame_witness: None }
 }
 
 fn fixture(extra: usize) -> (Arc<DeterministicVfs>, AuthorityDatabase) {

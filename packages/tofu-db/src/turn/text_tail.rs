@@ -202,7 +202,7 @@ pub(super) fn append(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     let mut head = loaded.projection_head.clone().unwrap_or_else(|| ProjectionHeadDescriptor {
         head_id: projection_head_id(&request.attempt_id, revision),
         attempt_id: request.attempt_id.clone(), base_revision: revision,
-        patch_count: 0, patch_bytes: 0, text_tail: None,
+        patch_count: 0, patch_bytes: 0, text_tail: None, frame_witness: None,
     });
     let mut baseline = None;
     let mut tail = if let Some(tail) = &head.text_tail { tail.clone() } else {
@@ -244,6 +244,7 @@ pub(super) fn append(database: &AuthorityDatabase, transaction: &mut AuthorityTr
         .ok_or_else(|| invalid_data("Turn text revision count overflows"))?;
     let projection_bytes = tail.projection_bytes;
     head.text_tail = Some(tail);
+    head.frame_witness = None;
     Ok(Some(AppendOutcome { head, projection_bytes }))
 }
 

@@ -1,26 +1,32 @@
-//! Experimental same-attempt execution frames inside an existing authority IR.
-//! Reuses Turn admission, owned projection patches and exact event publication.
-//! Only private top-level text/phase deltas may defer their final projection and
-//! indexes. Terminal, tool structure, interaction and effect acknowledgements
-//! remain separate boundaries. No producer, queue, durability or RPC is added.
+//! Projection evidence for the production single-event Turn owner, plus an
+//! explicit test-only same-attempt frame. Both reuse Turn admission, patches,
+//! checkpoint policy and exact publication. The witness reuses an unchanged
+//! checkpoint across independent commits; it adds no producer queue or RPC.
 
 use super::*;
+#[cfg(test)]
 use crate::transaction_ir::TransactionIrStep;
+
+mod witness;
+pub(super) use witness::{ProjectionWitness, classify_patch, append_from_witness};
 
 /// Exact serialized lengths of the owned projection's top-level fields. Only
 /// affected values are encoded after admission; append_text measures its suffix
 /// rather than re-encoding an accumulated prefix. This is transaction-local
 /// evidence, discarded together with the private projection on any error.
+#[cfg(test)]
 struct ProjectionBytes {
     values: BTreeMap<String, usize>,
     total: usize,
 }
 
+#[cfg(test)]
 fn encoded_len(value: &impl Serialize) -> io::Result<usize> {
     serde_json::to_vec(value).map(|bytes| bytes.len())
         .map_err(|_| invalid_data("execution frame value cannot be encoded"))
 }
 
+#[cfg(test)]
 impl ProjectionBytes {
     fn new(projection: &Map<String, Value>) -> io::Result<Self> {
         let mut value = Self { values: BTreeMap::new(), total: 2 };
@@ -62,6 +68,7 @@ impl ProjectionBytes {
     }
 }
 
+#[cfg(test)]
 fn eligible(request: &EventRecordRequest) -> bool {
     if request.terminal || request.slim || request.status != "running"
         || request.projection_segments_stable || request.background_command_ack.is_some()
@@ -96,6 +103,7 @@ fn require_guidance_repair_free_projection(projection: &Map<String, Value>) -> i
 /// All input is already owned by one validated IR and one durability boundary.
 /// The enclosing IR must abandon the transaction on error, exactly as for any
 /// other semantic step. No partial responses escape preparation on failure.
+#[cfg(test)]
 pub(crate) fn record(
     database: &AuthorityDatabase,
     transaction: &mut AuthorityTransaction,
@@ -118,7 +126,7 @@ pub(crate) fn record(
     if attempt.document.get("status").and_then(Value::as_str) != Some("running")
         || attempt.document.get("taskId").and_then(Value::as_str) != Some(first.task_id.as_str())
     { return Err(invalid_input("execution frame requires its already-running bound attempt")); }
-    let LoadedTurnForAttempt { key, physical_version, mut document, projection_head } = loaded;
+    let LoadedTurnForAttempt { key, physical_version, mut document, projection_head: mut current_head } = loaded;
     let initial_updated_at = document.get("updatedAt").and_then(Value::as_u64)
         .ok_or_else(|| invalid_data("Turn update timestamp is malformed"))?;
     let mut projection = match document.remove("projection") {
@@ -140,6 +148,7 @@ pub(crate) fn record(
         if patch.get("targetRevision").and_then(Value::as_u64) != Some(next) {
             return Err(invalid_input("Turn projection patch must advance exactly one revision"));
         }
+        let previous = if current_head.is_none() { projection.clone() } else { Map::new() };
         witness.apply(patch)?;
         projection = crate::turn_projection_patch::apply_projection_patch_owned(projection, patch)
             .map_err(|_| invalid_input("Turn projection patch is invalid"))?;
@@ -148,6 +157,9 @@ pub(crate) fn record(
         document.insert("status".to_owned(), Value::String(request.status.clone()));
         document.insert("settlement".to_owned(), Value::Object(Map::new()));
         validate_settleable_turn_size(&document, &projection, witness.total, &attempt.document, false)?;
+        current_head = store_event_projection(database, transaction, request,
+            &attempt.conversation_id, document["turnId"].as_str().unwrap(), revision, next,
+            current_head.as_ref(), &previous, &projection, patch)?;
         responses.push((*slot, publish_event_record(database, transaction, request, EventPublication {
             conversation_id: &attempt.conversation_id, turn: &document, attempt: &attempt.document,
             projection: &projection, projection_bytes: witness.total,
@@ -166,13 +178,9 @@ pub(crate) fn record(
         .ok_or_else(|| invalid_data("attempt recovery timestamp is malformed"))?;
     database.entity_put(transaction, recovery_index_key(transaction, created_at, &last.attempt_id)?,
         recovery_index_value(&attempt.document, witness.total)?)?;
-    retire_event_projection_head(database, transaction, &attempt.conversation_id, &turn_id, projection_head.as_ref())?;
-    if witness.total > MAX_TURN_PROJECTION_INLINE_LIVE_BYTES {
-        let head = ProjectionHeadDescriptor { head_id: projection_head_id(&last.attempt_id, revision),
-            attempt_id: last.attempt_id.clone(), base_revision: revision, patch_count: 0,
-            patch_bytes: 0, text_tail: None };
-        store_projection_checkpoint(database, transaction, &attempt.conversation_id, &turn_id,
-            &head, &projection, last.now_ms)?;
+    if let Some(mut head) = current_head {
+        head.frame_witness = ProjectionWitness::mint(&projection, revision,
+            document.get("actor").and_then(Value::as_str).unwrap_or("assistant"), &last.status)?;
         document.insert("projection".to_owned(), json!({}));
         document.insert("_projectionHead".to_owned(), projection_head_value(&head));
     } else {
