@@ -23,10 +23,10 @@ describe('assignment execution evidence', () => {
     expect(status(assignment('a', { execution: execution(input) }))).toBe(expected);
   });
 
-  it('distinguishes queued dispatch from missing execution and unknown prerequisites', () => {
+  it('does not infer queued execution from accepted or deferred dispatch', () => {
     expect(status(assignment('a'))).toBe('unknown');
-    expect(status(assignment('a', { dispatch: 'accepted' }))).toBe('queued');
-    expect(status(assignment('a', { dispatch: 'deferred' }))).toBe('queued');
+    expect(status(assignment('a', { dispatch: 'accepted' }))).toBe('unknown');
+    expect(status(assignment('a', { dispatch: 'deferred' }))).toBe('waiting');
     expect(status(assignment('a', { revoked: true }))).toBe('unknown');
     expect(status(assignment('a', { dispatch: 'aborted' }))).toBe('cancelled');
     expect(status(assignment('a', { dependencyStates: [{ reference: ref('old'), status: 'waiting_review', reason: 'review_required' }] }))).toBe('blocked');

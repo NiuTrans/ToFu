@@ -267,15 +267,17 @@ An unbound card offers **Create project Coordinator** explicitly; it calls the
 create/bind facade only on click, disables duplicate clicks, shows errors
 for retry and requires a selected project folder. Opening an ordinary chat never
 promotes it. Historical same-project chats cannot be selected as Coordinator.
-The bound chat shows an initially expanded, collapsible task execution graph;
-its bounded scroll viewport preserves space for the conversation and composer.
-The user's fold state survives live refreshes. **Manage work** explicitly opens
+The bound chat shows a compact work list, eight rows per visible page. The
+recorded dependency graph is collapsed and mounted only on disclosure, preserving
+space for conversation and composer. The user's fold state survives live
+refreshes. **Manage work** explicitly opens
 the demand-loaded management dialog; it is not the primary navigation action.
 
 Problem: repeated completion/failure labels and status lanes buried the actual
 work and did not show who delegated it or which result another task needs.
-Decision: `project-coordination-canvas.ts` renders the bounded graph as selectable
-Coordinator/Worker nodes. Dashed delegation, solid dependency and dotted rework
+Decision: `project-coordination-work-list.ts` renders actionable, bounded work
+rows first; `project-coordination-canvas.ts` exposes the optional graph as
+selectable Coordinator/Worker nodes. Dashed delegation, solid dependency and dotted rework
 edges describe only recorded relationships. The Coordinator remains the root
 while its conversation is open. Historical Board records without assignment
 links remain unconnected; the UI never guesses relationships from titles or order.
@@ -296,9 +298,10 @@ Its conversation action wraps within narrow panes. Expanding node height was
 rejected because it breaks the shared node/edge geometry; truncating stored
 content would discard evidence. Browser coverage includes long localized text
 inside the ordinary conversation summary, not only an isolated graph.
-Alternatives rejected: status lanes cannot convey dependencies; an LLM-generated
-chart adds cost and can invent state; another conversation renderer duplicates
-Turn ownership. SVG lines and ordinary DOM controls preserve accessible actions.
+Alternatives rejected: a graph-first display makes routine status expensive to
+scan; eliminating the graph loses dependency evidence. An LLM-generated chart
+adds cost and can invent state; another conversation renderer duplicates Turn
+ownership. SVG lines and ordinary DOM controls preserve accessible actions.
 Ordinary chats have no Worker role label and no top workspace shortcut; actual
 related-work evidence alone can offer a return-to-Coordinator link. The card is
 not duplicated in date groups. Alternatives rejected: automatic current-chat
@@ -356,6 +359,55 @@ with a 4,096-character project path, 256-character conversation/Turn IDs,
 path/title/body/key). These are record-shape measurements, not latency/RSS claims.
 The 33-intent recovery test verifies page advancement and retirement to one head;
 completion deletes transport records, never messages.
+
+### Stable capabilities, discoverable conversations and diagnosis
+
+Problem: permitted Coordinator tools were absent from default keyword-routed
+wire schemas and had to be rediscovered on every new task. Decision:
+`coordinator_policy.prepare_coordinator_tool_surface` derives required-direct
+exposure from the existing role policy intersected with the **post-gate**
+executable catalog. Assembly applies it to genuine bound roots and validated
+continuations, not ordinary chats, foreign owners or transient children. It
+preserves Plan/readonly/selection/authorization checks and does not expand a
+worker's issued tool scope. Alternatives rejected: making tools global `_ALWAYS`
+entries grants irrelevant visibility; a separate role whitelist drifts from
+execution authority. `test_coordinator_tool_surface.py` verifies actual wire
+schemas, retries, discovery modes and negative authority cases.
+
+Problem: assignment inventory, conversation inventory and actual execution were
+conflated, hiding zero-Turn workers. Decision: persisted empty catalog entries
+remain navigable; transient local drafts retain their existing cleanup. Search
+hits never stand in for full metadata: exact-ID navigation hydrates canonical
+owned metadata before activation and does not move the global paging boundary.
+Prefixed coordinator/worker IDs participate in instant local ID search.
+
+`GET /api/v4/project/coordination/conversations` supplies the passive roster from
+`coordinator_conversations.conversation_page`. One call reads at most 64 metadata
+headers through the selected authority, filters owner/project/archive scope,
+and returns a scope-bound keyset cursor and explicit coverage. Empty matching
+pages may still have `nextCursor`; they are not evidence of no workers. No
+transcripts, new worker store, grants, model calls or execution are created.
+The UI replaces each roster page on demand, joins assignment recipients, and
+never silently truncates a lifetime inventory. A zero-Turn shell without an
+assignment is **Not started**, never queued. Other history remains distinct.
+
+Every coordinator/work row exposes a copyable reference and inspectable IDs
+without Debug mode. **Ask assistant to diagnose** prepares an ordinary visible
+read-only-project draft containing the exact conversation/project references.
+It never auto-sends or overwrites existing text/attachments. Normal conversation
+navigation and Turn rendering remain the sole owners.
+
+Context organization and a fresh working view are distinct from coordinator
+replacement. No safe idle fresh-view command currently exists: manual compaction
+folds canonical Turns used by authorization/report references. The management
+surface explains that organize/fresh actions are unavailable rather than
+calling `/create` as a fallback. The shared compaction service and persistence
+adapter reject protected Coordinator contexts before summary work and again at
+canonical application; see `CONTEXT_COMPACTION.md` for conservative project
+protection and the remaining historical-reference limitation. **Replace
+Coordinator** lives under management, explains preserved history and invalidated
+old authority, requires confirmation, then rereads binding before CAS. Read
+failure has a read-only retry, not an automatic repeat of replacement.
 
 ### Fresh Coordinator backend guarantee
 
@@ -438,8 +490,11 @@ prompt tokens. The open overview reads binding, board and existing assignments;
 project pushes coalesce in a fixed 300 ms window. The slow-read regression sends
 10 events across one second: one refresh starts at 300 ms, concurrency stays one,
 and all events during it produce one follow-up. No timer polls while idle or on
-another tab. Board input groups cap records at 100 each,
-team at 100. Assignment history loads one page of at most 32 owned records;
+another tab. Board input groups cap records at 100 each. Team/roster uses explicit
+page navigation instead of a silent 100-entry slice; visible lists render eight
+rows at a time. An opened workspace requests one bounded roster page alongside
+existing reads; no roster reads occur merely to display the fixed sidebar entry.
+Assignment history loads one page of at most 32 owned records;
 the graph retains a defensive 128-node input ceiling for other callers.
 The dense graph fixture renders 128 assignments plus the Coordinator, with up
 to eight prerequisites per task: Chromium measured 3,887 DOM elements and about

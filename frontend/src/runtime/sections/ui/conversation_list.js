@@ -683,7 +683,7 @@ function renderConversationList() {
     statsEl.classList.remove("visible");
     const all = conversations.filter((c) =>
       (runtimeScope.ConversationTurnRead?.ordered?.(c)?.length || 0) > 0
-      || (c._serverTurnCount || 0) > 0 || c._turnSnapshotRequired);
+      || (c._serverTurnCount || 0) > 0 || c._turnSnapshotRequired || Number.isInteger(c._serverRev));
 
     const folders = typeof getFolders === 'function' ? getFolders() : [];
     const _activeFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
@@ -1113,32 +1113,22 @@ const _sidebarSearchController = createSidebarSearchController({
   },
 });
 retainedCompositionLifecycle.add(() => _sidebarSearchController.destroy());
-// Hydrate metadata only on interaction, before existing pointer/click delegates
-// switch the conversation. This never advances the global catalog cursor.
-const _prepareSearchConversationOpen = event => {
-  const row = event.target?.closest?.('.conv-item[data-conv-id]');
-  if (!sidebarSearchQuery || !row || !row.closest('#convList')) return;
-  if (conversations.some(c => c.id === row.dataset.convId)) return;
-  const hit = _sidebarSearchController.snapshot().items.find(item => item.id === row.dataset.convId);
-  if (hit) {
-    _globalConvPageBoundary ||= _oldestGlobalConvBoundary(conversations);
-    mergeConversationCatalogRows([hit.conversation]);
-  }
-};
-retainedCompositionLifecycle.listen(document, 'pointerdown', _prepareSearchConversationOpen, { capture: true });
-retainedCompositionLifecycle.listen(document, 'click', _prepareSearchConversationOpen, { capture: true });
+// Search hits intentionally omit settings. Do not merge them into the catalog:
+// loadConversation's shared resolveMissing owner fetches exact owned metadata
+// on selection, before navigation. Otherwise an empty worker loses its project
+// and may be purged before the selected conversation can open.
 
 function searchByTitle(query) {
   if (!query) return [];
   const results = [];
   const seen = new Set();
   /* ── Conv ID match (exact or prefix) ──
-   * Conv IDs are lowercase alphanumeric (14 chars) like "mosnzwji2h8kwo".
+   * IDs include ordinary chat IDs and prefixed coordinator-/worker- IDs.
    * If the user pastes an ID (full or partial ≥4 chars, no spaces), surface
    * that conversation first — lets you jump to a known ID without scrolling.
-   * Gate by /^[a-z0-9]+$/ + length ≥ 4 so ordinary search words don't
+   * Gate by lowercase identifier characters + length ≥ 4 so prose doesn't
    * accidentally trigger an ID scan that overlaps with title text. */
-  if (/^[a-z0-9]{4,}$/.test(query)) {
+  if (/^[a-z0-9_-]{4,}$/.test(query)) {
     for (const c of conversations) {
       if (c.id && c.id.toLowerCase().includes(query)) {
         results.push({

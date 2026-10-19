@@ -69,9 +69,10 @@ def _create(scope: dict, arguments: dict) -> dict:
         raise ValueError('Conversation creation key conflicts with an existing conversation')
     return {'conversation_id': conversation_id, 'created_only': True,
             'execution_started': False, 'project_path': scope['project_path'],
-            'next_step': ('Authorize an assignment for this conversation through the existing '
-                          'human Project dispatch controls, then call dispatch_project_assignment. '
-                          'Creation grants no execution rights.')}
+            'next_step': ('For work within the current authorized request, use delegate_project_work; '
+                          'it creates and starts its own Worker without a separate per-worker '
+                          'authorization step. This empty conversation grants no execution rights. '
+                          'Use dispatch_project_assignment only for an already-authorized assignment.')}
 
 
 def execute_coordinator_tool(task: dict, name: str, arguments: dict) -> str:

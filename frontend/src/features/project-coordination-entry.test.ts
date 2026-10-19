@@ -15,7 +15,7 @@ it('mounts the leader above date groups using explicit binding without promoting
   const interval = vi.spyOn(globalThis, 'setInterval').mockImplementation(() => { throw new Error('no polling'); });
   try {
     new Function('runtimeScope', 'pushSubscribe', 'pushUnsubscribe', 'createProjectCoordinationSurface',
-      'openProjectCoordinationWorkspace', 'getActiveConv', 'Api', 'getFolders', 'getActiveFolderId', 'loadConversation', '_projectConversationNavigation', source)(
+      'openProjectCoordinationWorkspace', 'getActiveConv', 'Api', 'getFolders', 'getActiveFolderId', 'loadConversation', '_projectConversationNavigation', 'const conversations = [];\n' + source)(
       scope, vi.fn(), vi.fn(), createProjectCoordinationSurface, details,
       () => ({ id: 'ordinary', projectPath: '/elsewhere' }),
       { project: { ...passiveReads, coordination: binding, board: async () => ({ active: [], recentOutcomes: [] }),
@@ -47,7 +47,7 @@ it('wires explicit atomic creation to the selected folder, never newChat or bind
   const runtime: Record<string, any> = {}, navigate = vi.fn(), bind = vi.fn();
   const create = vi.fn(async () => ({ conversationId: 'new-coordinator', availability: 'available' }));
   new Function('runtimeScope', 'pushSubscribe', 'pushUnsubscribe', 'createProjectCoordinationSurface',
-    'openProjectCoordinationWorkspace', 'getActiveConv', 'Api', 'getFolders', 'getActiveFolderId', 'loadConversation', '_projectConversationNavigation', source)(
+    'openProjectCoordinationWorkspace', 'getActiveConv', 'Api', 'getFolders', 'getActiveFolderId', 'loadConversation', '_projectConversationNavigation', 'const conversations = [];\n' + source)(
     runtime, vi.fn(), vi.fn(), createProjectCoordinationSurface, vi.fn(),
     () => ({ id: 'ordinary', projectPath: '/project' }),
     { project: { ...passiveReads, coordination: async () => ({ conversationId: '', availability: 'unbound', revision: 0 }),
@@ -74,7 +74,7 @@ it.each(['conversation', 'draft', 'away-and-back'])('does not steal navigation a
   const create = vi.fn(() => new Promise(resolve => { finish = resolve; }));
   new Function('runtimeScope', 'pushSubscribe', 'pushUnsubscribe', 'createProjectCoordinationSurface',
     'openProjectCoordinationWorkspace', 'getActiveConv', 'Api', 'getFolders', 'getActiveFolderId',
-    'loadConversation', '_projectConversationNavigation', source)(
+    'loadConversation', '_projectConversationNavigation', 'const conversations = [];\n' + source)(
     {}, vi.fn(), vi.fn(), createProjectCoordinationSurface, vi.fn(),
     () => ({ id: active, projectPath: '/project' }),
     { project: { ...passiveReads, coordination: async () => ({ conversationId: '', availability: 'unbound', revision: 0 }),

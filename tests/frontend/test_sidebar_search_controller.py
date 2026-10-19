@@ -132,12 +132,22 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
  assert.match(document.getElementById('convList').textContent,/Remote title/);
  assert.equal(catalog.length,2);
  document.querySelector('.conv-item').dispatchEvent(new dom.window.Event('pointerdown',{bubbles:true}));
+ assert.equal(catalog.length,2); // A settings-less search hit is not canonical metadata.
+ const navigationModule={exports:{}};
+ vm.runInNewContext(ts.transpileModule(fs.readFileSync('frontend/src/features/project-conversation-navigation.ts','utf8'),
+ {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports:navigationModule.exports});
+ const navigation=navigationModule.exports.createProjectConversationNavigation();
+ let opened, metadataReads=0;
+ document.addEventListener('click',()=>navigation.resolveMissing('remote',{
+   contains:id=>catalog.some(c=>c.id===id),
+   fetch:async id=>{metadataReads++;return {id,title:'Empty worker',updatedAt:1000,msgCount:0,rev:0,settings:{projectPath:'/project'}}},
+   merge:row=>{vm.runInNewContext('_globalConvPageBoundary ||= _oldestGlobalConvBoundary(conversations)',ctx);ctx.mergeConversationCatalogRows([row])},
+   navigate:id=>{opened=catalog.find(c=>c.id===id)},error:error=>{throw error},
+ }));
+ document.querySelector('.conv-item').dispatchEvent(new dom.window.Event('click',{bubbles:true})); await tick();
  const remote=catalog.find(c=>c.id==='remote');
- assert.equal(remote._turnSnapshotRequired,true); assert.equal(remote._serverTurnCount,2);
- assert.equal(remote._localOnly,false); assert.equal(remote.model,undefined);
- let opened;
- document.addEventListener('click',()=>{opened=catalog.find(c=>c.id==='remote')});
- document.querySelector('.conv-item').dispatchEvent(new dom.window.Event('click',{bubbles:true}));
+ assert.equal(metadataReads,1); assert.equal(remote._serverTurnCount,0); assert.equal(remote._serverRev,0);
+ assert.equal(remote.projectPath,'/project'); assert.equal(remote._localOnly,false);
  assert.equal(opened,remote); assert.equal(catalog.length,3);
  let pagerCalls=0;
  ctx.sidebarSearchQuery='';
@@ -151,6 +161,15 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
  assert.equal(document.querySelectorAll('button').length,2);
  rendered({query:'needle',items:[hit('remote')],loading:false,error:false,coverage:'ready',nextCursor:null,truncated:true});
  assert.match(document.getElementById('sidebarSearchStats').textContent,/searchTruncated/);
+ vm.runInNewContext(retained.slice(retained.indexOf('function searchByTitle')),ctx);
+ catalog.push({id:'worker-prefixed-id',title:'Unrelated title',_serverRev:0,_serverTurnCount:0});
+ assert.equal(ctx.searchByTitle('worker-prefixed-id')[0].conv.id,'worker-prefixed-id');
+ const purgeSource=fs.readFileSync('frontend/src/runtime/sections/main.js','utf8');
+ vm.runInNewContext(purgeSource.slice(purgeSource.indexOf('function _purgeEmptyConvs()'),purgeSource.indexOf('// ── Per-conversation')),ctx);
+ ctx.activeConvId='newest'; ctx.runtimeScope.ConversationTurnRead={ordered:()=>[]};
+ ctx._purgeEmptyConvs();
+ assert.ok(ctx.conversations.some(item=>item.id==='worker-prefixed-id'));
+ assert.ok(ctx.conversations.some(item=>item.id==='remote'));
  console.log('sidebar search behavior passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
 """

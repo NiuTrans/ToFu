@@ -2,6 +2,7 @@
 export type CoordinationBinding = { projectPath: string; conversationId: string; revision: number; availability: "unbound" | "available" | "unavailable"; capabilities: { assign: false; sendMessage: false; steerSubagent: boolean; }; };
 export type CoordinationBindRequest = { path: string; conversationId: string; expectedRevision: number; };
 export type CoordinationCreateRequest = { path: string; folderId: string; expectedRevision: number; };
+export type CoordinatorConversationPage = { conversations: ({ conversationId: string; title: string; turnCount: number; coordinatorId: string | null; })[]; nextCursor: string | null; coverage: "page" | "complete"; };
 export type CoordinatorReportState = { projectPath: string; conversationId: string; bindingRevision: number; latest: null | { turnId: string; ordinal: number; title: string; kind: "progress" | "decision" | "blocked" | "delivery"; createdAt: number; content: string; }; unread: boolean; };
 export type CoordinatorReportReadRequest = { path: string; conversationId: string; bindingRevision: number; turnId: string; };
 export type ProjectMessageView = { id: string; sender: string; kind: "reference" | "consult" | "report" | "question" | "assign" | "steer"; state: "submitted" | "input_confirmed"; decision: "accepted" | "rejected" | "deferred" | "conflict" | null; revision: number; content: string; decisionNote?: string; inputTurnId?: string; inputAttemptId?: string; };

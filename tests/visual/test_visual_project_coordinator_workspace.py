@@ -48,6 +48,11 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
       await window.historySurface.refresh();
     }''')
     graph = page.locator('.coordination-task-graph')
+    assert graph.locator('[data-node-kind=task]').count() == 0
+    assert graph.locator('.coordination-work-row').count() == 8
+    assert not graph.locator('.coordination-topology').evaluate('node=>node.open')
+    graph.locator('.coordination-topology > summary').click()
+    graph.locator('[data-node-kind=task]').first.wait_for()
     assert graph.locator('[data-node-kind=task]').count() == 32
     # Fixed graph geometry must contain long titles and summaries even when
     # the canvas is nested inside the real conversation summary shell.
@@ -68,7 +73,7 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
     for theme in ('dark', 'light', 'tofu'):
         page.evaluate('theme=>document.documentElement.dataset.theme=theme', theme)
         assert not page.locator('#canvas').evaluate('node=>node.scrollWidth > node.clientWidth + 1')
-        output = Path('/tmp/tofu-coordinator-history-evidence'); output.mkdir(exist_ok=True)
+        output = tmp_path / 'history-evidence'; output.mkdir(exist_ok=True)
         page.screenshot(path=str(output / f'{theme}-{width}.png'), full_page=True)
     page.locator('[data-coordination-focus=history-newer]').click()
     page.locator('[data-node-id="assignment:64"]').wait_for()
@@ -142,20 +147,24 @@ def test_project_workspace_attention_team_and_conversation_navigation(frontend_v
     assert 'projectCoordination.' not in dialog.inner_text()
     page.evaluate('async () => { await document.fonts.ready; }')
     assert dialog.get_by_role('tabpanel').count() == 1
-    assert 'Integration' in dialog.locator('[data-status=failed]').inner_text()
+    assert 'Integration' in dialog.locator('.coordination-task-graph [data-status=failed]').inner_text()
     assert dialog.locator('.coordination-metrics').count() == 0
-    assert dialog.locator('[data-status=running]').count() == 1
-    assert dialog.locator('[data-status=queued]').count() == 1
-    assert dialog.locator('.coordination-graph-node[data-node-kind=task]').count() == 4
-    assert dialog.locator('svg [data-edge-kind=dependency]').count() == 3
+    assert dialog.locator('.coordination-task-graph [data-status=running]').count() == 1
+    assert dialog.locator('.coordination-task-graph [data-status=queued]').count() == 1
+    assert dialog.locator('.coordination-graph-node[data-node-kind=task]').count() == 0
+    assert dialog.locator('.coordination-task-graph .coordination-work-row').count() == 4
     assert dialog.locator('.coordination-group').count() == 0
     for theme in ('dark', 'light', 'tofu'):
         page.evaluate('theme=>document.documentElement.dataset.theme=theme', theme)
         assert not dialog.evaluate('node=>node.scrollWidth > node.clientWidth + 1')
         assert dialog.bounding_box()['width'] <= width
-        output = ROOT / 'designs/project-coordination/previews/workspace'
+        output = tmp_path / 'workspace-evidence'
         output.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(output / f'{theme}-{width}.png'), full_page=True)
+    dialog.locator('.coordination-topology > summary').click()
+    dialog.locator('[data-node-kind=task]').first.wait_for()
+    assert dialog.locator('.coordination-graph-node[data-node-kind=task]').count() == 4
+    assert dialog.locator('svg [data-edge-kind=dependency]').count() == 3
     # Completed prerequisites remain visible; the inspector reveals evidence.
     dialog.locator('[data-node-id="assignment:ui"] button').click()
     assert '团队通信' in dialog.locator('.coordination-node-inspector').inner_text()
@@ -178,8 +187,8 @@ def test_project_workspace_attention_team_and_conversation_navigation(frontend_v
     }''')
     tabs.nth(0).click()
     page.wait_for_function("document.querySelector('.coordination-task-graph').textContent.includes('Updated research')")
-    assert dialog.locator('[data-status=running]').count() == 2
-    action = dialog.locator('[data-status=running]').first.get_by_role('button')
+    assert dialog.locator('.coordination-task-graph .coordination-work-list [data-status=running]').count() == 2
+    action = dialog.locator('.coordination-task-graph .coordination-work-list [data-status=running]').first.get_by_role('button').first
     action.focus()
     page.evaluate('window.focusedAction=document.activeElement')
     page.evaluate('''() => {
@@ -199,7 +208,7 @@ def test_project_workspace_attention_team_and_conversation_navigation(frontend_v
     assert action.evaluate('node=>node===document.activeElement')
     tabs.nth(1).click()
     assert 'Research worker' in panel.inner_text()
-    panel.locator('article').first.get_by_role('button').click()
+    panel.locator('article').first.get_by_role('button').first.click()
     page.wait_for_function('window.navigation.length === 1 && window.subscriptions === 0')
     assert page.evaluate('window.navigation[0]') == 'research'
     assert page.locator('dialog').count() == 0
@@ -231,15 +240,83 @@ def test_large_coordinator_graph_keeps_dom_and_viewport_bounded(frontend_visual_
       const start = performance.now();
       const graph = createCoordinationBoard({active:[],recent:[]},()=>{},0,{assignments,coordinatorId:'coordinator'});
       document.body.append(graph);
+      const defaultElements = graph.querySelectorAll('*').length;
+      const initialGraphNodes = graph.querySelectorAll('[data-node-id]').length;
+      const topology = graph.querySelector('.coordination-topology');
+      topology.open=true; topology.dispatchEvent(new Event('toggle'));
       const viewport = graph.querySelector('.coordination-graph-viewport');
       const bounds = viewport.getBoundingClientRect();
-      return {layoutMs:performance.now()-start, nodes:graph.querySelectorAll('[data-node-id]').length,
+      return {defaultElements, initialGraphNodes, layoutMs:performance.now()-start, nodes:graph.querySelectorAll('[data-node-id]').length,
         elements:graph.querySelectorAll('*').length, viewportHeight:bounds.height,
         visibleWireLayers:[...graph.querySelectorAll('svg')].filter(el=>getComputedStyle(el).display!=='none').length};
     }''')
+    assert result['initialGraphNodes'] == 0
+    assert result['defaultElements'] < 400
     assert result['nodes'] == 129
     assert result['elements'] < 5000
     assert result['visibleWireLayers'] == 1
     assert result['viewportHeight'] <= 480
     (tmp_path / 'graph-performance.json').write_text(json.dumps(result, indent=2))
     print('coordinator graph measurement:', json.dumps(result, sort_keys=True))
+
+
+@pytest.mark.parametrize('width', [1440, 320])
+@pytest.mark.parametrize('language', ['en', 'zh'])
+def test_coordinator_shell_reference_and_replacement_consent(frontend_visual_page, width, language, tmp_path):
+    page = frontend_visual_page
+    page.set_viewport_size({'width': width, 'height': 900})
+    page.emulate_media(reduced_motion='reduce')
+    entry = tmp_path / 'consent-entry.ts'
+    entry.write_text(f"export {{ openProjectCoordination }} from '{ROOT}/frontend/src/features/project-coordination';\n"
+                     f"export {{ ready, setLanguage }} from '{ROOT}/frontend/src/i18n';\n")
+    page.add_script_tag(path=native_module_path('.native/coordinator-consent.js', entry))
+    page.add_style_tag(path=str(ROOT / 'frontend/src/styles/application/33-project-coordination.css'))
+    page.evaluate('async language => { await ready(); await setLanguage(language); }', language)
+    page.evaluate('''() => {
+      window.replacements=[];
+      window.binding={projectPath:'/project',conversationId:'leader',revision:1,availability:'available',capabilities:{assign:false,sendMessage:false,steerSubagent:false}};
+      const ports={path:'/project',currentConversationId:'leader',currentPath:()=>'/project',
+        binding:async()=>window.binding,board:async()=>({active:[],recentOutcomes:[]}),
+        conversations:()=>[],workerConversations:async()=>({conversations:[
+          {conversationId:'leader',title:'Coordinator',turnCount:2,coordinatorId:null},
+          {conversationId:'empty-worker',title:'Not started / 尚未开始的执行会话',turnCount:0,coordinatorId:'leader'}],nextCursor:null,coverage:'complete'}),
+        create:async(path,revision)=>{window.replacements.push([path,revision]);return window.binding={...window.binding,conversationId:'new-leader',revision:2};},
+        bind:()=>{throw new Error('must not bind a historical chat');},navigate:()=>{},openEvidence:()=>{},diagnose:()=>{}};
+      window.workspace=openProjectCoordination(ports);
+    }''')
+    dialog = page.locator('dialog').first
+    shell = dialog.locator('[data-work-id="conversation:empty-worker"]').first
+    shell.wait_for()
+    assert shell.get_attribute('data-status') == 'not_started'
+    assert dialog.locator('.coordination-canvas').count() == 0
+    shell.locator('summary').click()
+    assert shell.locator('pre').is_visible()
+    assert shell.locator('pre').inner_text() == 'conversationId: empty-worker'
+    assert shell.get_by_role('button').count() >= 2
+    dialog.get_by_role('tab').nth(4).click()
+    replacement = dialog.locator('.coordination-management-section').nth(1).get_by_role('button').first
+    assert page.evaluate('window.replacements.length') == 0
+    # Unavailable context operations cannot silently invoke replacement.
+    context = dialog.locator('.coordination-management-section').first
+    assert context.locator('button:disabled').count() == 2
+    replacement.click()
+    confirm = page.locator('dialog').nth(1)
+    assert confirm.is_visible()
+    assert page.evaluate('window.replacements.length') == 0
+    page.keyboard.press('Escape')
+    confirm.wait_for(state='detached')
+    assert dialog.is_visible()
+    assert page.evaluate('window.replacements.length') == 0
+    replacement.click()
+    confirm = page.locator('dialog').nth(1)
+    for theme in ('dark', 'light', 'tofu'):
+        page.evaluate('theme=>document.documentElement.dataset.theme=theme', theme)
+        assert not confirm.evaluate('node=>node.scrollWidth > node.clientWidth + 1')
+        output = tmp_path / 'consent-evidence'; output.mkdir(exist_ok=True)
+        page.screenshot(path=str(output / f'{theme}-{language}-{width}.png'), full_page=True)
+    confirm.locator('.ui-dialog__footer button').last.click()
+    page.wait_for_function('window.replacements.length===1 && window.binding.revision===2')
+    assert page.evaluate('window.replacements') == [['/project', 1]]
+    assert 'projectCoordination.' not in dialog.inner_text()
+    dialog.locator('.ui-dialog__footer button').click()
+    dialog.wait_for(state='detached')

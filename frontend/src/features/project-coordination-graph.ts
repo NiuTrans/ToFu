@@ -6,13 +6,15 @@
 import type { ProjectDispatchDependency, ProjectDispatchDependencyState, ProjectDispatchView } from '../api/project-dispatch.generated';
 import type { CoordinationWork } from './project-coordination';
 
+import type { CoordinationReference } from './project-coordination-reference';
+
 export interface CoordinationGraphOptions {
   assignments?: readonly ProjectDispatchView[] | null;
   coordinatorId?: string;
   /** Conversation currently open, used for navigation context only. */
   activeConversationId?: string;
 }
-export type CoordinationGraphStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'blocked' | 'unknown';
+export type CoordinationGraphStatus = 'queued' | 'waiting' | 'running' | 'completed' | 'failed' | 'cancelled' | 'blocked' | 'unknown';
 export interface CoordinationGraphNode {
   id: string;
   kind: 'task' | 'coordinator' | 'reference';
@@ -23,6 +25,8 @@ export interface CoordinationGraphNode {
   revoked?: boolean;
   delivered?: boolean;
   dependencyUnknown?: boolean;
+
+  reference?: CoordinationReference;
 }
 export interface CoordinationGraphEdge {
   from: string;
@@ -86,7 +90,9 @@ function assignmentStatus(item: ProjectDispatchView): CoordinationGraphStatus {
   const states = dependencyReferences(item).map(reference => dependencyState(item, reference));
   if (states.some(state => state === 'waiting_review' || state === 'waiting_delivery' || state === 'invalid')) return 'blocked';
   if (states.some(state => !state || state === 'unknown')) return 'unknown';
-  return item.dispatch === 'accepted' || item.dispatch === 'deferred' ? 'queued' : 'unknown';
+  // A deferred dispatch has not started. Acceptance without attempt evidence
+  // must not be advertised as an execution queue or a running worker.
+  return item.dispatch === 'deferred' ? 'waiting' : 'unknown';
 }
 
 export function projectCoordinationGraph(
@@ -97,7 +103,7 @@ export function projectCoordinationGraph(
     nodes: [], edges: [], source: options.assignments?.length ? 'assignments' : 'work',
     assignmentsUnavailable: options.assignments === null, truncated: false,
     total: 0, completed: 0, delivered: options.assignments === undefined || options.assignments === null ? null : 0,
-    counts: { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0, blocked: 0, unknown: 0 },
+    counts: { queued: 0, waiting: 0, running: 0, completed: 0, failed: 0, cancelled: 0, blocked: 0, unknown: 0 },
   };
   const nodes = new Map<string, CoordinationGraphNode>();
   const coordinatorIds = new Set<string>();
@@ -123,6 +129,9 @@ export function projectCoordinationGraph(
       nodes.set(assignmentKey(item.assignmentId), {
         id: assignmentKey(item.assignmentId), kind: 'task', title: cleanTitle(item.request.brief || item.assignmentId, 240),
         conversationId: item.request.recipientId || undefined, status: assignmentStatus(item), revoked: item.revoked,
+
+        reference: { conversationId: item.request.recipientId, assignmentId: item.assignmentId,
+          grantRevision: item.grantRevision, resultRevision: item.execution?.resultRevision },
         summary: excerpt(typeof item.execution?.result?.content === 'string' ? item.execution.result.content : '', 320),
         delivered: (item.request.profile?.mode === 'files' || item.request.profile?.mode === 'project') || delivered ? delivered : undefined,
         dependencyUnknown: references.some(reference => !dependencyState(item, reference) || dependencyState(item, reference) === 'unknown'),
@@ -162,6 +171,8 @@ export function projectCoordinationGraph(
       nodes.set(`work:${item.id}`, {
         id: `work:${item.id}`, kind: 'task', title: cleanTitle(item.title || item.id, 240),
         conversationId: item.conversationId, status: item.status === 'active' ? 'running' : item.status,
+
+        reference: { conversationId: item.conversationId, workId: item.id },
         summary: excerpt(item.resultSummary, 320),
       });
     }

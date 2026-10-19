@@ -194,7 +194,7 @@
   --graph-x: var(--graph-x-3); --graph-y: var(--graph-y-3);
   position: absolute; left: calc(var(--graph-x) * var(--space-4)); top: calc(var(--graph-y) * var(--space-4));
   width: calc(14 * var(--space-4)); height: calc(7 * var(--space-4)); box-sizing: border-box;
-  display: grid; grid-template-columns: var(--space-4) 1fr; align-content: start; align-items: start; gap: var(--space-2);
+  display: grid; grid-template-columns: var(--space-4) minmax(0, 1fr); align-content: start; align-items: start; gap: var(--space-2);
   padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--bg-primary); box-shadow: var(--shadow-sm); color: var(--text-primary);
 }
@@ -202,6 +202,7 @@
 .coordination-graph-node[data-node-kind="reference"] { border-style: dashed; }
 .coordination-graph-node[data-selected="true"] { outline: var(--control-edge-inset) solid var(--accent); }
 .coordination-graph-node button { min-width: 0; max-height: calc(4 * var(--space-4)); overflow: hidden; justify-content: flex-start; text-align: start; }
+.coordination-node-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; line-height: var(--leading-tight); }
 .coordination-node-signal { display: inline-flex; align-items: center; justify-content: center; min-height: var(--space-6); font-size: var(--font-size-lg); color: var(--text-secondary); }
 .coordination-graph-node[data-status="running"] .coordination-node-signal { color: var(--accent); }
 .coordination-graph-node[data-status="completed"] .coordination-node-signal { color: var(--success-text); }
@@ -210,6 +211,7 @@
 .coordination-node-digest { grid-column: 1 / -1; color: var(--text-secondary); font-size: var(--font-size-xs); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .coordination-node-inspector { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); padding: var(--space-3); margin-block-start: var(--space-2); background: var(--bg-primary); border-inline-start: var(--space-1) solid var(--accent); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
 .coordination-node-inspector[hidden] { display: none; }
+.coordination-node-inspector > * { min-width: 0; max-width: 100%; }
 .coordination-node-inspector p { font-size: var(--font-size-sm); }
 .coordination-edge-legend { display: flex; flex-wrap: wrap; gap: var(--space-3); padding-block: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-xs); }
 .coordination-edge-legend span { display: inline-flex; align-items: center; gap: var(--space-1); }
@@ -257,6 +259,40 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
+
+/* Lists are primary; topology and exact references are independent disclosures.
+ * Cap the in-chat attachment so the ordinary conversation keeps its reading space. */
+.coordination-work-list { min-width: 0; color: var(--text-primary); }
+.coordination-work-rows { max-height: min(26vh, 18rem); overflow: auto; overscroll-behavior: contain; }
+.coordination-workspace .coordination-work-rows { max-height: min(42vh, 28rem); }
+.coordination-work-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2); padding-block: var(--space-2); border-block-end: 1px solid var(--border); min-width: 0; }
+.coordination-work-body { flex: 1 1 14rem; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.coordination-work-body strong { font-size: var(--font-size-sm); font-weight: var(--weight-semibold); line-height: var(--leading-tight); overflow-wrap: anywhere; }
+.coordination-work-body small { font-size: var(--font-size-xs); color: var(--text-secondary); }
+.coordination-work-digest { font-size: var(--font-size-xs); color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.coordination-work-row[data-status="failed"] .coordination-work-status { color: var(--error-text); }
+.coordination-work-row[data-status="blocked"] .coordination-work-status,
+.coordination-work-row[data-status="waiting"] .coordination-work-status { color: var(--warning-text); }
+.coordination-work-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-1); min-width: 0; max-width: 100%; }
+.coordination-list-paging { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); padding-block-start: var(--space-2); }
+.coordination-list-paging small { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-topology { min-width: 0; padding-block-start: var(--space-2); }
+.coordination-topology > summary { font-size: var(--font-size-sm); cursor: pointer; }
+.coordination-reference { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; }
+.coordination-reference details { min-width: 0; max-width: 100%; }
+.coordination-reference summary { font-size: var(--font-size-xs); font-weight: var(--weight-regular); cursor: pointer; }
+.coordination-reference pre { margin: var(--space-1) var(--space-0); padding: var(--space-2); background: var(--bg-primary); color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--font-size-xs); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12rem; overflow: auto; }
+.coordination-reference small { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-management { display: grid; gap: var(--space-4); }
+.coordination-management-section { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2); padding-block: var(--space-3); border-block-end: 1px solid var(--border); min-width: 0; }
+.coordination-management-section > h3,
+.coordination-management-section > p,
+.coordination-management-section > small { flex-basis: 100%; }
+.coordination-management-section p { font-size: var(--font-size-sm); overflow-wrap: anywhere; }
+.coordination-management-section small { color: var(--text-secondary); font-size: var(--font-size-xs); }
+.coordination-topology > summary:focus-visible,
+.coordination-reference summary:focus-visible { outline: var(--control-edge-inset) solid var(--accent); box-shadow: var(--focus-ring); }
+.coordination-refresh-feedback:empty { display: none; }
 /* Native rich response: reading visuals only; controls are UI factories. */
 
 .rich-response [hidden] { display: none !important; }
@@ -407,6 +443,10 @@
      THE fix for misaligned UI: all margins/padding/gaps in new code come
      from this scale. Half-steps and magic numbers are gate-rejected. */
   --space-0:0;
+  --chat-primary-background:var(--text-primary);
+  --chat-primary-ink:var(--bg-primary);
+  --chat-primary-border:transparent;
+  --chat-primary-shadow:none;
   --space-1:4px;
   --space-2:8px;
   --space-3:12px;
@@ -439,10 +479,26 @@
   --conversation-font-size-meta:var(--font-size-sm);
   --conversation-font-size-caption:var(--font-size-xs);
   --conversation-font-size-table:var(--font-size-lg);
-  --conversation-font-size-heading-1:var(--font-size-3xl);
-  --conversation-font-size-heading-2:var(--font-size-2xl);
-  --conversation-font-size-heading-3:var(--font-size-xl);
-  --conversation-reading-measure:720px;
+  --conversation-font-size-heading-1:var(--font-size-4xl);
+  --conversation-font-size-heading-2:var(--font-size-3xl);
+  --conversation-font-size-heading-3:var(--font-size-2xl);
+  /* Includes the hanging icon inset; the prose itself keeps about 720px. */
+  --conversation-reading-measure:760px;
+  /* Mixed chronology: shared process row, label column and evidence inset.
+     Content order stays in the Surface; these tokens only set reading geometry. */
+  --conversation-process-font-size:var(--font-size-lg);
+  --conversation-process-row-height:var(--control-h-md);
+  --conversation-process-inset:var(--space-1);
+  --conversation-process-marker:var(--space-4);
+  --conversation-process-gap:var(--space-2);
+  --conversation-process-indent:calc(var(--conversation-process-inset) + var(--conversation-process-marker) + var(--conversation-process-gap));
+  --conversation-flow-gap:var(--space-1);
+  --conversation-prose-gap:var(--space-4);
+  --conversation-process-radius:12px;
+  --conversation-process-shell-inset:var(--space-1);
+  --conversation-reading-inset:calc(var(--conversation-process-shell-inset) + var(--conversation-process-indent) + var(--control-edge-inset));
+  --conversation-inspector-width:440px;
+  --conversation-answer-gap:var(--space-8);
   --inspector-reading-measure:860px;
   --weight-regular:400;
   --weight-medium:500;
@@ -542,7 +598,7 @@
 [data-theme="tofu"]{
   --font-ui:var(--sans-body);
 
-  /* Match the existing CO-PILOT paper/ink/gold chrome, not chat's cold canvas. */
+  /* Match the existing CO-PILOT paper/ink/gold chrome, and the warm conversation paper. */
   --project-surface:#faf8f3;
   --project-panel:#fff;
   --project-band:#f2ecda;
@@ -553,7 +609,7 @@
   --project-accent-hover:#b58936;
   --project-on-accent:#1a1814;
   /* Darkened derivatives of the tofu palette (fetch-teal / thinking amber /
-     search-blue) so text clears 4.5:1 on the cold-white canvas. */
+     search-blue) so text clears 4.5:1 on the paper canvas. */
   --success-text:#3D7263;
   --success-bg:rgba(94,158,140,0.12);
   --success-border:rgba(94,158,140,0.35);
@@ -564,8 +620,8 @@
   --info-bg:rgba(94,144,174,0.12);
   --info-border:rgba(94,144,174,0.35);
   --backdrop:rgba(74,63,47,0.35);
-  --focus-ring:0 0 0 3px rgba(201,122,29,0.25);
-  --knob-shadow:0 1px 2px rgba(19,25,31,0.16);
+  --focus-ring:0 0 0 3px rgba(193,121,75,0.25);
+  --knob-shadow:0 1px 2px rgba(92,72,44,0.16);
 }
 
 /* ── Reduced motion: the whole library honors it from day one ── */
@@ -626,7 +682,11 @@ html[data-rail] .folder-quickadd{display:none}
 .sidebar-header-actions{display:flex;gap:2px;align-items:center}
 .sidebar-header-actions .action-btn{width:30px;height:30px}
 .sidebar-action-row{display:flex;gap:6px;padding:var(--space-3) var(--space-4);align-items:stretch}
-.new-chat-btn{flex:1;padding:10px var(--space-4);margin:0;background:var(--accent);color:white;border:none;border-radius:var(--radius-sm);font-family:inherit;font-size:var(--font-size-md);font-weight:600;cursor:pointer;transition:background var(--transition);display:flex;align-items:center;gap:var(--space-2);justify-content:center}.new-chat-btn:hover{background:var(--accent-hover)}
+/* One flat primary action; no texture, bevel or animated icon rotation. */
+.new-chat-btn{flex:1;min-height:var(--control-h-lg);padding:var(--space-2) var(--space-4);margin:0;background:var(--chat-primary-background);color:var(--chat-primary-ink);border:var(--control-edge-inset) solid var(--chat-primary-border);border-radius:var(--conversation-process-radius);font-family:var(--font-ui);font-size:var(--font-size-lg);font-weight:var(--weight-medium);cursor:pointer;box-shadow:var(--chat-primary-shadow);display:flex;align-items:center;gap:var(--space-2);justify-content:center;transition:background var(--motion-fast) var(--ease-standard)}
+.new-chat-btn:hover{filter:brightness(.97)}
+.new-chat-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.new-chat-btn:active{opacity:.9}
 /* new-folder-btn removed — folders use tab bar with "+" button */
 /* ── Folder create/rename dialog ── */
 .folder-dialog-overlay{position:fixed;inset:0;height:var(--vh100,100vh);background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.15s ease}
@@ -1725,7 +1785,8 @@ summary.thinking-header::-webkit-details-marker{display:none}
   flex-direction: column;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--conversation-process-radius);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--text-primary) 6%, transparent);
   margin-top: var(--space-3);
   transition: border-color var(--motion-base) ease, box-shadow var(--motion-base) ease;
   isolation: isolate;
@@ -1748,7 +1809,7 @@ summary.thinking-header::-webkit-details-marker{display:none}
   padding: var(--space-3) var(--space-4);
   resize: none;
   max-height: 200px;
-  min-height: var(--control-h-lg);
+  min-height: var(--space-16);
 }
 .input-area .input-box textarea::placeholder { color: var(--text-secondary); }
 .send-btn {
@@ -1771,6 +1832,7 @@ summary.thinking-header::-webkit-details-marker{display:none}
 .send-btn:active:not(:disabled) { opacity: .85; }
 .send-btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; background: var(--border); }
 .send-btn.stop-btn { background: var(--error-text); box-shadow: none; }
+.send-btn.stop-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--error-text) 85%, var(--text-primary)); }
 .send-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .composer-stop-btn[hidden] { display: none; }
 .input-actions-right.composer-dual-actions > .send-btn { margin-left: 0; }
@@ -1805,35 +1867,26 @@ summary.thinking-header::-webkit-details-marker{display:none}
 /* ── Action Buttons ── */
 .action-btn{width:32px;height:32px;background:none;border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--text-tertiary);transition:color .15s ease,background-color .15s ease,box-shadow .15s ease;font-size:15px;position:relative;flex-shrink:0}
 .action-btn:hover{color:var(--text-primary);background:var(--bg-hover)}
-.action-btn.active{color:var(--accent);background:var(--accent-subtle);box-shadow:0 0 0 1px var(--accent-subtle)}
-
-/* ── Topbar action buttons — unified labeled icon+text style shared by the
- *    feature launchers (Paper / My Day / …) AND the update button, so the
- *    whole topbar-right cluster reads as one consistent control group. ── */
+.action-btn.active{color:var(--accent);background:var(--accent-subtle);box-shadow:0 0 0 1px var(--accent-subtle)}/* Shared shell launchers. Quiet surfaces, one control scale; feature state
+ * remains visible. Scope excludes dialogs and feature-owned workspaces. */
 .topbar-tools{display:flex;align-items:center;gap:var(--space-1);margin-left:auto}
-.topbar-tool-btn,.update-btn{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;background:none;border:1px solid transparent;border-radius:8px;cursor:pointer;color:var(--text-secondary);font-family:'Jakarta Toolbar','Plus Jakarta Sans','Jakarta Fallback',sans-serif;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;flex-shrink:0;transition:color .15s ease,background-color .15s ease,border-color .15s ease}
+.topbar-tool-btn,.update-btn{display:inline-flex;align-items:center;gap:var(--space-2);height:var(--control-h-md);padding:0 var(--space-2);background:transparent;border:var(--control-edge-inset) solid transparent;border-radius:var(--radius-sm);cursor:pointer;color:var(--text-secondary);font-family:var(--font-ui);font-size:var(--font-size-sm);font-weight:var(--weight-medium);line-height:1;white-space:nowrap;flex-shrink:0;transition:color var(--motion-fast) var(--ease-standard),background-color var(--motion-fast) var(--ease-standard)}
 .topbar-tool-btn:hover,.update-btn:hover{color:var(--text-primary);background:var(--bg-hover);border-color:var(--border-light)}
 .topbar-tool-btn.active{color:var(--accent);background:var(--accent-subtle);border-color:var(--accent-subtle)}
+.topbar-tool-btn:focus-visible,.update-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .topbar-tool-btn svg,.update-btn svg{flex-shrink:0}
 .topbar-tool-label,.update-btn-label{white-space:nowrap}
-/* Narrow DESKTOP windows only (pointer:fine): drop the labels, keep icon-only
- * buttons. The `and (pointer:fine)` guard is load-bearing — a width-only rule
- * here also fires on a PORTRAIT TABLET (769–1024px, coarse pointer) which has
- * ample room, silently truncating the tool labels to bare icons. Coarse phones
- * (≤768) get their own icon-only hide inside the phone @media block, so this
- * rule intentionally does NOT need to cover them. Guarded by
- * tests/frontend/test_tablet_label_truncation.py. */
-@media (max-width:1080px) and (pointer:fine){.topbar-tool-label,.update-btn-label{display:none}.topbar-tool-btn,.update-btn{padding:0 7px}}
-
-/* ── Update button — inherits the unified style above; only the
- *    "update available" accent state is bespoke. ── */
+/* A narrow mouse-driven desktop may use tooltips. Tablets retain labels;
+ * phones have their own shell rules. See test_tablet_label_truncation.py. */
+@media (max-width:1080px) and (pointer:fine){.topbar-tool-label,.update-btn-label{display:none}.topbar-tool-btn,.update-btn{padding:0 var(--space-2)}}
 .update-btn-pill{display:none}
-/* When an update is available: turn the whole pill accent + show "New" */
-.update-btn.has-update{color:#fff;background:var(--accent);border-color:var(--accent)}
-.update-btn.has-update:hover{background:var(--accent-hover);color:#fff}
-.update-btn.has-update .update-btn-pill{display:inline-flex;align-items:center;padding:2px 6px;border-radius:6px;background:rgba(255,255,255,0.22);font-size:10px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;line-height:1}
+.update-btn.has-update{color:var(--text-on-accent);background:var(--accent);border-color:var(--accent)}
+.update-btn.has-update:hover{background:var(--accent-hover);color:var(--text-on-accent)}
+.update-btn.has-update .update-btn-pill{display:inline-flex;align-items:center;padding:var(--space-1);border-radius:var(--radius-sm);background:color-mix(in srgb,var(--text-on-accent) 22%,transparent);font-size:var(--font-size-xs);font-weight:var(--weight-semibold);letter-spacing:.03em;text-transform:uppercase;line-height:1}
 .update-btn.has-update svg{animation:updPulse 1.6s ease-in-out infinite}
 @keyframes updPulse{0%,100%{transform:rotate(0)}50%{transform:rotate(-22deg)}}
+@media (prefers-reduced-motion:reduce){.update-btn.has-update svg{animation:none}}
+
 /* ── Update modal ── */
 .update-modal{width:480px;max-width:92vw;padding:0;display:flex;flex-direction:column;overflow:hidden;border-radius:18px;box-shadow:var(--shadow);animation:updModalIn .26s cubic-bezier(0.16,1,0.3,1)}
 @keyframes updModalIn{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
@@ -13081,30 +13134,35 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 
 /* ══════════════════════════════════════════════════════════
-   TOFU — cold white / graphite reading canvas with one amber accent.
+   TOFU — warm rice paper, caramel ink and soft, rounded surfaces.
    Variable NAMES are a stable contract consumed app-wide — retune
    VALUES only; do not rename or remove.
    ══════════════════════════════════════════════════════════ */
 [data-theme="tofu"]{
-  --bg-primary:#F8FAFC;
-  --bg-secondary:#F7F8FA;
-  --bg-tertiary:#EEF1F4;
-  --bg-hover:#E8ECF0;
-  --bg-active:#DDE2E7;
+  /* Tofu's paper, caramel and soft clay are brand primitives, not neutral UI. */
+  --chat-primary-background:linear-gradient(180deg,#FFE8B2,#F2CA83);
+  --chat-primary-ink:#664520;
+  --chat-primary-border:#DBB675;
+  --chat-primary-shadow:0 2px 0 rgba(139,94,37,.16),inset 0 1px 0 rgba(255,255,255,.7);
+  --bg-primary:#FAF7F0;
+  --bg-secondary:#F4EFE5;
+  --bg-tertiary:#ECE6D9;
+  --bg-hover:#E5DECE;
+  --bg-active:#DBD2BF;
   /* Borders — soft, low-contrast (restraint over ruled lines) */
-  --border:#D9DEE4;
-  --border-light:#E9EDF1;
-  --text-primary:#202327;
-  --text-secondary:#626971;
-  --text-tertiary:#949CA5;
-  --accent:#C97A1D;
-  --accent-hover:#A85E0B;
-  --accent-subtle:rgba(201,122,29,0.10);
+  --border:#E2DAC8;
+  --border-light:#EDE6D8;
+  --text-primary:#2E2822;
+  --text-secondary:#6C6352;
+  --text-tertiary:#A69D88;
+  --accent:#C1794B;
+  --accent-hover:#A96536;
+  --accent-subtle:rgba(193,121,75,0.10);
   /* 品牌字身专用墨色 — 当前与 --accent-hover 同值,但刻意独立:品牌色不随交互态色阶演进 */
-  --brand-ink:#A85E0B;
-  --thinking-bg:rgba(201,122,29,0.05);
-  --thinking-border:rgba(201,122,29,0.22);
-  --thinking-text:#8B560F;
+  --brand-ink:#A96536;
+  --thinking-bg:rgba(193,121,75,0.055);
+  --thinking-border:rgba(193,121,75,0.22);
+  --thinking-text:#9A6238;
   --error-bg:rgba(178,96,80,0.07);
   --error-border:rgba(178,96,80,0.22);
   --error-text:#B05B48;
@@ -13125,8 +13183,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   --chip-neutral-color:var(--text-tertiary);
   --chip-neutral-bg:var(--bg-tertiary);
   --chip-neutral-border:var(--border);
-  --user-bubble:#F2F4F6;
-  --shadow:0 1px 2px rgba(19,25,31,0.04),0 3px 14px rgba(19,25,31,0.06);
+  --user-bubble:#F0E8D9;
+  --shadow:0 1px 2px rgba(92,72,44,0.04),0 3px 14px rgba(92,72,44,0.06);
   /* Soft-organic corners (editorial 8–16px) */
   --radius:14px;
   --radius-sm:10px;
@@ -13148,11 +13206,11 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   --fetch-green:#C1794B;
   --fetch-teal:#5E9E8C;
   /* Shadow tokens — soft, warm-tinted, diffuse (no hard pixel offset) */
-  --clay-sm:0 1px 2px rgba(19,25,31,0.05);
-  --clay-md:0 2px 10px rgba(19,25,31,0.07);
-  --clay-lg:0 10px 30px rgba(19,25,31,0.10);
-  --clay-pressed:inset 0 1px 3px rgba(19,25,31,0.10);
-  --stitch:1px solid #D9DEE4
+  --clay-sm:0 1px 2px rgba(92,72,44,0.05);
+  --clay-md:0 2px 10px rgba(92,72,44,0.07);
+  --clay-lg:0 10px 30px rgba(92,72,44,0.10);
+  --clay-pressed:inset 0 1px 3px rgba(92,72,44,0.10);
+  --stitch:1px solid #E2DAC8
 }
 
 /* ── Typography: reading-optimized with CJK care ── */
@@ -13561,102 +13619,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 }
 /* Pinned zone removed — replaced by folders */
 
-/* ══════════════════════════════════════════════════════
-   🕹️ PIXEL ART SYSTEM — identity through BORDER + FONT
-   SNES-style 3D borders: light top-left, dark bottom-right.
-   JetBrains Mono for cute monospace text in buttons/toggles.
-   Pixel identity = square corners (4px radius) +
-   directional borders + bottom drop shadow + press-down :active.
-
-   Technique: 2px border with per-side colors (FFFCF6 top/left,
-   A89878 bottom/right) + 0 2px 0 drop-shadow.
-   Font: JetBrains Mono 600 for crisp, dark (#5C4A33) text.
-   ══════════════════════════════════════════════════════ */
-
-/* ── New Chat — buttered-toast primary button ──
-   A golden toast-crust gradient (linear) topped by a soft melting-butter
-   sheen (radial highlight) — the Jon Kantner stacked-gradient skeuomorphic
-   recipe. Puffy "bread" depth via an inset top butter-rim + a warm baked
-   bottom crust shadow. Drop shadow stays in tofu's neutral warm-charcoal
-   clay vocabulary (rgba(92,72,44,…) — NO accent glow; guarded by
-   tests/frontend/test_frontend_new_chat_btn_style.py, which also rewrites the
-   rgba(92,72,44,0.10) token, so keep it present). */
-[data-theme="tofu"] .new-chat-btn{
-  background:
-    radial-gradient(58% 48% at 22% 32%,rgba(165,100,38,0.16) 0%,transparent 62%),
-    radial-gradient(52% 46% at 78% 66%,rgba(165,100,38,0.13) 0%,transparent 60%),
-    radial-gradient(42% 60% at 90% 22%,rgba(175,105,42,0.11) 0%,transparent 56%),
-    radial-gradient(100% 130% at 50% -8%,rgba(255,246,222,0.28) 0%,rgba(255,246,222,0) 46%),
-    linear-gradient(180deg,#E6C486 0%,#D8B168 56%,#CA9F52 100%);
-  color:#5A3A16;
-  border:1px solid rgba(150,100,45,0.34);
-  border-radius:12px;
-  box-shadow:0 1px 2px rgba(92,72,44,0.08),0 4px 12px rgba(92,72,44,0.10),inset 0 1px 0 rgba(255,248,228,0.34),inset 0 -3px 4px rgba(150,95,40,0.20);
-  font-family:var(--sans-body);
-  font-size:var(--font-size-md);font-weight:600;letter-spacing:0.01em;line-height:1;
-  text-transform:none;
-  text-shadow:0 1px 0 rgba(255,250,232,0.45);
-  padding:10px var(--space-4);
-  margin:0;
-  width:auto;
-  position:relative;
-  clip-path:none;
-  image-rendering:auto;
-  transition:background 0.18s ease,box-shadow 0.18s ease,transform 0.15s cubic-bezier(.34,1.56,.64,1)
-}
-[data-theme="tofu"] .new-chat-btn:hover{
-  background:
-    radial-gradient(58% 48% at 22% 32%,rgba(165,100,38,0.14) 0%,transparent 62%),
-    radial-gradient(52% 46% at 78% 66%,rgba(165,100,38,0.11) 0%,transparent 60%),
-    radial-gradient(100% 130% at 50% -8%,rgba(255,248,226,0.34) 0%,rgba(255,248,226,0) 46%),
-    linear-gradient(180deg,#EFCA8C 0%,#E2BA6F 56%,#D3A85A 100%);
-  color:#4E3213;
-  box-shadow:0 2px 4px rgba(92,72,44,0.12),0 7px 18px rgba(92,72,44,0.16),inset 0 1px 0 rgba(255,250,232,0.42),inset 0 -3px 4px rgba(150,95,40,0.22);
-  transform:translateY(-1px)
-}
-[data-theme="tofu"] .new-chat-btn:active{
-  transform:translateY(0);
-  box-shadow:var(--clay-pressed),inset 0 2px 4px rgba(150,95,40,0.35);
-  background:linear-gradient(180deg,#D29A4A 0%,#BC833B 100%)
-}
-[data-theme="tofu"] .new-chat-btn svg{
-  transition:transform 0.2s ease;
-  width:13px;height:13px;
-  stroke-width:2.2;
-  filter:none
-}
-[data-theme="tofu"] .new-chat-btn:hover svg{
-  transform:rotate(90deg)
-}
-/* Toasted-bread grain: an organic fractal-noise texture (inline SVG
-   feTurbulence), multiply-blended low so it reads as a fine baked grain,
-   NOT a mechanical dot grid. Sits above the crust, below the label. */
-[data-theme="tofu"] .new-chat-btn::before{
-  content:"";
-  position:absolute;
-  inset:1px;
-  border-radius:inherit;
-  pointer-events:none;
-  z-index:0;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='52'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size:120px 52px;
-  mix-blend-mode:multiply;
-  opacity:0.30
-}
-/* Toasted corners: a soft warm vignette so the edges look more baked. */
-[data-theme="tofu"] .new-chat-btn::after{
-  content:"";
-  position:absolute;
-  inset:0;
-  border-radius:inherit;
-  pointer-events:none;
-  z-index:0;
-  background:radial-gradient(120% 135% at 50% 42%,transparent 62%,rgba(140,80,30,0.14) 100%);
-  mix-blend-mode:multiply
-}
-[data-theme="tofu"] .new-chat-btn > *{position:relative;z-index:1}
-[data-theme="tofu"] .new-chat-btn:hover::before{opacity:0.24}
-
+/* New Chat uses the shared flat primary action in shell navigation. */
 /* ── Tofu theme: sidebar action row ── */
 [data-theme="tofu"] .sidebar-action-row{padding:10px 10px 6px}
 [data-theme="tofu"] .folder-dialog{background:#FDF8F3;border-color:#E8D5C0}
@@ -13734,138 +13697,9 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   letter-spacing:0.02em
 }
 
-/* ══════════════════════════════════════════════════════
-   🕹️ Topbar feature launchers (Paper / My Day / Trading) +
-   update btn — previously UNSTYLED in tofu, so they rendered as
-   flat ghost buttons clashing with the beveled pixel buttons in
-   the sidebar. Bring them into the same SNES-bevel language:
-   warm parchment fill, light top-left / dark bottom-right border,
-   JetBrains Mono label, steps() press-down. Active = kinako fill.
-   ══════════════════════════════════════════════════════ */
-[data-theme="tofu"] .topbar-tool-btn,
-[data-theme="tofu"] .update-btn{
-  height:28px;
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.5);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  box-shadow:0 1px 0 rgba(154,144,122,0.25);
-  color:#7C6A4E;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:600;
-  letter-spacing:0.02em;
-  transition:transform 0.08s ease,box-shadow 0.08s ease,color 0.12s,background 0.12s
-}
-[data-theme="tofu"] .topbar-tool-btn:hover,
-[data-theme="tofu"] .update-btn:hover{
-  color:#5C4A33;
-  background:linear-gradient(180deg, rgba(250,247,240,0.85) 0%, rgba(240,237,228,0.85) 100%);
-  border-right-color:rgba(168,152,120,0.55);
-  border-bottom-color:rgba(168,152,120,0.55);
-  transform:translateY(-1px);
-  box-shadow:0 2px 0 rgba(154,144,122,0.25)
-}
-[data-theme="tofu"] .topbar-tool-btn:active,
-[data-theme="tofu"] .update-btn:active{
-  transform:translateY(1px);
-  box-shadow:none
-}
-/* Active launcher (e.g. Paper mode on) — bright kinako selected slot */
-[data-theme="tofu"] .topbar-tool-btn.active{
-  color:#FFF8F0;
-  background:linear-gradient(180deg, #C4956A 0%, #B8895E 100%);
-  border-color:#C4956A;
-  border-top-color:#DEB890;
-  border-left-color:#DEB890;
-  border-right-color:#8A6840;
-  border-bottom-color:#8A6840;
-  text-shadow:0 1px 1px rgba(74,50,20,0.3);
-  box-shadow:0 1px 0 #7A5830
-}
-[data-theme="tofu"] .topbar-tool-btn.active:hover{
-  background:linear-gradient(180deg, #D4A57A 0%, #C8996E 100%);
-  transform:translateY(-1px);
-  box-shadow:0 2px 0 #7A5830
-}
-[data-theme="tofu"] .topbar-tool-btn svg,
-[data-theme="tofu"] .update-btn svg{stroke-width:2.2}
-/* Latency badge — mirror the kinako tool-button shell in the tofu theme. */
-[data-theme="tofu"] .net-latency-badge{
-  height:28px;
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.5);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  box-shadow:0 1px 0 rgba(154,144,122,0.25);
-  color:#7C6A4E;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:600;
-  letter-spacing:0.02em
-}
-[data-theme="tofu"] .net-latency-badge:hover{
-  color:#5C4A33;
-  background:linear-gradient(180deg, rgba(250,247,240,0.85) 0%, rgba(240,237,228,0.85) 100%);
-  border-right-color:rgba(168,152,120,0.55);
-  border-bottom-color:rgba(168,152,120,0.55)
-}
-[data-theme="tofu"] .net-latency-badge .net-ms{color:#9A8A6E}
+/* Topbar and latency controls inherit shared shell geometry and colors. */
 
-/* ══════════════════════════════════════════════════════
-   🕹️ Send btn — pixel art primary action button
-   Warm kinako fill, NES 3D shadow, press-down on click
-   ══════════════════════════════════════════════════════ */
-/* ══════════════════════════════════════════════════════
-   🕹️ Send btn — SNES bordered square (NO clip-path!)
-   Clean 2px border with light top-left / dark bottom-right
-   ══════════════════════════════════════════════════════ */
-[data-theme="tofu"] .send-btn{
-  background:var(--accent);
-  color:#FFFCF6;
-  border:1px solid transparent;
-  border-radius:var(--radius-sm);
-  font-weight:600;
-  position:relative;overflow:visible;
-  box-shadow:var(--clay-sm);
-  clip-path:none;
-  image-rendering:auto;
-  transition:background 0.18s ease,box-shadow 0.18s ease
-}
-[data-theme="tofu"] .send-btn:hover{
-  background:var(--accent-hover);
-  box-shadow:var(--clay-md);
-  transform:none
-}
-[data-theme="tofu"] .send-btn:active{
-  transform:none;
-  box-shadow:var(--clay-pressed);
-  background:var(--accent-hover)
-}
-/* Icon — slight nudge on hover */
-[data-theme="tofu"] .send-btn svg{
-  transition:transform 0.12s ease
-}
-[data-theme="tofu"] .send-btn:hover svg{
-  transform:translate(1px,-1px)
-}
-/* Disabled state — muted */
-[data-theme="tofu"] .send-btn:disabled{
-  background:var(--bg-active);
-  color:var(--text-tertiary);
-  border:1px solid var(--border);
-  box-shadow:none;
-  opacity:0.5
-}
-[data-theme="tofu"] .send-btn:disabled::before,
-[data-theme="tofu"] .send-btn:disabled::after{display:none}
-
+/* Send/stop use the shared composer intent states. */
 /* Attach button — quiet ghost icon */
 [data-theme="tofu"] .attach-btn{
   color:var(--text-secondary);
@@ -13879,62 +13713,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .attach-btn:active{
   transform:scale(.94)
 }
-/* Stop btn — calm solid, gentle pulse */
-[data-theme="tofu"] .send-btn.stop-btn{
-  background:var(--error-text);
-  border:1px solid transparent;
-  box-shadow:var(--clay-sm);
-  animation:tofuPixelPulse 1.8s ease-in-out infinite
-}
-[data-theme="tofu"] .send-btn.stop-btn:hover{
-  background:#9E4E3E;
-  box-shadow:var(--clay-md)
-}
-[data-theme="tofu"] .send-btn.stop-btn:active{
-  transform:none;
-  box-shadow:var(--clay-pressed);
-  animation:none
-}
-/* Gentle pulse for stop */
-@keyframes tofuPixelPulse{
-  0%,100%{opacity:1}
-  50%{opacity:0.82}
-}
 
-/* ══════════════════════════════════════════════════════
-   🕹️ Action buttons — rounded icon buttons
-   ══════════════════════════════════════════════════════ */
-/* ── Action buttons — pixel icon buttons with 3D frame ── */
-[data-theme="tofu"] .action-btn{
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.4);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.5) 0%, rgba(235,232,222,0.5) 100%);
-  color:#6B5A40;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3);
-  clip-path:none;
-  transition:color 0.15s,background 0.15s,transform 0.08s ease,box-shadow 0.08s ease
-}
-[data-theme="tofu"] .action-btn:hover{
-  background:linear-gradient(180deg, rgba(251,248,240,0.7) 0%, rgba(242,239,229,0.7) 100%);
-  color:#4A3820;
-  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06);
-  transform:translateY(-1px)
-}
-[data-theme="tofu"] .action-btn:active{
-  transform:translateY(1px);
-  box-shadow:0 0 0 rgba(154,144,122,0.3);
-  background:linear-gradient(180deg, rgba(232,229,219,0.7) 0%, rgba(226,223,212,0.7) 100%)
-}
-[data-theme="tofu"] .action-btn.active{
-  color:#8E6B48;
-  background:rgba(196,149,106,0.14);
-  border-color:rgba(196,149,106,0.35);
-  box-shadow:inset 0 1px 2px rgba(0,0,0,0.06)
-}
+/* Action controls use the shared composer control owner. */
 [data-theme="tofu"] .conv-streaming-dot{
   background:#BB9572;
   border-radius:50%;
@@ -14506,7 +14286,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .recent-path-item:hover .recent-path-name{color:#A67B52}
 
 /* ── Capability mode picker — tofu (clay) theme ──
- * The trigger inherits the pixel-pill [data-theme="tofu"] .submenu-trigger
+ * The trigger inherits the shared composer .submenu-trigger
  * style and the popover inherits [data-theme="tofu"] .flow-menu, so only the
  * active-Studio accent is bespoke here. */
 [data-theme="tofu"] .chat-mode-trigger[data-mode="studio"]{color:#A67B52;background:rgba(196,149,106,0.12);border-color:rgba(196,149,106,0.35)}
@@ -14521,35 +14301,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 .mobile-mode-item.active .mobile-sheet-item-check{opacity:1}
 
 /* ── Submenu triggers — pixel pill buttons with JetBrains Mono ── */
-[data-theme="tofu"] .submenu-trigger{
-  border-radius:4px;
-  border:1.5px solid rgba(194,188,164,0.4);
-  border-top-color:rgba(255,252,246,0.6);
-  border-left-color:rgba(255,252,246,0.6);
-  border-right-color:rgba(168,152,120,0.4);
-  border-bottom-color:rgba(168,152,120,0.4);
-  background:linear-gradient(180deg, rgba(245,242,234,0.6) 0%, rgba(235,232,222,0.6) 100%);
-  /* Item 2 — true frosted glass matching the project bar's pills */
-  -webkit-backdrop-filter:blur(6px) saturate(1.05);
-  backdrop-filter:blur(6px) saturate(1.05);
-  color:#3D3022;
-  box-shadow:0 1px 0 rgba(154,144,122,0.3);
-  clip-path:none;
-  padding:var(--space-1) 10px;
-  font-family:var(--sans-body);
-  font-size:var(--font-size-xs);
-  font-weight:700;
-  letter-spacing:0.02em;
-  -webkit-font-smoothing:antialiased;
-  -moz-osx-font-smoothing:grayscale;
-  transition:color 0.15s,background 0.15s,transform 0.08s ease,box-shadow 0.08s ease
-}
-[data-theme="tofu"] .submenu-trigger:hover{
-  background:linear-gradient(180deg, rgba(251,248,240,0.8) 0%, rgba(242,239,229,0.8) 100%);
-  color:#2A2018;
-  box-shadow:0 2px 0 rgba(154,144,122,0.3), 0 2px 6px rgba(74,63,47,0.06);
-  transform:translateY(-1px)
-}
 [data-theme="tofu"] .submenu-trigger:active{
   transform:translateY(1px);
   box-shadow:0 0 0 rgba(154,144,122,0.3)
@@ -14565,12 +14316,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 [data-theme="tofu"] .submenu-trigger.open{
   background:rgba(196,149,106,0.12);
   color:#3D3022;
-  border-color:rgba(196,149,106,0.35);
-  font-weight:700
-}
-[data-theme="tofu"] .submenu-trigger.has-active{
-  color:#6A4E2E;
-  background:rgba(196,149,106,0.1);
   border-color:rgba(196,149,106,0.35);
   font-weight:700
 }
@@ -15426,7 +15171,7 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
 /* tofu conv-pin removed — replaced by folders */
 
 /* ══════════════════════════════════════════════════════════
-   INPUT — Warm Reading Room composer
+   INPUT — Shared conversation composer
    A calm paper box: soft border, diffuse shadow, quiet focus
    ring. No controller frame, pet mascot, sparkles, D-pad or
    speech-bubble tail — all decorative pseudo-elements retired.
@@ -15437,23 +15182,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   box-shadow:none;
   position:relative;
   padding-top:var(--space-2)
-}
-[data-theme="tofu"] .input-box{
-  /* Item 1 — adopt the project bar's "gallery-hung frame" vocabulary: one slim
-     warm frame line + soft two-layer elevation (a tight contact shadow + a
-     feathered ambient halo), 14px radius. Kinship with .project-bar (styles.css
-     :11931), NOT a re-added game panel. STATIC — no animation on the box. */
-  border:1.5px solid rgba(140,116,80,0.34);
-  background:#FFFDF9;
-  border-radius:14px;
-  box-shadow:
-    0 1px 2px rgba(74,58,36,0.10),
-    0 8px 22px -8px rgba(96,76,48,0.22);
-  isolation:auto;
-  overflow:visible;
-  transition:border-color 0.2s ease,box-shadow 0.2s ease;
-  position:relative;
-  z-index:2
 }
 /* Decorative pseudo-elements retired (pet mascot / grip wings) */
 [data-theme="tofu"] .input-box::before,
@@ -15478,26 +15206,8 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   content:none;
   display:none
 }
-/* ── Focus state: quiet accent ring, no lift ── */
-[data-theme="tofu"] .input-box:focus-within{
-  /* Item 3 — warm focus echoing the bar's hover-warmth: deepen the warm frame,
-     widen the ambient shadow a touch, and add a soft warm-amber ring (the bar's
-     #C4956A family). NO lift, NO animation; the glow lives on the box FRAME
-     (box-shadow OUTSIDE the border) — never a layer behind the live text. */
-  border-color:rgba(140,116,80,0.62);
-  box-shadow:
-    0 1px 2px rgba(74,58,36,0.10),
-    0 10px 26px -8px rgba(96,76,48,0.28),
-    0 0 0 3px rgba(196,149,106,0.22);
-  transform:none
-}
-/* ── Conversation strip: the composer card's own top band ──
-   No frame of its own — the .input-box card supplies the paper, border and
-   elevation; the band is set off by one warm hairline, softer than the
-   card's outer frame. */
-[data-theme="tofu"] .conv-status-strip{
-  box-shadow:inset 0 -1px 0 rgba(140,116,80,0.22);
-}
+/* Conversation strip uses the composer card's single hairline. */
+[data-theme="tofu"] .conv-status-strip{box-shadow:inset 0 -1px 0 var(--border-light)}
 /* Quiet, static scene echo in the toolbar tray, never behind typing. */
 @media(min-width:801px){
   [data-theme="tofu"] .input-box .input-actions{border-radius:0 0 12.5px 12.5px}
@@ -15505,22 +15215,6 @@ html[data-tofu-planned-interruption="true"] .net-latency-badge{visibility:hidden
   [data-theme="tofu"] .project-bar[data-decor="pool"]:not([style*="none"]) ~ .input-box .input-actions{background:#edf1ef}
   [data-theme="tofu"] .project-bar[data-decor="sky"]:not([style*="none"]) ~ .input-box .input-actions{background:#f5ede8}
 }
-/* ── Textarea ── */
-[data-theme="tofu"] .input-box textarea{
-  min-height:64px;
-  max-height:260px;
-  padding:var(--space-4) var(--space-5) 14px;
-  font-size:var(--font-size-xl);
-  line-height:var(--leading-body)
-}
-[data-theme="tofu"] .input-box textarea::placeholder{
-  font-family:var(--sans-body);
-  color:var(--text-tertiary);
-  font-size:var(--font-size-lg);
-  font-weight:400;
-  letter-spacing:0
-}
-
 /* ══════════════════════════════════════════════════════════════
    Tofu Code Block — clean editorial code surface
    (mono kept for actual code text; cartridge frame/scanline/bevel gone)
@@ -21952,10 +21646,10 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   max-height:none;
   box-sizing:border-box;
   min-width:0;
-  font-size:10.5px;
-  font-weight:600;
+  font-size:var(--font-size-sm);
+  font-weight:var(--weight-medium);
   line-height:1.5;
-  user-select:none;
+  user-select:text;
   /* The rail IS hit-testable: the height backstop below SCROLLS (needs the
    * pointer), paths expose their full path via hover title, and hovering
    * the rail keeps `.message:hover` true regardless (the rail is a child
@@ -21971,6 +21665,10 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
  * few and short); layout+style containment stays. `.cv-off` keeps its
  * !important win. */
 .message:has(> .turn-ctx){ content-visibility:visible; contain:layout style; }
+/* A rail travels beside later Turns. Their layout containment creates new
+ * stacking contexts: lift only populated rail hosts so those transparent
+ * sibling boxes cannot intercept the rail's disclosure buttons. */
+.message:has(> .turn-ctx:not([hidden])){ z-index:var(--z-turn-context); }
 /* While pinned, the rail's height is the follower's inline budget — no
  * class-based cap. The old fixed 60vh left the gutter beside the reply
  * empty while the rail's own facts scrolled internally. */
@@ -21982,8 +21680,8 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   .turn-ctx{
     display:flex;
     flex-direction:column;
-    gap:5px;
-    padding:3px 0 3px 10px;
+    gap:var(--space-4);
+    padding:var(--space-2) var(--space-1) var(--space-3) var(--space-4);
     border-radius:0;
     background:transparent;
     border:none;
@@ -21992,7 +21690,7 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
      * more rectangle competing with the message — the rail now whispers. */
     border-left:1px solid var(--border);
     /* HEIGHT DISCIPLINE, two layers. (1) CONTENT caps in info-rail.js
-     * decide what renders up-front (≤9 chips / ≤3 paths, the rest behind
+     * decide what renders up-front (≤4 chips / ≤3 paths, the rest behind
      * the "+N" click) — a typical card renders COMPLETE, which the removed
      * 132px `overflow:hidden` guillotine never allowed (it clipped ordinary
      * cards mid-WORKSPACE with no way to reach the facts — the 2026-07-28
@@ -22012,7 +21710,7 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 /* Keep the geometry measurable when no track remains; the follower clears
  * this state as soon as a later layout grants space again. */
 .turn-ctx.tctx-no-space{ visibility:hidden; pointer-events:none; }
-.turn-ctx .tctx-head{ display:flex; align-items:center; flex-wrap:wrap; gap:var(--space-1) 6px; }
+.turn-ctx .tctx-head{ display:flex; align-items:center; flex-wrap:wrap; gap:var(--space-2); }
 .turn-ctx .tctx-logo{ display:inline-flex; flex:0 0 auto; align-items:center; }
 .turn-ctx .tctx-logo .stg-brand-icon svg{ display:block; width:100%; height:100%; fill:currentColor; }
 /* A compact unit: short labels do not push effort to the rail edge; long
@@ -22033,14 +21731,14 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   white-space:nowrap;
 }
 .turn-ctx .tctx-depth{
-  font-size:8px;
+  font-size:var(--font-size-xs);
   font-weight:700;
   text-transform:uppercase;
   letter-spacing:0.04em;
   padding:0 var(--space-1);
   border-radius:5px;
   background:transparent;
-  color:#c4b5fd;
+  color:var(--text-secondary);
   border:1px solid color-mix(in srgb, currentColor 42%, transparent);
   flex:0 0 auto;
 }
@@ -22049,65 +21747,78 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   flex:0 0 auto;
   padding:1px 6px;
   border-radius:6px;
-  font-size:8.5px;
+  font-size:var(--font-size-xs);
   line-height:1.4;
   font-weight:700;
   text-transform:uppercase;
   letter-spacing:0.03em;
   white-space:nowrap;
   background:transparent;
-  color:#e8b04a;
+  color:var(--text-secondary);
   border:1px solid color-mix(in srgb, currentColor 42%, transparent);
 }
-[data-theme="light"] .turn-ctx .tctx-mode-badge{ color:#b45309; }
-[data-theme="tofu"] .turn-ctx .tctx-mode-badge{ color:#8a6a2a; }
 
-.turn-ctx .tctx-row{ display:flex; flex-direction:column; gap:3px; }
+.turn-ctx .tctx-row{ display:flex; flex-direction:column; gap:var(--space-2); }
+.turn-ctx .tctx-row + .tctx-row{ padding-top:var(--space-3); border-top:var(--control-edge-inset) solid var(--border-light); }
+.turn-ctx .tctx-row-heading{ display:flex; align-items:center; justify-content:space-between; gap:var(--space-1); min-height:var(--control-h-sm); }
+.turn-ctx .tctx-row-count{ font-weight:var(--weight-regular); font-variant-numeric:tabular-nums; color:var(--text-secondary); }
 .turn-ctx .tctx-row-h{
-  font-size:8px;
+  font-size:var(--font-size-xs);
   font-weight:700;
-  letter-spacing:0.09em;
-  text-transform:uppercase;
-  opacity:0.45;
+  display:inline-flex;
+  align-items:baseline;
+  gap:var(--space-2);
+  letter-spacing:normal;
+  color:var(--text-secondary);
 }
 .turn-ctx .tctx-chips{ display:flex; flex-wrap:wrap; gap:var(--space-1); }
 .turn-ctx .tctx-chip{
-  font-size:10px;
-  font-weight:600;
-  padding:0 6px;
-  border-radius:999px;
-  background:transparent;
-  /* Quiet outline chips: the tone color survives ONLY as the ink, and the
-   * border is the same ink at 40% via currentColor — the six candy-fill
-   * backgrounds were the noisiest element on the whole message row. */
-  border:1px solid color-mix(in srgb, currentColor 38%, transparent);
+  font-size:var(--font-size-sm);
+  font-weight:var(--weight-medium);
+  padding:var(--space-1) var(--space-2);
+  border-radius:var(--radius-xs);
+  background:var(--bg-secondary);
+  color:var(--text-secondary);
+  border:var(--control-edge-inset) solid transparent;
   white-space:nowrap;
   max-width:100%;
   overflow:hidden;
   text-overflow:ellipsis;
 }
-.turn-ctx .tctx-tone-mode  { color:#e8b04a; }
-.turn-ctx .tctx-tone-search{ color:#93c5fd; }
-.turn-ctx .tctx-tone-net   { color:#6ee7b7; }
-.turn-ctx .tctx-tone-code  { color:#d8b4fe; }
-.turn-ctx .tctx-tone-ai    { color:#5eead4; }
-.turn-ctx .tctx-tone-mcp   { color:#cbd5e1; }
 /* "+N more" — a CLICK toggle, deliberately not hover. Expanding grows the
  * rail IN FLOW, which needs no containment escape (see the block comment).
  * It is the only pointer-reactive thing in the rail. */
 .turn-ctx .tctx-more{
   pointer-events:auto;
+  display:inline-flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:var(--space-2);
+  min-height:var(--control-h-sm);
   cursor:pointer;
-  font-size:9.5px;
-  font-weight:700;
-  padding:1px 7px;
-  border-radius:999px;
+  font-size:var(--font-size-sm);
+  font-weight:var(--weight-medium);
+  padding:var(--space-1) var(--space-2);
+  border-radius:var(--radius-sm);
   background:transparent;
-  color:var(--text-tertiary);
-  border:1px dashed rgba(148,163,184,0.45);
-  font-family:inherit;
+  color:var(--text-secondary);
+  border:var(--control-edge-inset) solid transparent;
+  flex:0 0 auto;
+  font-family:var(--font-ui);
 }
-.turn-ctx .tctx-more:hover{ color:var(--text-primary); border-color:var(--accent); }
+.turn-ctx .tctx-more::after{
+  content:'';
+  width:var(--space-2);
+  height:var(--space-2);
+  border-inline-end:var(--control-edge-inset) solid currentColor;
+  border-block-end:var(--control-edge-inset) solid currentColor;
+  transform:rotate(-45deg);
+}
+.turn-ctx .tctx-more[aria-expanded="true"]{background:var(--accent-subtle);color:var(--text-primary)}
+.turn-ctx .tctx-more[aria-expanded="true"]::after{transform:rotate(45deg)}
+.turn-ctx .tctx-more:hover{color:var(--text-primary);background:var(--bg-hover)}
+.turn-ctx .tctx-more:focus-visible{outline:var(--control-edge-inset) solid var(--accent);outline-offset:var(--space-1)}
+@media(pointer:coarse){.turn-ctx .tctx-more{min-height:var(--control-h-lg)}}
 /* The overflow group must NOT be a flex item of its own: as a single item it
  * cannot wrap internally, so its nowrap chips run straight off the rail's
  * right edge (measured +110px past the pane at 1440). `display:contents`
@@ -22115,15 +21826,12 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
  * and wraps exactly like the always-visible ones. */
 .turn-ctx .tctx-overflow{ display:contents; }
 .turn-ctx .tctx-overflow[hidden]{ display:none; }
-.turn-ctx .tctx-paths{ display:flex; flex-direction:column; gap:3px; }
-/* In the paths column the "+N" pill would stretch to the rail's full width
- * (column flex children stretch); keep it pill-sized like in the chips row. */
-.turn-ctx .tctx-paths .tctx-more{ align-self:flex-start; }
+.turn-ctx .tctx-paths{ display:flex; flex-direction:column; gap:var(--space-2); }
 .turn-ctx .tctx-path{
   display:flex;
   align-items:flex-start;
   gap:var(--space-1);
-  font-size:10px;
+  font-size:var(--font-size-sm);
   line-height:1.4;
   color:var(--text-secondary);
   word-break:break-all;
@@ -22136,9 +21844,8 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
  * borrowing the search/mcp/ai families. The branch glyph inherits the
  * chip color via currentColor. */
 .turn-ctx .tctx-tone-git{
-  color:#0e9f6e;
-  border-color:color-mix(in srgb, #0e9f6e 38%, transparent);
-  background:color-mix(in srgb, #0e9f6e 9%, transparent);
+  color:var(--text-secondary);
+  background:var(--bg-secondary);
 }
 .turn-ctx .tctx-tone-git .tctx-branch-icon{ flex:0 0 auto; }
 .turn-ctx .tctx-branch-root{
@@ -22157,9 +21864,8 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
  * the same "+N" toggle the other rows use — all travelling with `.tctx-stuck`.
  * Completed items FADE — never struck through. */
 .turn-ctx .tctx-tone-todo{
-  color:#0d9488;
-  border-color:color-mix(in srgb, #0d9488 38%, transparent);
-  background:color-mix(in srgb, #0d9488 9%, transparent);
+  color:var(--text-secondary);
+  background:var(--bg-secondary);
 }
 .turn-ctx .tctx-todo-count.is-done{
   color:var(--accent);
@@ -22189,7 +21895,7 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
    * own line, and pushes the branch row down (the "two separate pieces"). */
   min-width:0;
   align-items:center;
-  font-size:11.5px;
+  font-size:var(--font-size-sm);
   color:var(--text-primary);
 }
 .turn-ctx .tctx-todo-current .tctx-todo-text{
@@ -22213,7 +21919,7 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   display:flex;
   align-items:center;
   gap:4px;
-  font-size:11.5px;
+  font-size:var(--font-size-sm);
   line-height:1.45;
   color:var(--text-secondary);
   min-width:0;
@@ -22231,12 +21937,12 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
   color:var(--text-tertiary);
 }
 .turn-ctx .tctx-todo-text{ min-width:0; word-break:break-word; }
-.turn-ctx .tctx-todo-completed{ opacity:.62; }
+.turn-ctx .tctx-todo-completed{ color:var(--text-secondary); }
 .turn-ctx .tctx-todo-completed .tctx-todo-mark{ color:var(--accent); }
-.turn-ctx .tctx-todo-in_progress .tctx-todo-mark{ color:#b45309; }
+.turn-ctx .tctx-todo-in_progress .tctx-todo-mark{ color:var(--text-primary); }
 .turn-ctx .tctx-todo-in_progress .tctx-todo-text{ color:var(--text-primary); }
-.turn-ctx .tctx-todo-blocked .tctx-todo-mark{ color:#dc2626; }
-.turn-ctx .tctx-todo-blocked .tctx-todo-text{ color:#dc2626; }
+.turn-ctx .tctx-todo-blocked .tctx-todo-mark{ color:var(--error-text); }
+.turn-ctx .tctx-todo-blocked .tctx-todo-text{ color:var(--error-text); }
 
 /* ── Fold: the rail's content as ONE line under the message header ──
  * Shown exactly when the rail track is absent (narrow pane, or the
@@ -22251,11 +21957,11 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 .tctx-fold{
   display:flex;
   align-items:center;
-  gap:5px;
-  margin-bottom:6px;
-  font-size:10px;
-  font-weight:600;
-  color:var(--text-tertiary);
+  gap:var(--space-2);
+  margin-bottom:var(--space-2);
+  font-size:var(--font-size-sm);
+  font-weight:var(--weight-medium);
+  color:var(--text-secondary);
   white-space:nowrap;
   overflow:hidden;
   text-overflow:ellipsis;
@@ -22263,42 +21969,6 @@ details.compact-card:not([open]) > .compact-card-body { display: none; }
 .tctx-fold .tctx-fold-dot{ width:5px; height:5px; border-radius:50%; background:var(--accent); flex:0 0 auto; opacity:.7; }
 @container chatpane (min-width: 1056px){
   .tctx-fold{ display:none; }
-}
-
-/* ── Per-theme palettes ─────────────── */
-[data-theme="light"] .turn-ctx{ background:transparent; border:none; border-left:1px solid #e8e6df; }
-[data-theme="light"] .turn-ctx .tctx-model,
-[data-theme="light"] .turn-ctx .tctx-path{ color:#4a4a58; }
-[data-theme="light"] .turn-ctx .tctx-tone-mode  { color:#b45309; }
-[data-theme="light"] .turn-ctx .tctx-tone-ai    { color:#0d9488; }
-[data-theme="light"] .turn-ctx .tctx-tone-mcp   { color:#64748b; }
-[data-theme="light"] .turn-ctx .tctx-tone-git   { color:#047857; }
-[data-theme="light"] .turn-ctx .tctx-todo-in_progress .tctx-todo-mark{ color:#b45309; }
-[data-theme="light"] .turn-ctx .tctx-todo-blocked .tctx-todo-mark,
-[data-theme="light"] .turn-ctx .tctx-todo-blocked .tctx-todo-text{ color:#b91c1c; }
-
-[data-theme="tofu"] .turn-ctx{
-  background:transparent;
-  border:none;
-  box-shadow:none;
-  border-left:1px solid #e2dac8;
-}
-[data-theme="tofu"] .turn-ctx .tctx-model,
-[data-theme="tofu"] .turn-ctx .tctx-path{ color:#6a5a40; }
-[data-theme="tofu"] .turn-ctx .tctx-row-h{ color:#8a7a5e; }
-[data-theme="tofu"] .turn-ctx .tctx-depth{ color:#8a6a2a; }
-[data-theme="tofu"] .turn-ctx .tctx-tone-ai    { color:#2f7268; }
-[data-theme="tofu"] .turn-ctx .tctx-tone-mcp   { color:#7a6a50; }
-[data-theme="tofu"] .turn-ctx .tctx-tone-mode  { color:#8a6a2a; }
-[data-theme="tofu"] .turn-ctx .tctx-tone-git   { color:#3a7a54; }
-[data-theme="tofu"] .turn-ctx .tctx-todo-in_progress .tctx-todo-mark{ color:#8a6a2a; }
-
-/* ── Fallback: browsers without color-mix() get a neutral hairline on the
- *    quiet outline chips/badges (same fallback family as the meniscus). ── */
-@supports not (color: color-mix(in srgb, red, blue)){
-  .turn-ctx .tctx-chip,
-  .turn-ctx .tctx-mode-badge,
-  .turn-ctx .tctx-depth{ border-color:rgba(148,163,184,0.45); }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -23275,8 +22945,8 @@ body.artifact-panel-open {
    Scoped to NON-light, NON-tofu so the hand-built light & tofu themes
    are untouched. Goal: replace flat solid fills + hairline borders with
    subtle layering (gradient panels, edge highlights, a real separating
-   shadow, an accent bar on the active conversation, and a premium
-   New-Chat button). Pure visual; no layout/JS impact.
+   shadow and an accent bar on the active conversation).
+   Primary chat controls use the shared shell owner.
    ═══════════════════════════════════════════════════════════════════ */
 :root{--sb-edge:rgba(255,255,255,0.04);--tb-glass:rgba(17,17,21,0.72)}
 
@@ -23290,19 +22960,6 @@ html:not([data-theme="light"]):not([data-theme="tofu"]) .sidebar-header{
   border-bottom:1px solid #1f1f27;
   box-shadow:0 1px 0 var(--sb-edge);
 }
-
-/* ── New Chat: accent gradient + soft glow + hover lift (most-clicked control) ── */
-html:not([data-theme="light"]):not([data-theme="tofu"]) .new-chat-btn{
-  background:linear-gradient(135deg,#7c66d4 0%,#6e56cf 100%);
-  box-shadow:0 1px 2px rgba(0,0,0,0.4),0 4px 14px rgba(110,86,207,0.28),inset 0 1px 0 rgba(255,255,255,0.14);
-  transition:transform .15s cubic-bezier(.34,1.56,.64,1),box-shadow .15s ease,background .15s ease;
-}
-html:not([data-theme="light"]):not([data-theme="tofu"]) .new-chat-btn:hover{
-  background:linear-gradient(135deg,#866fe0 0%,#7866d8 100%);
-  box-shadow:0 2px 4px rgba(0,0,0,0.45),0 6px 20px rgba(110,86,207,0.40),inset 0 1px 0 rgba(255,255,255,0.18);
-  transform:translateY(-1px);
-}
-html:not([data-theme="light"]):not([data-theme="tofu"]) .new-chat-btn:active{transform:translateY(0)}
 
 /* ── Header action buttons: a touch more contrast on hover with a hairline edge ── */
 html:not([data-theme="light"]):not([data-theme="tofu"]) .action-btn:hover{
@@ -24352,6 +24009,8 @@ body.kb-open { overflow: hidden; }
   --turn-spine: color-mix(in srgb, var(--text-tertiary) 24%, transparent);
   --turn-process-surface: color-mix(in srgb, var(--bg-secondary) 62%, transparent);
   --turn-process-hover: color-mix(in srgb, var(--bg-hover) 70%, transparent);
+  --turn-process-panel: color-mix(in srgb, var(--bg-secondary) 72%, var(--bg-primary));
+  --turn-process-line: color-mix(in srgb, var(--border) 74%, var(--bg-primary));
 }
 
 [data-theme="tofu"] .conversation-surface {
@@ -24369,43 +24028,54 @@ body.kb-open { overflow: hidden; }
 /* One calm reading column: compact identity at the left, prose on the page. */
 
 .conversation-surface .conversation-turn.message {
-  grid-template-columns: var(--control-h-md) minmax(0, 1fr) var(--rail-w);
+  position: relative;
+  grid-template-columns: minmax(0, 1fr) var(--rail-w);
   column-gap: var(--space-3);
   margin-bottom: var(--space-10);
   overflow: visible;
 }
 
-.conversation-surface .conversation-turn-avatar.message-avatar {
-  width: 34px;
-  height: 34px;
+.conversation-surface .conversation-turn.message > .conversation-turn-avatar.message-avatar {
+  position: absolute;
+  inset-block-start: var(--space-2);
+  inset-inline-start: var(--space-2);
+  width: var(--space-5);
+  height: var(--space-5);
   margin-top: 0;
-  opacity: .9;
-  color: var(--text-secondary);
+  opacity: 1;
+  color: var(--accent);
+  border: var(--control-edge-inset) solid color-mix(in srgb, var(--accent) 18%, var(--border-light));
+  border-radius: var(--conversation-process-radius);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-primary));
 }
 
 .conversation-surface .conversation-turn-avatar.message-avatar :is(img, svg) {
-  max-width: 32px;
-  max-height: 32px;
+  max-width: var(--space-5);
+  max-height: var(--space-5);
 }
 
 .conversation-surface .conversation-turn-content.message-content {
+  grid-column: 1;
   overflow: visible;
   max-width: var(--msg-measure);
   min-width: 0;
   font-size: var(--conversation-font-size-body);
 }
 
+.conversation-surface .conversation-turn > .conversation-turn-context-rail { grid-column: 2; }
+
 .conversation-surface .conversation-turn-header.message-header {
   justify-content: flex-start;
-  min-height: 20px;
-  margin: 0 0 var(--space-2);
+  min-height: var(--control-h-md);
+  padding-inline-start: var(--conversation-reading-inset);
+  margin: 0 0 var(--space-3);
   gap: var(--space-2);
   line-height: 1.25;
 }
 
 .conversation-surface .message-role {
-  color: var(--text-secondary);
-  font-size: var(--conversation-font-size-content);
+  color: var(--text-primary);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-bold);
   letter-spacing: .006em;
 }
@@ -24433,18 +24103,93 @@ body.kb-open { overflow: hidden; }
 
 .conversation-surface .conversation-turn-blocks {
   overflow: visible;
+  gap: 0;
 }
 
 .conversation-surface .conversation-turn-blocks > .conversation-block {
-  margin: 0 0 var(--space-2);
+  margin: 0;
+}
+
+/* One hanging icon gutter: role, narration, answer rubric, headings and
+ * process labels all share a single reading baseline. */
+.conversation-surface .conversation-turn:not(.user-msg) :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block--text {
+  box-sizing: border-box;
+  padding-inline-start: var(--conversation-reading-inset);
+}
+
+.conversation-surface .conversation-turn:not(.user-msg) :is(.conversation-turn-actions, .conversation-turn-footer, .conversation-block--live-status) {
+  padding-inline-start: var(--conversation-reading-inset);
+}
+
+/* One spacing owner, including the demand-mounted historical process body.
+ * Adjacent process rows form a compact run. Prose gets a paragraph's breath
+ * on either side without moving, grouping or recreating any keyed leaf. */
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block + .conversation-block {
+  margin-block-start: var(--conversation-flow-gap);
+}
+
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block--text + .conversation-block,
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block + .conversation-block--text {
+  margin-block-start: var(--conversation-prose-gap);
 }
 
 .conversation-surface .conversation-turn-blocks > .conversation-block:last-child {
   margin-bottom: 0;
 }
 
-/* Round sections are semantic boundaries, not a decorative per-block spine.
- * Leaves remain direct keyed children so streaming never reparents live cards. */
+/* Adjacent process leaves make one continuous work surface. The derived edges
+ * describe the mounted order only: narration, deliverables and page boundaries
+ * break the surface. No extra wrapper, duplicate content or disclosure state. */
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge] {
+  position: relative;
+  isolation: isolate;
+  margin-block-start: 0;
+  padding-inline: var(--conversation-process-shell-inset);
+  border-inline: var(--control-edge-inset) solid var(--turn-process-line);
+  background: var(--turn-process-panel);
+}
+
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="start"], [data-process-edge="single"]) {
+  margin-block-start: var(--space-4);
+  padding-block-start: var(--space-2);
+  border-block-start: var(--control-edge-inset) solid var(--turn-process-line);
+  border-start-start-radius: var(--conversation-process-radius);
+  border-start-end-radius: var(--conversation-process-radius);
+}
+
+.conversation-surface :is(.conversation-turn-blocks, [data-history-process-blocks]) > .conversation-block[data-process-edge]:is([data-process-edge="end"], [data-process-edge="single"]) {
+  padding-block-end: var(--space-2);
+  border-block-end: var(--control-edge-inset) solid var(--turn-process-line);
+  border-end-start-radius: var(--conversation-process-radius);
+  border-end-end-radius: var(--conversation-process-radius);
+}
+
+.conversation-surface .conversation-block[data-process-edge]::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset-block: 0;
+  inset-inline-start: calc(var(--conversation-process-shell-inset) + var(--conversation-process-inset) + var(--conversation-process-marker) / 2);
+  width: var(--control-edge-inset);
+  background: var(--turn-spine);
+  pointer-events: none;
+}
+.conversation-surface .conversation-block[data-process-edge="start"]::before {
+  inset-block-start: calc(var(--conversation-process-row-height) / 2 + var(--space-2));
+}
+.conversation-surface .conversation-block[data-process-edge="end"]::before {
+  height: calc(var(--conversation-process-row-height) / 2);
+  inset-block-end: auto;
+}
+.conversation-surface .conversation-block[data-process-edge="single"]::before { display: none; }
+.conversation-surface .conversation-block[data-process-edge][data-action-state="active"] {
+  background: color-mix(in srgb, var(--accent) 5%, var(--turn-process-panel));
+}
+.conversation-surface .conversation-block[data-process-edge][data-action-state="attention"] {
+  border-inline-start-color: var(--error-text);
+}
+
+/* Leaves remain direct keyed children so streaming never reparents live cards. */
 
 .conversation-surface .conversation-turn-blocks {
   min-width: 0;
@@ -24522,8 +24267,8 @@ body.kb-open { overflow: hidden; }
   display: none;
 }
 
-.conversation-surface .conversation-block--text[data-deliverable="true"] {
-  margin-block-start: var(--space-6);
+.conversation-surface .conversation-block + .conversation-block--text[data-deliverable="true"] {
+  margin-block-start: var(--conversation-answer-gap);
 }
 
 .conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content {
@@ -24587,6 +24332,85 @@ body.kb-open { overflow: hidden; }
   font-weight: var(--weight-regular);
   line-height: var(--leading-body);
   overflow-wrap: anywhere;
+}
+
+/* The rubric is a reading toolbar. Text starts on the exact prose baseline;
+ * secondary navigation sits opposite it, never in an extra leading slot. */
+.conversation-surface .conversation-answer-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-lg);
+  margin-block: 0 var(--space-4);
+  padding-block-end: var(--space-2);
+  border-block-end: var(--control-edge-inset) solid var(--turn-rule);
+  color: var(--text-secondary);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-title);
+}
+.conversation-surface .conversation-answer-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+}
+.conversation-surface .conversation-answer-outline { position: relative; }
+.conversation-surface .conversation-answer-outline > summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-h-lg);
+  gap: var(--space-2);
+  padding-inline: var(--space-2);
+  border-radius: var(--radius-sm);
+  list-style: none;
+  cursor: pointer;
+  font-size: var(--conversation-font-size-meta);
+  font-weight: var(--weight-medium);
+}
+.conversation-surface .conversation-answer-outline > summary::after {
+  content: '';
+  width: var(--space-2);
+  height: var(--space-2);
+  border-inline-end: var(--control-edge-inset) solid currentColor;
+  border-block-end: var(--control-edge-inset) solid currentColor;
+  transform: rotate(-45deg);
+}
+.conversation-surface .conversation-answer-outline[open] > summary::after { transform: rotate(45deg); }
+.conversation-surface .conversation-answer-outline > summary::-webkit-details-marker { display: none; }
+.conversation-surface .conversation-answer-outline > summary:hover { background: var(--bg-hover); }
+.conversation-surface .conversation-answer-outline > nav {
+  position: absolute;
+  z-index: 5;
+  inset-inline-end: 0;
+  inset-block-start: calc(100% + var(--space-1));
+  display: grid;
+  gap: var(--space-1);
+  width: min(var(--tool-source-chip-measure), 65vw);
+  max-height: 50vh;
+  overflow: auto;
+  padding: var(--space-2);
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-primary);
+  box-shadow: var(--shadow);
+}
+.conversation-surface .conversation-answer-outline > nav > button { justify-content: flex-start; text-align: start; }
+.conversation-surface .conversation-answer-outline > summary:focus-visible {
+  outline: var(--control-edge-inset) solid var(--accent);
+  outline-offset: var(--space-1);
+}
+.conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content > :is(h1, h2, h3):first-child {
+  margin-block-start: 0;
+  font-size: var(--conversation-font-size-heading-1);
+  line-height: var(--leading-tight);
+  letter-spacing: -.025em;
+}
+.conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content > p:first-child {
+  font-size: var(--font-size-2xl);
+}
+.conversation-surface .conversation-history-process .conversation-block--text > .md-content {
+  font-size: var(--conversation-process-font-size);
+  color: var(--text-secondary);
 }
 
 .conversation-surface .conversation-block--text > .md-content :is(p, ul, ol, pre, table, blockquote) {
@@ -24776,19 +24600,167 @@ body.kb-open { overflow: hidden; }
  * Delivery: ordered application manifest; neighboring content owners are independent.
  */
 
-/*
- * Reasoning is inspectable process evidence, not a competing answer card —
- * and per-round reasoning is rarely opened, so a stack of full bordered
- * cards reads as visual noise (the same "too huge" verdict the retained
- * timeline's .seg-thinking already settled). Render it as a slim muted
- * one-liner disclosure: no card chrome, secondary label, full opacity only
- * while the reasoning is actually streaming. (2026-08-27 owner readability
- * recalibration: the previous .58-opacity header + 11.5px tertiary label
- * crossed from "quiet" into "hard to read".)
- */
+/* A shared disclosure grammar for reasoning, tool results, context notes,
+ * checklists, programs and the fallback renderer. Existing native disclosures
+ * retain their lifecycle; only the label/marker/evidence columns are shared. */
+.conversation-surface :is(
+  .thinking-header, .ptool-line, .ptc-head, .conversation-tool-card__summary
+) {
+  box-sizing: border-box;
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-process-font-size);
+  line-height: var(--leading-title);
+}
+
+.conversation-surface :is(
+  .thinking-header, .ptool-line, .ptc-head, .conversation-tool-card__summary
+):hover {
+  background: var(--turn-process-hover);
+}
+
+.conversation-surface :is(
+  .thinking-label, .ptool-text, .ptc-title, .conversation-tool-card__title
+) {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-title);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  letter-spacing: normal;
+}
+
+/* Tool identity stays in the leading slot; a single trailing caret is the
+ * consistent disclosure affordance. Native summaries still own interaction. */
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after {
+  content: '';
+  box-sizing: border-box;
+  flex: 0 0 var(--space-2);
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-inline: var(--space-1);
+  border-inline-end: var(--control-edge-inset) solid currentColor;
+  border-block-end: var(--control-edge-inset) solid currentColor;
+  transform: rotate(-45deg);
+  color: var(--text-secondary);
+}
+.conversation-surface details[open] > :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header, .conversation-tool-card__summary)::after,
+.conversation-surface .ptool-results-header[aria-expanded="true"]::after {
+  transform: rotate(45deg);
+}
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header) > .ptool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 var(--conversation-process-marker);
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  color: var(--text-secondary);
+}
+.conversation-surface .ptool-results-header > .ptool-results-toggle,
+.conversation-surface :is(.ptool-result-header, .sw-inbox-row-header, .ptool-todo-header) .ptool-text::after {
+  display: none;
+}
+.conversation-surface .ptc-head::before,
+.conversation-surface .conversation-tool-card__summary::before {
+  content: '{}';
+  order: -1;
+  width: var(--conversation-process-marker);
+  flex: 0 0 var(--conversation-process-marker);
+  text-align: center;
+  color: var(--text-secondary);
+  font: var(--weight-medium) var(--conversation-font-size-meta) var(--font-mono);
+}
+.conversation-surface .ptc-chevron { order: 2; }
+.conversation-surface .conversation-block[data-process-edge] :is(.ptool-icon, .ptool-cmd-icon, .thinking-state-dot),
+.conversation-surface .conversation-block[data-process-edge] .ptc-head::before {
+  position: relative;
+  z-index: 1;
+  background-color: var(--turn-process-panel);
+  box-shadow: 0 0 0 var(--space-1) var(--turn-process-panel);
+}
+
+.conversation-surface :is(.ptc-chevron, .conversation-disclosure-chevron) {
+  flex: 0 0 var(--conversation-process-marker);
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+}
+
+.conversation-surface .ptc-meta {
+  order: 3;
+  padding-inline-start: calc(var(--conversation-process-marker) + var(--conversation-process-gap));
+  font-size: var(--conversation-font-size-meta);
+}
+
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header) > .ptool-text {
+  flex: 1 1 auto;
+}
+.conversation-surface :is(.ptool-result-header, .ptool-results-header, .sw-inbox-row-header, .ptool-todo-header)::after {
+  margin-inline-start: auto;
+}
+.conversation-surface .ptc-preview {
+  margin-block: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+}
+
+.conversation-surface :is(.ptool-result-body, .ptc-body, .ptool-todo-body, .sw-inbox-row-body, .conversation-tool-card__body),
+.conversation-surface .ptool-results-block.expanded > .ptool-results-content {
+  margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
+  padding: var(--space-1) 0 var(--space-1) calc(var(--space-4) - var(--control-edge-inset));
+  border: 0;
+  border-inline-start: var(--control-edge-inset) solid var(--turn-spine);
+  border-radius: 0;
+  background: transparent;
+}
+
+.conversation-surface .ptool-results-block,
+.conversation-surface .ptool-results-block.expanded {
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+}
+
+.conversation-surface .ptool-results-content .search-result-item {
+  padding: var(--space-2) 0;
+  border-color: var(--turn-rule);
+}
+
+.conversation-surface :is(.ptool-result-pre, .conversation-tool-card__pre, .ptc-detail pre) {
+  border-color: var(--turn-rule);
+  border-radius: var(--radius-sm);
+  background: var(--turn-process-surface);
+  box-shadow: none;
+}
+
+.conversation-surface :is(.ptool-result-pre > code, .conversation-tool-card__pre > code) {
+  padding: var(--space-3);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+}
+
+.conversation-surface :is(.thinking-header, .ptool-result-header, .ptool-todo-header, .sw-inbox-row-header, .ptc-head, .conversation-tool-card__summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--control-edge-inset);
+}
 
 .conversation-surface .thinking-block {
-  margin: var(--space-1) 0 var(--space-2);
+  margin: 0;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -24797,23 +24769,21 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .thinking-header {
-  min-height: var(--control-h-md);
-  padding: var(--space-1) 0;
-  gap: var(--space-1);
-  background: transparent;
-  box-sizing: border-box;
   opacity: 1;
-  font-size: var(--conversation-font-size-content);
-  transition: opacity var(--motion-fast) ease;
+  transition: background var(--motion-fast) var(--ease-standard);
 }
 
 .conversation-surface .thinking-header:hover {
-  background: transparent;
+  background: var(--turn-process-hover);
   opacity: 1;
 }
 
 .conversation-surface .thinking-block[data-state="active"] .thinking-header {
   opacity: 1;
+}
+
+.conversation-surface .thinking-block[data-state="active"] .thinking-label {
+  color: var(--text-primary);
 }
 
 .conversation-surface .thinking-header:focus-visible,
@@ -24824,17 +24794,17 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .thinking-state-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border: 1px solid color-mix(in srgb, var(--text-tertiary) 70%, transparent);
+  box-sizing: border-box;
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  flex: 0 0 var(--conversation-process-marker);
+  border: var(--control-edge-inset) dashed var(--text-secondary);
   border-radius: 50%;
   background: transparent;
 }
 
 .conversation-surface .thinking-block[data-state="complete"] .thinking-state-dot {
-  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
-  background: color-mix(in srgb, var(--accent) 72%, var(--bg-primary));
+  display: block;
 }
 
 .conversation-surface .thinking-block[data-state="active"] .thinking-state-dot {
@@ -24849,11 +24819,19 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .thinking-label {
+  flex: 1;
+}
+
+.conversation-surface .thinking-state-dot { order: -1; }
+.conversation-surface .thinking-toggle.conversation-disclosure-chevron {
+  order: 2;
+  margin: 0;
+  opacity: 1;
   color: var(--text-secondary);
-  font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
-  font-weight: var(--weight-medium);
-  letter-spacing: .006em;
+  transform: rotate(-90deg);
+}
+.conversation-surface .thinking-block[open] > summary .thinking-toggle.conversation-disclosure-chevron {
+  transform: none;
 }
 
 .conversation-surface .conversation-disclosure-chevron {
@@ -24885,15 +24863,15 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .thinking-text {
-  padding: var(--space-1) 0 var(--space-2) var(--space-3);
-  margin-left: var(--space-1);
+  padding: var(--space-1) 0 var(--space-2) calc(var(--space-4) - var(--control-edge-inset));
+  margin: var(--space-1) var(--conversation-process-inset) var(--space-3) var(--space-4);
   border-top: 0;
   border-left: 1px solid var(--turn-spine);
-  color: color-mix(in srgb, var(--text-primary) 42%, var(--text-secondary));
+  color: var(--text-secondary);
   font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-regular);
-  line-height: 1.66;
+  line-height: var(--leading-body);
 }
 
 .conversation-surface .thinking-text > :first-child {
@@ -24967,16 +24945,16 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .conversation-block--tool .ptool-turn {
-  margin: var(--space-1) 0;
-  border: 1px solid var(--turn-rule);
-  border-radius: 8px;
-  background: var(--turn-process-surface);
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   box-shadow: none;
 }
 
 [data-theme="tofu"] .conversation-surface .conversation-block--tool .ptool-turn {
-  border-color: var(--turn-rule);
-  background: var(--turn-process-surface);
+  border: 0;
+  background: transparent;
   box-shadow: none;
 }
 
@@ -24985,11 +24963,11 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .conversation-block--tool .ptool-line {
-  min-height: 34px;
-  padding: var(--space-1) var(--space-2);
-  gap: var(--space-2);
-  border-bottom-color: var(--turn-rule);
-  font-size: var(--conversation-font-size-meta);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
+  border: 0;
+  font-size: var(--conversation-process-font-size);
 }
 
 .conversation-surface .conversation-block--tool .ptool-line:hover {
@@ -25010,15 +24988,31 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .conversation-block--tool :is(.ptool-text, .ptool-cmd-label) {
-  font-size: var(--conversation-font-size-meta);
-  line-height: 1.5;
+  font-size: var(--conversation-process-font-size);
+  line-height: var(--leading-title);
 }
 
 .conversation-surface .conversation-tool-card {
-  border-color: var(--turn-rule);
-  border-radius: 8px;
-  background: var(--turn-process-surface);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
 }
+
+/* Keep exceptional outcomes colored, make routine metadata readable and quiet. */
+.conversation-surface :is(.ptc-status, .conversation-tool-card__chip--ok, .ptool-line-status--ok, .ptool-badge-info, .ptool-badge-ok) {
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
+  box-shadow: none;
+  animation: none;
+}
+.conversation-surface .ptc-status.ptc-status-error {
+  color: var(--error-text);
+  background: var(--error-bg);
+}
+.conversation-surface .ptc-running .ptc-status { color: var(--accent); }
 
 .conversation-surface button.ptool-results-header,
 .conversation-surface button.eb-toggle,
@@ -25072,7 +25066,7 @@ body.kb-open { overflow: hidden; }
 /* Historical process is a quiet turn-leading disclosure. Closing unmounts
  * evidence; inner paging and scroll remain owned by HistoricalProcess. */
 .conversation-history-process {
-  margin-block: 0 var(--space-3);
+  margin-block: 0;
   color: var(--text-secondary);
   font-family: var(--font-ui);
   font-size: var(--conversation-font-size-content);
@@ -25085,9 +25079,11 @@ body.kb-open { overflow: hidden; }
   box-sizing: border-box;
   width: fit-content;
   max-width: 100%;
-  min-height: var(--control-h-sm);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-sm);
+  min-height: var(--control-h-lg);
+  padding: var(--space-2) var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-process-line);
+  border-radius: var(--conversation-process-radius);
+  background: var(--turn-process-panel);
   list-style: none;
   cursor: pointer;
   line-height: var(--leading-title);
@@ -25096,17 +25092,17 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-history-process > summary::-webkit-details-marker { display: none; }
-.conversation-history-process > summary::before {
+.conversation-history-process > summary::after {
   content: '';
   flex: 0 0 auto;
-  width: var(--space-1);
-  height: var(--space-1);
+  width: var(--space-2);
+  height: var(--space-2);
   border-inline-end: 1px solid currentColor;
   border-block-end: 1px solid currentColor;
   transform: rotate(-45deg);
   transition: transform var(--motion-fast) ease;
 }
-.conversation-history-process[open] > summary::before { transform: rotate(45deg); }
+.conversation-history-process[open] > summary::after { transform: rotate(45deg); }
 .conversation-history-process > summary:hover {
   color: var(--text-primary);
   background: var(--bg-secondary);
@@ -25118,10 +25114,13 @@ body.kb-open { overflow: hidden; }
 
 .conversation-history-process__body {
   max-height: min(65vh, var(--conversation-reading-measure));
-  margin-block-start: var(--space-2);
-  margin-inline-start: var(--space-2);
-  padding-inline-start: var(--space-3);
-  border-inline-start: 1px solid var(--border-light);
+  margin-block-start: var(--space-3);
+  margin-inline-start: 0;
+  padding: var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-process-line);
+  border-radius: var(--conversation-process-radius);
+  background: var(--bg-primary);
+  scrollbar-width: thin;
   overflow: auto;
   overscroll-behavior: contain;
   overflow-anchor: none;
@@ -25131,9 +25130,6 @@ body.kb-open { overflow: hidden; }
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  position: sticky;
-  top: 0;
-  z-index: 1;
   padding-block: var(--space-1) var(--space-2);
   background: var(--bg-primary);
   font-size: var(--conversation-font-size-meta);
@@ -25142,10 +25138,65 @@ body.kb-open { overflow: hidden; }
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
 }
+.conversation-history-process__controls[hidden] { display: none; }
 .conversation-history-notice {
   font-size: var(--conversation-font-size-content);
   color: var(--text-secondary);
   overflow-wrap: anywhere;
+}
+
+
+/* A non-modal reading inspector uses the native top layer. It keeps the
+ * original keyed evidence beneath its Turn for delegation and teardown. */
+.conversation-surface .conversation-answer-label > [data-conversation-part="turn-history-process"] {
+  flex: 0 0 auto;
+}
+.conversation-surface .conversation-answer-label .conversation-history-process > summary {
+  border-color: transparent;
+  background: var(--bg-secondary);
+  font-size: var(--conversation-font-size-meta);
+}
+.conversation-surface .conversation-history-process__body[popover] {
+  position: fixed;
+  inset: var(--space-16) var(--space-6) var(--space-6) auto;
+  box-sizing: border-box;
+  width: min(var(--conversation-inspector-width), calc(100vw - var(--space-12)));
+  height: auto;
+  max-height: calc(100dvh - var(--space-16) - var(--space-6));
+  margin: 0;
+  padding: var(--space-4);
+  border: var(--control-edge-inset) solid var(--border);
+  border-radius: var(--space-5);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  box-shadow: var(--shadow);
+}
+.conversation-surface .conversation-history-process__heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: var(--control-h-lg);
+  margin-block-end: var(--space-3);
+  padding-block-end: var(--space-3);
+  border-block-end: var(--control-edge-inset) solid var(--border-light);
+}
+.conversation-surface .conversation-history-process__heading > strong {
+  color: var(--text-primary);
+  font-size: var(--conversation-process-font-size);
+  font-weight: var(--weight-semibold);
+}
+@media (max-width: 720px) {
+  .conversation-surface .conversation-history-process__body[popover] {
+    inset: auto var(--space-2) var(--space-2);
+    width: calc(100vw - var(--space-4));
+    max-height: 78dvh;
+    border-radius: var(--space-5);
+  }
 }
 /* Durable activity, failures and compaction receipts.
  * Owner: ConversationSurface; tokens: 00-design-tokens.css.
@@ -25164,9 +25215,9 @@ body.kb-open { overflow: hidden; }
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  min-height: 29px;
-  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-1);
-  border-bottom: 1px solid color-mix(in srgb, var(--turn-rule) 70%, transparent);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  border-bottom: 0;
   border-radius: 0;
   background: transparent;
   box-sizing: border-box;
@@ -25186,8 +25237,8 @@ body.kb-open { overflow: hidden; }
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: var(--bg-primary);
-  box-shadow: 0 0 0 1px var(--turn-spine);
+  background: transparent;
+  box-shadow: none;
   color: var(--text-tertiary);
 }
 
@@ -25471,9 +25522,9 @@ body.kb-open { overflow: hidden; }
  * scrollbar. */
 
 .conversation-surface .conversation-block--file-changes {
-  border: 1px solid var(--turn-rule);
-  border-radius: 8px;
-  background: var(--turn-process-surface);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   box-shadow: none;
 }
 
@@ -25489,8 +25540,11 @@ body.kb-open { overflow: hidden; }
 
 .conversation-surface .conversation-file-changes .fc-summary {
   min-width: 0;
-  padding: var(--space-2) var(--space-2);
-  border-radius: 7px;
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
+  border-radius: var(--radius-sm);
+  font-size: var(--conversation-process-font-size);
 }
 
 .conversation-surface .conversation-file-changes .fc-summary:hover {
@@ -25610,8 +25664,8 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .bilingual-header {
-  min-height: 34px;
-  padding: var(--space-1) var(--space-1);
+  min-height: var(--conversation-process-row-height);
+  padding: var(--space-2) var(--conversation-process-inset);
   background: transparent;
 }
 
@@ -25757,10 +25811,15 @@ body.kb-open { overflow: hidden; }
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  margin-top: var(--space-2);
-  padding-top: var(--space-1);
+  margin-top: var(--space-4);
+  padding-top: var(--space-2);
   opacity: 1;
   transition: opacity var(--motion-fast) ease;
+}
+
+.conversation-surface .conversation-block--text:has(> .conversation-answer-label) > .conversation-block-copy {
+  top: calc(var(--control-h-lg) + var(--space-6));
+  background: var(--bg-primary);
 }
 
 .conversation-surface .conversation-turn:hover .conversation-turn-actions,
@@ -25815,6 +25874,16 @@ body.kb-open { overflow: hidden; }
   height: 13.5px;
   flex: 0 0 auto;
   opacity: .82;
+}
+
+/* A compact icon shelf leaves the answer as the visual endpoint. The review
+ * action keeps its label; every icon retains its localized accessible name. */
+.conversation-surface .conversation-turn-actions .msg-action-btn:not(.conversation-action--review):has(.msg-action-icon) .msg-action-label {
+  display: none;
+}
+.conversation-surface .conversation-turn-actions .msg-action-btn {
+  min-width: var(--control-h-sm);
+  justify-content: center;
 }
 
 .conversation-surface .msg-action-btn:hover .msg-action-icon {
@@ -26021,15 +26090,24 @@ body.kb-open { overflow: hidden; }
 /* User turns are compact notes; they deliberately do not grow an execution spine. */
 
 .conversation-surface .message.user-msg .message-content {
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--turn-rule);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--user-bubble) 50%, var(--bg-primary));
+  justify-self: end;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 90%;
+  padding: var(--space-4) var(--space-5);
+  border: var(--control-edge-inset) solid var(--turn-rule);
+  border-radius: var(--conversation-process-radius);
+  background: color-mix(in srgb, var(--user-bubble) 70%, var(--bg-primary));
   box-shadow: none;
 }
 
+.conversation-surface .message.user-msg .message-avatar {
+  visibility: hidden;
+}
+
 .conversation-surface .message.user-msg .message-header {
-  margin-bottom: var(--space-1);
+  margin-block: 0 var(--space-2);
+  padding-inline-start: 0;
 }
 
 .conversation-surface .message.user-msg .conversation-turn-blocks > .conversation-block {
@@ -26047,6 +26125,9 @@ body.kb-open { overflow: hidden; }
 }
 
 @media (max-width: 720px) {
+  .conversation-surface {
+    --conversation-process-row-height: var(--control-h-lg);
+  }
   .conversation-surface .conversation-turn.message {
     grid-template-columns: minmax(0, 1fr);
     margin-bottom: var(--space-6);
@@ -26061,6 +26142,13 @@ body.kb-open { overflow: hidden; }
     margin-bottom: var(--space-2);
   }
 
+  .conversation-surface .conversation-block--text[data-deliverable="true"] > .md-content > :is(h1, h2, h3):first-child {
+    font-size: var(--conversation-font-size-heading-2);
+  }
+  .conversation-surface .conversation-history-process__body {
+    padding: var(--space-2);
+  }
+
   .conversation-surface .message-time {
     font-size: var(--conversation-font-size-caption);
   }
@@ -26069,17 +26157,8 @@ body.kb-open { overflow: hidden; }
     flex-wrap: wrap;
   }
 
-  .conversation-surface .thinking-header {
-    min-height: 36px;
-  }
-
   .conversation-surface .bilingual-header {
     min-height: 44px;
-  }
-
-  .conversation-surface .thinking-text {
-    padding: var(--space-1) 0 var(--space-2) var(--space-3);
-    font-size: var(--conversation-font-size-content);
   }
 
   .conversation-surface .conversation-turn-actions.message-actions {
@@ -26091,6 +26170,29 @@ body.kb-open { overflow: hidden; }
   }
   .conversation-surface .conversation-block-copy {
     opacity: .6;
+  }
+  /* Touch keeps copy discoverable without painting over the last words. */
+  .conversation-surface .conversation-block--text:has(> .conversation-block-copy) > .md-content {
+    box-sizing: border-box;
+    padding-inline-end: var(--space-6);
+  }
+
+  .conversation-surface .sw-inbox-row > .sw-inbox-row-header,
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+  }
+  .conversation-surface .sw-inbox-row-header > .ptool-text,
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) > .ptool-text {
+    flex-basis: calc(100% - var(--conversation-process-marker) - var(--conversation-process-gap) - var(--space-8));
+  }
+  .conversation-surface .sw-inbox-row-header > :not(.ptool-icon, .ptool-text),
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) > :not(.ptool-icon, .ptool-text) {
+    order: 2;
+  }
+  .conversation-surface .sw-inbox-row-header > .ptool-text + :not(.ptool-row-ctl),
+  .conversation-surface .ptool-result-header:has(.ptool-artifact-header) > .ptool-text + :not(.ptool-row-ctl) {
+    margin-inline-start: calc(var(--conversation-process-marker) + var(--conversation-process-gap));
   }
 
   .conversation-surface .conversation-turn-actions::-webkit-scrollbar {
@@ -26110,9 +26212,15 @@ body.kb-open { overflow: hidden; }
   }
 
   .conversation-surface .message.user-msg .message-content {
-    padding: var(--space-2) var(--space-3) var(--space-2);
-    border-radius: var(--radius-sm);
+    max-width: 100%;
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--conversation-process-radius);
   }
+}
+
+@media (pointer: coarse) {
+  .conversation-surface { --conversation-process-row-height: var(--control-h-lg); }
+  .conversation-surface .ptool-cmd-fold { min-height: var(--control-h-lg); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -26373,17 +26481,19 @@ body.kb-open { overflow: hidden; }
 
 /* Intent-first execution rows. Each action owns one summary line: intent
  * description on the left, meta strip (context + fold chips + quiet verdict)
- * on the right; evidence folds open underneath. Owner call 2026-10-04: the
- * tofu theme hides the icon slot entirely, so the icon grid column collapses
- * to zero and never indents the description. */
+ * on the right; evidence folds open underneath. The marker and label columns
+ * use the same tokens as reasoning, generic tools and checklist disclosures. */
 
 .ptool-cmd-block > .ptool-cmd-header {
   display: grid;
-  grid-template-columns: 0 minmax(0, 1fr) max-content;
+  grid-template-columns: var(--conversation-process-marker) minmax(0, 1fr) max-content;
   align-items: center;
-  column-gap: var(--space-2);
+  column-gap: var(--conversation-process-gap);
   row-gap: var(--space-1);
-  padding: var(--space-3);
+  padding: var(--space-2) var(--conversation-process-inset);
+  min-height: var(--conversation-process-row-height);
+  box-sizing: border-box;
+  border: 0;
   font-family: var(--font-ui);
   background: transparent;
 }
@@ -26392,7 +26502,16 @@ body.kb-open { overflow: hidden; }
   grid-column: 1;
   grid-row: 1;
   align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--conversation-process-marker);
+  height: var(--conversation-process-marker);
+  color: var(--text-secondary);
 }
+
+.conversation-surface .ptool-cmd-header > .ptool-cmd-icon { display: flex; }
+.conversation-surface .ptool-cmd-icon::before { content: none; }
 
 .ptool-cmd-block .ptool-cmd-desc-inline {
   grid-column: 2;
@@ -26401,11 +26520,11 @@ body.kb-open { overflow: hidden; }
   flex: none;
   min-width: 0;
   max-width: none;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-medium);
-  line-height: var(--leading-body);
+  line-height: var(--leading-title);
   white-space: pre-wrap;
   overflow: visible;
   overflow-wrap: anywhere;
@@ -26456,8 +26575,8 @@ body.kb-open { overflow: hidden; }
 }
 
 .ptool-cmd-context {
-  color: var(--text-tertiary);
-  font-size: var(--conversation-font-size-caption);
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-meta);
   font-weight: var(--weight-regular);
   line-height: var(--leading-tight);
   white-space: nowrap;
@@ -26531,16 +26650,11 @@ body.kb-open { overflow: hidden; }
 
 .ptool-todo-header .ptool-text {
   font-family: var(--font-ui);
-  font-size: var(--conversation-font-size-content);
+  font-size: var(--conversation-process-font-size);
   font-weight: var(--weight-medium);
 }
 
 /* Flatten only proven self-contained cards, not generic batch/program shells. */
-
-.conversation-surface .conversation-block[data-tool-summary="self-contained"] {
-  margin-block: var(--space-2);
-  border-bottom: 1px solid var(--turn-rule);
-}
 
 .conversation-surface .conversation-block[data-tool-summary="self-contained"] .ptool-turn {
   margin: 0;
@@ -26559,9 +26673,33 @@ body.kb-open { overflow: hidden; }
 }
 
 .conversation-surface .conversation-block[data-tool-summary="self-contained"] .ptool-todo-header {
-  padding: var(--space-3);
-  gap: var(--space-2);
+  padding: var(--space-2) var(--conversation-process-inset);
+  gap: var(--conversation-process-gap);
   border: 0;
+}
+
+.conversation-surface .ptool-cmd-ok .ptool-cmd-status {
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: var(--weight-regular);
+}
+
+.conversation-surface .ptool-cmd-block > :is(.ptool-cmd-code, .ptool-cmd-output-wrap, .ptool-cmd-js-code) {
+  margin-inline: var(--conversation-process-indent) var(--conversation-process-inset);
+}
+
+.conversation-surface .ptool-cmd-block :is(.ptool-cmd-code code, .ptool-cmd-output code) {
+  color: var(--text-secondary);
+  font-size: var(--conversation-font-size-content);
+  line-height: var(--leading-body);
+}
+
+.conversation-surface .ptool-cmd-block :is(.ptool-cmd-code, .ptool-cmd-output) {
+  padding: var(--space-3);
+  border: var(--control-edge-inset) solid var(--turn-rule);
+  border-radius: var(--radius-sm);
+  background: var(--turn-process-surface);
+  box-shadow: none;
 }
 
 .ptool-todo-body > .ptool-todo-revisions {
@@ -26573,7 +26711,7 @@ body.kb-open { overflow: hidden; }
 
 @media (max-width: 600px) {
   .ptool-cmd-block > .ptool-cmd-header {
-    grid-template-columns: 0 minmax(0, 1fr);
+    grid-template-columns: var(--conversation-process-marker) minmax(0, 1fr);
   }
   .ptool-cmd-block .ptool-cmd-desc-inline {
     grid-column: 2;

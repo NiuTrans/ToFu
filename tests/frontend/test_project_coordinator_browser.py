@@ -126,13 +126,18 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
     assert summary.get_attribute('open') is not None
     assert summary.locator('.coordination-task-graph').count() == 1
     assert page.locator('dialog[open]').count() == 0
+    # Work is immediately readable; topology mounts only when requested.
+    assert summary.locator('.coordination-work-row').count() >= 4
+    assert summary.locator('.coordination-graph-node[data-node-kind="task"]').count() == 0
+    assert not summary.locator('.coordination-topology').evaluate('node => node.open')
+    summary.locator('.coordination-topology > summary').click()
     # A completed prerequisite stays in the graph of current work.
-    assert summary.locator('.coordination-graph-node[data-node-kind="task"]').count() == 4
+    expect(summary.locator('.coordination-graph-node[data-node-kind="task"]')).to_have_count(4)
     assert summary.locator('svg [data-edge-kind="dependency"]').count() == 3
     assert summary.locator('.coordination-group').count() == 0
     assert 'Internal continuation' not in summary.inner_text()
     assert '75 used / 2,000,000' in summary.locator('.coordinator-budget').inner_text()
-    summary.get_by_role('button', name='Manage work', exact=True).click()
+    summary.locator('.coordination-summary-actions').get_by_role('button', name='Manage work', exact=True).click()
     workspace = page.locator('dialog[open]')
     workspace.get_by_role('tab', name='Manage work', exact=True).click()
     workspace.locator('.coordinator-budget-settings').get_by_role('spinbutton', name='Tokens').fill('500000')
@@ -180,6 +185,7 @@ def test_create_independent_leader_and_keep_project_navigation_isolated(page, mo
     page.locator('#projectCoordinatorEntry .coordination-leader[data-unread="true"]').wait_for()
     assert 'Delivery verified' in entry.inner_text()
     assert reports.read()['unread'] is True
+    summary.locator('.coordination-topology > summary').click()
     summary.locator('[data-node-id="assignment:research"] button').click()
     summary.get_by_role('button', name='Open conversation: Research task', exact=True).click()
     page.wait_for_function('(id) => window.activeConvId === id', arg=worker)

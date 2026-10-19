@@ -204,3 +204,23 @@ def test_create_empty_coordinator_replay_and_scope(flask_client, chat_sidecar, m
                               headers={'Idempotency-Key': 'replace-clean'})
     assert replay.status_code == 200
     assert replay.get_json()['conversationId'] == fresh['conversationId']
+
+
+def test_project_conversation_inventory_is_passive_owned_and_includes_empty_shells(flask_client, chat_sidecar):
+    from tests._seed import seed_conversation
+    from lib.project_dispatch.repository import ProjectDispatchRepository
+    path = '/test/inventory-' + uuid.uuid4().hex
+    worker, foreign = 'worker-' + uuid.uuid4().hex, 'foreign-' + uuid.uuid4().hex
+    seed_conversation(worker, title=worker, settings={'projectPath': path, '_coordinatorSource': 'coordinator-source'})
+    seed_conversation(foreign, user_id=2, settings={'projectPath': path})
+    endpoint = '/api/v4/project/coordination/conversations'
+    response = flask_client.get(endpoint, query_string={'path': path})
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body['conversations'] == [{'conversationId': worker, 'title': worker,
+        'turnCount': 0, 'coordinatorId': 'coordinator-source'}]
+    assert body['nextCursor'] is None and body['coverage'] == 'complete'
+    assert flask_client.get(endpoint, query_string={'path': path, 'cursor': '%'}).status_code == 400
+    assert flask_client.get(endpoint, query_string={'path': path + '-other'}).get_json()['conversations'] == []
+    value, _ = ProjectDispatchRepository(1, path)._load()
+    assert not value['assignments'] and not value.get('requestBudgets')

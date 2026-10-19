@@ -63,6 +63,11 @@ function _applySettingsToConv(conv, settings) {
     conv.projectSummary = settings.projectSummary;
   if (settings.projectPath !== undefined)
     conv.projectPath = settings.projectPath;
+
+  // Passive creation provenance is navigation evidence, never role authority.
+  if (settings._coordinatorSource !== undefined)
+    conv._coordinatorSource = typeof settings._coordinatorSource === 'string'
+      && settings._coordinatorSource.length <= 256 ? settings._coordinatorSource : null;
   if (settings.projectPaths !== undefined)
     conv.projectPaths = settings.projectPaths;
   conv.paperDocument = settings.paperDocument || null;

@@ -2531,6 +2531,11 @@ function _applySettingsToConv(conv, settings) {
     conv.projectSummary = settings.projectSummary;
   if (settings.projectPath !== undefined)
     conv.projectPath = settings.projectPath;
+
+  // Passive creation provenance is navigation evidence, never role authority.
+  if (settings._coordinatorSource !== undefined)
+    conv._coordinatorSource = typeof settings._coordinatorSource === 'string'
+      && settings._coordinatorSource.length <= 256 ? settings._coordinatorSource : null;
   if (settings.projectPaths !== undefined)
     conv.projectPaths = settings.projectPaths;
   conv.paperDocument = settings.paperDocument || null;
@@ -6246,7 +6251,7 @@ function renderConversationList() {
     statsEl.classList.remove("visible");
     const all = conversations.filter((c) =>
       (runtimeScope.ConversationTurnRead?.ordered?.(c)?.length || 0) > 0
-      || (c._serverTurnCount || 0) > 0 || c._turnSnapshotRequired);
+      || (c._serverTurnCount || 0) > 0 || c._turnSnapshotRequired || Number.isInteger(c._serverRev));
 
     const folders = typeof getFolders === 'function' ? getFolders() : [];
     const _activeFolderId = typeof getActiveFolderId === 'function' ? getActiveFolderId() : null;
@@ -6676,32 +6681,22 @@ const _sidebarSearchController = createSidebarSearchController({
   },
 });
 retainedCompositionLifecycle.add(() => _sidebarSearchController.destroy());
-// Hydrate metadata only on interaction, before existing pointer/click delegates
-// switch the conversation. This never advances the global catalog cursor.
-const _prepareSearchConversationOpen = event => {
-  const row = event.target?.closest?.('.conv-item[data-conv-id]');
-  if (!sidebarSearchQuery || !row || !row.closest('#convList')) return;
-  if (conversations.some(c => c.id === row.dataset.convId)) return;
-  const hit = _sidebarSearchController.snapshot().items.find(item => item.id === row.dataset.convId);
-  if (hit) {
-    _globalConvPageBoundary ||= _oldestGlobalConvBoundary(conversations);
-    mergeConversationCatalogRows([hit.conversation]);
-  }
-};
-retainedCompositionLifecycle.listen(document, 'pointerdown', _prepareSearchConversationOpen, { capture: true });
-retainedCompositionLifecycle.listen(document, 'click', _prepareSearchConversationOpen, { capture: true });
+// Search hits intentionally omit settings. Do not merge them into the catalog:
+// loadConversation's shared resolveMissing owner fetches exact owned metadata
+// on selection, before navigation. Otherwise an empty worker loses its project
+// and may be purged before the selected conversation can open.
 
 function searchByTitle(query) {
   if (!query) return [];
   const results = [];
   const seen = new Set();
   /* ── Conv ID match (exact or prefix) ──
-   * Conv IDs are lowercase alphanumeric (14 chars) like "mosnzwji2h8kwo".
+   * IDs include ordinary chat IDs and prefixed coordinator-/worker- IDs.
    * If the user pastes an ID (full or partial ≥4 chars, no spaces), surface
    * that conversation first — lets you jump to a known ID without scrolling.
-   * Gate by /^[a-z0-9]+$/ + length ≥ 4 so ordinary search words don't
+   * Gate by lowercase identifier characters + length ≥ 4 so prose doesn't
    * accidentally trigger an ID scan that overlaps with title text. */
-  if (/^[a-z0-9]{4,}$/.test(query)) {
+  if (/^[a-z0-9_-]{4,}$/.test(query)) {
     for (const c of conversations) {
       if (c.id && c.id.toLowerCase().includes(query)) {
         results.push({
@@ -9568,7 +9563,10 @@ function _handleSwarmPhase(ev, c) {
             status: "searching",
             toolName: "spawn_agents",
 
-            taskId: swarmFrameExecutionTaskId(ev) || ev.swarmId || ev.swarm_id || undefined,
+            // A legacy mirror may carry only conversation routing and a run ID.
+            // Leave its producer unknown until the durable launch supplies it;
+            // inventing taskId=runId prevents scoped reconciliation to that row.
+            taskId: swarmFrameExecutionTaskId(ev) || undefined,
             attemptId: ev.attemptId || undefined,
             _swarmRunId: ev.swarmId || ev.swarm_id || undefined,
             _swarm: true,
@@ -14850,7 +14848,10 @@ function loadConversation(id) {
   const missing = _projectConversationNavigation.resolveMissing(id, {
     contains: (key) => conversations.some((conversation) => conversation.id === key),
     fetch: (key) => Api.conversations.get(key, { onError: 'throw' }),
-    merge: (row) => mergeConversationCatalogRows([row]),
+    merge: (row) => {
+      _globalConvPageBoundary ||= _oldestGlobalConvBoundary(conversations);
+      mergeConversationCatalogRows([row]);
+    },
     navigate: loadConversation,
     error: (error) => { if (typeof showToast === 'function') showToast(_conversationLoadFailureText(error), 'error'); },
   });
@@ -18620,7 +18621,7 @@ function _purgeEmptyConvs() {
      *   showed the user re-attaching via mpApplyFolders 4× in 7 minutes). */
     const turnCount = runtimeScope.ConversationTurnRead?.ordered?.(c)?.length || 0;
     const keep = turnCount > 0 || c.id === activeConvId || (c._serverTurnCount || 0) > 0 || c._turnSnapshotRequired
-      || !!c.projectPath;
+      || !!c.projectPath || Number.isInteger(c._serverRev);
     if (!keep) purged.push(`${c.id.slice(0,8)}(turns=${turnCount},srv=${c._serverTurnCount||0},snapshotRequired=${!!c._turnSnapshotRequired})`);
     return keep;
   });
@@ -20906,7 +20907,9 @@ let backgroundConversationActivity = new Map();
             return conversations.filter(function (item) {
               return !item._localOnly && !item.archived && !item.readOnly
                 && norm(typeof _getConvProjectPath === 'function' ? _getConvProjectPath(item) : item.projectPath) === root;
-            }).map(function (item) { return { id: item.id, title: item.title || item.id }; });
+            }).map(function (item) { return { id: item.id, title: item.title || item.id,
+              turnCount: item._serverTurnCount ?? runtimeScope.ConversationTurnRead?.ordered?.(item)?.length ?? null,
+              coordinatorId: item._coordinatorSource || null }; });
           },
           subscribe: function (refresh) {
             pushSubscribe('project', '*', refresh);
@@ -20914,6 +20917,7 @@ let backgroundConversationActivity = new Map();
           },
           binding: function (path) { return api.coordination(path); },
 
+          workerConversations: function (path, cursor) { return api.workerConversations(path, cursor); },
           dispatch: {
             recipients: function () {
               return conversations.filter(function (item) {
@@ -20977,6 +20981,21 @@ let backgroundConversationActivity = new Map();
             return api.createCoordinator(path, folderId, revision);
           },
           navigate: function (id) { if (typeof loadConversation === 'function') loadConversation(id); },
+
+          diagnose: function (id) {
+            var prepared = _projectConversationNavigation.prepareDraft(
+              t('projectCoordination.diagnosePrompt', { id: id, path: root }), {
+                hasDraft: _hasProjectComposerDraft,
+                startDraft: function () { newChat(); _saveConvProjectPath(root, [], [root]); },
+                writeText: function (text) {
+                  var input = document.getElementById('userInput');
+                  input.value = text;
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                  input.focus();
+                },
+              });
+            if (!prepared) showToast(t('projectCoordination.diagnoseDraftConflict'), 'warning');
+          },
           openEvidence: function () { runtimeScope.openProjectBrain?.({ tab: 'integration' }); },
 
     };
@@ -21323,13 +21342,13 @@ let backgroundConversationActivity = new Map();
    * all: `_collectTools()` emits one chip per connected MCP server, which
    * can be dozens. The rail's box is bounded by the message's own height
    * (styles.css `.turn-ctx` is out of flow, `max-height:100%`) and
-   * SCROLLS, so the cap is about glanceability, not geometry — 9 keeps a
-   * typical setup (a few feature toggles + a few MCP servers) fully
-   * visible while the geometry guard's 10-tool probe stays gated.
+   * SCROLLS, so the cap is about glanceability, not geometry — 4 gives a
+   * useful preview without turning a large MCP catalog into a wall of badges.
+   * The count and stationary disclosure expose all remaining entries.
    * Expansion is a click (not hover) because a hover overlay would have
    * to escape `.message`'s content-visibility paint containment — exactly
    * the carve-out this redesign deleted. */
-  const _MAX_VISIBLE_CHIPS = 9;
+  const _MAX_VISIBLE_CHIPS = 4;
 
   /** Max workspace paths rendered up-front; extra roots collapse behind
    * the same "+N" toggle as chips (the delegated click handler only asks
@@ -21495,13 +21514,14 @@ let backgroundConversationActivity = new Map();
       const shown = tools.slice(0, _MAX_VISIBLE_CHIPS).map(_chip).join('');
       const rest = tools.slice(_MAX_VISIBLE_CHIPS);
       let overflow = '';
+      let toggle = '';
       if (rest.length) {
-        overflow =
-          '<span class="tctx-overflow" hidden>' + rest.map(_chip).join('') + '</span>' +
-          '<button type="button" class="tctx-more" data-tctx-more="1"' +
-          ' aria-expanded="false">+' + rest.length + '</button>';
+        overflow = '<span class="tctx-overflow" hidden>' + rest.map(_chip).join('') + '</span>';
+        toggle = '<button type="button" class="tctx-more" data-tctx-more="1"' +
+          ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: rest.length})) + '</button>';
       }
-      rows.push('<div class="tctx-row"><span class="tctx-row-h">' + _esc(t('turnCtx.toolsLabel')) + '</span>' +
+      rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
+        _esc(t('turnCtx.toolsLabel')) + '<span class="tctx-row-count">' + tools.length + '</span></span>' + toggle + '</div>' +
         '<div class="tctx-chips">' + shown + overflow + '</div></div>');
     }
     if (roots.length) {
@@ -21515,13 +21535,14 @@ let backgroundConversationActivity = new Map();
       const shownPaths = roots.slice(0, _MAX_VISIBLE_PATHS).map(_path).join('');
       const restPaths = roots.slice(_MAX_VISIBLE_PATHS);
       let pathOverflow = '';
+      let pathToggle = '';
       if (restPaths.length) {
-        pathOverflow =
-          '<div class="tctx-overflow" hidden>' + restPaths.map(_path).join('') + '</div>' +
-          '<button type="button" class="tctx-more" data-tctx-more="1"' +
-          ' aria-expanded="false">+' + restPaths.length + '</button>';
+        pathOverflow = '<div class="tctx-overflow" hidden>' + restPaths.map(_path).join('') + '</div>';
+        pathToggle = '<button type="button" class="tctx-more" data-tctx-more="1"' +
+          ' aria-expanded="false">' + _esc(t('turnCtx.showMore', {count: restPaths.length})) + '</button>';
       }
-      rows.push('<div class="tctx-row"><span class="tctx-row-h">' + _esc(t('turnCtx.workspaceLabel')) + '</span>' +
+      rows.push('<div class="tctx-row"><div class="tctx-row-heading"><span class="tctx-row-h">' +
+        _esc(t('turnCtx.workspaceLabel')) + '<span class="tctx-row-count">' + roots.length + '</span></span>' + pathToggle + '</div>' +
         '<div class="tctx-paths">' + shownPaths + pathOverflow + '</div></div>');
     }
     /* ── Git branch + checklist rows ── LIVE rows (rebuilt in place by
@@ -21583,7 +21604,7 @@ let backgroundConversationActivity = new Map();
         if (opening) hidden.removeAttribute('hidden');
         else hidden.setAttribute('hidden', '');
         btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
-        btn.textContent = opening ? '−' : '+' + hidden.children.length;
+        btn.textContent = opening ? t('turnCtx.showLess') : t('turnCtx.showMore', {count: hidden.children.length});
       }
     }
     ev.stopPropagation();
@@ -21702,8 +21723,11 @@ let backgroundConversationActivity = new Map();
          * by its one-line host. The CSS cap becomes none — the geometry,
          * not an arbitrary vh, is the budget. Out-of-flow + the clamp keep
          * the no-row-inflation and continuous-handoff contracts intact. */
-        const visibleTop = hostTop + off;
-        const maxH = Math.max(0, Math.round(nextTop - visibleTop - 1));
+        // Use the same tenth-pixel translation that was applied above.
+        // Rounding the remaining height independently opens a visible seam
+        // at handoff when localized text gives the rail fractional height.
+        const visibleTop = hostTop + (off > 0 ? Math.round(off * 10) / 10 : 0);
+        const maxH = Math.max(0, nextTop - visibleTop);
         rail.style.maxHeight = maxH + 'px';
         /* max-height:0 still paints padding/borders. Suppress that sliver,
          * without display:none/hidden (which would drop this rail from the
@@ -23363,7 +23387,12 @@ function _recoverSwarmAgents(round, allRounds) {
          master._snapshot_tool_timeline). Without this the reloaded card
          showed no tools/timeline even though the agent used them live. */
       const tools = Array.isArray(a.tools) ? a.tools : [];
-      const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls : [];
+      /* The dock sends normalized snapshot agents back through this adapter;
+         their wire aliases have already become `_toolCalls`/`_toolCallsOmitted`. */
+      const toolCalls = Array.isArray(a.toolCalls) ? a.toolCalls
+        : (Array.isArray(a._toolCalls) ? a._toolCalls : []);
+      const toolCallsOmitted = typeof a.toolCallsOmitted === "number"
+        ? a.toolCallsOmitted : a._toolCallsOmitted;
       /* Restore the live stopwatch's anchor (backend `startedAt`, epoch ms
          — see master._build_agent_snapshot). The per-agent timer renders only
          while the agent is running AND has a `_startedAt`; that field used to
@@ -23393,6 +23422,8 @@ function _recoverSwarmAgents(round, allRounds) {
       }
       return {
         id: a.id || "",
+        executionTaskId: a.executionTaskId,
+        conversationId: a.conversationId,
         role: a.role || "agent",
         model: a.model || "",
         objective: a.objective || "",
@@ -23411,8 +23442,8 @@ function _recoverSwarmAgents(round, allRounds) {
         messageReceiptsVersion: a.messageReceiptsVersion,
         tools,
         _toolCalls: toolCalls,
-        _toolCallsOmitted: (typeof a.toolCallsOmitted === "number" && a.toolCallsOmitted > 0)
-          ? a.toolCallsOmitted : 0,
+        _toolCallsOmitted: (typeof toolCallsOmitted === "number" && toolCallsOmitted > 0)
+          ? toolCallsOmitted : 0,
         _startedAt: startedAt || undefined,
         /* Stall evidence persisted by the backend (master._build_agent_snapshot)
            — without carrying it here a reloaded stalled card loses its

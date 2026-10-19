@@ -8935,6 +8935,24 @@
       "handler": "project_coordinator_budget_update"
     },
     {
+      "method": "GET",
+      "path": "/api/v4/project/coordination/conversations",
+      "transport": "http",
+      "responseContract": "tofu.api/v4",
+      "summary": "Read a bounded project conversation page, including unstarted workers",
+      "tags": [
+        "project"
+      ],
+      "scope": "conversations",
+      "public": false,
+      "requiredScopes": [
+        "conversations"
+      ],
+      "documented": true,
+      "owner": "routes/api_v1/project_brain.py",
+      "handler": "project_coordination_conversations"
+    },
+    {
       "method": "POST",
       "path": "/api/v4/project/coordination/create",
       "transport": "http",

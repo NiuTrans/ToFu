@@ -54,6 +54,29 @@
     }
   },
   "$defs": {
+
+    "conversationPage": {
+      "description": "A bounded owner-catalog page filtered to this project. Empty pages can have a cursor; shells are conversations, not execution assignments. Reads never create, authorize or launch work.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversations", "nextCursor", "coverage"],
+      "properties": {
+        "conversations": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/conversationEntry"}},
+        "nextCursor": {"anyOf": [{"type": "string", "maxLength": 1024}, {"type": "null"}]},
+        "coverage": {"enum": ["page", "complete"]}
+      }
+    },
+    "conversationEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversationId", "title", "turnCount", "coordinatorId"],
+      "properties": {
+        "conversationId": {"type": "string", "minLength": 1, "maxLength": 256},
+        "title": {"type": "string", "maxLength": 200},
+        "turnCount": {"type": "integer", "minimum": 0},
+        "coordinatorId": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 256}, {"type": "null"}]}
+      }
+    },
     "createRequest": {
       "description": "At the current revision, create a fresh empty ordinary conversation and CAS-bind it, replacing any prior binding without deleting its chat. A stale retry returns the current available binding without creating another conversation.",
       "type": "object",

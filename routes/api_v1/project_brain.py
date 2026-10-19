@@ -61,6 +61,18 @@ def project_coordination_read():
         return _safe_route_error_response(exc)
 
 
+@api_v1_project_brain_bp.route('/api/v1/project/coordination/conversations', methods=['GET'])
+@require_scope('conversations')
+@api_meta(summary='Read a bounded project conversation page, including unstarted workers', tags=['project'], scope='conversations')
+def project_coordination_conversations():
+    from quart import request
+    from lib.conversations.coordinator_conversations import conversation_page
+    try:
+        return api_ok(conversation_page(_owner(), _path(), request.args.get('cursor')))
+    except Exception as exc:
+        return _safe_route_error_response(exc)
+
+
 @api_v1_project_brain_bp.route('/api/v1/project/coordination/reports', methods=['GET'])
 @require_scope('conversations')
 @api_meta(summary='Read the latest Coordinator report and durable unread state', tags=['project'], scope='conversations')

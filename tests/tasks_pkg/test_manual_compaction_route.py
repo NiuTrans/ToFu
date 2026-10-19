@@ -133,6 +133,8 @@ def test_route_error_code_status_mapping(monkeypatch):
         'stale':              409,
         'summary_failed':     503,
         'turn_protocol_unsupported': 409,
+        'coordinator_context_compaction_unsupported': 409,
+        'project_context_compaction_unsupported': 409,
         'some_unknown_error': 500,
     }
 

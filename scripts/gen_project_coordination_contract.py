@@ -48,7 +48,8 @@ def main():
 
     content += 'export type CoordinationCreateRequest = ' + ts(schema['$defs']['createRequest']) + ';\n'
 
-    for name, definition in [('CoordinatorReportState', 'reportState'),
+    for name, definition in [('CoordinatorConversationPage', 'conversationPage'),
+                             ('CoordinatorReportState', 'reportState'),
                              ('CoordinatorReportReadRequest', 'reportReadRequest')]:
         content += f'export type {name} = ' + ts(schema['$defs'][definition], schema) + ';\n'
 

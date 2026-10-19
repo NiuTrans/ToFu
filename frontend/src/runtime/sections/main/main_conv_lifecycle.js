@@ -120,7 +120,10 @@ function loadConversation(id) {
   const missing = _projectConversationNavigation.resolveMissing(id, {
     contains: (key) => conversations.some((conversation) => conversation.id === key),
     fetch: (key) => Api.conversations.get(key, { onError: 'throw' }),
-    merge: (row) => mergeConversationCatalogRows([row]),
+    merge: (row) => {
+      _globalConvPageBoundary ||= _oldestGlobalConvBoundary(conversations);
+      mergeConversationCatalogRows([row]);
+    },
     navigate: loadConversation,
     error: (error) => { if (typeof showToast === 'function') showToast(_conversationLoadFailureText(error), 'error'); },
   });

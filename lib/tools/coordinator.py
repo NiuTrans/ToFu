@@ -11,11 +11,13 @@ def _tool(name, description, properties, required):
 
 COORDINATOR_TOOLS = [
     _tool('create_conversation',
-          'Create an empty independent worker conversation in this Coordinator project. '
-          'Recommended execution destination, visible in the ordinary conversation list. '
-          'Does not start a task, send a user message, or authorize execution. Reuse the '
-          'same idempotency_key when retrying. A human must create/authorize its assignment '
-          'through existing Project dispatch controls before dispatch_project_assignment.',
+          'Create an empty independent conversation in this Coordinator project, '
+          'visible in the ordinary conversation list. Does not start a task, send '
+          'a user message, or authorize execution. Reuse the same idempotency_key '
+          'when retrying. For work within the current authorized request, prefer '
+          'delegate_project_work: it creates and starts its own Worker without '
+          'a separate per-worker authorization step. Use dispatch_project_assignment '
+          'only for an already-authorized assignment.',
           {'title': {'type': 'string', 'minLength': 1, 'maxLength': 160},
            'idempotency_key': {'type': 'string', 'minLength': 1, 'maxLength': 200}},
           ['title', 'idempotency_key']),
@@ -24,8 +26,8 @@ COORDINATOR_TOOLS = [
           'worker conversation. Uses ordinary conversation Turn/task admission and the '
           'existing exact grant, budget, concurrency and capability limits. Cannot create '
           'or enlarge a grant; reports unauthorized/stale assignments rather than running. '
-          'Only the existing grant profile is permitted: consult or explicitly scoped files. '
-          'Shell/browser work needs the ordinary human worker execution flow.',
+          'Only the existing grant profile is permitted. For new work within the '
+          'current authorized request, use delegate_project_work instead.',
           {'assignment_id': {'type': 'string', 'minLength': 1},
            'expected_revision': {'type': 'integer', 'minimum': 1}},
           ['assignment_id', 'expected_revision']),
@@ -52,7 +54,8 @@ COORDINATOR_TOOLS.append(_tool('report_to_user',
 from lib.project_dispatch.contract import schema as _dispatch_schema
 for _name, _definition, _description in (
     ('get_project_workers', 'getProjectWorkers',
-     'List a page of Worker evidence for this original request, including work from earlier Coordinator turns. '
+     'List a page of registered Worker execution assignments for this original request, including work from earlier Coordinator turns. '
+     'This is not a roster of every created conversation: use list_conversations with scope=project to find empty conversation shells. '
      'Use scope=project on new human input to find earlier work in this Coordinator binding (32-row history pages). Use next_cursor as after_id; an empty filtered page can still have a cursor. Source Turn and current_request distinguish earlier objectives. Passive facts only; get_project_assignment reads full evidence.'),
     ('cancel_project_work', 'cancelProjectWork',
      'Cancel an owned Worker in this Coordinator binding when handling human steering; automatic continuations may cancel only their original request Workers. Withdraws its grant and stops its exact active attempt. '
