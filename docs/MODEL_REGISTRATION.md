@@ -316,9 +316,15 @@ reasoning with medium default and no disable rung. The
 2026-09-29 availability. Its exact source recipe/defaults do not copy the older
 Sol's disable behavior. The shared OpenAI price compiler derives cache-read
 multipliers per Model, preserving this model's 5% cache price and the existing
-long-context tiers. Specifications:
-`tests/model_routing/test_subscription_registration_research.py` and
-`tests/oauth/test_codex_catalog.py`.
+long-context tiers. The YourProvider AIGC gateway serves the public wire id
+`gpt-6.1-sol` (live probe 2026-10-19: HTTP 429 per-model RPM, not 400
+`不支持的模型类型`). Do not pin `X-Custom-Header` or Kunlun
+serving aliases on that provider template; gray cells are temporary (see
+`bundles/yourprovider/provider_templates/yourprovider.json` `_extra_headers_note`).
+Specifications:
+`tests/model_routing/test_subscription_registration_research.py`,
+`tests/oauth/test_codex_catalog.py`, and
+`bundles/yourprovider/tests/test_yourprovider_served_catalog_sync.py`.
 
 Gemini 4 Argon evidence boundary (checked 2026-10-17): the only Gemini 4
 model and the current GA flagship. The official
