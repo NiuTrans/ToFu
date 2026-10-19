@@ -61,6 +61,10 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 # deliberate, reviewable act of saying "yes, this export-excluded file stays in
 # the private repo" — the guard fails loudly for anything NOT listed.
 _EXTRA_KEEPERS = {
+
+    # The internal canvas adapter is excluded publicly; keep its offline tests
+    # private with that owner rather than publishing a dangling provider import.
+    'tests/evaluations/test_yourprovider_sandbox_submit_watch.py',
     # Maintainer-only diagnostics; they do not participate in public builds.
     'scripts/inspect_native_crash.py',
     'scripts/tofudb_profile_report.py',

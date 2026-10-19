@@ -282,7 +282,11 @@ markers; public-only exclusion leaves the internal sharing boundary unsafe.
 
 Public build/test closure — the restored helper set is explicit and includes
 transitive generator and receipt-assessment imports required by shipped tests.
-Each added helper passes the public secret scan. The privacy drift gate also
+Each added helper passes the public secret scan.
+ Internal-provider acceptance
+tests stay with their excluded adapters; portable measurement and qualification
+helpers remain available to the public tests that exercise them.
+ The privacy drift gate also
 runs in linked Git worktrees (`.git` is a pointer file); a failed Git inventory
 read is an error, not an empty clean snapshot. Broadly publishing `scripts/` or
 silently skipping worktree verification would defeat the private/public boundary.
