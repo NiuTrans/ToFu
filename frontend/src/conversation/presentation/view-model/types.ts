@@ -92,6 +92,7 @@ export interface TextBlockViewModel extends ConversationBlockBase {
   translatedMarkdown?: string;
   displayMarkdown: string;
   displayMode: TranslationDisplayMode;
+  /** Settled deliverable presentation; a live accumulator stays narration. */
   deliverable: boolean;
   terminal: boolean;
   resumable: boolean;

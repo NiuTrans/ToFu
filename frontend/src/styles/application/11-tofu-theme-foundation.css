@@ -1,33 +1,32 @@
 /* ══════════════════════════════════════════════════════════
-   TOFU — warm rice paper, caramel ink and soft, rounded surfaces.
+   TOFU — pale gray-white surfaces, soft corners and restrained amber accents.
    Variable NAMES are a stable contract consumed app-wide — retune
    VALUES only; do not rename or remove.
    ══════════════════════════════════════════════════════════ */
 [data-theme="tofu"]{
-  /* Tofu's paper, caramel and soft clay are brand primitives, not neutral UI. */
-  --chat-primary-background:linear-gradient(180deg,#FFE8B2,#F2CA83);
-  --chat-primary-ink:#664520;
-  --chat-primary-border:#DBB675;
-  --chat-primary-shadow:0 2px 0 rgba(139,94,37,.16),inset 0 1px 0 rgba(255,255,255,.7);
-  --bg-primary:#FAF7F0;
-  --bg-secondary:#F4EFE5;
-  --bg-tertiary:#ECE6D9;
-  --bg-hover:#E5DECE;
-  --bg-active:#DBD2BF;
+  /* A quiet navigation action: warmth is a local tint, not a yellow canvas. */
+  --chat-primary-background:color-mix(in srgb,var(--accent) 6%,var(--bg-primary));
+  --chat-primary-hover:color-mix(in srgb,var(--accent) 10%,var(--bg-primary));
+  --chat-primary-border:color-mix(in srgb,var(--accent) 18%,var(--border));
+  --bg-primary:#F8FAFC;
+  --bg-secondary:#F7F8FA;
+  --bg-tertiary:#EEF1F4;
+  --bg-hover:#E8ECF0;
+  --bg-active:#DDE2E7;
   /* Borders — soft, low-contrast (restraint over ruled lines) */
-  --border:#E2DAC8;
-  --border-light:#EDE6D8;
-  --text-primary:#2E2822;
-  --text-secondary:#6C6352;
-  --text-tertiary:#A69D88;
-  --accent:#C1794B;
-  --accent-hover:#A96536;
-  --accent-subtle:rgba(193,121,75,0.10);
+  --border:#D9DEE4;
+  --border-light:#E9EDF1;
+  --text-primary:#202327;
+  --text-secondary:#626971;
+  --text-tertiary:#949CA5;
+  --accent:#C97A1D;
+  --accent-hover:#A85E0B;
+  --accent-subtle:rgba(201,122,29,0.10);
   /* 品牌字身专用墨色 — 当前与 --accent-hover 同值,但刻意独立:品牌色不随交互态色阶演进 */
-  --brand-ink:#A96536;
-  --thinking-bg:rgba(193,121,75,0.055);
-  --thinking-border:rgba(193,121,75,0.22);
-  --thinking-text:#9A6238;
+  --brand-ink:#A85E0B;
+  --thinking-bg:rgba(201,122,29,0.05);
+  --thinking-border:rgba(201,122,29,0.22);
+  --thinking-text:#8B560F;
   --error-bg:rgba(178,96,80,0.07);
   --error-border:rgba(178,96,80,0.22);
   --error-text:#B05B48;
@@ -48,8 +47,8 @@
   --chip-neutral-color:var(--text-tertiary);
   --chip-neutral-bg:var(--bg-tertiary);
   --chip-neutral-border:var(--border);
-  --user-bubble:#F0E8D9;
-  --shadow:0 1px 2px rgba(92,72,44,0.04),0 3px 14px rgba(92,72,44,0.06);
+  --user-bubble:#F2F4F6;
+  --shadow:0 1px 2px rgba(19,25,31,0.04),0 3px 14px rgba(19,25,31,0.06);
   /* Soft-organic corners (editorial 8–16px) */
   --radius:14px;
   --radius-sm:10px;
@@ -70,12 +69,12 @@
   --search-purple:#8C7FB0;
   --fetch-green:#C1794B;
   --fetch-teal:#5E9E8C;
-  /* Shadow tokens — soft, warm-tinted, diffuse (no hard pixel offset) */
-  --clay-sm:0 1px 2px rgba(92,72,44,0.05);
-  --clay-md:0 2px 10px rgba(92,72,44,0.07);
-  --clay-lg:0 10px 30px rgba(92,72,44,0.10);
-  --clay-pressed:inset 0 1px 3px rgba(92,72,44,0.10);
-  --stitch:1px solid #E2DAC8
+  /* Shadow tokens — soft, neutral, diffuse (no hard pixel offset) */
+  --clay-sm:0 1px 2px rgba(19,25,31,0.05);
+  --clay-md:0 2px 10px rgba(19,25,31,0.07);
+  --clay-lg:0 10px 30px rgba(19,25,31,0.10);
+  --clay-pressed:inset 0 1px 3px rgba(19,25,31,0.10);
+  --stitch:1px solid #D9DEE4
 }
 
 /* ── Typography: reading-optimized with CJK care ── */

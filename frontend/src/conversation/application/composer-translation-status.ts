@@ -1,12 +1,18 @@
-/** Ephemeral composer translation progress/failure. Browser elapsed time is waiting, never
- * provider execution time. No transport, durable writes or model inference. */
+/** Composer send/translation receipts. Insertion sends retain their original
+ * message here without manufacturing an assistant Turn. Browser elapsed time
+ * is waiting, never provider execution time. No transport or durable writes. */
 import { createDemandScopedPresentationTicker } from './demand-scoped-presentation-ticker';
 
 export type TranslationWait = {
   conversationId: string; startedAt: number; kind: 'send' | 'turn';
   status: 'pending' | 'completed' | 'failed' | 'cancelled';
   elapsedMs?: number; model?: string;
-};
+} & SendReceiptPresentation;
+export interface SendReceiptPresentation {
+  phase?: 'preparing' | 'translating';
+  /** Optional original insertion text; never a translated or durable Turn. */
+  message?: string;
+}
 export interface TranslationStatusPorts {
   document: Document;
   activeConversationId(): string | null;
@@ -60,12 +66,27 @@ export function createComposerTranslationStatus(ports: TranslationStatusPorts) {
     }
     row.dataset.state = item.status;
     const key = item.status === 'pending' ? item.kind : item.status;
-    const phase = ports.label('translationWait.' + key);
+    const phase = ports.label(item.status === 'pending' && item.phase === 'preparing'
+      ? 'send.preparing' : item.status === 'cancelled'
+        ? 'preview.cancelled' : 'translationWait.' + key);
     if (row.children[0].textContent !== phase) row.children[0].textContent = phase;
     const seconds = Math.max(0, (item.elapsedMs ?? ports.now() - item.startedAt) / 1000);
     const model = item.model || ports.label(item.status === 'pending'
       ? 'translationWait.modelPending' : 'translationWait.modelUnknown');
-    row.children[1].textContent = model + ' · ' + ports.label('translationWait.waited') + ' ' + seconds.toFixed(1) + 's';
+    const insertion = item.message !== undefined;
+    row.children[1].textContent = (insertion && !item.model ? '' : model + ' · ')
+      + ports.label('translationWait.waited') + ' ' + seconds.toFixed(1) + 's';
+    row.classList.toggle('has-message', insertion);
+    let message = row.querySelector<HTMLElement>('.composer-translation-message');
+    if (insertion && item.message) {
+      if (!message) {
+        message = ports.document.createElement('span');
+        message.className = 'composer-translation-message';
+        row.append(message);
+      }
+      if (message.textContent !== item.message) message.textContent = item.message;
+      message.title = item.message;
+    } else message?.remove();
     row.title = ports.label('translationWait.explanation');
   }
   function refresh() {
@@ -73,10 +94,15 @@ export function createComposerTranslationStatus(ports: TranslationStatusPorts) {
     if (visible()?.status === 'pending') ticker.demand();
     else ticker.stop();
   }
-  function begin(conversationId: string, kind: TranslationWait['kind']) {
-    const item: TranslationWait = { conversationId, kind, startedAt: ports.now(), status: 'pending' };
+  function begin(conversationId: string, kind: TranslationWait['kind'], presentation: SendReceiptPresentation = {}) {
+    const item: TranslationWait = { conversationId, kind, startedAt: ports.now(), status: 'pending', ...presentation };
     if (!disposed) { pending.add(item); last = undefined; refresh(); }
     return item;
+  }
+  function update(item: TranslationWait, presentation: SendReceiptPresentation) {
+    if (disposed || !pending.has(item)) return;
+    Object.assign(item, presentation);
+    refresh();
   }
   function finish(item: TranslationWait, status: Exclude<TranslationWait['status'], 'pending'>, model?: string) {
     if (!pending.delete(item)) return;
@@ -93,5 +119,5 @@ export function createComposerTranslationStatus(ports: TranslationStatusPorts) {
     disposed = true; ticker.stop(); pending.clear(); last = undefined;
     row?.remove(); row = null;
   }
-  return { begin, finish, refresh, destroy };
+  return { begin, update, finish, refresh, destroy };
 }

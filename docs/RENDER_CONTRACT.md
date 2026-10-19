@@ -95,14 +95,36 @@ other failures remain scoped. Reader folds, focus, original text and escaped mod
 names survive replay/navigation/disposal. No attribution request or idle timer is added.
 **Rejected:** picker-based guessing, duplicated badges and lingering composer receipts.
 
+**Problem:** inserting or queueing an instruction during generation created a
+temporary assistant with a translating/connecting status, then removed it at
+acknowledgement. **Decision:** the existing composer receipt retains the original
+instruction and updates its preparation/translation phase in place. Only idle
+ordinary sends create an optimistic input/output pair. Steer/queue sends,
+including an idle-to-busy retry, create neither provisional transcript Turns nor
+a standalone status assistant. The existing acknowledgement owns accepted
+insertion/queue evidence; failure restores the draft and preserves the scoped
+failure receipt. Navigation, stop and disposal use the existing send lifecycle.
+**Rejected:** hiding the fake assistant with CSS retains duplicate transcript
+state; a separate insertion spinner would duplicate the composer status owner.
+
 ## Content-first execution details
 
 Mixed live/history content follows the shared [conversation reading
 grammar](DESIGN_SYSTEM.md#conversation-reading-grammar): prose boundaries create
 reading pauses, adjacent process leaves share a continuous activity surface, and
 evidence opens under a common label column. Explicit answer text has a localized
-rubric and a distinct type hierarchy. These are decorations of the mounted
-chronology; no leaf is moved into a new wrapper. Visual density never changes block order, stable identity,
+rubric and a distinct type hierarchy after authoritative Turn settlement.
+**Problem:** the live `text:terminal` accumulator already carries wire-level
+`terminal`/`deliverable` flags, so decorating those flags directly flashes Answer
+on pre-tool narration until a later projection or translation replaces it.
+**Decision:** `selectTurnBlocks` projects `deliverable: false` while the Turn is
+pending/running, without changing source flags, prose or translation. Settlement
+and resume change that presentation bit even when the text is identical, so the
+keyed Surface repaints the title, type hierarchy and bilingual alternative
+immediately. **Rejected:** translation completion, timers, DOM inspection and
+content heuristics cannot establish answer identity. These are decorations of the
+mounted chronology; no leaf is moved into a new wrapper. Visual density never
+changes block order, stable identity,
 reader-owned disclosure, actionable states or lazy result ownership. Historical
 pagination is visible only when there is earlier or later content to navigate.
 

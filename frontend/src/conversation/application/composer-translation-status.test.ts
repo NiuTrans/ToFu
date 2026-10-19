@@ -4,6 +4,30 @@ import { createComposerTranslationStatus } from './composer-translation-status';
 
 afterEach(() => { vi.useRealTimers(); document.body.replaceChildren(); });
 describe('composer translation progress', () => {
+  it('keeps an insertion preview in one receipt through preparation and translation', () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<div class="input-box"><textarea>next draft</textarea></div>';
+    const receipt = createComposerTranslationStatus({ document, now: () => 0,
+      activeConversationId: () => 'c1', label: key => key });
+    const wait = receipt.begin('c1', 'send', { phase: 'preparing', message: '<b>补充约束</b>' });
+    const row = document.querySelector('[role="status"]');
+    expect(row?.querySelector('.composer-translation-message')?.textContent).toBe('<b>补充约束</b>');
+    expect(row?.querySelector('b')).toBeNull();
+    expect(row?.textContent).toContain('send.preparing');
+    receipt.update(wait, { phase: 'translating' });
+    expect(document.querySelector('[role="status"]')).toBe(row);
+    expect(row?.textContent).toContain('translationWait.send');
+    expect(row?.textContent).not.toContain('modelPending');
+    expect(row?.querySelector('.composer-translation-message')?.textContent).toBe('<b>补充约束</b>');
+    receipt.finish(wait, 'completed');
+    expect(document.querySelector('[role="status"]')).toBeNull();
+    receipt.update(wait, { phase: 'preparing' });
+    expect(document.querySelector('[role="status"]')).toBeNull();
+    expect(document.querySelector('textarea')?.value).toBe('next draft');
+    expect(vi.getTimerCount()).toBe(0);
+    receipt.destroy();
+  });
+
   it('ticks waiting time, preserves the draft and clears successful completion immediately', () => {
     vi.useFakeTimers();
     document.body.innerHTML = '<div class="input-box"><textarea>unsent draft</textarea></div>';

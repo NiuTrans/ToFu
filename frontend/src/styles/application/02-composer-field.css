@@ -72,3 +72,17 @@
 .composer-translation-phase { color: var(--accent); }
 .composer-translation-status[data-state="failed"] .composer-translation-phase { color: var(--error-text); }
 .composer-translation-detail { min-width: 0; font-variant-numeric: tabular-nums; }
+.composer-translation-status.has-message {
+  border-top: var(--control-edge-inset) solid var(--border-light);
+  padding-top: var(--space-2);
+}
+.composer-translation-message {
+  order: -1;
+  flex-basis: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: var(--font-size-md);
+}

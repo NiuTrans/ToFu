@@ -14,6 +14,71 @@ from tests.support.frontend_visual import frontend_visual_origin, frontend_visua
 pytestmark = pytest.mark.visual
 
 
+def test_answer_title_waits_for_turn_settlement(frontend_visual_page, timeline_bundle):
+    """Actual Surface replay: translation and tool boundaries cannot title narration."""
+    from playwright.sync_api import expect
+
+    page = frontend_visual_page
+    page.set_content('<html data-theme="tofu"><head><link rel="stylesheet" href="/static/styles.css">'
+                     '</head><body class="cv-off"><main id="surface"></main></body></html>')
+    page.add_style_tag(path=str(ROOT / 'frontend/src/conversation/ui/conversation-surface.css'))
+    page.add_script_tag(path=timeline_bundle)
+    page.evaluate("""async ()=>{
+      await setReadingLanguage('zh');
+      let revision=0;
+      window.surface=createConversationSurface(document.getElementById('surface'),createClassicConversationRenderers({
+        renderSafeMarkdownHtml:text=>{const p=document.createElement('p');p.textContent=text;return p.outerHTML;},
+        localizedText:(key,fallback)=>key==='conversation.answer'?'答复':fallback,
+      }));
+      window.stage=(status,segments,extra={})=>{
+        const turn={turnId:'turn',conversationId:'answer-lifecycle',actor:'assistant',role:'assistant',
+          laneId:'main',ordinal:0,status,projectionRevision:++revision,projection:{segments,...extra}};
+        surface.render(selectConversationViewModel({...createTurnState('answer-lifecycle'),
+          turnsById:{turn},laneOrder:{main:['turn']}}));
+      };
+      window.tail=(text,translatedText)=>({type:'text',blockId:'text:terminal',text,translatedText,
+        terminal:true,deliverable:true});
+      stage('running',[tail('I will inspect the file.')]);
+    }""")
+    expect(page.locator('.md-content')).to_have_text('I will inspect the file.')
+    expect(page.locator('.conversation-answer-label')).to_have_count(0)
+    # Translation is already durable, but this content still precedes a tool.
+    page.evaluate("""()=>stage('running',[tail('I will inspect the file.','我会检查文件。')],
+      {translation:{status:'completed',model:'translator'}})""")
+    expect(page.locator('.md-content')).to_have_text('我会检查文件。')
+    expect(page.locator('.conversation-answer-label, .bilingual-block')).to_have_count(0)
+    page.evaluate("""()=>{
+      window.readingHistory=[{type:'text',blockId:'narration-1',text:'I will inspect the file.',
+        translatedText:'我会检查文件。',terminal:false,deliverable:false},
+        {type:'tool_use',blockId:'read',id:'read',name:'read_files',input:{path:'example.txt'},
+          _round:{toolName:'read_files',toolCallId:'read',status:'done',results:[{text:'Verified.'}]}}];
+      stage('running',readingHistory);
+    }""")
+    expect(page.locator('.conversation-answer-label')).to_have_count(0)
+    expect(page.locator('[data-block-id="narration-1"] .md-content')).to_have_text('我会检查文件。')
+    page.evaluate("""()=>{
+      window.answerSegments=[...readingHistory,tail('The file is correct.')];
+      stage('running',answerSegments);
+    }""")
+    expect(page.locator('.conversation-answer-label')).to_have_count(0)
+    # Only status changes; semantic block equality must still repaint the title.
+    page.evaluate("()=>stage('completed',answerSegments)")
+    expect(page.locator('.conversation-answer-title')).to_have_text('答复')
+    expect(page.locator('[data-block-id="text:terminal"] > .md-content')).to_have_text('The file is correct.')
+    process = page.locator('.conversation-history-process > summary')
+    process.focus()
+    page.evaluate("""()=>stage('completed',answerSegments,{translatedContent:'文件没有问题。',
+      translation:{status:'completed',model:'translator'}})""")
+    expect(process).to_be_focused()
+    expect(page.locator('.conversation-answer-title')).to_have_count(1)
+    expect(page.locator('[data-block-id="text:terminal"] > .md-content')).to_have_text('文件没有问题。')
+    expect(page.locator('.bilingual-block')).to_have_count(1)
+    page.evaluate("()=>stage('running',answerSegments)")
+    expect(page.locator('.conversation-answer-label, .bilingual-block')).to_have_count(0)
+    expect(page.locator('[data-block-id="narration-1"] .md-content')).to_have_text('我会检查文件。')
+    page.evaluate('surface.dispose()')
+
+
 @pytest.fixture(scope='module')
 def reading_tools(tmp_path_factory):
     rounds = [
@@ -92,7 +157,7 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
         {type:'system_note',blockId:'note',noteKind:'context-injection',reason:'active_checklist',text:'检查项：阅读层级、键盘交互、窄屏布局。',...scope,llmRound:1},
         tool('checklist','todo_write',1),
         tool('program','execute_program',2),
-        text('answer','### 让阅读沿着内容自然前进\n\n正文保持清晰的阅读节奏；思考和工具使用统一的折叠入口，需要时再展开查看。\n\n- 时间顺序保持完整。\n- 过程标题对齐，展开详情共用缩进。\n- 失败与待确认操作继续明确显示。\n\n### 过程随时可查\n\n在答复旁打开过程面板，可以沿着原始时间线查看证据。\n\n### 留住豆腐的温度\n\n奶油纸色、焦糖强调色和柔软的圆角，让阅读轻松一点。',3,{deliverable:true,terminal:true})];
+        text('answer','### 让阅读沿着内容自然前进\n\n正文保持清晰的阅读节奏；思考和工具使用统一的折叠入口，需要时再展开查看。\n\n- 时间顺序保持完整。\n- 过程标题对齐，展开详情共用缩进。\n- 失败与待确认操作继续明确显示。\n\n### 过程随时可查\n\n在答复旁打开过程面板，可以沿着原始时间线查看证据。\n\n### 留住豆腐的温度\n\n清淡的底色、少量暖色点缀和柔软的圆角，让阅读轻松一点。',3,{deliverable:true,terminal:true})];
       segments.find(s=>s.blockId==='program')._round={toolName:'execute_program',toolCallId:'program',status:'done',
         toolArgs:{code:'return await tools.read_files({path:"docs/RENDER_CONTRACT.md"});'},
         toolContent:{summary:'Renderer contract inspected'},...scope,llmRound:2};
@@ -119,20 +184,14 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     assert page.locator('[data-block-id="thinking-1"]').get_attribute('data-process-edge') == 'start'
     assert page.locator('[data-block-id="program"]').get_attribute('data-process-edge') == 'end'
     assert page.locator('[data-block-id="narration"]').get_attribute('data-process-edge') is None
-    assert page.locator('[data-block-id="answer"] .conversation-answer-title').inner_text() == '答复'
+    assert not page.locator('.conversation-answer-label').count()
     assert not page.locator('.user-msg .conversation-answer-label').count()
     # Role, narration, process labels and the answer share an actual text edge.
     alignment = page.evaluate("""()=>['.conversation-turn:not(.user-msg) .message-role',
       '[data-block-id="intro"] .md-content', '.thinking-label',
-      '.conversation-answer-title', '[data-block-id="answer"] > .md-content > h3']
+      '[data-block-id="answer"] > .md-content > h3']
       .map(s=>({selector:s,x:document.querySelector(s).getBoundingClientRect().left}))""")
     assert max(x['x'] for x in alignment)-min(x['x'] for x in alignment) <= 1, alignment
-    outline = page.locator('.conversation-answer-outline')
-    outline.locator('summary').focus(); outline.locator('summary').press('Enter')
-    expect(outline.locator('nav')).to_be_visible()
-    outline.get_by_role('button', name='留住豆腐的温度').click()
-    expect(page.locator('[data-block-id="answer"] h3').last).to_be_focused()
-    expect(outline.locator('nav')).not_to_be_visible()
     # Native keyboard access and mounted reader choices survive a revision.
     summary = page.locator('.thinking-header').first
     summary.focus()
@@ -185,6 +244,17 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     # real order when reopened rather than regrouping by content kind.
     page.evaluate("""()=>{const turn=state.turnsById.turn;state={...state,turnsById:{...state.turnsById,turn:{...turn,status:'completed',projectionRevision:3}}};render();}""")
     expect(page.locator('[data-block-id="answer"]')).to_be_visible()
+    assert page.locator('.conversation-answer-title').inner_text() == '答复'
+    answer_edges = page.evaluate("""()=>['.conversation-turn:not(.user-msg) .message-role',
+      '.conversation-answer-title','[data-block-id="answer"] > .md-content > h3']
+      .map(s=>document.querySelector(s).getBoundingClientRect().left)""")
+    assert max(answer_edges)-min(answer_edges) <= 1, answer_edges
+    outline = page.locator('.conversation-answer-outline')
+    outline.locator('summary').focus(); outline.locator('summary').press('Enter')
+    expect(outline.locator('nav')).to_be_visible()
+    outline.get_by_role('button', name='留住豆腐的温度').click()
+    expect(page.locator('[data-block-id="answer"] h3').last).to_be_focused()
+    expect(outline.locator('nav')).not_to_be_visible()
     process = page.locator('.conversation-history-process > summary')
     answer_y = page.locator('[data-block-id="answer"] > .md-content').bounding_box()['y']
     process.focus(); process.press('Enter')
@@ -234,10 +304,10 @@ def test_mixed_timeline_reading(frontend_visual_page, reading_tools, timeline_bu
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
     page.screenshot(path=str(tmp_path / f'timeline-shell-{theme}-{width}.png'))
     primary_fill = page.locator('.new-chat-btn').evaluate('n=>getComputedStyle(n).backgroundImage')
-    assert ('gradient' in primary_fill) if theme == 'tofu' else primary_fill == 'none'
+    assert primary_fill == 'none'
     if theme == 'tofu':
         paper = page.evaluate('getComputedStyle(document.documentElement).getPropertyValue("--bg-primary").trim().toUpperCase()')
-        assert paper == '#FAF7F0'
+        assert paper == '#F8FAFC'
     assert page.locator('.conversation-turn-actions button').evaluate_all(
         'nodes=>nodes.every(n=>n.getAttribute("aria-label") && n.title)')
     page.locator('#userInput').focus()

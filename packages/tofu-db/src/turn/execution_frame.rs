@@ -8,7 +8,7 @@ use super::*;
 use crate::transaction_ir::TransactionIrStep;
 
 mod witness;
-pub(super) use witness::{ProjectionWitness, classify_patch, append_from_witness};
+pub(super) use witness::{ProjectionWitness, VerifiedStableSegments, classify_patch, append_from_witness, normalize_for_patch};
 
 /// Exact serialized lengths of the owned projection's top-level fields. Only
 /// affected values are encoded after admission; append_text measures its suffix
@@ -126,7 +126,7 @@ pub(crate) fn record(
     if attempt.document.get("status").and_then(Value::as_str) != Some("running")
         || attempt.document.get("taskId").and_then(Value::as_str) != Some(first.task_id.as_str())
     { return Err(invalid_input("execution frame requires its already-running bound attempt")); }
-    let LoadedTurnForAttempt { key, physical_version, mut document, projection_head: mut current_head } = loaded;
+    let LoadedTurnForAttempt { key, physical_version, mut document, projection_head: mut current_head, .. } = loaded;
     let initial_updated_at = document.get("updatedAt").and_then(Value::as_u64)
         .ok_or_else(|| invalid_data("Turn update timestamp is malformed"))?;
     let mut projection = match document.remove("projection") {
@@ -159,7 +159,7 @@ pub(crate) fn record(
         validate_settleable_turn_size(&document, &projection, witness.total, &attempt.document, false)?;
         current_head = store_event_projection(database, transaction, request,
             &attempt.conversation_id, document["turnId"].as_str().unwrap(), revision, next,
-            current_head.as_ref(), &previous, &projection, patch)?;
+            current_head.as_ref(), &previous, &projection, witness.total, patch)?;
         responses.push((*slot, publish_event_record(database, transaction, request, EventPublication {
             conversation_id: &attempt.conversation_id, turn: &document, attempt: &attempt.document,
             projection: &projection, projection_bytes: witness.total,
