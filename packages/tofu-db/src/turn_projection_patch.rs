@@ -157,7 +157,7 @@ pub(crate) fn apply_projection_patch_owned(
     apply_projection_patch_operations_owned(projection, operations)
 }
 
-fn checked_projection_patch_operations(
+pub(crate) fn checked_projection_patch_operations(
     raw_patch: &Map<String, Value>,
 ) -> Result<&[Value], ProjectionPatchError> {
     validate_patch_budget(raw_patch)?;
