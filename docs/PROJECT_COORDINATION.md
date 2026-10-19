@@ -496,10 +496,13 @@ rows at a time. An opened workspace requests one bounded roster page alongside
 existing reads; no roster reads occur merely to display the fixed sidebar entry.
 Assignment history loads one page of at most 32 owned records;
 the graph retains a defensive 128-node input ceiling for other callers.
-The dense graph fixture renders 128 assignments plus the Coordinator, with up
-to eight prerequisites per task: Chromium measured 3,887 DOM elements and about
-63 ms synchronous render/layout on the verification host, with a 480 px viewport.
-Only one responsive wire layer is visible; no observer or timer is allocated.
+For 128 assignments with up to eight prerequisites each, the default work-first
+view measured 146 DOM elements and zero mounted graph nodes. Explicitly opening
+topology renders 128 assignments plus the Coordinator: Chromium measured 4,156
+DOM elements and about 55 ms for the combined initial render/expansion/layout,
+with a 480 px viewport. The browser gate bounds the default view below 400
+elements and the expanded view below 5,000. Only one responsive wire layer is
+visible; no observer or timer is allocated.
 This is a local layout measurement, not a universal latency promise.
 Browser tests cover 1440/390/320 widths and all three themes; unit/pipeline tests
 cover team isolation, sender-key collisions, no-wake, recovery and input receipts.
