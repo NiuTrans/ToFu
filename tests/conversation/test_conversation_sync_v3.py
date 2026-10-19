@@ -1309,20 +1309,18 @@ def test_refs_snapshot_serves_legacy_turn_images_lazily_and_immutably(
 def test_v3_stream_setup_failure_releases_subscription(flask_client, conversation_sync_db, monkeypatch):
     from lib.conversation_sync.broker import ConversationWakeBroker
     from routes import conversation_sync_v3 as sync_routes
-    class BrokenAccounting:
-        @staticmethod
-        def try_acquire(principal):
-            raise RuntimeError('injected accounting setup failure')
+    def broken_observation(*_args):
+        raise RuntimeError('injected stream observation failure')
     isolated_broker = ConversationWakeBroker(owner_history_capacity=16)
     monkeypatch.setattr(sync_routes, 'broker', isolated_broker)
-    monkeypatch.setattr(sync_routes, 'sse_limiter', BrokenAccounting())
+    monkeypatch.setattr(sync_routes, 'record_stream_admission', broken_observation)
     response = flask_client.get('/api/v4/conversations/conv-sync-a/events', query_string={
         'streamClientId': 'page-a', 'streamGeneration': '1'})
     assert response.status_code == 500
     assert isolated_broker.snapshot()['active'] == 0
 
 
-def test_v3_finite_stream_releases_exact_shared_slot_and_subscription(
+def test_v3_finite_stream_releases_subscription(
     flask_client, monkeypatch,
 ):
     from lib.conversation_sync.broker import ConversationWakeBroker
@@ -1354,28 +1352,9 @@ def test_v3_finite_stream_releases_exact_shared_slot_and_subscription(
                 },
             }
 
-    class RecordingLimiter:
-        refresh_interval_seconds = 60.0
-
-        def __init__(self):
-            self.released: list[str] = []
-
-        @staticmethod
-        def try_acquire(_principal):
-            return "slot-a"
-
-        def release(self, token):
-            self.released.append(token)
-
-        @staticmethod
-        def refresh(_token):
-            raise AssertionError("finite stream should not need a lease refresh")
-
     isolated_broker = ConversationWakeBroker(owner_history_capacity=16)
-    limiter = RecordingLimiter()
     monkeypatch.setattr(sync_routes, "_service", FiniteService())
     monkeypatch.setattr(sync_routes, "broker", isolated_broker)
-    monkeypatch.setattr(sync_routes, "sse_limiter", limiter)
 
     response = flask_client.get(
         "/api/v4/conversations/conv-finite/events",
@@ -1387,7 +1366,6 @@ def test_v3_finite_stream_releases_exact_shared_slot_and_subscription(
 
     assert response.status_code == 200
     assert b"event: sync.reset_required" in response.data
-    assert limiter.released == ["slot-a"]
     assert isolated_broker.snapshot()["active"] == 0
 
 

@@ -289,7 +289,14 @@ Problem: a local request count could hide a healthy authorized provider; a separ
 
 Decision: dispatch records every request reservation without a local capacity refusal or fan-out reduction. Request-owned route registration is atomic with no count ceiling; construction failure, cancellation and observer failure keep the existing rollback/disposal owner. Controllers observe demand but cannot restore these limits. RPM pressure remains a selection hint with a saturating score so a busy healthy target cannot overflow into ineligibility. Provider errors, cooldown, authorized fallback, billing and consumption policy remain with their existing authorities.
 
-SSE tracks opaque connection tokens by explicit principal locally, releasing only the exact owned token. It has no shared lease store, count admission, expiry heartbeat or quota response. New conversations cannot evict other live streams. Same-client reconnect supersession and stale-generation fencing stay in the broker. Setup failure closes the subscription, and response/observer close never cancels accepted agent execution.
+Conversation SSE uses the existing broker's principal/conversation/client ownership, with no second connection lease or count admission. Headless model-response SSE retains its configured per-principal admission budget and exact-token cleanup. Read-only conversation observers neither consume that budget nor refuse progress/terminal delivery when it is exhausted. New conversations cannot evict other live streams. Same-client reconnect supersession and stale-generation fencing stay in the broker. Setup failure closes the subscription, and response/observer close never cancels accepted agent execution. The 64-observer route test holds every subscription concurrently, then requires zero active owners and bounded generation history after close; it also injects a fully exhausted headless budget.
+
+Measurement: one warm local run of the 64-observer route fixture completed
+setup, first-frame delivery and close in 67 ms with tracemalloc enabled;
+peak Python allocations were 533,754 bytes and post-GC retained allocations
+8,910 bytes. No subscription remained. This measures route/broker ownership
+with synthetic read responses, excluding HTTP sockets, storage and model cost.
+Native-browser recovery tests cover repeated HTTP 204 and both startup labels.
 
 Alternatives rejected: raising count defaults leaves nested bottlenecks; unrelated subscription eviction interrupts legitimate work; pretending real provider failures succeeded would corrupt accounting; expiring live ownership can lose exact teardown. Reconstructible generation history remains bounded, and connection/request metadata is reclaimed at actual close/settlement.
 

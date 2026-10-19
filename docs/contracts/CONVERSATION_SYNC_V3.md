@@ -1006,12 +1006,27 @@ recoveries supersede the same client's older subscription synchronously,
 waking its wait and releasing its exact token. Older generations get HTTP 204
 to stop native retry. Legacy clients remain readable without replacement rights.
 
-SSE has no per-principal count quota or shared capacity lease; new conversations
+Conversation SSE has no per-principal count quota or shared capacity lease; new conversations
 cannot evict other subscriptions. Exact-client generation replacement owns
 cleanup, with bounded owner-generation tombstones carrying no projection data.
 An unconsumed response has a 10-second body-start deadline. One rollback scope
 covers every setup exit, including cancellation, until response construction
 transfers release to the generator finalizer and that deadline.
+
+**Problem:** applying the headless model-stream cap to these observers stranded
+accepted tasks behind old startup labels once 24 subscriptions were open.
+**Decision:** the existing broker alone owns conversation observation; the
+headless generation-stream budget remains independent. A native EventSource
+that reports CLOSED (including HTTP 204) retires immediately and sets the
+existing snapshot-required barrier. The shared retry timer repairs authority
+before reopening, and wake/resume hints cannot bypass its backoff. Only a valid
+stream frame resets retries; a successful snapshot alone does not prove stream
+admission. **Alternatives rejected:** raising 24 to another fixed count merely
+moves the failure; re-opening without a snapshot pins old UI under persistent
+refusal; treating CLOSED as CONNECTING waits for a retry the browser will never
+perform. Tests hold 64 independent observers above the old limit and require
+zero subscriptions after close. Native-browser tests inject repeated HTTP 204
+for both pending and tool-preparation states and verify terminal convergence.
 
 Browser residency follows visible demand: the active shell keeps its stream;
 an inactive shell keeps one only while its authoritative TurnState has pending

@@ -76,6 +76,10 @@ create another recovery owner. No additional poller, queue or durable state.
 Specs: `core/conversation-sync.test.ts`, `core/connection-health.test.ts`,
 `tests/conversation/test_conversation_stream_{setup,ownership}.py` and the
 real-EventSource/Surface browser test `test_visual_conversation_sync_recovery.py`.
+Permanent EventSource closure uses that same timer and snapshot barrier; native
+CONNECTING errors retain browser retry. Snapshot success does not reset stream
+failure backoff, and wake/resume hints join the scheduled retry. The observer
+route has no model-stream admission lease: broker teardown is its sole owner.
 The resource regression runs 100 recovery/disposal cycles, requiring zero live
 streams/timers and aborted read signals after every disposal.
 
