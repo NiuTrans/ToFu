@@ -47,9 +47,9 @@ selected suffix once. Each page retains the original byte accounting and
 cursor. Complete response construction moves Turns and the continuation;
 `EncodedResponse` supplies producer-owned canonical/depth evidence through the
 existing IR slot. Mutation, overwrite and alternate result selection retain
-their existing proof invalidation. No query cache or durable index is added.
-Header proof scans remain O(history headers); rebuilding uncached context
-necessarily reads all selected evidence. This change makes neither path O(1).
+their existing proof invalidation. That materialization change added no query cache or durable index. The
+certified-frontier path below separately removes repeated prefix scans;
+rebuilding uncached context still reads all selected evidence.
 
 Alternatives considered: caching parsed histories adds ownership, invalidation
 and residency costs while leaving cold reconstruction unchanged; skipping
@@ -61,6 +61,98 @@ objects belong to the request; canonical sizing uses one stack counter and
 the existing serializer. The target allocation lives until selected or request
 completion. Normalization tests prove that an ordinary large String retains
 its allocation; actual process RSS remains a separate measurement.
+
+## Persisted authenticated continuation frontier
+
+Problem: a valid completed-prefix continuation avoided old Turn payloads, but
+still scanned and hashed every compact history header on every read. Moving
+that scan to every checkpoint write would retain the same long-run cost.
+
+Decision: reuse the existing owner-scoped
+`model.continuation.v1.lanes` directory value for one bounded, storage-minted
+certificate per lane. The public history proof remains exactly version 2:
+SHA256 over the same canonical header JSON lines as SQLite. No client-supplied
+proof or process-local cache can authorize skipping a header. The first eligible
+checkpoint publication reads authority headers and compares their independently
+computed count/digest with the submitted proof. A mismatch leaves the directory
+value empty and retains the existing full verification path. Old checkpoints and
+migration restore likewise have no certificate until an actual frontier advance.
+
+The certificate binds its exact entity key (tenant, owner, conversation and
+lane), existing authority-open epoch, terminal identity, ordinal, preceding
+header count, and versioned SHA256 source state. Its framing checks all lengths, a 1 KiB maximum, a SHA256 checksum,
+and consistent block count/tail length. RustCrypto still owns SHA256 compression;
+`turn/model_context/sha_state.rs` stores the chaining words, source byte count and
+at most 63 buffered bytes. It never resumes from an already finalized digest.
+The checksum detects malformed state; authority-scoped publication and mutation
+validation, rather than a caller-held secret or signature, establish its trust.
+
+Within the same authority-open epoch, continuation reads and subsequent
+checkpoint publications resume this certified state and scan only the terminal and added suffix. Reads still load
+the settled terminal and compare its full authority witness, including model
+revision and attempt identity. They materialize every selected Turn and preserve
+public proof bytes, coverage, pagination, media eligibility and output bounds.
+The certificate does not change the 10,000-header support limit. Full output
+reconstruction remains proportional to the selected output.
+
+Every compact-header publication crosses `put_lane_compaction_index`. When a
+header below the certificate's anchor ordinal changes its v2-protected fields,
+the same transaction empties the certificate while preserving the directory for
+cleanup. Insertion below the anchor also invalidates it. Display-only updates
+with the same semantic revision preserve it; genuine edit/revert cannot restore
+it. Terminal changes remain guarded by the dynamic settled witness. Deletion
+and compaction use the existing continuation cleanup; branch copy and Turn
+restore pass through the same header owner. Conversation deletion clears the
+continuation and directory together. Import never imports certified hash state.
+Generic `record.*` keys belong to a separate physical record namespace and
+cannot mutate this private entity directory by choosing its name.
+
+The source headers, directory read, certificate publication and continuation CAS
+share one authority transaction. A concurrent earlier mutation conflicts through
+the certificate version; a mutation in the newly scanned suffix conflicts through
+the range witness. Conversely, a mutation staged against an older certificate
+conflicts with a concurrent frontier advance. Equal-frontier replay performs no
+publication or extra certification. No worker, global cache or new namespace is
+introduced; one existing directory row grows by at most 1 KiB. Main-lane header
+writes acquire one scoped directory read, which is an explicit write-path cost
+and must be included in progression measurements.
+
+An authority reopen deliberately declines the previous certificate. It reuses
+`AuthorityDatabase::event_read_epoch`, already fresh on every open and inherited
+by read replicas, to fence a downgrade to older writers that lack this mutation
+hook. The engine's exclusive directory lease prevents simultaneous independent
+writers. A reopened read still returns the valid public continuation after full
+header verification; the first advancing checkpoint save also performs a full
+scan and mints state for the new epoch. Later reads and advances regain suffix
+work. Read-only requests do not rewrite metadata; equal-frontier replay remains
+write-free. There is no whole-database startup sweep or secondary in-memory
+proof cache. Recovery and first recertification are separately measured cold
+costs; persisted state is not trusted across an arbitrary writer lifetime.
+
+Alternatives considered: trusting the submitted history proof would allow a
+forged prefix to hide history; a process-local cache would require a second
+recovery and invalidation design; a new Merkle proof would change the public
+contract and SQL reference. Recomputing v2 on every save merely shifts the scan
+cost. The persisted resumable state preserves the existing proof protocol while
+allowing both reads and advancing saves within one epoch to do work proportional
+to the suffix. A CONTROL format upgrade would fence old writers by refusing the
+entire database; reauthenticating this reconstructible certificate after open
+preserves backward compatibility without imposing that storage migration.
+
+The focused Rust suite checks independent SHA256 parity across block/padding and
+resume boundaries, malformed state and owner/key substitution, display and real
+edits, two-direction OCC races, WAL write/sync failures followed by power-loss
+recovery, acknowledged publication/invalidation followed by actual SIGKILL,
+read-replica epoch sharing, and an earlier writer leaving stale certificate bytes
+behind across reopen.
+On real authority fixtures with 8, 128 and 2,048 retained Turns, initial
+certification visits exactly N headers; a two-Turn extension visits three headers
+in both the context read and advancing checkpoint save. Those are logical work
+counts, not latency claims. Public storage differential tests and progression
+measurements separately verify exact v2 proof bytes and practical costs. The
+production rollout is gated on the independent public-interface differential
+and progression matrix; the logical work figures alone do not establish a
+latency or complete Harness improvement.
 
 ## Verification and reproduction
 

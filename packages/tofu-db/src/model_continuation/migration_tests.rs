@@ -358,18 +358,18 @@ fn continuation_legacy_reads_and_equal_replay_do_not_rewrite_but_advance_upgrade
         read_record(&database, &mut tx, &key).unwrap(),
         Some((7, body.clone()))
     );
-    assert!(super::super::put_frontier(&database, &mut tx, key.clone(), &super::super::continuation_raw_key("legacy", "main"), 7, &body, 200).unwrap());
+    assert!(super::super::put_frontier(&database, &mut tx, key.clone(), &super::super::continuation_raw_key("legacy", "main"), 7, &body, 200, "legacy", "main").unwrap());
     assert_eq!(database.entity_get(&mut tx, &key).unwrap().unwrap(), raw);
     drop(tx);
     let mut large = body;
     large.get_mut("messages").unwrap()[0]["content"] = json!("x".repeat(16 * 1024));
     let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
-    assert!(super::super::put_frontier(&database, &mut tx, key.clone(), &super::super::continuation_raw_key("legacy", "main"), 8, &large, 300).unwrap());
+    assert!(super::super::put_frontier(&database, &mut tx, key.clone(), &super::super::continuation_raw_key("legacy", "main"), 8, &large, 300, "legacy", "main").unwrap());
     // Dropping the transaction must leave the legacy record intact.
     drop(tx);
     let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
     assert_eq!(database.entity_get(&mut tx, &key).unwrap().unwrap(), raw);
-    assert!(super::super::put_frontier(&database, &mut tx, key.clone(), &super::super::continuation_raw_key("legacy", "main"), 8, &large, 300).unwrap());
+    assert!(super::super::put_frontier(&database, &mut tx, key.clone(), &super::super::continuation_raw_key("legacy", "main"), 8, &large, 300, "legacy", "main").unwrap());
     database.commit(tx).unwrap();
     let mut tx = database.begin_with_identity_claim_scopes(7, 11).unwrap();
     assert_eq!(
