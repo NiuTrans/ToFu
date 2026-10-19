@@ -101,7 +101,7 @@ export function createCoordinationCanvas(graph: CoordinationGraph, navigate: (id
     }
     if (node.conversationId) {
       const open = createButton({ label: t('projectCoordination.graph.openConversation', { task: titleOf(node) }),
-        size: 'sm', onClick: () => navigate(node.conversationId!) });
+        size: 'sm', wrap: true, onClick: () => navigate(node.conversationId!) });
       open.dataset.coordinationFocus = `graph-open:${node.id}`; inspector.append(open);
     } else if (node.kind === 'task') inspector.append(text(t('projectCoordination.graph.missingConversation'), 'small'));
   }
@@ -122,6 +122,7 @@ export function createCoordinationCanvas(graph: CoordinationGraph, navigate: (id
       card.dataset.nodeId = node.id; card.dataset.nodeKind = node.kind;
       if (node.status) card.dataset.status = node.status;
       const selectButton = createButton({ label: titleOf(node), size: 'sm', variant: 'ghost', wrap: true, onClick: () => select(node.id, true) });
+      selectButton.replaceChildren(text(titleOf(node), 'span', 'coordination-node-title'));
       selectButton.setAttribute('aria-label', `${titleOf(node)} · ${statusOf(node)}`);
       selectButton.dataset.coordinationFocus = `graph-node:${node.id}`;
       const dot = text(node.kind === 'coordinator' ? '◎' : node.kind === 'reference' ? '?' : node.status === 'completed' ? '✓'
@@ -130,7 +131,7 @@ export function createCoordinationCanvas(graph: CoordinationGraph, navigate: (id
       dot.setAttribute('aria-hidden', 'true'); dot.title = statusOf(node);
       card.append(dot, selectButton);
       const summary = node.kind === 'coordinator' ? t('projectCoordination.graph.coordinatorRole') : digest(node);
-      if (summary) card.append(text(summary, 'p', 'coordination-node-digest'));
+      if (summary) card.append(text(summary, 'span', 'coordination-node-digest'));
       stage.append(card); cards.set(node.id, card);
     }
     // CSS container queries select identical geometry for both cards and wires.
