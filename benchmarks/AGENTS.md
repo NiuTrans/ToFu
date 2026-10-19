@@ -6,6 +6,14 @@ This directory contains retained, executable measurement contracts. Local run
 outputs and candidate result payloads are reconstructible artifacts and remain
 untracked according to `.gitignore`.
 
+`tofudb_context_progression.py` measures real append/read/checkpoint advancement
+with an independent public-header digest and exact suffix oracle. Keep initial
+certification, later checkpoint writes and appends separate; round zero's appends
+belong to setup. Freeze CLI/library identities and compare fresh alternating
+processes. This compares production algorithms, not equal-algorithm engines.
+Verify `tests/tofudb/test_context_progression_measure.py`; the public recovery and
+older-writer boundary is in `test_harness_frontier_runtime.py`.
+
 `native_engine_manifest_measure.py` compares frozen source-fingerprint owners in
 fresh alternating processes. Require the same compiled source digest on every
 call and include isolated child CPU. This component diagnostic has no memory,
