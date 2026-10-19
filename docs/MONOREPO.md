@@ -332,7 +332,9 @@ Both shareable export tiers restore allowlisted build/test dependencies and
 check shipped test imports. The keep-list derives each tier's Git ignore
 exceptions, so restored helpers reach the publication index. Internal helpers
 retain source semantics; public helpers pass through the public sanitizer.
-Staged-byte verification checks the exact tree that will be committed.
+Staged-byte verification checks the exact tree that will be committed. An
+optional or deferred import never waives a mandatory sibling import, and
+release qualification also collects tests from the exported checkout.
 Alternatives: publishing private controls widens the release tier; exempting
 generated drift leaves the shipped graph inconsistent with its sources.
 
