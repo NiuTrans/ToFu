@@ -467,6 +467,7 @@ struct LoadedTurnForAttempt {
     physical_version: u64,
     document: Map<String, Value>,
     projection_head: Option<ProjectionHeadDescriptor>,
+    verified_stable_segments: Option<execution_frame::VerifiedStableSegments>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2754,7 +2755,7 @@ fn materialize_projection_head(
     transaction: &mut AuthorityTransaction,
     document: &mut Map<String, Value>,
     head: &ProjectionHeadDescriptor,
-) -> io::Result<()> {
+) -> io::Result<Option<execution_frame::VerifiedStableSegments>> {
     let _head_timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_PROJECTION_HEAD_MATERIALIZE);
     let checkpoint_timer = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_PROJECTION_HEAD_CHECKPOINT);
     let conversation_id = document
@@ -2850,14 +2851,14 @@ fn materialize_projection_head(
         return Err(invalid_data("Turn projection patch byte witness differs"));
     }
     text_tail::materialize(database, transaction, conversation_id, turn_id, head, &mut projection)?;
-    if let Some(witness) = &head.frame_witness {
+    let verified_stable_segments = if let Some(witness) = &head.frame_witness {
         witness.verify(&projection,
             document.get("actor").and_then(Value::as_str).unwrap_or("assistant"),
-            document.get("status").and_then(Value::as_str).unwrap_or("running"))?;
-    }
+            document.get("status").and_then(Value::as_str).unwrap_or("running"))?
+    } else { None };
     document.insert("projection".to_owned(), Value::Object(projection));
     document.remove("_projectionHead");
-    Ok(())
+    Ok(verified_stable_segments)
 }
 
 fn materialize_turn(
@@ -10429,7 +10430,8 @@ fn load_current_turn_for_attempt(
         database, transaction, attempt_id, attempt, conversation_id,
     )? else { return Ok(None); };
     if let Some(head) = &loaded.projection_head {
-        materialize_projection_head(database, transaction, &mut loaded.document, head)?;
+        loaded.verified_stable_segments =
+            materialize_projection_head(database, transaction, &mut loaded.document, head)?;
     }
     Ok(Some(loaded))
 }
@@ -10473,6 +10475,7 @@ fn load_current_turn_header_for_attempt(
         physical_version,
         document,
         projection_head,
+        verified_stable_segments: None,
     }))
 }
 
@@ -13668,6 +13671,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     let starts_attempt = !request.terminal && attempt_status == "pending";
 
     let mut turn = loaded_turn.document.clone();
+    let mut verified_stable_segments = loaded_turn.verified_stable_segments.clone();
     let turn_id = turn
         .get("turnId")
         .and_then(Value::as_str)
@@ -13704,7 +13708,7 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     } else { None };
     if (text_append.is_some() || frame_candidate) && text_update.is_none() && frame_update.is_none() {
         if let Some(head) = &loaded_turn.projection_head {
-            materialize_projection_head(database, transaction, &mut turn, head)?;
+            verified_stable_segments = materialize_projection_head(database, transaction, &mut turn, head)?;
         }
     }
     let previous_projection = turn
@@ -13753,21 +13757,22 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
         // first segments[0] append cannot resolve, or reconnecting clients
         // miss the normalization repair.
         let patch_base = if request.projection_segments_stable {
-            crate::turn_projection_segments::stabilize_for_patch(
-                &previous_projection,
-                turn.get("actor")
-                    .and_then(Value::as_str)
-                    .unwrap_or("assistant"),
-                turn.get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("running"),
-            )?
+            let (stable, proof) = execution_frame::normalize_for_patch(
+                &previous_projection, previous_revision,
+                turn.get("actor").and_then(Value::as_str).unwrap_or("assistant"),
+                turn.get("status").and_then(Value::as_str).unwrap_or("running"),
+                verified_stable_segments.as_ref(),
+            )?;
+            verified_stable_segments = proof;
+            stable
         } else {
             previous_projection.clone()
         };
         let next = crate::turn_projection_patch::apply_projection_patch(Some(&patch_base), patch)
             .map_err(|_| invalid_input("Turn projection patch is invalid"))?;
-        let replay = if patch_base == previous_projection {
+        // normalize_for_patch already compared these exact old trees; reuse
+        // that result as well as its no-op proof instead of walking them twice.
+        let replay = if !request.projection_segments_stable || verified_stable_segments.is_some() {
             patch.clone()
         } else {
             crate::turn_projection_patch::build_projection_patch(
@@ -13810,6 +13815,16 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     drop(_projection_stage);
     let _store_stage = crate::fsync_stats::StageTimer::new(crate::fsync_stats::STAGE_TURN_EVENT_STORE);
     let mut attempt = loaded_attempt.document.clone();
+    // Measure an eligible materialized head once. The same actual field bytes
+    // feed recovery, size admission and its published witness. Inline Turns
+    // retain their original path until the physical owner promotes a head.
+    let measured_frame = frame_candidate && text_update.is_none() && frame_update.is_none()
+        && loaded_turn.projection_head.is_some();
+    let frame_witness = if measured_frame {
+        execution_frame::ProjectionWitness::mint_after_patch(&next_projection, next_revision,
+            turn.get("actor").and_then(Value::as_str).unwrap_or("assistant"), &request.status,
+            verified_stable_segments.as_ref(), &replay_patch)?
+    } else { None };
     let mut projection_bytes = 0;
     if !request.terminal {
         let created_at_ms = attempt
@@ -13817,7 +13832,8 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
             .and_then(Value::as_u64)
             .ok_or_else(|| invalid_data("attempt recovery timestamp is malformed"))?;
         projection_bytes = match text_update.as_ref().map(|u| u.projection_bytes)
-            .or_else(|| frame_update.as_ref().map(|u| u.projection_bytes)) {
+            .or_else(|| frame_update.as_ref().map(|u| u.projection_bytes))
+            .or_else(|| frame_witness.as_ref().map(|witness| witness.bytes())) {
             Some(bytes) => bytes,
             None => serde_json::to_vec(&next_projection)
                 .map_err(|_| invalid_data("turn projection cannot be encoded"))?.len(),
@@ -13907,12 +13923,15 @@ fn event_record_mode(database: &AuthorityDatabase, transaction: &mut AuthorityTr
     } else {
         store_event_projection(database, transaction, request, &loaded_attempt.conversation_id,
             &turn_id, previous_revision, next_revision, loaded_turn.projection_head.as_ref(),
-            &previous_projection, &next_projection, &replay_patch)?
+            &previous_projection, &next_projection, projection_bytes, &replay_patch)?
     };
     if frame_candidate && text_update.is_none() && frame_update.is_none() {
         if let Some(head) = &mut next_projection_head {
-            head.frame_witness = execution_frame::ProjectionWitness::mint(&next_projection,
-                next_revision, turn.get("actor").and_then(Value::as_str).unwrap_or("assistant"), &request.status)?;
+            head.frame_witness = if measured_frame { frame_witness } else {
+                execution_frame::ProjectionWitness::mint_after_patch(&next_projection,
+                    next_revision, turn.get("actor").and_then(Value::as_str).unwrap_or("assistant"),
+                    &request.status, verified_stable_segments.as_ref(), &replay_patch)?
+            };
         }
     }
     if let Some(head) = &next_projection_head {
@@ -14005,7 +14024,7 @@ fn store_event_projection(database: &AuthorityDatabase, transaction: &mut Author
     request: &EventRecordRequest, conversation_id: &str, turn_id: &str,
     previous_revision: u64, next_revision: u64, current_head: Option<&ProjectionHeadDescriptor>,
     previous_projection: &Map<String, Value>, next_projection: &Map<String, Value>,
-    replay_patch: &Map<String, Value>,
+    next_projection_bytes: usize, replay_patch: &Map<String, Value>,
 ) -> io::Result<Option<ProjectionHeadDescriptor>> {
     let replay_patch_bytes = serde_json::to_vec(replay_patch)
         .map_err(|_| invalid_data("Turn projection patch cannot be encoded"))?.len();
@@ -14077,9 +14096,6 @@ fn store_event_projection(database: &AuthorityDatabase, transaction: &mut Author
         }
     } else {
         let previous_projection_bytes = serde_json::to_vec(&previous_projection)
-            .map_err(|_| invalid_data("Turn projection cannot be encoded"))?
-            .len();
-        let next_projection_bytes = serde_json::to_vec(&next_projection)
             .map_err(|_| invalid_data("Turn projection cannot be encoded"))?
             .len();
         if previous_projection_bytes > MAX_TURN_PROJECTION_INLINE_LIVE_BYTES

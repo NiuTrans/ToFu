@@ -496,6 +496,88 @@ fn execution_frame_runtime_witness_depth_corruption_and_legacy_version_fallback(
     );
 }
 
+#[test]
+fn execution_frame_runtime_local_proof_preserves_mint_bytes_and_dependency_repairs() {
+    let projection = canonical_projection().as_object().unwrap().clone();
+    let (stable, proof) =
+        normalize_for_patch(&projection, 7, "assistant", "running", None).unwrap();
+    assert_eq!(stable, projection);
+    assert!(proof.is_some());
+    let witness = ProjectionWitness::mint(&projection, 7, "assistant", "running")
+        .unwrap()
+        .unwrap();
+    let verified = witness.verify(&projection, "assistant", "running").unwrap();
+    assert!(verified.is_some());
+    assert!(
+        witness
+            .verify(&projection, "user", "running")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        witness
+            .verify(&projection, "assistant", "completed")
+            .unwrap()
+            .is_none()
+    );
+
+    let operations = [
+        json!([]),
+        json!([{"op":"set","path":["phase"],"value":{"escaped":"\n汉😀\\\""}}]),
+        json!([{"op":"set","path":["content"],"value":"BEFORE"}]),
+        json!([{"op":"set","path":["thinking"],"value":"new thought"}]),
+        json!([{"op":"remove","path":["segments"]}]),
+        json!([{"op":"set","path":["toolRounds"],"value":[{"id":"t","status":"running"}]}]),
+        json!([{"op":"set","path":["fileChanges"],"value":[{"path":"a.rs"}]}]),
+        json!([{"op":"set","path":["modifiedFileList"],"value":["a.rs"]}]),
+        json!([{"op":"set","path":["modifiedFiles"],"value":["a.rs"]}]),
+    ];
+    for operations in operations {
+        let patch =
+            json!({"version":1,"baseRevision":7,"targetRevision":8,"operations":operations})
+                .as_object()
+                .unwrap()
+                .clone();
+        let next = crate::turn_projection_patch::apply_projection_patch(Some(&projection), &patch)
+            .unwrap();
+        for (actor, status) in [
+            ("assistant", "running"),
+            ("user", "running"),
+            ("assistant", "completed"),
+        ] {
+            let actual = ProjectionWitness::mint_after_patch(
+                &next,
+                8,
+                actor,
+                status,
+                verified.as_ref(),
+                &patch,
+            )
+            .unwrap()
+            .unwrap();
+            let ordinary = ProjectionWitness::mint(&next, 8, actor, status)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                actual, ordinary,
+                "dependency/scope {patch:?}, {actor}/{status}"
+            );
+            assert_eq!(actual.bytes(), serde_json::to_vec(&next).unwrap().len());
+            actual.verify(&next, actor, status).unwrap();
+        }
+    }
+    // A mismatched revision cannot reuse a no-op result on a repaired value.
+    let mut changed = projection.clone();
+    changed.insert("content".into(), json!("BEFORE"));
+    let expected =
+        crate::turn_projection_segments::stabilize_for_patch(&changed, "assistant", "running")
+            .unwrap();
+    let (repaired, proof) =
+        normalize_for_patch(&changed, 8, "assistant", "running", verified.as_ref()).unwrap();
+    assert_eq!(repaired, expected);
+    assert!(proof.is_none());
+}
+
 fn timing_prefix(fixture: &str) -> String {
     match fixture {
         "compressible" => "s".repeat(256 * 1024),
@@ -606,6 +688,95 @@ fn execution_frame_runtime_work_counts() {
                     json!({"case":case,"events":count,"runtime":runtime,"work":work,"wal_bytes":database.wal_len().unwrap()-wal_before})
                 );
             }
+        }
+    }
+}
+
+#[test]
+#[ignore = "explicit alternating-path work attribution; profile-on, never a timing result"]
+fn execution_frame_runtime_alternating_work_counts() {
+    assert!(crate::request_profile::enabled());
+    for middle in ["text_tail", "tool"] {
+        let mut expected = None;
+        for runtime in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut database = AuthorityDatabase::initialize(directory.path()).unwrap();
+            let revision = seed_projection(
+                &mut database,
+                producer_projection(&timing_prefix("compressible")),
+                false,
+            );
+            let mut replies = Vec::new();
+            for index in 0..3 {
+                let mut command = producer_shaped_step(
+                    revision + index as u64,
+                    index,
+                    if index == 1 && middle == "tool" {
+                        "tool"
+                    } else {
+                        "cold"
+                    },
+                );
+                if index == 1 && middle == "text_tail" {
+                    command.projection_segments_stable = false;
+                    command.projection_patch.as_mut().unwrap()["operations"] =
+                        json!([{"op":"append_text","path":["content"],"value":"suffix"}]);
+                }
+                let before = crate::request_profile::snapshot();
+                let wal_before = database.wal_len().unwrap();
+                let mut guard =
+                    crate::request_profile::RequestGuard::start("turn.event.record").unwrap();
+                replies.push(commit_step(&mut database, &command, runtime).unwrap());
+                guard.finish("ok");
+                drop(guard);
+                let aggregate = |value: Value| {
+                    value["operations"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|v| v["operation"] == "turn.event.record")
+                        .cloned()
+                        .unwrap_or(json!({}))
+                };
+                let a = aggregate(before);
+                let b = aggregate(crate::request_profile::snapshot());
+                let work: Map<String, Value> = b["work"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            json!(value.as_u64().unwrap() - a["work"][name].as_u64().unwrap_or(0)),
+                        )
+                    })
+                    .collect();
+                let current = head(&database);
+                if runtime {
+                    assert_eq!(current.frame_witness.is_some(), index != 1);
+                    assert_eq!(
+                        current.text_tail.is_some(),
+                        index == 1 && middle == "text_tail"
+                    );
+                }
+                println!(
+                    "FRAME_RUNTIME_ALTERNATING {}",
+                    json!({"middle":middle,"step":index,
+                    "runtime":runtime,"work":work,"wal_bytes":database.wal_len().unwrap()-wal_before,
+                    "witness":current.frame_witness.is_some(),"text_tail":current.text_tail.is_some()})
+                );
+            }
+            let actual = json!({"state":state(&database),"responses":replies});
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual.clone());
+            }
+            drop(database);
+            assert_eq!(
+                state(&AuthorityDatabase::open(directory.path()).unwrap()),
+                actual["state"]
+            );
         }
     }
 }
