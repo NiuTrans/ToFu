@@ -27,6 +27,7 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
     page.add_style_tag(path=str(ROOT / 'frontend/src/styles/application/33-project-coordination.css'))
     page.evaluate('''async () => {
       document.body.innerHTML='<aside id="sidebar"></aside><main id="canvas"></main>';
+      document.body.style.display='block';
       const binding={projectPath:'/project',conversationId:'leader',revision:1,availability:'available',capabilities:{assign:false,sendMessage:false,steerSubagent:false}};
       window.navigation=[];
       const scope={path:'/project',currentConversationId:'leader',currentPath:()=>'/project',
@@ -37,10 +38,10 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
           window.historyOffset=offset;
           return {olderCursor:offset<128?String(offset+32):null,newerCursor:offset?String(offset-32):null,
             assignments:Array.from({length:32},(_,index)=>({assignmentId:String(160-offset-index),
-              request:{projectPath:'/project',coordinatorId:'leader',recipientId:'worker-'+(160-offset-index),brief:'Worker '+(160-offset-index),
+              request:{projectPath:'/project',coordinatorId:'leader',recipientId:'worker-'+(160-offset-index),brief:index===0 && offset===0 ? 'Coordinate the project update / 汇总每个 Worker 的结果与证据。'.repeat(6) : 'Worker '+(160-offset-index),
                 authorizationSource:{conversationId:'leader',turnId:'human',projectionRevision:1},model:'test',budget:{maxTokens:1000,maxModelRequests:2,deadline:9999999999}},
               grantRevision:1,revoked:false,canonicalDelivery:false,review:null,
-              execution:{turnId:'result',attemptId:'attempt',taskId:'task',status:offset?'completed':'running',resultRevision:1,result:{content:'Verified result'}}}))};
+              execution:{turnId:'result',attemptId:'attempt',taskId:'task',status:offset?'completed':'running',resultRevision:1,result:{content:'A long Worker result with an error code and enough detail to require disclosure. '.repeat(12)}}}))};
         }}};
       window.historySurface=createProjectCoordinationSurface({sidebar:document.querySelector('#sidebar'),canvas:document.querySelector('#canvas'),
         scope:()=>scope,sidebarPath:()=>'/project',details:()=>{},create:()=>{}});
@@ -48,6 +49,16 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
     }''')
     graph = page.locator('.coordination-task-graph')
     assert graph.locator('[data-node-kind=task]').count() == 32
+    # Fixed graph geometry must contain long titles and summaries even when
+    # the canvas is nested inside the real conversation summary shell.
+    assert graph.locator('[data-node-id="assignment:160"]').evaluate('''node => {
+      const bounds = node.getBoundingClientRect();
+      return [...node.children, node.querySelector('.coordination-node-title')].every(child => {
+        const rect = child.getBoundingClientRect();
+        return rect.left >= bounds.left && rect.right <= bounds.right + 1
+          && rect.top >= bounds.top && rect.bottom <= bounds.bottom + 1;
+      });
+    }''')
     for offset in (32, 64, 96, 128):
         page.locator('[data-coordination-focus=history-older]').click()
         page.locator(f'[data-node-id="assignment:{160-offset}"]').wait_for()
@@ -64,7 +75,11 @@ def test_coordinator_graph_pages_reach_old_workers_with_bounded_dom(frontend_vis
     page.locator('[data-coordination-focus=history-latest]').click()
     page.locator('[data-node-id="assignment:160"]').wait_for()
     graph.locator('[data-node-id="assignment:160"] button').click()
-    page.locator('.coordination-node-inspector button').last.click()
+    inspector = page.locator('.coordination-node-inspector')
+    assert inspector.evaluate('node => node.scrollWidth <= node.clientWidth + 1')
+    assert not graph.evaluate('node => node.scrollWidth > node.clientWidth + 1')
+    page.screenshot(path=str(output / f'long-text-{width}.png'))
+    inspector.locator('button').last.click()
     assert page.evaluate('window.navigation') == ['worker-160']
     page.evaluate('window.historySurface.destroy()')
 

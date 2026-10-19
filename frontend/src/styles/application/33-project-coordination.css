@@ -112,7 +112,7 @@
   --graph-x: var(--graph-x-3); --graph-y: var(--graph-y-3);
   position: absolute; left: calc(var(--graph-x) * var(--space-4)); top: calc(var(--graph-y) * var(--space-4));
   width: calc(14 * var(--space-4)); height: calc(7 * var(--space-4)); box-sizing: border-box;
-  display: grid; grid-template-columns: var(--space-4) 1fr; align-content: start; align-items: start; gap: var(--space-2);
+  display: grid; grid-template-columns: var(--space-4) minmax(0, 1fr); align-content: start; align-items: start; gap: var(--space-2);
   padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--bg-primary); box-shadow: var(--shadow-sm); color: var(--text-primary);
 }
@@ -120,6 +120,7 @@
 .coordination-graph-node[data-node-kind="reference"] { border-style: dashed; }
 .coordination-graph-node[data-selected="true"] { outline: var(--control-edge-inset) solid var(--accent); }
 .coordination-graph-node button { min-width: 0; max-height: calc(4 * var(--space-4)); overflow: hidden; justify-content: flex-start; text-align: start; }
+.coordination-node-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; line-height: var(--leading-tight); }
 .coordination-node-signal { display: inline-flex; align-items: center; justify-content: center; min-height: var(--space-6); font-size: var(--font-size-lg); color: var(--text-secondary); }
 .coordination-graph-node[data-status="running"] .coordination-node-signal { color: var(--accent); }
 .coordination-graph-node[data-status="completed"] .coordination-node-signal { color: var(--success-text); }
@@ -128,6 +129,7 @@
 .coordination-node-digest { grid-column: 1 / -1; color: var(--text-secondary); font-size: var(--font-size-xs); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .coordination-node-inspector { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); padding: var(--space-3); margin-block-start: var(--space-2); background: var(--bg-primary); border-inline-start: var(--space-1) solid var(--accent); border-radius: var(--radius-sm); overflow-wrap: anywhere; }
 .coordination-node-inspector[hidden] { display: none; }
+.coordination-node-inspector > * { min-width: 0; max-width: 100%; }
 .coordination-node-inspector p { font-size: var(--font-size-sm); }
 .coordination-edge-legend { display: flex; flex-wrap: wrap; gap: var(--space-3); padding-block: var(--space-2); color: var(--text-secondary); font-size: var(--font-size-xs); }
 .coordination-edge-legend span { display: inline-flex; align-items: center; gap: var(--space-1); }

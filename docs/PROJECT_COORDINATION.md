@@ -290,6 +290,12 @@ select matching one/two/three-column card and SVG geometry without observers,
 new polling or model calls. Native scrolling preserves readable node sizes on
 narrow screens. All controls use the shared kit; EN/ZH labels, keyboard access
 and three themes share the same view. The fixed sidebar entry remains navigation.
+Long titles occupy at most three lines and result digests one line inside each
+fixed-size node; the selection inspector preserves the full title and detail.
+Its conversation action wraps within narrow panes. Expanding node height was
+rejected because it breaks the shared node/edge geometry; truncating stored
+content would discard evidence. Browser coverage includes long localized text
+inside the ordinary conversation summary, not only an isolated graph.
 Alternatives rejected: status lanes cannot convey dependencies; an LLM-generated
 chart adds cost and can invent state; another conversation renderer duplicates
 Turn ownership. SVG lines and ordinary DOM controls preserve accessible actions.
