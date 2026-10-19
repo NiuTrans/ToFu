@@ -18,11 +18,12 @@ function deferred<T>() {
 
 class Source extends EventTarget {
   closed = false;
+  readyState = 0;
   onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   constructor(readonly url: string) { super(); }
-  close() { this.closed = true; }
+  close() { this.closed = true; this.readyState = 2; }
   emit(type: string, fields: object, cursor = '') {
     this.dispatchEvent(new MessageEvent(type, { lastEventId: cursor, data: JSON.stringify({
       contract: 'tofu.conversation-sync.event/v1', conversationId: 'conv', type, ...fields,
@@ -145,6 +146,48 @@ describe('snapshot recovery barrier', () => {
 });
 
 describe('transport liveness and observer isolation', () => {
+  it('recovers a permanently closed source through a fresh snapshot with backoff', async () => {
+    const { coordinator, api, sources, onSnapshot } = fixture();
+    await coordinator.resume();
+    api.snapshot.mockResolvedValue(snapshot(9));
+    sources[0].readyState = 2; // Native EventSource after HTTP 204.
+    sources[0].onerror?.();
+    expect(coordinator.connected).toBe(false);
+    expect(sources[0].closed).toBe(true);
+    await coordinator.wake(); await coordinator.resume(); coordinator.invalidate();
+    expect(api.snapshot).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(onSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({syncSeq: 9}));
+    expect(sources).toHaveLength(2);
+    expect(sources[1].url).toContain('cursor-9');
+
+    sources[1].readyState = 2; sources[1].onerror?.();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sources).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sources).toHaveLength(3);
+    sources[2].emit('sync.heartbeat', {cursor:'cursor-9', serverBootId:'boot', degraded:false});
+    sources[2].readyState = 2; sources[2].onerror?.();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sources).toHaveLength(4);
+  });
+
+  it.each(['pause', 'suspend', 'close'] as const)(
+    'retires closed-source retries on %s and ignores late callbacks', async action => {
+      const {coordinator, api, sources} = fixture();
+      await coordinator.resume();
+      const lateError = sources[0].onerror;
+      sources[0].readyState = 2; lateError?.();
+      if (action === 'suspend') coordinator.setSuspended(true);
+      else coordinator[action]();
+      lateError?.();
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(api.snapshot).toHaveBeenCalledTimes(1);
+      expect(sources.filter(source => !source.closed)).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it('bounds connecting time even when EventSource never opens or errors', async () => {
     const { coordinator, sources } = fixture();
     await coordinator.resume();

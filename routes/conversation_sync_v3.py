@@ -15,7 +15,6 @@ from quart import Response, request
 from lib.api_v4 import NativeContractBlueprint
 from lib.conversation_sync.generated_contract import CONTRACT_ID
 from lib.agent_core.principal import principal_key
-from lib.agent_core.sse_limit import limiter as sse_limiter
 from lib.api_response import (
     api_bad_request,
     api_error,
@@ -677,15 +676,9 @@ async def conversation_sync_events(conversation_id: str):
     # path, including failures outside the typed ownership probe.
     with ExitStack() as setup:
         setup.callback(subscription.close, "setup_failed")
-        slot_token = sse_limiter.try_acquire(request_principal)
-        if slot_token is None:
-            # A bounded 204 stops native EventSource retry without dropping
-            # the subscription's generation fencing; the client reconnects
-            # through its normal durable sync path.
-            record_stream_admission("conversation-sync", "capacity")
-            return _stream_stop_response('capacity')
-        subscription.add_close_callback(
-            lambda: sse_limiter.release(slot_token))
+        # This read observes already accepted work. The broker owns its exact
+        # lifetime; a model-stream quota must never block progress/settlement
+        # delivery or strand a browser on its last startup phase.
         if subscription.closed:
             return _stream_stop_response(subscription.close_reason)
         record_stream_admission("conversation-sync", "admitted")
@@ -715,19 +708,7 @@ async def conversation_sync_events(conversation_id: str):
                 sequence = after_sequence
                 heartbeat_due = False
                 storage_failures = 0
-                slot_refresh_due = (
-                    time.monotonic() + sse_limiter.refresh_interval_seconds)
-
-                def refresh_slot_if_due() -> None:
-                    nonlocal slot_refresh_due
-                    now = time.monotonic()
-                    if now < slot_refresh_due:
-                        return
-                    sse_limiter.refresh(slot_token)
-                    slot_refresh_due = now + sse_limiter.refresh_interval_seconds
-
                 while not subscription.closed:
-                    refresh_slot_if_due()
                     try:
                         page = await asyncio.to_thread(
                             _service.changes,
@@ -781,7 +762,6 @@ async def conversation_sync_events(conversation_id: str):
                     awakened = await subscription.wait(
                         _service.heartbeat_interval_ms / 1000.0
                     )
-                    refresh_slot_if_due()
                     heartbeat_due = not awakened
             finally:
                 subscription.close("generator_closed")

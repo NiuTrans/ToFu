@@ -159,7 +159,7 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
   async resume(): Promise<void> {
     if (this.closed) return;
     this.shouldConnect = true;
-    if (this.suspended) return;
+    if (this.suspended || this.reconnectTimer) return;
     if (this.snapshotRequired || !this.cursorValue) {
       await this.hydrate(true);
       return;
@@ -360,7 +360,6 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
               this.sequence = snapshot.syncSeq;
               this.cursorValue = snapshot.cursor;
               this.snapshotRequired = false;
-              this.retryCount = 0;
               // Generated clients validate scope. Keep legacy injected snapshot
               // ports usable, but never admit their unscoped rank navigation.
               this.roundOwner = Number(snapshot.scope?.ownerId || 0);
@@ -369,7 +368,9 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
               notifyObserver('conversation-push-withheld', this.options.onPushWithheld,
                 snapshot.pushWithheld === true);
               if (this.closed) return snapshot;
-              if (this.shouldConnect && !this.suspended) this.touchFrame();
+              // A successful read repairs state, but does not prove that the
+              // stream can open. Only a valid stream frame resets backoff.
+              if (this.shouldConnect && !this.suspended) this.publishHealth('connecting');
               else this.publishHealth('idle');
               return snapshot;
             });
@@ -458,6 +459,17 @@ export class ConversationSyncCoordinator implements ConversationSyncConnection {
     }
     source.onerror = () => {
       if (this.closed || sourceGeneration !== this.generation) return;
+      if (source.readyState === 2 /* EventSource.CLOSED */) {
+        // HTTP 204 and fatal transport refusals stop native retry permanently.
+        // Repair the displayed authority before opening a replacement. Retain
+        // backoff across successful snapshots so persistent refusal cannot
+        // turn task wake hints into a read/reconnect storm.
+        this.retryCount += 1;
+        this.snapshotRequired = true;
+        this.closeSource();
+        this.scheduleReconnect('event-source-closed');
+        return;
+      }
       // Native EventSource resumes with Last-Event-ID.  Brief transport flaps
       // remain "recovering" and do not poison the badge; the silence deadline
       // below promotes only a genuinely stalled pipe to degraded.
