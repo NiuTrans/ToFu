@@ -1906,11 +1906,11 @@ fn put_lane_compaction_index(
         .get("ordinal")
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid_data("Turn ordinal is malformed"))?;
-    database.entity_put(
-        transaction,
-        lane_compaction_index_key(transaction, conversation_id, lane_id, ordinal)?,
-        lane_compaction_index_value(document)?,
-    )
+    let key = lane_compaction_index_key(transaction, conversation_id, lane_id, ordinal)?;
+    let value = lane_compaction_index_value(document)?;
+    model_context::before_header_write(database, transaction,
+        conversation_id, lane_id, ordinal, &key, &value)?;
+    database.entity_put(transaction, key, value)
 }
 
 fn scan_lane_compaction_metadata(

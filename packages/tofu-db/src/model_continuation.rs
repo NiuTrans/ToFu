@@ -4,7 +4,8 @@
 //! loss. A settled Turn ordinal is the monotonic CAS frontier, and its
 //! model-visible witness fences edited or foreign writers. Equal-frontier
 //! retries are read-only: no command stores a second payload. At most one
-//! 8 MiB record per lane; every read-modify-write happens inside one authority
+//! 8 MiB record plus at most 1 KiB in its existing lane-directory value; every
+//! read-modify-write happens inside one authority
 //! transaction so the frontier CAS is atomic with settlement.
 
 use std::io;
@@ -25,6 +26,8 @@ pub(crate) const CONTINUATION_NAMESPACE: &str = "model.continuation.v1";
 /// per stored continuation lets conversation/turn deletion find and remove
 /// the hash-keyed derived records, matching the legacy authority's
 /// `delete_conversation_continuations` (which prefix-deletes the SQL rows).
+/// Its optional value is an authority-certified context prefix (empty on legacy
+/// or invalidated state); model_context owns that codec and invalidation.
 pub(crate) const LANE_INDEX_NAMESPACE: &str = "model.continuation.v1.lanes";
 /// Hard bound for one conversation's lane directory. Conversations have a
 /// handful of branch lanes; beyond this the directory is corrupt, so
@@ -49,7 +52,7 @@ fn invalid_data(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn continuation_raw_key(conversation_id: &str, lane_id: &str) -> String {
+pub(crate) fn continuation_raw_key(conversation_id: &str, lane_id: &str) -> String {
     // The owner component of the entity key already scopes the record; the raw
     // key carries collision-resistant conversation/lane identities only.
     let conversation_digest = Sha256::digest(conversation_id.as_bytes());
@@ -80,7 +83,7 @@ fn continuation_key(
     )
 }
 
-fn lane_index_key(transaction: &AuthorityTransaction, raw_key: &str) -> io::Result<EntityKey> {
+pub(crate) fn lane_index_key(transaction: &AuthorityTransaction, raw_key: &str) -> io::Result<EntityKey> {
     EntityKey::new(
         transaction.tenant_id(),
         transaction.owner_user_id(),
@@ -442,6 +445,8 @@ fn put_frontier(
     frontier: u64,
     projection: &Map<String, Value>,
     updated_at_ms: u64,
+    conversation_id: &str,
+    lane_id: &str,
 ) -> io::Result<bool> {
     match read_record(database, transaction, &key)? {
         Some((actual, stored)) => {
@@ -459,10 +464,12 @@ fn put_frontier(
                 projection,
                 updated_at_ms,
             )?;
+            let certificate = crate::turn::model_context::certify_frontier(
+                database, transaction, conversation_id, lane_id, frontier - 1, projection)?;
             database.entity_put(
                 transaction,
                 lane_index_key(transaction, raw_key)?,
-                Vec::new(),
+                certificate,
             )?;
             Ok(true)
         }
@@ -475,10 +482,12 @@ fn put_frontier(
                 projection,
                 updated_at_ms,
             )?;
+            let certificate = crate::turn::model_context::certify_frontier(
+                database, transaction, conversation_id, lane_id, frontier - 1, projection)?;
             database.entity_put(
                 transaction,
                 lane_index_key(transaction, raw_key)?,
-                Vec::new(),
+                certificate,
             )?;
             Ok(true)
         }
@@ -527,6 +536,8 @@ pub(crate) fn settle(
             frontier,
             &projection,
             updated_at_ms,
+            conversation_id,
+            lane_id,
         )? {
             "stored"
         } else {
@@ -836,6 +847,8 @@ pub(crate) fn execute(
                 frontier,
                 &candidate,
                 *updated_at_ms,
+                conversation_id,
+                lane_id,
             )?;
             Ok(Some(if stored {
                 b"true".to_vec()
